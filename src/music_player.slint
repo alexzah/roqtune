@@ -1,0 +1,75 @@
+
+import { Button, VerticalBox, StandardTableView } from "std-widgets.slint";
+
+export component AppWindow inherits Window {
+    width: 1280px;
+    height: 720px;
+    title: "Music Player";
+
+    VerticalBox {
+        spacing: 10px;
+        padding: 20px;
+
+        HorizontalLayout {
+            Button {
+                text: "Open File";
+                clicked => {
+                    root.open_file();
+                }
+            }
+
+            Button {
+                text: "Play";
+                clicked => {
+                    root.play();
+                }
+            }
+
+            Button {
+                text: "Pause";
+                clicked => {
+                    root.pause();
+                }
+            }
+
+            Button {
+                text: "Stop";
+                clicked => {
+                    root.stop();
+                }
+            }
+        }
+
+        StandardTableView {
+            columns: [
+                { title: "Title" },
+                { title: "Artist" },
+                { title: "Album" },
+            ];
+
+            rows: track_model;
+            row-pointer-event(int, PointerEvent, Point) => {
+                root.playlist_item_click(int, PointerEvent, Point);
+            }
+        }
+
+        Text {
+            text: file_path;
+        } // Removed id, directly use property
+        Text {
+            text: status;
+        } // Removed id, directly use property
+    }
+
+    // Properties to communicate with Rust
+    in-out property <string> file_path: "";
+    in-out property <string> status: "No file selected";
+    in-out property <[[StandardListViewItem]]> track_model: []; // holds rows of strings
+
+    // Callback declarations
+    callback open_file();
+    callback play();
+    callback pause();
+    callback stop();
+    callback playlist_item_click(int, PointerEvent, Point);
+}
