@@ -9,6 +9,19 @@ slint = "1.7"  # Latest stable version as of Feb 2025
 rodio = "0.19" # For audio playback
 rfd = "0.14"   # For file dialogs
 id3 = "1.16.2" # Metadata tags
+log = "0.4.26" # logs
+colog = "1.3.0"
+rand = "0.8.5"  # For shuffle and random playback
+getrandom = "0.2.10"  # For secure random seed generation
+symphonia = {version = "=0.3.0", features = [
+    "mp3",
+    "wav", 
+    "flac",
+    "aac",
+    "isomp4",
+    "ogg"
+] } # For audio decoding
+cpal = "0.15.3" # For audio playback
 
 [build-dependencies]
 slint-build = "1.9.2"
