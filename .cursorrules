@@ -25,4 +25,4 @@
     - No need to mention your knowledge cutoff
     - No need to disclose you're an AI
     - Split into multiple responses if one response isn't enough to answer the question.
-    - Please ALWAYS write out the entire code and do not abbreviate. Specifically do NOT put comments into the code like "# ... existing code ...".
+    - Please ALWAYS write out the entire code and do not abbreviate. Specifically do NOT put comments into the code like "// ... existing code ...".

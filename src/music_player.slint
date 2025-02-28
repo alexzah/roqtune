@@ -5,15 +5,11 @@ component PlayerButton inherits Rectangle {
     height: 32px;
     background: touch-area.pressed ? #444 : touch-area.has-hover ? #666 : transparent;
     animate background { duration: 150ms; }
-    
     in property <string> icon-text;
     in property <bool> enabled: true;
     in property <bool> is-primary: false;
-    
     in property <length> font-size: 16px;
-    
     callback clicked;
-    
     Text {
         text: root.icon-text;
         font-size: root.font-size;
@@ -21,7 +17,7 @@ component PlayerButton inherits Rectangle {
         horizontal-alignment: center;
         opacity: root.enabled ? 1.0 : 0.5;
     }
-    
+
     touch-area := TouchArea {
         clicked => {
             if (root.enabled) {
@@ -45,7 +41,6 @@ export component AppWindow inherits Window {
         Rectangle {
             height: 42px;
             background: #202020;
-            
             HorizontalLayout {
                 padding-left: 8px;
                 padding-right: 8px;
@@ -57,24 +52,22 @@ export component AppWindow inherits Window {
                     height: 28px;
                     border-radius: 2px;
                     background: #373737;
-                    
                     HorizontalLayout {
                         alignment: center;
                         spacing: 4px;
-                        
-                        Text { 
+                        Text {
                             text: "📂"; 
                             color: #ddd;
                             font-size: 14px;
                         }
-                        
-                        Text { 
-                            text: "Open"; 
+
+                        Text {
+                            text: "Open";
                             color: #ddd;
                             font-size: 14px;
                         }
                     }
-                    
+
                     TouchArea {
                         clicked => {
                             root.open_file();
@@ -86,14 +79,13 @@ export component AppWindow inherits Window {
                 HorizontalLayout {
                     alignment: center;
                     spacing: 14px;
-                    
                     PlayerButton {
                         icon-text: "⏮";
                         clicked => {
                             root.previous();
                         }
                     }
-                    
+
                     PlayerButton {
                         icon-text: "▶";
                         is-primary: true;
@@ -101,21 +93,21 @@ export component AppWindow inherits Window {
                             root.play();
                         }
                     }
-                    
+
                     PlayerButton {
                         icon-text: "⏸";
                         clicked => {
                             root.pause();
                         }
                     }
-                    
+
                     PlayerButton {
                         icon-text: "⏹";
                         clicked => {
                             root.stop();
                         }
                     }
-                    
+
                     PlayerButton {
                         icon-text: "⏭";
                         clicked => {
@@ -127,13 +119,12 @@ export component AppWindow inherits Window {
                 // Playback mode selection
                 HorizontalLayout {
                     spacing: 8px;
-                    
                     Text {
                         text: "Order:";
                         color: #aaa;
                         font-size: 14px;
                     }
-                    
+
                     ComboBox {
                         width: 120px;
                         height: 28px;
@@ -143,13 +134,13 @@ export component AppWindow inherits Window {
                             root.playback_order_changed(self.current-index);
                         }
                     }
-                    
+
                     Text {
                         text: "Repeat:";
                         color: #aaa;
                         font-size: 14px;
                     }
-                    
+
                     PlayerButton {
                         icon-text: root.repeat_on ? "🔁" : "↩";
                         font-size: 14px;
@@ -176,7 +167,6 @@ export component AppWindow inherits Window {
         Rectangle {
             height: 36px;
             background: #242424;
-            
             HorizontalLayout {
                 padding-left: 16px;
                 padding-right: 16px;
@@ -189,7 +179,6 @@ export component AppWindow inherits Window {
                     background: #444;
                     border-radius: 2px;
                     width: 70px;
-                    
                     Text {
                         text: root.current-position-text;
                         color: #bbb;
@@ -205,7 +194,6 @@ export component AppWindow inherits Window {
                     border-radius: 3px;
                     background: #333;
                     horizontal-stretch: 1;
-                    
                     property <length> handle-position: self.width * root.position-percentage;
                     
                     // Progress indicator - shows playback progress with smooth animation
@@ -214,7 +202,10 @@ export component AppWindow inherits Window {
                         width: seekbar.handle-position;
                         background: #2a6def;
                         border-radius: 3px;
-                        animate width { duration: 150ms; easing: ease-out; }
+                        animate width {
+                            duration: 150ms;
+                            easing: ease-out;
+                        }
                     }
                     
                     // Position percentage label for debugging
@@ -230,7 +221,7 @@ export component AppWindow inherits Window {
                     handle := Rectangle {
                         width: 10px;
                         height: parent.height + 4px;
-                        x: seekbar.handle-position - self.width/2;
+                        x: seekbar.handle-position - self.width / 2;
                         y: -2px;
                         background: white;
                         border-radius: 5px;
@@ -239,7 +230,10 @@ export component AppWindow inherits Window {
                         drop-shadow-color: #00000080;
                         
                         // Smooth animation for handle position updates
-                        animate x { duration: 150ms; easing: ease-out; }
+                        animate x {
+                            duration: 150ms;
+                            easing: ease-out;
+                        }
                         animate height { duration: 80ms; }
                         animate y { duration: 80ms; }
                     }
@@ -258,12 +252,10 @@ export component AppWindow inherits Window {
                         width: parent.width;
                         height: parent.height + 10px; // Make touch area slightly larger
                         mouse-cursor: pointer;
-                        
                         clicked => {
                             // Calculate position as percentage of width and send seek command
                             root.seek-to(max(0, min(1, self.mouse-x / seekbar.width)));
                         }
-                        
                         moved => {
                             if (self.pressed) {
                                 // Update while dragging
@@ -287,16 +279,14 @@ export component AppWindow inherits Window {
         // Main content: Playlist 
         StandardTableView {
             columns: [
-                { title: "#", width: 40px },
+                // { title: "#", width: 40px },
                 { title: "Title", width: 300px },
                 { title: "Artist", width: 200px },
                 { title: "Album", width: 200px },
             ];
-            
             rows: track_model;
             horizontal-stretch: 1;
             vertical-stretch: 1;
-            
             row-pointer-event(int, PointerEvent, Point) => {
                 root.playlist_item_click(int, PointerEvent, Point);
             }
@@ -306,11 +296,9 @@ export component AppWindow inherits Window {
         Rectangle {
             height: 28px;
             background: #1a1a1a;
-            
             HorizontalLayout {
                 padding-left: 10px;
                 padding-right: 10px;
-                
                 Text {
                     text: "Now Playing: " + root.status-display;
                     color: #bbb;
