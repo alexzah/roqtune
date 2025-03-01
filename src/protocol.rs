@@ -14,6 +14,8 @@ pub enum PlaylistMessage {
 
 #[derive(Debug, Clone)]
 pub enum AudioMessage {
+    DecodeTracks(Vec<PathBuf>),
+    ClearCache,
     BufferReady {
         samples: Vec<f32>,
         sample_rate: u32,
@@ -23,6 +25,10 @@ pub enum AudioMessage {
 
 #[derive(Debug, Clone)]
 pub enum PlaybackMessage {
+    ReadyForPlayback,
     Play,
+    PlayTrack(usize), //play a specific track by index
+    Stop,
     TrackFinished,
+    ClearPlayerCache,
 }

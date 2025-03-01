@@ -5,7 +5,7 @@ edition = "2021"
 build = "build.rs"
 
 [dependencies]
-slint = "1.7"  # Latest stable version as of Feb 2025
+slint = "1.10.0" # UI framework
 rodio = "0.19" # For audio playback
 rfd = "0.14"   # For file dialogs
 id3 = "1.16.2" # Metadata tags
@@ -25,4 +25,4 @@ cpal = "0.15.3" # For audio playback
 tokio = { version = "1.43.0", features = ["sync"] }
 
 [build-dependencies]
-slint-build = "1.9.2"
+slint-build = "1.10.0"

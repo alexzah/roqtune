@@ -5,7 +5,13 @@ mod playlist_manager;
 mod protocol;
 mod ui_manager;
 
-use std::{path::PathBuf, rc::Rc, sync::Mutex, thread};
+use std::{
+    path::PathBuf,
+    rc::Rc,
+    sync::Mutex,
+    thread,
+    time::{Duration, Instant},
+};
 
 use audio_decoder::AudioDecoder;
 use audio_player::AudioPlayer;
@@ -59,6 +65,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let ui_handle_clone = ui.as_weak().clone();
     let bus_sender_clone = bus_sender.clone();
+    let mut last_click_time = Instant::now();
 
     // Setup file dialog
     ui.on_open_file(move || {
@@ -87,6 +94,30 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     ui.on_play(move || {
         debug!("Play button clicked");
         let _ = bus_sender_clone.send(Message::Playback(PlaybackMessage::Play));
+    });
+
+    // Wire up stop button
+    let bus_sender_clone = bus_sender.clone();
+    ui.on_stop(move || {
+        debug!("Stop button clicked");
+        let _ = bus_sender_clone.send(Message::Playback(PlaybackMessage::Stop));
+    });
+
+    // Handle playlist item clicks
+    let bus_sender_clone = bus_sender.clone();
+    ui.on_playlist_item_click(move |index, _event, _point| {
+        // Only respond to double-click events
+        if _event.button.to_string() == "left" && _event.kind.to_string() == "down" {
+            if last_click_time.elapsed() < Duration::from_millis(500) {
+                debug!("Playlist item double-clicked: {}", index);
+                let _ = bus_sender_clone.send(Message::Playback(PlaybackMessage::PlayTrack(
+                    index as usize,
+                )));
+            } else {
+                debug!("Playlist item clicked: {}", index);
+            }
+            last_click_time = Instant::now();
+        }
     });
 
     // Setup playlist manager

@@ -1,17 +1,17 @@
+use rand::{rngs::StdRng, Rng, SeedableRng};
 use std::path::PathBuf;
-use rand::{Rng, SeedableRng, rngs::StdRng};
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum PlaybackOrder {
-    Sequential,  // Play tracks in order
-    Shuffle,     // Randomize order once and play through that order
-    Random,      // Pick a random track each time
+    Sequential, // Play tracks in order
+    Shuffle,    // Randomize order once and play through that order
+    Random,     // Pick a random track each time
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum RepeatMode {
-    Off,     // Stop after reaching the end of playlist
-    On,      // Repeat playlist from the beginning
+    Off, // Stop after reaching the end of playlist
+    On,  // Repeat playlist from the beginning
 }
 
 pub struct Track {
@@ -35,7 +35,7 @@ impl Playlist {
         // Generate a random seed
         let mut seed = [0u8; 32];
         getrandom::getrandom(&mut seed).expect("Failed to generate random seed");
-        
+
         return Playlist {
             tracks: Vec::new(),
             playing_track_index: None,
@@ -80,20 +80,20 @@ impl Playlist {
         return self.is_playing;
     }
 
-    pub fn get_selected_track(&self) -> &Track {
-        return &self.tracks[self.selected_track_index];
+    pub fn get_track(&self, index: usize) -> &Track {
+        return &self.tracks[index];
     }
 
     pub fn num_tracks(&self) -> usize {
         return self.tracks.len();
     }
-    
+
     // Get the next track index based on the current playback order and repeat mode
     pub fn get_next_track_index(&mut self, current_index: usize) -> Option<usize> {
         if self.tracks.is_empty() {
             return None;
         }
-        
+
         match self.playback_order {
             PlaybackOrder::Sequential => {
                 // Return the next track in sequence
@@ -113,9 +113,13 @@ impl Playlist {
                 if self.shuffled_indices.is_empty() {
                     self.generate_shuffle_order();
                 }
-                
+
                 // Find the current position in the shuffled list
-                if let Some(position) = self.shuffled_indices.iter().position(|&i| i == current_index) {
+                if let Some(position) = self
+                    .shuffled_indices
+                    .iter()
+                    .position(|&i| i == current_index)
+                {
                     if position + 1 < self.shuffled_indices.len() {
                         // Return the next track in the shuffled order
                         Some(self.shuffled_indices[position + 1])
@@ -149,7 +153,7 @@ impl Playlist {
                         *val = self.rng_seed[i].wrapping_add(1);
                     }
                     self.rng_seed = new_seed;
-                    
+
                     Some(next_index)
                 } else if self.tracks.len() == 1 {
                     // Only one track, just play it again if repeat is on
@@ -165,60 +169,60 @@ impl Playlist {
             }
         }
     }
-    
+
     // Generate a random order for all tracks
     fn generate_shuffle_order(&mut self) {
         let track_count = self.tracks.len();
         let mut indices: Vec<usize> = (0..track_count).collect();
-        
+
         // Create a new RNG with our seed
         let mut rng = StdRng::from_seed(self.rng_seed);
-        
+
         // Shuffle the indices
         for i in (1..track_count).rev() {
             let j = rng.gen_range(0..=i);
             indices.swap(i, j);
         }
-        
+
         // Update the seed for next time
         let mut new_seed = [0u8; 32];
         for (i, val) in new_seed.iter_mut().enumerate() {
             *val = self.rng_seed[i].wrapping_add(1);
         }
         self.rng_seed = new_seed;
-        
+
         self.shuffled_indices = indices;
     }
-    
+
     pub fn set_playback_order(&mut self, order: PlaybackOrder) {
         if self.playback_order != order {
             self.playback_order = order;
-            
+
             // If changing to shuffle, generate the shuffle order
             if order == PlaybackOrder::Shuffle {
                 self.generate_shuffle_order();
             }
         }
     }
-    
+
     pub fn get_playback_order(&self) -> PlaybackOrder {
         self.playback_order
     }
-    
+
     pub fn set_repeat_mode(&mut self, mode: RepeatMode) {
         self.repeat_mode = mode;
     }
-    
+
     pub fn get_repeat_mode(&self) -> RepeatMode {
         self.repeat_mode
     }
-    
+
     // Get first track index based on current playback order
     pub fn get_first_track_index(&mut self) -> Option<usize> {
         if self.tracks.is_empty() {
             return None;
         }
-        
+
         match self.playback_order {
             PlaybackOrder::Sequential => Some(0),
             PlaybackOrder::Shuffle => {
@@ -226,18 +230,18 @@ impl Playlist {
                     self.generate_shuffle_order();
                 }
                 self.shuffled_indices.first().copied()
-            },
+            }
             PlaybackOrder::Random => {
                 let mut rng = StdRng::from_seed(self.rng_seed);
                 let index = rng.gen_range(0..self.tracks.len());
-                
+
                 // Update the seed for next time
                 let mut new_seed = [0u8; 32];
                 for (i, val) in new_seed.iter_mut().enumerate() {
                     *val = self.rng_seed[i].wrapping_add(1);
                 }
                 self.rng_seed = new_seed;
-                
+
                 Some(index)
             }
         }
