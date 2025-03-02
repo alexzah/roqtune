@@ -105,7 +105,7 @@ impl DecodeWorker {
         let target_sample_rate = 48000;
         let target_channels = 2;
         SincFixedIn::<f32>::new(
-            source_sample_rate as f64 / target_sample_rate as f64,
+            target_sample_rate as f64 / source_sample_rate as f64,
             2.0,
             params,
             chunk_size,
@@ -141,11 +141,10 @@ impl DecodeWorker {
 
         // TODO: get channels as message from player
         let channels: usize = 2;
-        let target_sample_rate: u32 = 48000;
-        let mut resampled: Vec<Vec<f32>> = vec![vec![]; channels];
+        let target_sample_rate = 48000;
         let mut result: Vec<f32> = Vec::new();
         if let Some(resampler) = &mut self.resampler {
-            debug!(
+            trace!(
                 "Attempting to pull {} samples from resample buffer of size {}",
                 resampler.input_frames_next() * channels,
                 self.resample_buffer.len()
@@ -164,116 +163,13 @@ impl DecodeWorker {
                 waves_out = resampler
                     .process_partial(Some(&deinterleaved), None)
                     .unwrap();
+                if let Ok(result) = resampler.process_partial::<&[f32]>(None, None) {
+                    for i in 0..channels {
+                        waves_out[i].extend(result[i].iter());
+                    }
+                }
             }
             result = Self::interleave(&waves_out);
-            // resampler.reset();
-            // debug!(
-            //     "Attempting to pull {} samples from resample buffer of size {}",
-            //     resampler.input_frames_next() * channels,
-            //     self.resample_buffer.len()
-            // );
-            // for _ in 0..min(
-            //     resampler.input_frames_next() * channels,
-            //     self.resample_buffer.len(),
-            // ) {
-            //     samples.push(self.resample_buffer.pop_front().unwrap());
-            // }
-            // let delay = resampler.output_delay();
-
-            // let mut source_index = 0;
-            // // Process most frames
-            // loop {
-            //     let needed_frames = resampler.input_frames_next() * channels; // Comes in interleaved with all channels
-            //     trace!(
-            //         "AudioPlayer: Need {} frames for next resampling step",
-            //         needed_frames
-            //     );
-
-            //     if source_index + needed_frames > samples.len() {
-            //         trace!(
-            //             "AudioPlayer: Not enough samples left (have {}, need {}), breaking",
-            //             samples.len(),
-            //             needed_frames
-            //         );
-            //         break;
-            //     }
-            //     let mut channel_index = 0usize;
-            //     let mut input: Vec<Vec<f32>> = vec![vec![]; channels as usize];
-            //     for i in source_index..source_index + needed_frames {
-            //         input[channel_index].push(samples[i]);
-            //         channel_index = (channel_index + 1) % channels as usize;
-            //     }
-            //     source_index += needed_frames;
-            //     trace!(
-            //         "AudioPlayer: Processing {} input frames at index {}",
-            //         needed_frames,
-            //         source_index
-            //     );
-
-            //     let result = resampler.process(&input, None);
-            //     if let Ok(resulting_samples) = result {
-            //         trace!(
-            //             "AudioPlayer: Successfully resampled {} frames",
-            //             resulting_samples[0].len()
-            //         );
-            //         for i in 0..resampled.len() {
-            //             resampled[i].extend(resulting_samples[i].iter());
-            //         }
-            //     } else {
-            //         error!("AudioPlayer: Error resampling audio {:?}", result);
-            //         return vec![];
-            //     }
-            // }
-
-            // trace!(
-            //     "AudioPlayer: Processing remaining frames starting at index {}",
-            //     source_index
-            // );
-            // // Process remaining frames
-            // let mut input = vec![vec![]; channels];
-            // let mut channel_index = 0usize;
-            // for i in source_index..samples.len() {
-            //     input[channel_index].push(samples[i]);
-            //     channel_index = (channel_index + 1) % channels;
-            // }
-
-            // trace!("AudioPlayer: Processing partial remaining frames");
-            // if let Ok(result) = resampler.process_partial(Some(&input), None) {
-            //     debug!(
-            //         "AudioPlayer: Got {} frames from partial processing",
-            //         result[0].len()
-            //     );
-            //     for i in 0..resampled.len() {
-            //         resampled[i].extend(result[i].iter());
-            //     }
-            // }
-
-            // trace!("AudioPlayer: Filling remaining samples to reach target length");
-            // let new_length: usize = ((samples.len() as f32 / channels as f32) * sample_rate as f32
-            //     / target_sample_rate as f32) as usize;
-            // while resampled[0].len() < new_length + delay {
-            //     if let Ok(result) = resampler.process_partial::<&[f32]>(None, None) {
-            //         debug!("AudioPlayer: Got {} frames from flushing", result[0].len());
-            //         for i in 0..resampled.len() {
-            //             resampled[i].extend(result[i].iter());
-            //         }
-            //     }
-            // }
-
-            // if resampled.is_empty() {
-            //     error!("AudioPlayer: No output after resampling");
-            //     return vec![];
-            // }
-            // debug!(
-            //     "AudioPlayer: Completed resampling with {} frames",
-            //     resampled[0].len()
-            // );
-
-            // for i in delay - 1..delay + new_length - 1 {
-            //     for channel in 0..channels {
-            //         result.push(resampled[channel][i]);
-            //     }
-            // }
         }
 
         result
