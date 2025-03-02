@@ -1,75 +1,336 @@
+import { Button, VerticalBox, StandardTableView, ComboBox } from "std-widgets.slint";
 
-import { Button, VerticalBox, StandardTableView } from "std-widgets.slint";
+component PlayerButton inherits Rectangle {
+    width: 32px;
+    height: 32px;
+    background: touch-area.pressed ? #444 : touch-area.has-hover ? #666 : transparent;
+    animate background { duration: 150ms; }
+    in property <string> icon-text;
+    in property <bool> enabled: true;
+    in property <bool> is-primary: false;
+    in property <length> font-size: 16px;
+    callback clicked;
+    Text {
+        text: root.icon-text;
+        font-size: root.font-size;
+        color: root.is-primary ? #2a6def : #eee;
+        horizontal-alignment: center;
+        opacity: root.enabled ? 1.0 : 0.5;
+    }
+
+    touch-area := TouchArea {
+        clicked => {
+            if (root.enabled) {
+                root.clicked();
+            }
+        }
+    }
+}
 
 export component AppWindow inherits Window {
-    width: 1280px;
-    height: 720px;
-    title: "Music Player";
+    width: 900px;
+    height: 600px;
+    title: "fooBar-like Music Player";
+    background: #282828;
+    
+    // Status display at the bottom showing the currently playing track
+    property <string> status-display: file_path != "" ? file_path : "No track selected";
 
-    VerticalBox {
-        spacing: 10px;
-        padding: 20px;
+    VerticalLayout {
+        // Toolbar with open and playback controls
+        Rectangle {
+            height: 42px;
+            background: #202020;
+            HorizontalLayout {
+                padding-left: 8px;
+                padding-right: 8px;
+                spacing: 8px;
+                
+                // Open file button
+                Rectangle {
+                    width: 80px;
+                    height: 28px;
+                    border-radius: 2px;
+                    background: #373737;
+                    HorizontalLayout {
+                        alignment: center;
+                        spacing: 4px;
+                        Text {
+                            text: "📂"; 
+                            color: #ddd;
+                            font-size: 14px;
+                        }
 
-        HorizontalLayout {
-            Button {
-                text: "Open File";
-                clicked => {
-                    root.open_file();
+                        Text {
+                            text: "Open";
+                            color: #ddd;
+                            font-size: 14px;
+                        }
+                    }
+
+                    TouchArea {
+                        clicked => {
+                            root.open_file();
+                        }
+                    }
                 }
-            }
+                
+                // Playback controls
+                HorizontalLayout {
+                    alignment: center;
+                    spacing: 14px;
+                    PlayerButton {
+                        icon-text: "⏮";
+                        clicked => {
+                            root.previous();
+                        }
+                    }
 
-            Button {
-                text: "Play";
-                clicked => {
-                    root.play();
+                    PlayerButton {
+                        icon-text: "▶";
+                        is-primary: true;
+                        clicked => {
+                            root.play();
+                        }
+                    }
+
+                    PlayerButton {
+                        icon-text: "⏸";
+                        clicked => {
+                            root.pause();
+                        }
+                    }
+
+                    PlayerButton {
+                        icon-text: "⏹";
+                        clicked => {
+                            root.stop();
+                        }
+                    }
+
+                    PlayerButton {
+                        icon-text: "⏭";
+                        clicked => {
+                            root.next();
+                        }
+                    }
                 }
-            }
+                
+                // Playback mode selection
+                HorizontalLayout {
+                    spacing: 8px;
+                    Text {
+                        text: "Order:";
+                        color: #aaa;
+                        font-size: 14px;
+                    }
 
-            Button {
-                text: "Pause";
-                clicked => {
-                    root.pause();
+                    ComboBox {
+                        width: 120px;
+                        height: 28px;
+                        model: ["Sequential", "Shuffle", "Random"];
+                        current-index: root.playback_order_index;
+                        selected => {
+                            root.playback_order_changed(self.current-index);
+                        }
+                    }
+
+                    Text {
+                        text: "Repeat:";
+                        color: #aaa;
+                        font-size: 14px;
+                    }
+
+                    PlayerButton {
+                        icon-text: root.repeat_on ? "🔁" : "↩";
+                        font-size: 14px;
+                        is-primary: root.repeat_on;
+                        clicked => {
+                            root.toggle_repeat();
+                        }
+                    }
                 }
-            }
-
-            Button {
-                text: "Stop";
-                clicked => {
-                    root.stop();
+                
+                // Spacer to push notification area to the right
+                Rectangle { }
+                
+                // Status area
+                Text {
+                    text: status;
+                    color: #aaa;
+                    font-size: 13px;
                 }
             }
         }
-
+        
+        // Progress bar section
+        Rectangle {
+            height: 36px;
+            background: #242424;
+            HorizontalLayout {
+                padding-left: 16px;
+                padding-right: 16px;
+                padding-top: 10px;
+                padding-bottom: 10px;
+                spacing: 8px;
+                
+                // Current time display
+                Rectangle {
+                    background: #444;
+                    border-radius: 2px;
+                    width: 70px;
+                    Text {
+                        text: root.current-position-text;
+                        color: #bbb;
+                        font-size: 13px;
+                        vertical-alignment: center;
+                        horizontal-alignment: center;
+                    }
+                }
+                
+                // Improved interactive seek bar
+                seekbar := Rectangle {
+                    height: 16px;
+                    border-radius: 3px;
+                    background: #333;
+                    horizontal-stretch: 1;
+                    property <length> handle-position: self.width * root.position-percentage;
+                    
+                    // Progress indicator - shows playback progress with smooth animation
+                    progress := Rectangle {
+                        height: parent.height;
+                        width: seekbar.handle-position;
+                        background: #2a6def;
+                        border-radius: 3px;
+                        animate width {
+                            duration: 150ms;
+                            easing: ease-out;
+                        }
+                    }
+                    
+                    // Position percentage label for debugging
+                    Text {
+                        text: round(root.position-percentage * 100) + "%";
+                        color: white;
+                        font-size: 10px;
+                        y: -16px;
+                        x: seekbar.width / 2 - self.width / 2;
+                    }
+                    
+                    // Handle over the progress bar with smooth animation
+                    handle := Rectangle {
+                        width: 10px;
+                        height: parent.height + 4px;
+                        x: seekbar.handle-position - self.width / 2;
+                        y: -2px;
+                        background: white;
+                        border-radius: 5px;
+                        drop-shadow-offset-y: 1px;
+                        drop-shadow-blur: 2px;
+                        drop-shadow-color: #00000080;
+                        
+                        // Smooth animation for handle position updates
+                        animate x {
+                            duration: 150ms;
+                            easing: ease-out;
+                        }
+                        animate height { duration: 80ms; }
+                        animate y { duration: 80ms; }
+                    }
+                    
+                    // Focus highlighting when hovering
+                    states [
+                        hover when ta.has-hover || ta.pressed: {
+                            handle.background: #f0f0f0;
+                            handle.height: parent.height + 6px;
+                            handle.y: -3px;
+                        }
+                    ]
+                    
+                    // Simple touch area for seeking
+                    ta := TouchArea {
+                        width: parent.width;
+                        height: parent.height + 10px; // Make touch area slightly larger
+                        mouse-cursor: pointer;
+                        clicked => {
+                            // Calculate position as percentage of width and send seek command
+                            root.seek-to(max(0, min(1, self.mouse-x / seekbar.width)));
+                        }
+                        moved => {
+                            if (self.pressed) {
+                                // Update while dragging
+                                root.seek-to(max(0, min(1, self.mouse-x / seekbar.width)));
+                            }
+                        }
+                    }
+                }
+                
+                // Total duration display
+                Text {
+                    text: root.total-duration-text;
+                    color: #bbb;
+                    font-size: 13px;
+                    vertical-alignment: center;
+                    width: 45px;
+                }
+            }
+        }
+        
+        // Main content: Playlist 
         StandardTableView {
             columns: [
-                { title: "Title" },
-                { title: "Artist" },
-                { title: "Album" },
+                // { title: "#", width: 40px },
+                { title: "Title", width: 300px },
+                { title: "Artist", width: 200px },
+                { title: "Album", width: 200px },
             ];
-
             rows: track_model;
+            horizontal-stretch: 1;
+            vertical-stretch: 1;
             row-pointer-event(int, PointerEvent, Point) => {
                 root.playlist_item_click(int, PointerEvent, Point);
             }
         }
-
-        Text {
-            text: file_path;
-        } // Removed id, directly use property
-        Text {
-            text: status;
-        } // Removed id, directly use property
+        
+        // Status bar
+        Rectangle {
+            height: 28px;
+            background: #1a1a1a;
+            HorizontalLayout {
+                padding-left: 10px;
+                padding-right: 10px;
+                Text {
+                    text: "Now Playing: " + root.status-display;
+                    color: #bbb;
+                    font-size: 13px;
+                }
+            }
+        }
     }
 
     // Properties to communicate with Rust
     in-out property <string> file_path: "";
-    in-out property <string> status: "No file selected";
+    in-out property <string> status: "Ready";
     in-out property <[[StandardListViewItem]]> track_model: []; // holds rows of strings
+    in-out property <int> playback_order_index: 0;
+    in-out property <bool> repeat_on: false;
+    
+    // Seek bar properties
+    in-out property <float> current-position: 0.0; // in seconds
+    in-out property <float> total-duration: 0.0; // in seconds
+    in-out property <float> position-percentage: 0.0; // between 0.0 and 1.0
+    in-out property <string> current-position-text: "0:00";
+    in-out property <string> total-duration-text: "0:00";
 
     // Callback declarations
     callback open_file();
     callback play();
     callback pause();
     callback stop();
+    callback next();
+    callback previous();
     callback playlist_item_click(int, PointerEvent, Point);
+    callback playback_order_changed(int);
+    callback toggle_repeat();
+    callback seek-to(float); // Position between 0.0 and 1.0
 }
