@@ -54,6 +54,10 @@ impl PlaylistManager {
                         if original_selected_track_index != index {
                             self.clear_cached_tracks();
                             self.cache_tracks();
+                        } else {
+                            self.bus_producer
+                                .send(protocol::Message::Playback(protocol::PlaybackMessage::Play))
+                                .unwrap();
                         }
                     }
                     protocol::Message::Playback(protocol::PlaybackMessage::Stop) => {

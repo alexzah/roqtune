@@ -1,6 +1,10 @@
 use crate::protocol::{AudioMessage, Message, PlaybackMessage};
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use log::{debug, error, trace};
+use rubato::{
+    FftFixedIn, Resampler, SincFixedIn, SincInterpolationParameters, SincInterpolationType,
+    WindowFunction,
+};
 use std::{
     collections::VecDeque,
     path::PathBuf,
@@ -12,19 +16,26 @@ use std::{
 use symphonia::core::{codecs::Decoder, formats::Packet};
 use tokio::sync::broadcast::{Receiver, Sender};
 
+pub struct Sample {
+    sample: f32,
+    sample_rate: u32,
+    channels: u16,
+}
+
 pub struct AudioPlayer {
     bus_receiver: Receiver<Message>,
     bus_sender: Sender<Message>,
     // Audio state
-    current_sample_rate: u32,
-    current_channels: u16,
-    sample_queue: Arc<Mutex<VecDeque<f32>>>,
+    target_sample_rate: u32,
+    target_channels: u16,
+    sample_queue: Arc<Mutex<VecDeque<Sample>>>,
     buffer_position: Arc<AtomicU64>,
     is_playing: Arc<AtomicBool>,
     // Audio stream
     config: Option<cpal::StreamConfig>,
     device: Option<cpal::Device>,
     stream: Option<cpal::Stream>,
+    resampler: Option<FftFixedIn<f32>>,
 }
 
 impl AudioPlayer {
@@ -38,8 +49,9 @@ impl AudioPlayer {
             device: None,
             config: None,
             stream: None,
-            current_sample_rate: 0,
-            current_channels: 0,
+            target_sample_rate: 0,
+            target_channels: 0,
+            resampler: None,
         };
 
         // Initialize audio device once during construction
@@ -57,69 +69,70 @@ impl AudioPlayer {
             }
         };
 
-        // Store device for later use
-        self.device = Some(device);
-        debug!("Audio device initialized");
-    }
-
-    fn setup_stream(&mut self, sample_rate: u32, channels: u16) -> bool {
-        self.current_sample_rate = sample_rate;
-        self.current_channels = channels;
-
-        let device = match &self.device {
-            Some(device) => device,
-            None => {
-                error!("No audio device available");
-                return false;
-            }
-        };
-
+        let sample_rate = 48000u32;
+        let channels = 2usize;
         // Setup stream config
         let config = match device.supported_output_configs() {
             Ok(mut configs) => {
                 match configs.find(|config| {
-                    config.channels() == channels
+                    config.channels() == channels as u16
                         && config.min_sample_rate().0 <= sample_rate
                         && config.max_sample_rate().0 >= sample_rate
                 }) {
                     Some(config) => config.with_sample_rate(cpal::SampleRate(sample_rate)),
                     None => {
                         error!("No matching device config found");
-                        return false;
+                        return;
                     }
                 }
             }
             Err(e) => {
                 error!("Error getting device configs: {}", e);
-                return false;
+                return;
             }
         };
 
+        self.target_channels = config.channels(); // config.channels();
+        self.target_sample_rate = config.sample_rate().0; // config.sample_rate().0;
         self.config = Some(config.into());
+        self.device = Some(device);
         debug!(
-            "Stream config updated for {}Hz, {} channels",
-            sample_rate, channels
+            "AudioPlayer: Audio device initialized with target sample rate: {} and channels: {}",
+            self.target_sample_rate, self.target_channels
         );
-        true
+    }
+
+    fn create_resampler(&mut self, source_sample_rate: u32, chunk_size: usize) -> FftFixedIn<f32> {
+        // let params = SincInterpolationParameters {
+        //     sinc_len: 256,
+        //     f_cutoff: 0.95,
+        //     interpolation: SincInterpolationType::Nearest,
+        //     oversampling_factor: 128,
+        //     window: WindowFunction::BlackmanHarris2,
+        // };
+        let resampler = FftFixedIn::<f32>::new(
+            source_sample_rate as usize,
+            self.target_sample_rate as usize,
+            chunk_size,
+            4,
+            self.target_channels as usize,
+        );
+        resampler.unwrap()
     }
 
     fn load_samples(&mut self, samples: Vec<f32>, sample_rate: u32, channels: u16) {
         // Create new stream if none exists or if config changed
         if self.stream.is_none() {
-            if self.setup_stream(sample_rate, channels) {
-                self.create_stream();
-            }
+            self.create_stream();
         }
-
-        // Store the samples
-        {
-            let mut queue = self.sample_queue.lock().unwrap();
-            trace!(
-                "AudioPlayer: Adding {} samples to queue (total: {})",
-                samples.len(),
-                queue.len()
-            );
-            queue.extend(samples);
+        trace!("AudioPlayer: Loading {} samples", samples.len());
+        let mut queue = self.sample_queue.lock().unwrap();
+        for sample in samples {
+            queue.push_back(Sample {
+                sample,
+                sample_rate,
+                channels,
+            });
         }
     }
 
@@ -168,7 +181,7 @@ impl AudioPlayer {
                 // Copy samples to output
                 for (i, sample) in data.iter_mut().enumerate() {
                     *sample = if pos + i < buffer_lock.len() {
-                        buffer_lock[pos + i]
+                        buffer_lock[pos + i].sample
                     } else {
                         0.0
                     };

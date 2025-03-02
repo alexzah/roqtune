@@ -34,7 +34,7 @@ impl Playlist {
     pub fn new() -> Playlist {
         // Generate a random seed
         let mut seed = [0u8; 32];
-        getrandom::getrandom(&mut seed).expect("Failed to generate random seed");
+        getrandom::fill(&mut seed).expect("Failed to generate random seed");
 
         return Playlist {
             tracks: Vec::new(),
