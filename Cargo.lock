@@ -280,6 +280,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "6b964d184e89d9b6b67dd2715bc8e74cf3107fb2b529990c90cf517326150bf4"
 
 [[package]]
+name = "ape"
+version = "0.6.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "8fb0a5091f05526b27cd637f680c0b20ecc3af600bc74bbf1069fef11d323ab5"
+dependencies = [
+ "byteorder",
+]
+
+[[package]]
 name = "arbitrary"
 version = "1.4.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3230,6 +3239,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "metaflac"
+version = "0.2.8"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "fdf25a3451319c52a4a56d956475fbbb763bfb8420e2187d802485cb0fd8d965"
+dependencies = [
+ "byteorder",
+ "hex",
+]
+
+[[package]]
 name = "minimal-lexical"
 version = "0.2.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3270,11 +3289,13 @@ dependencies = [
 name = "music_player"
 version = "0.1.0"
 dependencies = [
+ "ape",
  "colog",
  "cpal",
  "getrandom 0.3.1",
  "id3",
  "log",
+ "metaflac",
  "rand 0.9.0",
  "rfd",
  "rubato",

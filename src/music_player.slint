@@ -32,6 +32,16 @@ export component AppWindow inherits Window {
     height: 600px;
     title: "fooBar-like Music Player";
     background: #282828;
+
+    key-handler := FocusScope {
+        key-pressed(event) => {
+            if (event.text == Key.Delete) {
+                root.delete_track(root.selected_track_index);
+                return accept;
+            }
+            reject
+        }
+    }
     
     // Status display at the bottom showing the currently playing track
     property <string> status-display: file_path != "" ? file_path : "No track selected";
@@ -277,10 +287,13 @@ export component AppWindow inherits Window {
         }
         
         // Main content: Playlist 
-        StandardTableView {
+        playlist-view := StandardTableView {
+            width: 100%;
+            height: 100%;
+            forward-focus: key-handler;
             columns: [
-                // { title: "#", width: 40px },
-                { title: "Title", width: 300px },
+            // { title: "#", width: 40px },
+            { title: "Title", width: 300px },
                 { title: "Artist", width: 200px },
                 { title: "Album", width: 200px },
             ];
@@ -289,6 +302,7 @@ export component AppWindow inherits Window {
             vertical-stretch: 1;
             row-pointer-event(int, PointerEvent, Point) => {
                 root.playlist_item_click(int, PointerEvent, Point);
+                key-handler.focus();
             }
         }
         
@@ -314,6 +328,7 @@ export component AppWindow inherits Window {
     in-out property <[[StandardListViewItem]]> track_model: []; // holds rows of strings
     in-out property <int> playback_order_index: 0;
     in-out property <bool> repeat_on: false;
+    in-out property <int> selected_track_index: -1;
     
     // Seek bar properties
     in-out property <float> current-position: 0.0; // in seconds
@@ -333,4 +348,5 @@ export component AppWindow inherits Window {
     callback playback_order_changed(int);
     callback toggle_repeat();
     callback seek-to(float); // Position between 0.0 and 1.0
+    callback delete_track(int);
 }

@@ -74,6 +74,7 @@ impl DecodeWorker {
         // try_recv() returns None if channel is empty, Some if there's a message
         match self.work_receiver.try_recv() {
             Ok(DecodeWorkItem::Stop) => {
+                debug!("DecodeWorker: Received stop signal");
                 self.work_queue.clear();
                 self.bus_sender
                     .send(Message::Playback(PlaybackMessage::ClearPlayerCache))

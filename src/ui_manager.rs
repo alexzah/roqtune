@@ -1,5 +1,6 @@
 use std::{
     ops::Deref,
+    path::PathBuf,
     rc::Rc,
     sync::{Arc, Mutex, RwLock},
 };
@@ -25,6 +26,12 @@ pub struct UiManager {
     bus_sender: Sender<protocol::Message>,
 }
 
+struct TrackMetadata {
+    title: String,
+    artist: String,
+    album: String,
+}
+
 impl UiManager {
     pub fn new(
         ui: slint::Weak<AppWindow>,
@@ -38,6 +45,102 @@ impl UiManager {
         }
     }
 
+    fn read_track_metadata(&self, path: &PathBuf) -> TrackMetadata {
+        debug!("Reading metadata for: {}", path.display());
+
+        // Try ID3 tags first
+        match Tag::read_from_path(path) {
+            Ok(tag) => {
+                let title = tag.title().unwrap_or("");
+                let artist = tag.artist().unwrap_or("");
+                let album = tag.album().unwrap_or("");
+
+                if !title.is_empty() || !artist.is_empty() || !album.is_empty() {
+                    debug!(
+                        "Found ID3 tags: title='{}', artist='{}', album='{}'",
+                        title, artist, album
+                    );
+                    return TrackMetadata {
+                        title: title.to_string(),
+                        artist: artist.to_string(),
+                        album: album.to_string(),
+                    };
+                }
+                debug!("ID3 tags were empty or incomplete");
+            }
+            Err(e) => {
+                debug!("No ID3 tags found: {}", e);
+            }
+        }
+
+        // Fall back to APE tags
+        match ape::read_from_path(path) {
+            Ok(ape_tag) => {
+                let title: &str = ape_tag.item("title").unwrap().try_into().unwrap();
+
+                let artist: &str = ape_tag.item("artist").unwrap().try_into().unwrap();
+
+                let album: &str = ape_tag.item("album").unwrap().try_into().unwrap();
+
+                if !title.is_empty() || !artist.is_empty() || !album.is_empty() {
+                    debug!(
+                        "Found APE tags: title='{}', artist='{}', album='{}'",
+                        title, artist, album
+                    );
+                    return TrackMetadata {
+                        title: title.to_string(),
+                        artist: artist.to_string(),
+                        album: album.to_string(),
+                    };
+                }
+                debug!("APE tags were empty or incomplete");
+            }
+            Err(e) => {
+                debug!("No APE tags found: {}", e);
+            }
+        }
+
+        // Fall back to FLAC tags
+        match metaflac::Tag::read_from_path(path) {
+            Ok(flac_tag) => {
+                let title = flac_tag.get_vorbis("title").unwrap().next().unwrap_or("");
+                let artist = flac_tag.get_vorbis("artist").unwrap().next().unwrap_or("");
+                let album = flac_tag.get_vorbis("album").unwrap().next().unwrap_or("");
+
+                if !title.is_empty() || !artist.is_empty() || !album.is_empty() {
+                    debug!(
+                        "Found FLAC tags: title='{}', artist='{}', album='{}'",
+                        title, artist, album
+                    );
+                    return TrackMetadata {
+                        title: title.to_string(),
+                        artist: artist.to_string(),
+                        album: album.to_string(),
+                    };
+                }
+                debug!("FLAC tags were empty or incomplete");
+            }
+            Err(e) => {
+                debug!("No FLAC tags found: {}", e);
+            }
+        }
+
+        // If no tags found, use filename as title
+        let filename = path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or("")
+            .to_string();
+
+        debug!("No tags found, using filename: {}", filename);
+
+        TrackMetadata {
+            title: filename,
+            artist: "".to_string(),
+            album: "".to_string(),
+        }
+    }
+
     pub fn run(&mut self) {
         loop {
             while let Ok(message) = self.bus_receiver.blocking_recv() {
@@ -45,10 +148,7 @@ impl UiManager {
                     protocol::Message::Playlist(playlist_message) => match playlist_message {
                         protocol::PlaylistMessage::LoadTrack(path) => {
                             debug!("Loading track: {}", path.display());
-                            let tag = Tag::read_from_path(&path).unwrap_or_default();
-                            let artist = tag.artist().unwrap_or("").to_string();
-                            let title = tag.title().unwrap_or("").to_string();
-                            let album = tag.album().unwrap_or("").to_string();
+                            let tags: TrackMetadata = self.read_track_metadata(&path);
 
                             // Push the track to the playlist
                             let _ = self.ui.upgrade_in_event_loop(move |ui| {
@@ -58,10 +158,20 @@ impl UiManager {
                                     .downcast_ref::<VecModel<ModelRc<StandardListViewItem>>>()
                                     .expect("We know we set a VecModel earlier");
                                 track_model.push(ModelRc::new(VecModel::from(vec![
-                                    StandardListViewItem::from(title.as_str()),
-                                    StandardListViewItem::from(artist.as_str()),
-                                    StandardListViewItem::from(album.as_str()),
+                                    StandardListViewItem::from(tags.title.as_str()),
+                                    StandardListViewItem::from(tags.artist.as_str()),
+                                    StandardListViewItem::from(tags.album.as_str()),
                                 ])));
+                            });
+                        }
+                        protocol::PlaylistMessage::DeleteTrack(index) => {
+                            let _ = self.ui.upgrade_in_event_loop(move |ui| {
+                                let track_model_strong = ui.get_track_model();
+                                let track_model = track_model_strong
+                                    .as_any()
+                                    .downcast_ref::<VecModel<ModelRc<StandardListViewItem>>>()
+                                    .expect("We know we set a VecModel earlier");
+                                track_model.remove(index);
                             });
                         }
                     },

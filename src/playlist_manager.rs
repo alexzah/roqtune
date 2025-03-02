@@ -77,6 +77,10 @@ impl PlaylistManager {
                                 .unwrap();
                         }
                     }
+                    protocol::Message::Playlist(protocol::PlaylistMessage::DeleteTrack(index)) => {
+                        debug!("PlaylistManager: Received delete track command: {}", index);
+                        self.playlist.delete_track(index);
+                    }
                     _ => trace!("PlaylistManager: ignoring unsupported message"),
                 }
             }

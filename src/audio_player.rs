@@ -174,7 +174,6 @@ impl AudioPlayer {
                 // Check if we've reached the end
                 if pos >= buffer_lock.len() {
                     data.fill(0.0);
-                    let _ = bus_sender.send(Message::Playback(PlaybackMessage::TrackFinished));
                     return;
                 }
 

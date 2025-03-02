@@ -10,6 +10,7 @@ pub enum Message {
 #[derive(Debug, Clone)]
 pub enum PlaylistMessage {
     LoadTrack(PathBuf),
+    DeleteTrack(usize),
 }
 
 #[derive(Debug, Clone)]

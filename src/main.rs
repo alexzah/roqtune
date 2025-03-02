@@ -19,7 +19,7 @@ use id3::{Tag, TagLike};
 use log::{debug, info};
 use playlist::Playlist;
 use playlist_manager::PlaylistManager;
-use protocol::{Message, PlaybackMessage};
+use protocol::{Message, PlaybackMessage, PlaylistMessage};
 use slint::{ModelRc, StandardListViewItem, VecModel};
 use tokio::sync::broadcast;
 use ui_manager::{UiManager, UiState};
@@ -105,6 +105,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Handle playlist item clicks
     let bus_sender_clone = bus_sender.clone();
+    let ui_handle_clone = ui.as_weak().clone();
     ui.on_playlist_item_click(move |index, _event, _point| {
         // Only respond to double-click events
         if _event.button.to_string() == "left" && _event.kind.to_string() == "down" {
@@ -114,10 +115,24 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     index as usize,
                 )));
             } else {
-                debug!("Playlist item clicked: {}", index);
+                debug!(
+                    "Playlist item clicked with button {:?}, kind {:?}, and index {:?}",
+                    _event.button, _event.kind, index
+                );
+                ui_handle_clone.unwrap().set_selected_track_index(index);
             }
             last_click_time = Instant::now();
         }
+    });
+
+    // Wire up delete track handler
+
+    let bus_sender_clone = bus_sender.clone();
+    ui.on_delete_track(move |index| {
+        debug!("Delete track button clicked: {}", index);
+        let _ = bus_sender_clone.send(Message::Playlist(PlaylistMessage::DeleteTrack(
+            index as usize,
+        )));
     });
 
     // Setup playlist manager

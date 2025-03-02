@@ -88,6 +88,10 @@ impl Playlist {
         return self.tracks.len();
     }
 
+    pub fn delete_track(&mut self, index: usize) {
+        self.tracks.remove(index);
+    }
+
     // Get the next track index based on the current playback order and repeat mode
     pub fn get_next_track_index(&mut self, current_index: usize) -> Option<usize> {
         if self.tracks.is_empty() {
