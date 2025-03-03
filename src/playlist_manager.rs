@@ -29,7 +29,7 @@ impl PlaylistManager {
             bus_consumer,
             bus_producer,
             cached_track_ids: HashSet::new(),
-            max_num_cached_tracks: 1,
+            max_num_cached_tracks: 6,
         }
     }
 
@@ -136,6 +136,10 @@ impl PlaylistManager {
                     protocol::Message::Audio(protocol::AudioMessage::TrackCached(id)) => {
                         debug!("PlaylistManager: Received TrackCached: {}", id);
                         self.cached_track_ids.insert(id);
+                    }
+                    protocol::Message::Audio(protocol::AudioMessage::TrackEvictedFromCache(id)) => {
+                        debug!("PlaylistManager: Received TrackEvictedFromCache: {}", id);
+                        self.cached_track_ids.remove(&id);
                     }
                     _ => trace!("PlaylistManager: ignoring unsupported message"),
                 }

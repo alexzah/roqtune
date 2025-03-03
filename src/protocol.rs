@@ -43,6 +43,7 @@ pub enum AudioMessage {
     StopDecoding,
     AudioPacket(AudioPacket),
     TrackCached(String),
+    TrackEvictedFromCache(String),
 }
 
 #[derive(Debug, Clone)]
