@@ -174,6 +174,12 @@ impl UiManager {
                                 track_model.remove(index);
                             });
                         }
+                        _ => {
+                            trace!(
+                                "UiManager: received unsupported playlist message {:?}",
+                                playlist_message
+                            );
+                        }
                     },
                     _ => {
                         trace!("UiManager: received unsupported message {:?}", message);

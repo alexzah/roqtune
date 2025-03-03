@@ -16,6 +16,7 @@ pub enum RepeatMode {
 
 pub struct Track {
     pub path: PathBuf,
+    pub id: String,
 }
 
 pub struct Playlist {
@@ -90,6 +91,10 @@ impl Playlist {
 
     pub fn delete_track(&mut self, index: usize) {
         self.tracks.remove(index);
+    }
+
+    pub fn get_track_id(&self, index: usize) -> String {
+        return self.tracks[index].id.clone();
     }
 
     // Get the next track index based on the current playback order and repeat mode

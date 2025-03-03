@@ -11,25 +11,48 @@ pub enum Message {
 pub enum PlaylistMessage {
     LoadTrack(PathBuf),
     DeleteTrack(usize),
+    SelectTrack(usize),
 }
 
 #[derive(Debug, Clone)]
-pub enum AudioMessage {
-    DecodeTracks(Vec<PathBuf>),
-    ClearCache,
-    BufferReady {
+pub enum AudioPacket {
+    TrackHeader {
+        id: String,
+        play_immediately: bool,
+    },
+    Samples {
         samples: Vec<f32>,
         sample_rate: u32,
         channels: u16,
     },
+    TrackFooter {
+        id: String,
+    },
+}
+
+#[derive(Debug, Clone)]
+pub struct TrackIdentifier {
+    pub id: String,
+    pub path: PathBuf,
+    pub play_immediately: bool,
+}
+
+#[derive(Debug, Clone)]
+pub enum AudioMessage {
+    DecodeTracks(Vec<TrackIdentifier>),
+    StopDecoding,
+    AudioPacket(AudioPacket),
+    TrackCached(String),
 }
 
 #[derive(Debug, Clone)]
 pub enum PlaybackMessage {
     ReadyForPlayback,
-    Play,
-    PlayTrack(usize), //play a specific track by index
+    Play,                    // play the currently selected track
+    PlayTrackByIndex(usize), // play a specific track by index
+    PlayTrackById(String),   // play a specific track by identifier
     Stop,
-    TrackFinished,
+    TrackFinished(String),
+    TrackStarted(String),
     ClearPlayerCache,
 }

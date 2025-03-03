@@ -1,11 +1,12 @@
-use std::collections::HashSet;
+use std::{cmp::min, collections::HashSet};
 
 use log::{debug, error, trace};
 use tokio::sync::broadcast::{Receiver, Sender};
+use uuid::Uuid;
 
 use crate::{
     playlist::{self, Playlist, Track},
-    protocol,
+    protocol::{self, TrackIdentifier},
 };
 
 // Manages the playlist
@@ -13,7 +14,7 @@ pub struct PlaylistManager {
     playlist: Playlist,
     bus_consumer: Receiver<protocol::Message>,
     bus_producer: Sender<protocol::Message>,
-    cached_track_indices: HashSet<usize>,
+    cached_track_ids: HashSet<String>,
     max_num_cached_tracks: usize,
 }
 
@@ -27,8 +28,29 @@ impl PlaylistManager {
             playlist: playlist,
             bus_consumer,
             bus_producer,
-            cached_track_indices: HashSet::new(),
-            max_num_cached_tracks: 2,
+            cached_track_ids: HashSet::new(),
+            max_num_cached_tracks: 1,
+        }
+    }
+
+    fn play_selected_track(&mut self) {
+        self.playlist.set_playing(true);
+        self.playlist
+            .set_playing_track_index(Some(self.playlist.get_selected_track_index()));
+        if !self.cached_track_ids.contains(
+            &self
+                .playlist
+                .get_track_id(self.playlist.get_selected_track_index()),
+        ) {
+            self.stop_decoding();
+            self.cache_tracks(true);
+        } else {
+            self.bus_producer.send(protocol::Message::Playback(
+                protocol::PlaybackMessage::PlayTrackById(
+                    self.playlist
+                        .get_track_id(self.playlist.get_selected_track_index()),
+                ),
+            ));
         }
     }
 
@@ -38,48 +60,82 @@ impl PlaylistManager {
                 match message {
                     protocol::Message::Playlist(protocol::PlaylistMessage::LoadTrack(path)) => {
                         debug!("PlaylistManager: Loading track {:?}", path);
-                        self.playlist.add_track(Track { path: path });
-                        self.cache_tracks();
+                        self.playlist.add_track(Track {
+                            path: path,
+                            id: Uuid::new_v4().to_string(),
+                        });
                     }
                     protocol::Message::Playback(protocol::PlaybackMessage::Play) => {
                         debug!("PlaylistManager: Received play command");
-                        self.playlist.set_playing(true);
+                        self.play_selected_track();
                     }
-                    protocol::Message::Playback(protocol::PlaybackMessage::PlayTrack(index)) => {
+                    protocol::Message::Playback(protocol::PlaybackMessage::PlayTrackByIndex(
+                        index,
+                    )) => {
                         debug!("PlaylistManager: Received play track command: {}", index);
-                        let original_selected_track_index =
-                            self.playlist.get_selected_track_index();
                         self.playlist.set_selected_track(index);
-                        self.playlist.set_playing(true);
-                        if original_selected_track_index != index {
-                            self.clear_cached_tracks();
-                            self.cache_tracks();
-                        } else {
-                            self.bus_producer
-                                .send(protocol::Message::Playback(protocol::PlaybackMessage::Play))
-                                .unwrap();
-                        }
+                        self.play_selected_track();
                     }
                     protocol::Message::Playback(protocol::PlaybackMessage::Stop) => {
                         debug!("PlaylistManager: Received stop command");
                         self.playlist.set_playing(false);
+                        self.playlist.set_playing_track_index(None);
                         self.clear_cached_tracks();
-                        self.cache_tracks();
+                        self.cache_tracks(false);
                     }
-                    protocol::Message::Playback(protocol::PlaybackMessage::TrackFinished) => {
-                        debug!("PlaylistManager: Received track finished command");
+                    protocol::Message::Playback(protocol::PlaybackMessage::TrackFinished(id)) => {
+                        debug!("PlaylistManager: Received track finished command: {}", id);
+                        let index = self
+                            .playlist
+                            .get_playing_track_index()
+                            .expect("Track should be playing already ")
+                            + 1;
+                        if index < self.playlist.num_tracks() {
+                            self.playlist.set_playing_track_index(Some(index));
+                            self.playlist.set_selected_track(index);
+                            self.cache_tracks(false);
+                        }
                     }
                     protocol::Message::Playback(protocol::PlaybackMessage::ReadyForPlayback) => {
                         debug!("PlaylistManager: Received ready for playback command");
+
+                        // Inform the audio player which track to play from its cache
                         if self.playlist.is_playing() {
                             self.bus_producer
-                                .send(protocol::Message::Playback(protocol::PlaybackMessage::Play))
+                                .send(protocol::Message::Playback(
+                                    protocol::PlaybackMessage::PlayTrackById(
+                                        self.playlist
+                                            .get_track(
+                                                self.playlist.get_playing_track_index().unwrap(),
+                                            )
+                                            .id
+                                            .clone(),
+                                    ),
+                                ))
                                 .unwrap();
                         }
                     }
                     protocol::Message::Playlist(protocol::PlaylistMessage::DeleteTrack(index)) => {
                         debug!("PlaylistManager: Received delete track command: {}", index);
+                        if self
+                            .cached_track_ids
+                            .contains(&self.playlist.get_track_id(index))
+                        {
+                            self.cached_track_ids
+                                .remove(&self.playlist.get_track_id(index));
+                            self.clear_cached_tracks();
+                        }
                         self.playlist.delete_track(index);
+                    }
+                    protocol::Message::Playlist(protocol::PlaylistMessage::SelectTrack(index)) => {
+                        debug!("PlaylistManager: Received select track command: {}", index);
+                        if index != self.playlist.get_selected_track_index() {
+                            self.playlist.set_selected_track(index);
+                        }
+                    }
+                    protocol::Message::Audio(protocol::AudioMessage::TrackCached(id)) => {
+                        debug!("PlaylistManager: Received TrackCached: {}", id);
+                        self.cached_track_ids.insert(id);
                     }
                     _ => trace!("PlaylistManager: ignoring unsupported message"),
                 }
@@ -87,25 +143,34 @@ impl PlaylistManager {
         }
     }
 
-    fn cache_tracks(&mut self) {
+    fn cache_tracks(&mut self, play_immediately: bool) {
+        let first_index = self.playlist.get_selected_track_index();
         let mut current_index = self.playlist.get_selected_track_index();
         let mut track_paths = Vec::new();
-        if self.cached_track_indices.len() < self.max_num_cached_tracks {
-            for _ in 0..self.max_num_cached_tracks {
-                if !self.cached_track_indices.contains(&current_index) {
-                    self.cached_track_indices.insert(current_index);
-                    track_paths.push(self.playlist.get_track(current_index).path.clone());
-                }
-                if let Some(next_index) = self.playlist.get_next_track_index(current_index) {
-                    current_index = next_index;
-                } else {
+
+        for _ in 0..self.max_num_cached_tracks {
+            if !self
+                .cached_track_ids
+                .contains(&self.playlist.get_track_id(current_index))
+            {
+                track_paths.push(TrackIdentifier {
+                    id: self.playlist.get_track(current_index).id.clone(),
+                    path: self.playlist.get_track(current_index).path.clone(),
+                    play_immediately: play_immediately && current_index == first_index,
+                });
+            }
+            if let Some(next_index) = self.playlist.get_next_track_index(current_index) {
+                current_index = next_index;
+                if next_index >= self.playlist.num_tracks() {
                     break;
                 }
+            } else {
+                break;
             }
         }
         debug!(
-            "PlaylistManager: Caching tracks: {:?}",
-            self.cached_track_indices
+            "PlaylistManager: Updated cached tracks: {:?}",
+            self.cached_track_ids
         );
         self.bus_producer.send(protocol::Message::Audio(
             protocol::AudioMessage::DecodeTracks(track_paths),
@@ -113,8 +178,15 @@ impl PlaylistManager {
     }
 
     fn clear_cached_tracks(&mut self) {
-        self.cached_track_indices.clear();
-        self.bus_producer
-            .send(protocol::Message::Audio(protocol::AudioMessage::ClearCache));
+        self.cached_track_ids.clear();
+        self.bus_producer.send(protocol::Message::Audio(
+            protocol::AudioMessage::StopDecoding,
+        ));
+    }
+
+    fn stop_decoding(&mut self) {
+        self.bus_producer.send(protocol::Message::Audio(
+            protocol::AudioMessage::StopDecoding,
+        ));
     }
 }

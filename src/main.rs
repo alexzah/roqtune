@@ -111,22 +111,24 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         if _event.button.to_string() == "left" && _event.kind.to_string() == "down" {
             if last_click_time.elapsed() < Duration::from_millis(500) {
                 debug!("Playlist item double-clicked: {}", index);
-                let _ = bus_sender_clone.send(Message::Playback(PlaybackMessage::PlayTrack(
-                    index as usize,
-                )));
+                let _ = bus_sender_clone.send(Message::Playback(
+                    PlaybackMessage::PlayTrackByIndex(index as usize),
+                ));
             } else {
                 debug!(
                     "Playlist item clicked with button {:?}, kind {:?}, and index {:?}",
                     _event.button, _event.kind, index
                 );
                 ui_handle_clone.unwrap().set_selected_track_index(index);
+                let _ = bus_sender_clone.send(Message::Playlist(PlaylistMessage::SelectTrack(
+                    index as usize,
+                )));
             }
             last_click_time = Instant::now();
         }
     });
 
     // Wire up delete track handler
-
     let bus_sender_clone = bus_sender.clone();
     ui.on_delete_track(move |index| {
         debug!("Delete track button clicked: {}", index);

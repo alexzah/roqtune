@@ -1,4 +1,4 @@
-use crate::protocol::{AudioMessage, Message, PlaybackMessage};
+use crate::protocol::{AudioMessage, AudioPacket, Message, PlaybackMessage};
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use log::{debug, error, trace};
 use rubato::{
@@ -6,20 +6,27 @@ use rubato::{
     WindowFunction,
 };
 use std::{
-    collections::VecDeque,
+    collections::{HashMap, VecDeque},
     path::PathBuf,
     sync::{
-        atomic::{AtomicBool, AtomicU64, Ordering},
+        atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering},
         Arc, Mutex,
     },
+    thread,
+    time::Duration,
 };
 use symphonia::core::{codecs::Decoder, formats::Packet};
 use tokio::sync::broadcast::{Receiver, Sender};
 
-pub struct Sample {
-    sample: f32,
-    sample_rate: u32,
-    channels: u16,
+enum AudioSample {
+    Sample(f32),
+    TrackHeader(String),
+    TrackFooter(String),
+}
+
+struct TrackIndex {
+    start: usize,
+    end: Option<usize>,
 }
 
 pub struct AudioPlayer {
@@ -28,9 +35,12 @@ pub struct AudioPlayer {
     // Audio state
     target_sample_rate: u32,
     target_channels: u16,
-    sample_queue: Arc<Mutex<VecDeque<Sample>>>,
-    buffer_position: Arc<AtomicU64>,
+    sample_queue: Arc<Mutex<VecDeque<AudioSample>>>,
+    track_indices: Arc<Mutex<HashMap<String, TrackIndex>>>,
     is_playing: Arc<AtomicBool>,
+    current_track_id: String,
+    current_track_position: Arc<AtomicUsize>,
+
     // Audio stream
     config: Option<cpal::StreamConfig>,
     device: Option<cpal::Device>,
@@ -44,7 +54,7 @@ impl AudioPlayer {
             bus_receiver,
             bus_sender,
             sample_queue: Arc::new(Mutex::new(VecDeque::new())),
-            buffer_position: Arc::new(AtomicU64::new(0)),
+            track_indices: Arc::new(Mutex::new(HashMap::new())),
             is_playing: Arc::new(AtomicBool::new(false)),
             device: None,
             config: None,
@@ -52,6 +62,8 @@ impl AudioPlayer {
             target_sample_rate: 0,
             target_channels: 0,
             resampler: None,
+            current_track_id: String::new(),
+            current_track_position: Arc::new(AtomicUsize::new(0)),
         };
 
         // Initialize audio device once during construction
@@ -120,19 +132,78 @@ impl AudioPlayer {
         resampler.unwrap()
     }
 
-    fn load_samples(&mut self, samples: Vec<f32>, sample_rate: u32, channels: u16) {
+    fn load_samples(&mut self, samples: AudioPacket) {
         // Create new stream if none exists or if config changed
         if self.stream.is_none() {
             self.create_stream();
         }
-        trace!("AudioPlayer: Loading {} samples", samples.len());
-        let mut queue = self.sample_queue.lock().unwrap();
-        for sample in samples {
-            queue.push_back(Sample {
-                sample,
+        trace!("AudioPlayer: Loading {:?} samples", samples);
+        match samples {
+            AudioPacket::Samples {
+                samples,
                 sample_rate,
                 channels,
-            });
+            } => {
+                for sample in samples {
+                    self.sample_queue
+                        .lock()
+                        .unwrap()
+                        .push_back(AudioSample::Sample(sample));
+                }
+            }
+            AudioPacket::TrackHeader {
+                id,
+                play_immediately,
+            } => {
+                debug!("AudioPlayer: Received track header: {}", id);
+                self.sample_queue
+                    .lock()
+                    .unwrap()
+                    .push_back(AudioSample::TrackHeader(id.clone()));
+
+                let start_index = self.sample_queue.lock().unwrap().len() - 1;
+                self.track_indices.lock().unwrap().insert(
+                    id.clone(),
+                    TrackIndex {
+                        start: start_index,
+                        end: None,
+                    },
+                );
+                if play_immediately {
+                    self.current_track_id = id.clone();
+                    self.current_track_position
+                        .store(start_index, Ordering::Relaxed);
+                    if let Some(stream) = &self.stream {
+                        if let Err(e) = stream.play() {
+                            error!("AudioPlayer: Failed to start playback: {}", e);
+                        } else {
+                            self.is_playing.store(true, Ordering::Relaxed);
+                            debug!("AudioPlayer: Playback started");
+                        }
+                    } else {
+                        debug!("No audio stream available to play");
+                    }
+                }
+            }
+            AudioPacket::TrackFooter { id } => {
+                debug!("AudioPlayer: Received track footer: {}", id);
+                self.sample_queue
+                    .lock()
+                    .unwrap()
+                    .push_back(AudioSample::TrackFooter(id.clone()));
+                let mut track_indices = self
+                    .track_indices
+                    .lock()
+                    .expect("Failed to lock track indices");
+                let _ = track_indices
+                    .get_mut(&id)
+                    .expect(&format!("Track id {} not found in index", id))
+                    .end
+                    .insert(self.sample_queue.lock().unwrap().len() - 1);
+                self.bus_sender
+                    .send(Message::Audio(AudioMessage::TrackCached(id)))
+                    .unwrap();
+            }
         }
     }
 
@@ -154,40 +225,65 @@ impl AudioPlayer {
         };
 
         // Clone our handles for the audio callback
-        let buffer = self.sample_queue.clone();
-        let buffer_position = self.buffer_position.clone();
+        let sample_queue = self.sample_queue.clone();
+        let bus_sender_clone = self.bus_sender.clone();
         let is_playing = self.is_playing.clone();
-        let bus_sender = self.bus_sender.clone();
-
+        let current_track_position = self.current_track_position.clone();
         // Build the output stream
         match device.build_output_stream(
             config,
-            move |data: &mut [f32], _: &cpal::OutputCallbackInfo| {
+            move |output_buffer: &mut [f32], _: &cpal::OutputCallbackInfo| {
                 if !is_playing.load(Ordering::Relaxed) {
-                    data.fill(0.0);
+                    output_buffer.fill(0.0);
                     return;
                 }
 
-                let buffer_lock = buffer.lock().unwrap();
-                let pos = buffer_position.load(Ordering::Relaxed) as usize;
+                let mut sample_queue_unlocked = sample_queue.lock().unwrap();
 
-                // Check if we've reached the end
-                if pos >= buffer_lock.len() {
-                    data.fill(0.0);
-                    return;
-                }
-
+                let mut input_current_position = current_track_position.load(Ordering::Relaxed);
+                let mut output_current_position = 0;
                 // Copy samples to output
-                for (i, sample) in data.iter_mut().enumerate() {
-                    *sample = if pos + i < buffer_lock.len() {
-                        buffer_lock[pos + i].sample
+                while output_current_position < output_buffer.len() {
+                    let sample = &mut output_buffer[output_current_position];
+                    *sample = if input_current_position < sample_queue_unlocked.len() {
+                        let next_sample = &mut sample_queue_unlocked[input_current_position];
+                        match next_sample {
+                            AudioSample::Sample(buffered_sample) => {
+                                input_current_position += 1;
+                                *buffered_sample
+                            }
+                            AudioSample::TrackHeader(id) => {
+                                bus_sender_clone
+                                    .send(Message::Playback(PlaybackMessage::TrackStarted(
+                                        id.clone(),
+                                    )))
+                                    .unwrap();
+                                input_current_position += 1;
+                                continue;
+                            }
+                            AudioSample::TrackFooter(id) => {
+                                // Detected track footer, notify that track has finished and skip this sample
+                                bus_sender_clone
+                                    .send(Message::Playback(PlaybackMessage::TrackFinished(
+                                        id.clone(),
+                                    )))
+                                    .unwrap();
+                                input_current_position += 1;
+                                continue;
+                            }
+                        }
                     } else {
                         0.0
                     };
+                    output_current_position += 1;
                 }
 
-                trace!("AudioPlayer: Copied {} samples to output", data.len());
-                buffer_position.store((pos + data.len()) as u64, Ordering::Relaxed);
+                current_track_position.store(input_current_position, Ordering::Relaxed);
+
+                trace!(
+                    "AudioPlayer: Copied {} samples to output",
+                    output_buffer.len()
+                );
             },
             |err| error!("Audio stream error: {}", err),
             None,
@@ -204,15 +300,40 @@ impl AudioPlayer {
         loop {
             while let Ok(message) = self.bus_receiver.blocking_recv() {
                 match message {
-                    Message::Audio(AudioMessage::BufferReady {
-                        samples,
-                        sample_rate,
-                        channels,
-                    }) => {
-                        trace!("AudioPlayer: Received {} samples", samples.len());
-                        self.load_samples(samples, sample_rate, channels);
+                    Message::Audio(AudioMessage::AudioPacket(buffer)) => {
+                        trace!("AudioPlayer: Received {:?} samples", buffer);
+                        self.load_samples(buffer);
                     }
                     Message::Playback(PlaybackMessage::Play) => {
+                        if let Some(stream) = &self.stream {
+                            if let Err(e) = stream.play() {
+                                error!("AudioPlayer: Failed to start playback: {}", e);
+                            } else {
+                                self.is_playing.store(true, Ordering::Relaxed);
+                                debug!("AudioPlayer: Playback started");
+                            }
+                        } else {
+                            debug!("No audio stream available to play");
+                        }
+                    }
+                    Message::Playback(PlaybackMessage::PlayTrackByIndex(_)) => {
+                        if let Some(stream) = &self.stream {
+                            if let Err(e) = stream.play() {
+                                error!("AudioPlayer: Failed to start playback: {}", e);
+                            } else {
+                                self.is_playing.store(true, Ordering::Relaxed);
+                                debug!("AudioPlayer: Playback started");
+                            }
+                        } else {
+                            debug!("No audio stream available to play");
+                        }
+                    }
+                    Message::Playback(PlaybackMessage::PlayTrackById(id)) => {
+                        self.current_track_id = id.clone();
+                        let current_track_index =
+                            self.track_indices.lock().unwrap().get(&id).unwrap().start;
+                        self.current_track_position
+                            .store(current_track_index, Ordering::Relaxed);
                         if let Some(stream) = &self.stream {
                             if let Err(e) = stream.play() {
                                 error!("AudioPlayer: Failed to start playback: {}", e);
@@ -227,17 +348,25 @@ impl AudioPlayer {
                     Message::Playback(PlaybackMessage::Stop) => {
                         if let Some(stream) = &self.stream {
                             stream.pause().unwrap();
-                            self.buffer_position.store(0, Ordering::Relaxed);
                             self.is_playing.store(false, Ordering::Relaxed);
                         }
                     }
                     Message::Playback(PlaybackMessage::ClearPlayerCache) => {
                         debug!("AudioPlayer: Clearing cache");
-                        self.buffer_position.store(0, Ordering::Relaxed);
                         self.sample_queue.lock().unwrap().clear();
+                        self.create_stream();
+
+                        debug!("AudioPlayer: Ready for playback");
                         self.bus_sender
                             .send(Message::Playback(PlaybackMessage::ReadyForPlayback))
                             .unwrap();
+                    }
+                    Message::Playback(PlaybackMessage::TrackStarted(id)) => {
+                        debug!("AudioPlayer: Received track started command: {}", id);
+                        self.current_track_id = id.clone();
+                    }
+                    Message::Playback(PlaybackMessage::TrackFinished(id)) => {
+                        debug!("AudioPlayer: Received track finished command: {}", id);
                     }
                     _ => {} // Ignore other messages
                 }

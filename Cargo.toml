@@ -28,3 +28,10 @@ rubato = "0.16.1" # For audio resampling
 
 [build-dependencies]
 slint-build = "1.10.0"
+
+[dependencies.uuid]
+version = "1.15.1"
+# Lets you generate random UUIDs
+features = [
+    "v4",
+]

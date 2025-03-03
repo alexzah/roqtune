@@ -1,4 +1,6 @@
-use crate::protocol::{self, AudioMessage, Message, PlaybackMessage, PlaylistMessage};
+use crate::protocol::{
+    self, AudioMessage, AudioPacket, Message, PlaybackMessage, PlaylistMessage, TrackIdentifier,
+};
 use log::{debug, error, trace};
 use rubato::{
     FftFixedIn, Resampler, SincFixedIn, SincInterpolationParameters, SincInterpolationType,
@@ -13,7 +15,7 @@ use std::thread;
 use std::time::Duration;
 use symphonia::core::audio::{Channels, SampleBuffer};
 use symphonia::core::codecs::DecoderOptions;
-use symphonia::core::formats::FormatOptions;
+use symphonia::core::formats::{FormatOptions, Track};
 use symphonia::core::io::MediaSourceStream;
 use symphonia::core::meta::MetadataOptions;
 use symphonia::core::probe::Hint;
@@ -22,7 +24,8 @@ use tokio::sync::mpsc::{self, Receiver as MpscReceiver, Sender as MpscSender};
 
 #[derive(Debug, Clone)]
 enum DecodeWorkItem {
-    DecodeFile(PathBuf),
+    DecodeTracks(Vec<TrackIdentifier>),
+    DecodeTrack(TrackIdentifier),
     Stop,
 }
 
@@ -53,18 +56,23 @@ impl DecodeWorker {
                     DecodeWorkItem::Stop => {
                         debug!("DecodeWorker: Received stop signal");
                         self.work_queue.clear();
-                        self.bus_sender
-                            .send(Message::Playback(PlaybackMessage::ClearPlayerCache))
-                            .unwrap();
+                        self.resample_buffer.clear();
+                        self.resampler = None;
                     }
-                    DecodeWorkItem::DecodeFile(path) => {
-                        self.work_queue
-                            .push_back(DecodeWorkItem::DecodeFile(path.clone()));
-                        if let Some(DecodeWorkItem::DecodeFile(path)) = self.work_queue.pop_front()
-                        {
-                            self.decode_file(path);
+                    DecodeWorkItem::DecodeTracks(tracks) => {
+                        for track in tracks {
+                            self.work_queue
+                                .push_back(DecodeWorkItem::DecodeTrack(track));
                         }
                     }
+                    DecodeWorkItem::DecodeTrack(_) => {
+                        trace!("DecodeWorkItem::DecodeTrack: Only supported via work queue");
+                    }
+                }
+
+                // TODO: this seems hacky, and we should handle other work items
+                while let Some(DecodeWorkItem::DecodeTrack(track)) = self.work_queue.pop_front() {
+                    self.decode_track(track);
                 }
             }
         }
@@ -76,9 +84,8 @@ impl DecodeWorker {
             Ok(DecodeWorkItem::Stop) => {
                 debug!("DecodeWorker: Received stop signal");
                 self.work_queue.clear();
-                self.bus_sender
-                    .send(Message::Playback(PlaybackMessage::ClearPlayerCache))
-                    .unwrap();
+                self.resample_buffer.clear();
+                self.resampler = None;
                 false
             }
             Ok(other) => {
@@ -87,11 +94,6 @@ impl DecodeWorker {
             }
             Err(_) => true,
         }
-    }
-
-    pub fn load_file(&mut self, path: PathBuf) {
-        debug!("DecodeWorker: Loading file: {:?}", path);
-        self.work_queue.push_back(DecodeWorkItem::DecodeFile(path));
     }
 
     fn create_resampler(&mut self, source_sample_rate: u32, chunk_size: usize) -> SincFixedIn<f32> {
@@ -176,9 +178,9 @@ impl DecodeWorker {
         result
     }
 
-    pub fn decode_file(&mut self, path: PathBuf) {
-        debug!("DecodeWorker: Decoding file: {:?}", path);
-        let file = match std::fs::File::open(path.clone()) {
+    pub fn decode_track(&mut self, input_track: TrackIdentifier) {
+        debug!("DecodeWorker: Decoding file: {:?}", input_track);
+        let file = match std::fs::File::open(input_track.path.clone()) {
             Ok(file) => file,
             Err(e) => {
                 error!("Failed to open file: {}", e);
@@ -223,6 +225,11 @@ impl DecodeWorker {
             self.resampler = Some(self.create_resampler(sample_rate, 2048));
         }
 
+        self.resampler
+            .as_mut()
+            .expect("Resampler just initialized")
+            .reset();
+
         let target_sample_rate = 48000;
         let target_channels = 2;
 
@@ -241,6 +248,16 @@ impl DecodeWorker {
                 return;
             }
         };
+
+        // Send the track header
+        self.bus_sender
+            .send(Message::Audio(AudioMessage::AudioPacket(
+                AudioPacket::TrackHeader {
+                    id: input_track.id.to_string(),
+                    play_immediately: input_track.play_immediately,
+                },
+            )))
+            .unwrap();
 
         // Decode in chunks
         let mut format_reader = format_reader;
@@ -279,11 +296,13 @@ impl DecodeWorker {
                             let resampled_samples = self.resample_next_frame(sample_rate);
                             let _ =
                                 self.bus_sender
-                                    .send(Message::Audio(AudioMessage::BufferReady {
-                                        samples: resampled_samples,
-                                        sample_rate,
-                                        channels: channels as u16,
-                                    }));
+                                    .send(Message::Audio(AudioMessage::AudioPacket(
+                                        AudioPacket::Samples {
+                                            samples: resampled_samples,
+                                            sample_rate,
+                                            channels: channels as u16,
+                                        },
+                                    )));
                         }
 
                         decoded_chunk = Vec::with_capacity(chunk_size);
@@ -306,11 +325,13 @@ impl DecodeWorker {
             // debug!("Sending final chunk of {} samples", decoded_chunk.len());
             let _ = self
                 .bus_sender
-                .send(Message::Audio(AudioMessage::BufferReady {
-                    samples: resampled_samples,
-                    sample_rate,
-                    channels: channels as u16,
-                }));
+                .send(Message::Audio(AudioMessage::AudioPacket(
+                    AudioPacket::Samples {
+                        samples: resampled_samples,
+                        sample_rate,
+                        channels: channels as u16,
+                    },
+                )));
         }
 
         // Flush resampler queue
@@ -321,6 +342,16 @@ impl DecodeWorker {
             }
             self.resample_next_frame(sample_rate);
         }
+
+        self.bus_sender
+            .send(Message::Audio(AudioMessage::AudioPacket(
+                AudioPacket::TrackFooter {
+                    id: input_track.id.clone(),
+                },
+            )))
+            .unwrap();
+
+        self.resampler = None;
     }
 }
 
@@ -348,13 +379,11 @@ impl AudioDecoder {
                 match message {
                     Message::Audio(AudioMessage::DecodeTracks(paths)) => {
                         debug!("AudioDecoder: Loading tracks {:?}", paths);
-                        for path in paths {
-                            self.worker_sender
-                                .blocking_send(DecodeWorkItem::DecodeFile(path))
-                                .unwrap();
-                        }
+                        self.worker_sender
+                            .blocking_send(DecodeWorkItem::DecodeTracks(paths))
+                            .unwrap();
                     }
-                    Message::Audio(AudioMessage::ClearCache) => {
+                    Message::Audio(AudioMessage::StopDecoding) => {
                         debug!("AudioDecoder: Clearing cache");
                         self.worker_sender.blocking_send(DecodeWorkItem::Stop);
                     }
