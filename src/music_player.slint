@@ -34,6 +34,8 @@ export component AppWindow inherits Window {
     background: #282828;
 
     key-handler := FocusScope {
+        width: 0px;
+        height: 0px;
         key-pressed(event) => {
             if (event.text == Key.Delete) {
                 root.delete_track(root.selected_track_index);
@@ -290,11 +292,12 @@ export component AppWindow inherits Window {
         playlist-view := StandardTableView {
             width: 100%;
             height: 100%;
+            current-row: playing_track_index;
             columns: [
-            // { title: "#", width: 40px },
-            { title: "Title", width: 300px },
-                { title: "Artist", width: 200px },
-                { title: "Album", width: 200px },
+                { title: "Playing", width: 200px },
+                { title: "Title", width: 250px },
+                { title: "Artist", width: 250px },
+                { title: "Album", width: 250px },
             ];
             rows: track_model;
             horizontal-stretch: 1;
@@ -328,6 +331,7 @@ export component AppWindow inherits Window {
     in-out property <int> playback_order_index: 0;
     in-out property <bool> repeat_on: false;
     in-out property <int> selected_track_index: -1;
+    in-out property <int> playing_track_index: -1;
     
     // Seek bar properties
     in-out property <float> current-position: 0.0; // in seconds

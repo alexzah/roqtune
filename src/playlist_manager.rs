@@ -85,16 +85,31 @@ impl PlaylistManager {
                     }
                     protocol::Message::Playback(protocol::PlaybackMessage::TrackFinished(id)) => {
                         debug!("PlaylistManager: Received track finished command: {}", id);
+                        let original_index = self.playlist.get_playing_track_index().unwrap();
                         let index = self
                             .playlist
-                            .get_playing_track_index()
-                            .expect("Track should be playing already ")
-                            + 1;
-                        if index < self.playlist.num_tracks() {
-                            self.playlist.set_playing_track_index(Some(index));
-                            self.playlist.set_selected_track(index);
-                            self.cache_tracks(false);
+                            .get_next_track_index(self.playlist.get_playing_track_index().unwrap());
+                        if let Some(index) = index {
+                            if index < self.playlist.num_tracks() {
+                                self.playlist.set_playing_track_index(Some(index));
+                                self.playlist.set_selected_track(index);
+                                self.cache_tracks(false);
+                            }
                         }
+
+                        let _ = self.bus_producer.send(protocol::Message::Playlist(
+                            protocol::PlaylistMessage::TrackFinished(original_index),
+                        ));
+                    }
+                    protocol::Message::Playback(protocol::PlaybackMessage::TrackStarted(id)) => {
+                        debug!("PlaylistManager: Received track started command: {}", id);
+                        let _ = self.bus_producer.send(protocol::Message::Playlist(
+                            protocol::PlaylistMessage::TrackStarted(
+                                self.playlist
+                                    .get_playing_track_index()
+                                    .expect("No playing track index"),
+                            ),
+                        ));
                     }
                     protocol::Message::Playback(protocol::PlaybackMessage::ReadyForPlayback) => {
                         debug!("PlaylistManager: Received ready for playback command");

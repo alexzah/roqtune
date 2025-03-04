@@ -12,6 +12,8 @@ pub enum PlaylistMessage {
     LoadTrack(PathBuf),
     DeleteTrack(usize),
     SelectTrack(usize),
+    TrackStarted(usize),
+    TrackFinished(usize),
 }
 
 #[derive(Debug, Clone)]

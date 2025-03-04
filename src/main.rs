@@ -20,7 +20,7 @@ use log::{debug, info};
 use playlist::Playlist;
 use playlist_manager::PlaylistManager;
 use protocol::{Message, PlaybackMessage, PlaylistMessage};
-use slint::{ModelRc, StandardListViewItem, VecModel};
+use slint::{ComponentHandle, ModelRc, StandardListViewItem, VecModel};
 use tokio::sync::broadcast;
 use ui_manager::{UiManager, UiState};
 
@@ -114,11 +114,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 let _ = bus_sender_clone.send(Message::Playback(
                     PlaybackMessage::PlayTrackByIndex(index as usize),
                 ));
+                ui_handle_clone.unwrap().set_selected_track_index(index);
+                ui_handle_clone.unwrap().set_playing_track_index(index);
             } else {
-                debug!(
-                    "Playlist item clicked with button {:?}, kind {:?}, and index {:?}",
-                    _event.button, _event.kind, index
-                );
+                debug!("Playlist item clicked at index {:?}", index);
                 ui_handle_clone.unwrap().set_selected_track_index(index);
                 let _ = bus_sender_clone.send(Message::Playlist(PlaylistMessage::SelectTrack(
                     index as usize,
