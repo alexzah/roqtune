@@ -156,6 +156,15 @@ impl PlaylistManager {
                         debug!("PlaylistManager: Received TrackEvictedFromCache: {}", id);
                         self.cached_track_ids.remove(&id);
                     }
+                    protocol::Message::Playlist(
+                        protocol::PlaylistMessage::ChangePlaybackOrder(order),
+                    ) => {
+                        debug!(
+                            "PlaylistManager: Received change playback order command: {:?}",
+                            order
+                        );
+                        self.playlist.set_playback_order(order);
+                    }
                     _ => trace!("PlaylistManager: ignoring unsupported message"),
                 }
             }

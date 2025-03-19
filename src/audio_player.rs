@@ -1,4 +1,4 @@
-use crate::protocol::{AudioMessage, AudioPacket, Message, PlaybackMessage};
+use crate::protocol::{AudioMessage, AudioPacket, ConfigMessage, Message, PlaybackMessage};
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use log::{debug, error, trace};
 use rubato::{
@@ -37,6 +37,7 @@ pub struct AudioPlayer {
     // Audio state
     target_sample_rate: u32,
     target_channels: u16,
+    target_bits_per_sample: u16,
     sample_queue: Arc<Mutex<VecDeque<AudioSample>>>,
     is_playing: Arc<AtomicBool>,
     current_track_id: String,
@@ -66,6 +67,7 @@ impl AudioPlayer {
             stream: None,
             target_sample_rate: 0,
             target_channels: 0,
+            target_bits_per_sample: 0,
             resampler: None,
             current_track_id: String::new(),
             current_track_position: Arc::new(AtomicUsize::new(0)),
@@ -87,8 +89,8 @@ impl AudioPlayer {
             }
         };
 
-        let sample_rate = 48000u32;
-        let channels = 2usize;
+        let sample_rate = self.target_sample_rate;
+        let channels = self.target_channels;
         // Setup stream config
         let config = match device.supported_output_configs() {
             Ok(mut configs) => {
@@ -96,6 +98,19 @@ impl AudioPlayer {
                     config.channels() == channels as u16
                         && config.min_sample_rate().0 <= sample_rate
                         && config.max_sample_rate().0 >= sample_rate
+                        && match config.sample_format() {
+                            cpal::SampleFormat::I16 => 16,
+                            cpal::SampleFormat::U16 => 16,
+                            cpal::SampleFormat::F32 => 32,
+                            cpal::SampleFormat::I32 => 32,
+                            cpal::SampleFormat::U32 => 32,
+                            cpal::SampleFormat::I8 => 8,
+                            cpal::SampleFormat::U8 => 8,
+                            cpal::SampleFormat::I64 => 64,
+                            cpal::SampleFormat::U64 => 64,
+                            cpal::SampleFormat::F64 => 64,
+                            _ => 0,
+                        } >= self.target_bits_per_sample
                 }) {
                     Some(config) => config.with_sample_rate(cpal::SampleRate(sample_rate)),
                     None => {
@@ -110,32 +125,15 @@ impl AudioPlayer {
             }
         };
 
-        self.target_channels = config.channels(); // config.channels();
-        self.target_sample_rate = config.sample_rate().0; // config.sample_rate().0;
+        let matched_config_channels = config.channels(); // config.channels();
+        let matched_config_sample_rate = config.sample_rate().0; // config.sample_rate().0;
+        let matched_config_sample_format = config.sample_format();
         self.config = Some(config.into());
         self.device = Some(device);
         debug!(
-            "AudioPlayer: Audio device initialized with target sample rate: {} and channels: {}",
-            self.target_sample_rate, self.target_channels
+            "AudioPlayer: Audio device initialized with target sample rate: {}, channels: {}, sample format: {}",
+            matched_config_sample_rate, matched_config_channels, matched_config_sample_format
         );
-    }
-
-    fn create_resampler(&mut self, source_sample_rate: u32, chunk_size: usize) -> FftFixedIn<f32> {
-        // let params = SincInterpolationParameters {
-        //     sinc_len: 256,
-        //     f_cutoff: 0.95,
-        //     interpolation: SincInterpolationType::Nearest,
-        //     oversampling_factor: 128,
-        //     window: WindowFunction::BlackmanHarris2,
-        // };
-        let resampler = FftFixedIn::<f32>::new(
-            source_sample_rate as usize,
-            self.target_sample_rate as usize,
-            chunk_size,
-            4,
-            self.target_channels as usize,
-        );
-        resampler.unwrap()
     }
 
     fn load_samples(&mut self, samples: AudioPacket) {
@@ -181,15 +179,29 @@ impl AudioPlayer {
                     let mut sample_queue_unlocked = self.sample_queue.lock().unwrap();
                     let oldest_track_header = sample_queue_unlocked.front().unwrap().clone();
                     if let AudioSample::TrackHeader(oldest_track_id) = oldest_track_header {
-                        let old_end_index = self.cached_track_indices.lock().unwrap().get(&oldest_track_id).expect(&format!("Track id {} not found in index", oldest_track_id)).end.expect("Track end index not found");
-                        let current_player_position = self.current_track_position.load(Ordering::Relaxed);
+                        let old_end_index = self
+                            .cached_track_indices
+                            .lock()
+                            .unwrap()
+                            .get(&oldest_track_id)
+                            .expect(&format!("Track id {} not found in index", oldest_track_id))
+                            .end
+                            .expect("Track end index not found");
+                        let current_player_position =
+                            self.current_track_position.load(Ordering::Relaxed);
 
                         // Evict oldest track from cache if it's not currently playing
                         if current_player_position > old_end_index {
-                            debug!("AudioPlayer: Evicting oldest track from cache: {}", oldest_track_id);
+                            debug!(
+                                "AudioPlayer: Evicting oldest track from cache: {}",
+                                oldest_track_id
+                            );
 
                             // Remove track from index
-                            self.cached_track_indices.lock().unwrap().remove(&oldest_track_id);
+                            self.cached_track_indices
+                                .lock()
+                                .unwrap()
+                                .remove(&oldest_track_id);
 
                             // Remove all samples from the queue until we hit the end of the track
                             while let Some(sample) = sample_queue_unlocked.pop_front() {
@@ -199,21 +211,31 @@ impl AudioPlayer {
                             }
 
                             // Decrement all cached indices now that we've evicted an item
-                            for (_, track_index) in self.cached_track_indices.lock().unwrap().iter_mut() {
+                            for (_, track_index) in
+                                self.cached_track_indices.lock().unwrap().iter_mut()
+                            {
                                 if track_index.start > old_end_index {
-                                    track_index.start  = track_index.start - old_end_index -1;
+                                    track_index.start = track_index.start - old_end_index - 1;
                                 }
-                                if track_index.end.is_some() && track_index.end.unwrap() > old_end_index {
-                                    track_index.end = Some(track_index.end.unwrap() - old_end_index - 1);
+                                if track_index.end.is_some()
+                                    && track_index.end.unwrap() > old_end_index
+                                {
+                                    track_index.end =
+                                        Some(track_index.end.unwrap() - old_end_index - 1);
                                 }
                             }
 
                             // Decrement the current track position, if needed
                             if current_player_position > old_end_index {
-                                self.current_track_position.fetch_sub(old_end_index + 1, Ordering::Relaxed);
+                                self.current_track_position
+                                    .fetch_sub(old_end_index + 1, Ordering::Relaxed);
                             }
 
-                            self.bus_sender.send(Message::Audio(AudioMessage::TrackEvictedFromCache(oldest_track_id.clone()))).unwrap();
+                            self.bus_sender
+                                .send(Message::Audio(AudioMessage::TrackEvictedFromCache(
+                                    oldest_track_id.clone(),
+                                )))
+                                .unwrap();
                         } else {
                             debug!("AudioPlayer: Unable to evict oldest track from cache because it's currently playing. track_id={}", oldest_track_id);
                             break;
@@ -382,8 +404,13 @@ impl AudioPlayer {
                     }
                     Message::Playback(PlaybackMessage::PlayTrackById(id)) => {
                         self.current_track_id = id.clone();
-                        let current_track_index =
-                            self.cached_track_indices.lock().unwrap().get(&id).unwrap().start;
+                        let current_track_index = self
+                            .cached_track_indices
+                            .lock()
+                            .unwrap()
+                            .get(&id)
+                            .unwrap()
+                            .start;
                         self.current_track_position
                             .store(current_track_index, Ordering::Relaxed);
                         if let Some(stream) = &self.stream {
@@ -419,6 +446,14 @@ impl AudioPlayer {
                     }
                     Message::Playback(PlaybackMessage::TrackFinished(id)) => {
                         debug!("AudioPlayer: Received track finished command: {}", id);
+                    }
+                    Message::Config(ConfigMessage::ConfigChanged(config)) => {
+                        debug!("AudioPlayer: Received config changed command: {:?}", config);
+                        self.target_channels = config.output.channel_count;
+                        self.target_sample_rate = config.output.sample_rate_khz;
+                        self.target_bits_per_sample = config.output.bits_per_sample;
+                        self.setup_audio_device();
+                        self.create_stream();
                     }
                     _ => {} // Ignore other messages
                 }

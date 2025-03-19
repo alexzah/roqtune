@@ -1,13 +1,6 @@
+use crate::protocol::PlaybackOrder;
 use rand::{rngs::StdRng, Rng, SeedableRng};
 use std::path::PathBuf;
-
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub enum PlaybackOrder {
-    Sequential, // Play tracks in order
-    Shuffle,    // Randomize order once and play through that order
-    Random,     // Pick a random track each time
-}
-
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum RepeatMode {
     Off, // Stop after reaching the end of playlist
@@ -42,7 +35,7 @@ impl Playlist {
             playing_track_index: None,
             selected_track_index: 0,
             is_playing: false,
-            playback_order: PlaybackOrder::Sequential,
+            playback_order: PlaybackOrder::Default,
             repeat_mode: RepeatMode::Off,
             shuffled_indices: Vec::new(),
             rng_seed: seed,
@@ -104,7 +97,7 @@ impl Playlist {
         }
 
         match self.playback_order {
-            PlaybackOrder::Sequential => {
+            PlaybackOrder::Default => {
                 // Return the next track in sequence
                 let next_index = current_index + 1;
                 if next_index < self.tracks.len() {
@@ -233,7 +226,7 @@ impl Playlist {
         }
 
         match self.playback_order {
-            PlaybackOrder::Sequential => Some(0),
+            PlaybackOrder::Default => Some(0),
             PlaybackOrder::Shuffle => {
                 if self.shuffled_indices.is_empty() {
                     self.generate_shuffle_order();

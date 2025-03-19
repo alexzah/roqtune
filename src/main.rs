@@ -19,7 +19,7 @@ use id3::{Tag, TagLike};
 use log::{debug, info};
 use playlist::Playlist;
 use playlist_manager::PlaylistManager;
-use protocol::{Message, PlaybackMessage, PlaylistMessage};
+use protocol::{Config, ConfigMessage, Message, PlaybackMessage, PlaylistMessage};
 use slint::{ComponentHandle, ModelRc, StandardListViewItem, VecModel};
 use tokio::sync::broadcast;
 use ui_manager::{UiManager, UiState};
@@ -57,6 +57,29 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let ui_state = UiState {
         track_model: Rc::new(VecModel::from(vec![])),
     };
+
+    let config_dir = dirs::config_dir().unwrap();
+    let config_file = config_dir.join("music_player.toml");
+
+    if !config_file.exists() {
+        let default_config = toml::toml! {
+            [output]
+            channel_count = 2
+        };
+
+        info!(
+            "Config file not found. Creating default config. path={}",
+            config_file.display()
+        );
+        std::fs::write(
+            config_file.clone(),
+            toml::to_string(&default_config).unwrap(),
+        )
+        .unwrap();
+    }
+
+    let config =
+        toml::from_str::<Config>(&std::fs::read_to_string(config_file.clone()).unwrap()).unwrap();
 
     setup_app_state_associations(&ui, &ui_state);
 
@@ -136,6 +159,32 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         )));
     });
 
+    // Wire up sequence selector
+    let bus_sender_clone = bus_sender.clone();
+    ui.on_playback_order_changed(move |index| {
+        debug!("Playback order changed: {}", index);
+        match index {
+            0 => {
+                let _ = bus_sender_clone.send(Message::Playlist(
+                    PlaylistMessage::ChangePlaybackOrder(protocol::PlaybackOrder::Default),
+                ));
+            }
+            1 => {
+                let _ = bus_sender_clone.send(Message::Playlist(
+                    PlaylistMessage::ChangePlaybackOrder(protocol::PlaybackOrder::Shuffle),
+                ));
+            }
+            2 => {
+                let _ = bus_sender_clone.send(Message::Playlist(
+                    PlaylistMessage::ChangePlaybackOrder(protocol::PlaybackOrder::Random),
+                ));
+            }
+            _ => {
+                debug!("Invalid playback order index: {}", index);
+            }
+        }
+    });
+
     // Setup playlist manager
     let playlist_manager_bus_receiver = bus_sender.subscribe();
     let playlist_manager_bus_sender = bus_sender.clone();
@@ -175,6 +224,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let mut audio_player = AudioPlayer::new(player_bus_receiver, player_bus_sender);
         audio_player.run();
     });
+
+    let bus_sender_clone = bus_sender.clone();
+    let _ = bus_sender_clone.send(Message::Config(ConfigMessage::ConfigChanged(config)));
 
     ui.run()?;
 

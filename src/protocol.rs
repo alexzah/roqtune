@@ -1,10 +1,30 @@
 use std::path::PathBuf;
 
+#[derive(Debug, Clone, serde::Deserialize)]
+pub struct Config {
+    pub output: OutputConfig,
+}
+
+#[derive(Debug, Clone, serde::Deserialize)]
+pub struct OutputConfig {
+    pub channel_count: u16,
+    pub sample_rate_khz: u32,
+    pub bits_per_sample: u16,
+}
+
 #[derive(Debug, Clone)]
 pub enum Message {
     Playlist(PlaylistMessage),
     Audio(AudioMessage),
     Playback(PlaybackMessage),
+    Config(ConfigMessage),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum PlaybackOrder {
+    Default,
+    Shuffle,
+    Random,
 }
 
 #[derive(Debug, Clone)]
@@ -14,6 +34,7 @@ pub enum PlaylistMessage {
     SelectTrack(usize),
     TrackStarted(usize),
     TrackFinished(usize),
+    ChangePlaybackOrder(PlaybackOrder),
 }
 
 #[derive(Debug, Clone)]
@@ -58,4 +79,9 @@ pub enum PlaybackMessage {
     TrackFinished(String),
     TrackStarted(String),
     ClearPlayerCache,
+}
+
+#[derive(Debug, Clone)]
+pub enum ConfigMessage {
+    ConfigChanged(Config),
 }

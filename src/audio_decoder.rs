@@ -1,5 +1,6 @@
 use crate::protocol::{
-    self, AudioMessage, AudioPacket, Message, PlaybackMessage, PlaylistMessage, TrackIdentifier,
+    self, AudioMessage, AudioPacket, Config, ConfigMessage, Message, PlaybackMessage,
+    PlaylistMessage, TrackIdentifier,
 };
 use log::{debug, error, trace};
 use rubato::{
@@ -27,6 +28,7 @@ enum DecodeWorkItem {
     DecodeTracks(Vec<TrackIdentifier>),
     DecodeTrack(TrackIdentifier),
     Stop,
+    ConfigChanged(Config),
 }
 
 // Worker to decode in a separate thread
@@ -36,6 +38,9 @@ struct DecodeWorker {
     work_queue: VecDeque<DecodeWorkItem>,
     resampler: Option<SincFixedIn<f32>>,
     resample_buffer: VecDeque<f32>,
+    target_sample_rate: u32,
+    target_channels: u16,
+    target_bits_per_sample: u16,
 }
 
 impl DecodeWorker {
@@ -46,6 +51,9 @@ impl DecodeWorker {
             work_queue: VecDeque::new(),
             resampler: None,
             resample_buffer: VecDeque::new(),
+            target_sample_rate: 0,
+            target_channels: 0,
+            target_bits_per_sample: 0,
         }
     }
 
@@ -67,6 +75,11 @@ impl DecodeWorker {
                     }
                     DecodeWorkItem::DecodeTrack(_) => {
                         trace!("DecodeWorkItem::DecodeTrack: Only supported via work queue");
+                    }
+                    DecodeWorkItem::ConfigChanged(config) => {
+                        self.target_sample_rate = config.output.sample_rate_khz;
+                        self.target_channels = config.output.channel_count;
+                        self.target_bits_per_sample = config.output.bits_per_sample;
                     }
                 }
 
@@ -105,14 +118,12 @@ impl DecodeWorker {
             window: WindowFunction::BlackmanHarris2,
         };
         // TODO: get sample_rate and channels as message from player
-        let target_sample_rate = 48000;
-        let target_channels = 2;
         SincFixedIn::<f32>::new(
-            target_sample_rate as f64 / source_sample_rate as f64,
+            self.target_sample_rate as f64 / source_sample_rate as f64,
             2.0,
             params,
             chunk_size,
-            target_channels,
+            self.target_channels as usize,
         )
         .unwrap()
     }
@@ -386,6 +397,15 @@ impl AudioDecoder {
                     Message::Audio(AudioMessage::StopDecoding) => {
                         debug!("AudioDecoder: Clearing cache");
                         self.worker_sender.blocking_send(DecodeWorkItem::Stop);
+                    }
+                    Message::Config(ConfigMessage::ConfigChanged(config)) => {
+                        debug!(
+                            "AudioDecoder: Received config changed command: {:?}",
+                            config
+                        );
+                        self.worker_sender
+                            .blocking_send(DecodeWorkItem::ConfigChanged(config))
+                            .unwrap();
                     }
                     _ => {} // Ignore other messages for now
                 }
