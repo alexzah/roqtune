@@ -337,6 +337,7 @@ impl AudioPlayer {
                             }
                             AudioSample::TrackFooter(id) => {
                                 // Detected track footer, notify that track has finished and skip this sample
+                                debug!("AudioPlayer: Sending track finished message: {}", id);
                                 bus_sender_clone
                                     .send(Message::Playback(PlaybackMessage::TrackFinished(
                                         id.clone(),

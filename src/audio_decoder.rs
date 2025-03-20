@@ -153,9 +153,7 @@ impl DecodeWorker {
             self.resampler = Some(self.create_resampler(sample_rate, 2048));
         }
 
-        // TODO: get channels as message from player
-        let channels: usize = 2;
-        let target_sample_rate = 48000;
+        let channels: usize = self.target_channels as usize;
         let mut result: Vec<f32> = Vec::new();
         if let Some(resampler) = &mut self.resampler {
             trace!(
@@ -169,6 +167,12 @@ impl DecodeWorker {
             ) {
                 samples.push(self.resample_buffer.pop_front().unwrap());
             }
+
+            // No need to resample
+            if sample_rate == self.target_sample_rate {
+                return samples;
+            }
+
             let deinterleaved = Self::deinterleave(&samples, channels);
             let mut waves_out = vec![vec![]; channels];
             if deinterleaved[0].len() == resampler.input_frames_next() {
@@ -178,6 +182,9 @@ impl DecodeWorker {
                     .process_partial(Some(&deinterleaved), None)
                     .unwrap();
                 if let Ok(result) = resampler.process_partial::<&[f32]>(None, None) {
+                    // if result.is_empty() || result[0].is_empty() {
+                    //     break;
+                    // }
                     for i in 0..channels {
                         waves_out[i].extend(result[i].iter());
                     }
@@ -295,29 +302,26 @@ impl DecodeWorker {
 
                     decoded_chunk.extend_from_slice(sample_buffer.samples());
 
-                    // Send chunk when we have enough samples
-                    if decoded_chunk.len() >= chunk_size {
-                        trace!(
-                            "Got chunk of size {} samples, expecting {}",
-                            decoded_chunk.len(),
-                            chunk_size
-                        );
-                        self.resample_buffer.extend(decoded_chunk.iter());
-                        if self.resample_buffer.len() >= chunk_size {
-                            let resampled_samples = self.resample_next_frame(sample_rate);
-                            let _ =
-                                self.bus_sender
-                                    .send(Message::Audio(AudioMessage::AudioPacket(
-                                        AudioPacket::Samples {
-                                            samples: resampled_samples,
-                                            sample_rate,
-                                            channels: channels as u16,
-                                        },
-                                    )));
-                        }
-
-                        decoded_chunk = Vec::with_capacity(chunk_size);
+                    trace!(
+                        "Got chunk of size {} samples, expecting {}",
+                        decoded_chunk.len(),
+                        chunk_size
+                    );
+                    self.resample_buffer.extend(decoded_chunk.iter());
+                    while self.resample_buffer.len() >= chunk_size {
+                        let resampled_samples = self.resample_next_frame(sample_rate);
+                        let _ = self
+                            .bus_sender
+                            .send(Message::Audio(AudioMessage::AudioPacket(
+                                AudioPacket::Samples {
+                                    samples: resampled_samples,
+                                    sample_rate,
+                                    channels: channels as u16,
+                                },
+                            )));
                     }
+
+                    decoded_chunk = Vec::with_capacity(chunk_size);
                 }
                 Err(e) => {
                     error!("Decode error: {}", e);
@@ -332,8 +336,16 @@ impl DecodeWorker {
                 debug!("DecodeWorker: Stopping");
                 return;
             }
+            self.resample_buffer.extend(decoded_chunk.iter());
+        }
+
+        // Flush resampler queue
+        while self.resample_buffer.len() > 0 {
+            if !self.should_continue() {
+                debug!("DecodeWorker: Stopping");
+                return;
+            }
             let resampled_samples = self.resample_next_frame(sample_rate);
-            // debug!("Sending final chunk of {} samples", decoded_chunk.len());
             let _ = self
                 .bus_sender
                 .send(Message::Audio(AudioMessage::AudioPacket(
@@ -343,15 +355,6 @@ impl DecodeWorker {
                         channels: channels as u16,
                     },
                 )));
-        }
-
-        // Flush resampler queue
-        while self.resample_buffer.len() > 0 {
-            if !self.should_continue() {
-                debug!("DecodeWorker: Stopping");
-                return;
-            }
-            self.resample_next_frame(sample_rate);
         }
 
         self.bus_sender
