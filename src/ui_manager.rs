@@ -143,8 +143,8 @@ impl UiManager {
 
     pub fn run(&mut self) {
         loop {
-            while let Ok(message) = self.bus_receiver.blocking_recv() {
-                match message {
+            match self.bus_receiver.blocking_recv() {
+                Ok(message) => match message {
                     protocol::Message::Playlist(protocol::PlaylistMessage::LoadTrack(path)) => {
                         debug!("Loading track: {}", path.display());
                         let tags: TrackMetadata = self.read_track_metadata(&path);
@@ -232,9 +232,15 @@ impl UiManager {
                     _ => {
                         trace!("UiManager: received unsupported message {:?}", message);
                     }
+                },
+                Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
+                    // Ignore lag as we've increased the bus capacity
+                }
+                Err(tokio::sync::broadcast::error::RecvError::Closed) => {
+                    error!("UiManager: bus closed");
+                    break;
                 }
             }
-            error!("Bad message received by playlist manager, trying again");
         }
     }
 }

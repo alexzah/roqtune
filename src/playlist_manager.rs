@@ -43,6 +43,10 @@ impl PlaylistManager {
                 .get_track_id(self.playlist.get_selected_track_index()),
         ) {
             self.stop_decoding();
+            self.cached_track_ids.clear();
+            let _ = self.bus_producer.send(protocol::Message::Playback(
+                protocol::PlaybackMessage::ClearPlayerCache,
+            ));
             self.cache_tracks(true);
         } else {
             self.bus_producer.send(protocol::Message::Playback(
@@ -56,8 +60,8 @@ impl PlaylistManager {
 
     pub fn run(&mut self) {
         loop {
-            while let Ok(message) = self.bus_consumer.blocking_recv() {
-                match message {
+            match self.bus_consumer.blocking_recv() {
+                Ok(message) => match message {
                     protocol::Message::Playlist(protocol::PlaylistMessage::LoadTrack(path)) => {
                         debug!("PlaylistManager: Loading track {:?}", path);
                         self.playlist.add_track(Track {
@@ -111,23 +115,27 @@ impl PlaylistManager {
                             ),
                         ));
                     }
-                    protocol::Message::Playback(protocol::PlaybackMessage::ReadyForPlayback) => {
-                        debug!("PlaylistManager: Received ready for playback command");
+                    protocol::Message::Playback(protocol::PlaybackMessage::ReadyForPlayback(
+                        id,
+                    )) => {
+                        debug!(
+                            "PlaylistManager: Received ready for playback command for track: {}",
+                            id
+                        );
 
                         // Inform the audio player which track to play from its cache
                         if self.playlist.is_playing() {
-                            self.bus_producer
-                                .send(protocol::Message::Playback(
-                                    protocol::PlaybackMessage::PlayTrackById(
-                                        self.playlist
-                                            .get_track(
-                                                self.playlist.get_playing_track_index().unwrap(),
-                                            )
-                                            .id
-                                            .clone(),
-                                    ),
-                                ))
-                                .unwrap();
+                            let playing_track_id = self
+                                .playlist
+                                .get_track(self.playlist.get_playing_track_index().unwrap())
+                                .id
+                                .clone();
+
+                            if playing_track_id == id {
+                                let _ = self.bus_producer.send(protocol::Message::Playback(
+                                    protocol::PlaybackMessage::PlayTrackById(id),
+                                ));
+                            }
                         }
                     }
                     protocol::Message::Playlist(protocol::PlaylistMessage::DeleteTrack(index)) => {
@@ -166,6 +174,13 @@ impl PlaylistManager {
                         self.playlist.set_playback_order(order);
                     }
                     _ => trace!("PlaylistManager: ignoring unsupported message"),
+                },
+                Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
+                    // Ignore lag as we've increased the bus capacity
+                }
+                Err(tokio::sync::broadcast::error::RecvError::Closed) => {
+                    error!("PlaylistManager: bus closed");
+                    break;
                 }
             }
         }
@@ -200,20 +215,23 @@ impl PlaylistManager {
             "PlaylistManager: Updated cached tracks: {:?}",
             self.cached_track_ids
         );
-        self.bus_producer.send(protocol::Message::Audio(
+        let _ = self.bus_producer.send(protocol::Message::Audio(
             protocol::AudioMessage::DecodeTracks(track_paths),
         ));
     }
 
     fn clear_cached_tracks(&mut self) {
         self.cached_track_ids.clear();
-        self.bus_producer.send(protocol::Message::Audio(
+        let _ = self.bus_producer.send(protocol::Message::Audio(
             protocol::AudioMessage::StopDecoding,
+        ));
+        let _ = self.bus_producer.send(protocol::Message::Playback(
+            protocol::PlaybackMessage::ClearPlayerCache,
         ));
     }
 
     fn stop_decoding(&mut self) {
-        self.bus_producer.send(protocol::Message::Audio(
+        let _ = self.bus_producer.send(protocol::Message::Audio(
             protocol::AudioMessage::StopDecoding,
         ));
     }

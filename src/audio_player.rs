@@ -71,7 +71,7 @@ impl AudioPlayer {
             resampler: None,
             current_track_id: String::new(),
             current_track_position: Arc::new(AtomicUsize::new(0)),
-            max_cached_tracks: 2,
+            max_cached_tracks: 6,
         };
 
         // Initialize audio device once during construction
@@ -177,74 +177,94 @@ impl AudioPlayer {
                 // Remove the oldest track from the cache if we have too many
                 while self.cached_track_indices.lock().unwrap().len() > self.max_cached_tracks {
                     let mut sample_queue_unlocked = self.sample_queue.lock().unwrap();
-                    let oldest_track_header = sample_queue_unlocked.front().unwrap().clone();
-                    if let AudioSample::TrackHeader(oldest_track_id) = oldest_track_header {
-                        let old_end_index = self
-                            .cached_track_indices
-                            .lock()
-                            .unwrap()
-                            .get(&oldest_track_id)
-                            .expect(&format!("Track id {} not found in index", oldest_track_id))
-                            .end
-                            .expect("Track end index not found");
-                        let current_player_position =
-                            self.current_track_position.load(Ordering::Relaxed);
+                    let oldest_track_header = sample_queue_unlocked.front().cloned();
 
-                        // Evict oldest track from cache if it's not currently playing
-                        if current_player_position > old_end_index {
-                            debug!(
-                                "AudioPlayer: Evicting oldest track from cache: {}",
-                                oldest_track_id
-                            );
+                    if let Some(AudioSample::TrackHeader(oldest_track_id)) = oldest_track_header {
+                        let track_indices = self.cached_track_indices.lock().unwrap();
+                        let oldest_track_info = track_indices.get(&oldest_track_id);
 
-                            // Remove track from index
-                            self.cached_track_indices
-                                .lock()
-                                .unwrap()
-                                .remove(&oldest_track_id);
+                        if let Some(info) = oldest_track_info {
+                            if let Some(old_end_index) = info.end {
+                                let current_player_position =
+                                    self.current_track_position.load(Ordering::Relaxed);
 
-                            // Remove all samples from the queue until we hit the end of the track
-                            while let Some(sample) = sample_queue_unlocked.pop_front() {
-                                if let AudioSample::TrackFooter(_) = sample {
+                                // Evict oldest track from cache if it's not currently playing
+                                if current_player_position > old_end_index {
+                                    debug!(
+                                        "AudioPlayer: Evicting oldest track from cache: {}",
+                                        oldest_track_id
+                                    );
+
+                                    // Remove all samples from the queue until we hit the end of the track
+                                    while let Some(sample) = sample_queue_unlocked.pop_front() {
+                                        if let AudioSample::TrackFooter(_) = sample {
+                                            break;
+                                        }
+                                    }
+                                    drop(sample_queue_unlocked);
+                                    drop(track_indices);
+
+                                    // Remove track from index
+                                    self.cached_track_indices
+                                        .lock()
+                                        .unwrap()
+                                        .remove(&oldest_track_id);
+
+                                    // Decrement all cached indices now that we've evicted an item
+                                    for (_, track_index) in
+                                        self.cached_track_indices.lock().unwrap().iter_mut()
+                                    {
+                                        if track_index.start > old_end_index {
+                                            track_index.start =
+                                                track_index.start - old_end_index - 1;
+                                        }
+                                        if track_index.end.is_some()
+                                            && track_index.end.unwrap() > old_end_index
+                                        {
+                                            track_index.end =
+                                                Some(track_index.end.unwrap() - old_end_index - 1);
+                                        }
+                                    }
+
+                                    // Decrement the current track position, if needed
+                                    if current_player_position > old_end_index {
+                                        self.current_track_position
+                                            .fetch_sub(old_end_index + 1, Ordering::Relaxed);
+                                    }
+
+                                    self.bus_sender
+                                        .send(Message::Audio(AudioMessage::TrackEvictedFromCache(
+                                            oldest_track_id.clone(),
+                                        )))
+                                        .unwrap();
+                                } else {
+                                    debug!("AudioPlayer: Unable to evict oldest track from cache because it's currently playing or ahead in queue. track_id={}", oldest_track_id);
                                     break;
                                 }
+                            } else {
+                                debug!("AudioPlayer: Oldest track hasn't finished decoding yet, skipping eviction.");
+                                break;
                             }
-
-                            // Decrement all cached indices now that we've evicted an item
-                            for (_, track_index) in
-                                self.cached_track_indices.lock().unwrap().iter_mut()
-                            {
-                                if track_index.start > old_end_index {
-                                    track_index.start = track_index.start - old_end_index - 1;
-                                }
-                                if track_index.end.is_some()
-                                    && track_index.end.unwrap() > old_end_index
-                                {
-                                    track_index.end =
-                                        Some(track_index.end.unwrap() - old_end_index - 1);
-                                }
-                            }
-
-                            // Decrement the current track position, if needed
-                            if current_player_position > old_end_index {
-                                self.current_track_position
-                                    .fetch_sub(old_end_index + 1, Ordering::Relaxed);
-                            }
-
-                            self.bus_sender
-                                .send(Message::Audio(AudioMessage::TrackEvictedFromCache(
-                                    oldest_track_id.clone(),
-                                )))
-                                .unwrap();
                         } else {
-                            debug!("AudioPlayer: Unable to evict oldest track from cache because it's currently playing. track_id={}", oldest_track_id);
-                            break;
+                            // Track not in index, but in queue? Just pop it to keep things moving.
+                            sample_queue_unlocked.pop_front();
                         }
+                    } else {
+                        break;
                     }
                 }
 
                 if play_immediately {
                     self.current_track_id = id.clone();
+                    // Use the index from the map in case evictions changed it
+                    let start_index = self
+                        .cached_track_indices
+                        .lock()
+                        .unwrap()
+                        .get(&id)
+                        .map(|idx| idx.start)
+                        .unwrap_or(0);
+
                     self.current_track_position
                         .store(start_index, Ordering::Relaxed);
                     if let Some(stream) = &self.stream {
@@ -257,6 +277,12 @@ impl AudioPlayer {
                     } else {
                         debug!("No audio stream available to play");
                     }
+
+                    self.bus_sender
+                        .send(Message::Playback(PlaybackMessage::ReadyForPlayback(
+                            id.clone(),
+                        )))
+                        .unwrap();
                 }
             }
             AudioPacket::TrackFooter { id } => {
@@ -269,13 +295,23 @@ impl AudioPlayer {
                     .cached_track_indices
                     .lock()
                     .expect("Failed to lock track indices");
-                let _ = track_indices
-                    .get_mut(&id)
-                    .expect(&format!("Track id {} not found in index", id))
-                    .end
-                    .insert(self.sample_queue.lock().unwrap().len() - 1);
+                if let Some(track_index) = track_indices.get_mut(&id) {
+                    track_index.end = Some(self.sample_queue.lock().unwrap().len() - 1);
+                } else {
+                    debug!(
+                        "AudioPlayer: Received footer for unknown track {}, skipping index update",
+                        id
+                    );
+                }
                 self.bus_sender
-                    .send(Message::Audio(AudioMessage::TrackCached(id)))
+                    .send(Message::Audio(AudioMessage::TrackCached(id.clone())))
+                    .unwrap();
+
+                // If not playing immediately, still notify when first chunk is ready if it's the selected track
+                // But TrackCached already serves a similar purpose for the manager's state.
+                // However, the manager specifically waits for ReadyForPlayback in its current logic for immediate play.
+                self.bus_sender
+                    .send(Message::Playback(PlaybackMessage::ReadyForPlayback(id)))
                     .unwrap();
             }
         }
@@ -373,8 +409,8 @@ impl AudioPlayer {
 
     pub fn run(&mut self) {
         loop {
-            while let Ok(message) = self.bus_receiver.blocking_recv() {
-                match message {
+            match self.bus_receiver.blocking_recv() {
+                Ok(message) => match message {
                     Message::Audio(AudioMessage::AudioPacket(buffer)) => {
                         trace!("AudioPlayer: Received {:?} samples", buffer);
                         self.load_samples(buffer);
@@ -405,41 +441,47 @@ impl AudioPlayer {
                     }
                     Message::Playback(PlaybackMessage::PlayTrackById(id)) => {
                         self.current_track_id = id.clone();
-                        let current_track_index = self
+                        let start_index = self
                             .cached_track_indices
                             .lock()
                             .unwrap()
                             .get(&id)
-                            .unwrap()
-                            .start;
-                        self.current_track_position
-                            .store(current_track_index, Ordering::Relaxed);
-                        if let Some(stream) = &self.stream {
-                            if let Err(e) = stream.play() {
-                                error!("AudioPlayer: Failed to start playback: {}", e);
+                            .map(|idx| idx.start);
+
+                        if let Some(current_track_index) = start_index {
+                            self.current_track_position
+                                .store(current_track_index, Ordering::Relaxed);
+                            if let Some(stream) = &self.stream {
+                                if let Err(e) = stream.play() {
+                                    error!("AudioPlayer: Failed to start playback: {}", e);
+                                } else {
+                                    self.is_playing.store(true, Ordering::Relaxed);
+                                    debug!("AudioPlayer: Playback started");
+                                }
                             } else {
-                                self.is_playing.store(true, Ordering::Relaxed);
-                                debug!("AudioPlayer: Playback started");
+                                debug!("No audio stream available to play");
                             }
                         } else {
-                            debug!("No audio stream available to play");
+                            error!(
+                                "AudioPlayer: Attempted to play track {} but it's not in cache",
+                                id
+                            );
                         }
                     }
                     Message::Playback(PlaybackMessage::Stop) => {
                         if let Some(stream) = &self.stream {
-                            stream.pause().unwrap();
+                            let _ = stream.pause();
                             self.is_playing.store(false, Ordering::Relaxed);
                         }
                     }
                     Message::Playback(PlaybackMessage::ClearPlayerCache) => {
                         debug!("AudioPlayer: Clearing cache");
                         self.sample_queue.lock().unwrap().clear();
+                        self.cached_track_indices.lock().unwrap().clear();
+                        self.current_track_position.store(0, Ordering::Relaxed);
                         self.create_stream();
 
-                        debug!("AudioPlayer: Ready for playback");
-                        self.bus_sender
-                            .send(Message::Playback(PlaybackMessage::ReadyForPlayback))
-                            .unwrap();
+                        debug!("AudioPlayer: Cache cleared");
                     }
                     Message::Playback(PlaybackMessage::TrackStarted(id)) => {
                         debug!("AudioPlayer: Received track started command: {}", id);
@@ -457,9 +499,15 @@ impl AudioPlayer {
                         self.create_stream();
                     }
                     _ => {} // Ignore other messages
+                },
+                Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
+                    // Ignore lag as we've increased the bus capacity
+                }
+                Err(tokio::sync::broadcast::error::RecvError::Closed) => {
+                    error!("AudioPlayer: bus closed");
+                    break;
                 }
             }
-            error!("AudioPlayer: receiver error, restarting loop");
         }
     }
 }

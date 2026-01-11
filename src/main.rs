@@ -84,7 +84,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     setup_app_state_associations(&ui, &ui_state);
 
     // Bus for communication between components
-    let (bus_sender, _) = broadcast::channel(100);
+    let (bus_sender, _) = broadcast::channel(1024);
 
     let ui_handle_clone = ui.as_weak().clone();
     let bus_sender_clone = bus_sender.clone();

@@ -59,7 +59,8 @@ impl DecodeWorker {
 
     pub fn run(&mut self) {
         loop {
-            while let Some(item) = self.work_receiver.blocking_recv() {
+            // Process any items in the work queue first
+            while let Some(item) = self.work_queue.pop_front() {
                 match item {
                     DecodeWorkItem::Stop => {
                         debug!("DecodeWorker: Received stop signal");
@@ -73,8 +74,8 @@ impl DecodeWorker {
                                 .push_back(DecodeWorkItem::DecodeTrack(track));
                         }
                     }
-                    DecodeWorkItem::DecodeTrack(_) => {
-                        trace!("DecodeWorkItem::DecodeTrack: Only supported via work queue");
+                    DecodeWorkItem::DecodeTrack(track) => {
+                        self.decode_track(track);
                     }
                     DecodeWorkItem::ConfigChanged(config) => {
                         self.target_sample_rate = config.output.sample_rate_khz;
@@ -82,11 +83,11 @@ impl DecodeWorker {
                         self.target_bits_per_sample = config.output.bits_per_sample;
                     }
                 }
+            }
 
-                // TODO: this seems hacky, and we should handle other work items
-                while let Some(DecodeWorkItem::DecodeTrack(track)) = self.work_queue.pop_front() {
-                    self.decode_track(track);
-                }
+            // Wait for new work
+            if let Some(item) = self.work_receiver.blocking_recv() {
+                self.work_queue.push_back(item);
             }
         }
     }
@@ -389,8 +390,8 @@ impl AudioDecoder {
 
     pub fn run(&mut self) {
         loop {
-            while let Ok(message) = self.bus_receiver.blocking_recv() {
-                match message {
+            match self.bus_receiver.blocking_recv() {
+                Ok(message) => match message {
                     Message::Audio(AudioMessage::DecodeTracks(paths)) => {
                         debug!("AudioDecoder: Loading tracks {:?}", paths);
                         self.worker_sender
@@ -399,7 +400,7 @@ impl AudioDecoder {
                     }
                     Message::Audio(AudioMessage::StopDecoding) => {
                         debug!("AudioDecoder: Clearing cache");
-                        self.worker_sender.blocking_send(DecodeWorkItem::Stop);
+                        let _ = self.worker_sender.blocking_send(DecodeWorkItem::Stop);
                     }
                     Message::Config(ConfigMessage::ConfigChanged(config)) => {
                         debug!(
@@ -411,9 +412,15 @@ impl AudioDecoder {
                             .unwrap();
                     }
                     _ => {} // Ignore other messages for now
+                },
+                Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
+                    // Ignore lag as we've increased the bus capacity
+                }
+                Err(tokio::sync::broadcast::error::RecvError::Closed) => {
+                    error!("AudioDecoder: bus closed");
+                    break;
                 }
             }
-            error!("AudioDecoder: receiver error, restarting loop");
         }
     }
 

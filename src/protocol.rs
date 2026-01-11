@@ -71,7 +71,7 @@ pub enum AudioMessage {
 
 #[derive(Debug, Clone)]
 pub enum PlaybackMessage {
-    ReadyForPlayback,
+    ReadyForPlayback(String),
     Play,                    // play the currently selected track
     PlayTrackByIndex(usize), // play a specific track by index
     PlayTrackById(String),   // play a specific track by identifier
