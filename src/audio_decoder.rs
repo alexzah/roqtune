@@ -11,7 +11,7 @@ use std::path::PathBuf;
 use std::thread;
 use symphonia::core::audio::SampleBuffer;
 use symphonia::core::codecs::DecoderOptions;
-use symphonia::core::formats::FormatOptions;
+use symphonia::core::formats::{FormatOptions, SeekMode, SeekTo};
 use symphonia::core::io::MediaSourceStream;
 use symphonia::core::meta::MetadataOptions;
 use symphonia::core::probe::Hint;
@@ -92,7 +92,7 @@ impl DecodeWorker {
         // try_recv() returns None if channel is empty, Some if there's a message
         match self.work_receiver.try_recv() {
             Ok(DecodeWorkItem::Stop) => {
-                debug!("DecodeWorker: Received stop signal");
+                debug!("DecodeWorker: Stopping");
                 self.work_queue.clear();
                 self.resample_buffer.clear();
                 self.resampler = None;
@@ -114,7 +114,6 @@ impl DecodeWorker {
             oversampling_factor: 256,
             window: WindowFunction::BlackmanHarris2,
         };
-        // TODO: get sample_rate and channels as message from player
         SincFixedIn::<f32>::new(
             self.target_sample_rate as f64 / source_sample_rate as f64,
             2.0,
@@ -153,11 +152,6 @@ impl DecodeWorker {
         let channels: usize = self.target_channels as usize;
         let mut result: Vec<f32> = Vec::new();
         if let Some(resampler) = &mut self.resampler {
-            trace!(
-                "Attempting to pull {} samples from resample buffer of size {}",
-                resampler.input_frames_next() * channels,
-                self.resample_buffer.len()
-            );
             for _ in 0..min(
                 resampler.input_frames_next() * channels,
                 self.resample_buffer.len(),
@@ -179,9 +173,6 @@ impl DecodeWorker {
                     .process_partial(Some(&deinterleaved), None)
                     .unwrap();
                 if let Ok(result) = resampler.process_partial::<&[f32]>(None, None) {
-                    // if result.is_empty() || result[0].is_empty() {
-                    //     break;
-                    // }
                     for i in 0..channels {
                         waves_out[i].extend(result[i].iter());
                     }
@@ -228,19 +219,6 @@ impl DecodeWorker {
                         }
                     }
                 }
-
-                // Check APEv2 at end
-                if file_size > 32 {
-                    let _ = file.seek(SeekFrom::End(-32));
-                    let mut ape_footer = [0u8; 8];
-                    if let Ok(_) = file.read_exact(&mut ape_footer) {
-                        if &ape_footer == b"APETAGEX" {
-                            // APE tag is variable size, but usually follows ID3v1 or is at the very end
-                            // For simplicity, we'll just count the ID3v1 which is more common.
-                            // True APE parsing is complex, but this covers most cases.
-                        }
-                    }
-                }
             }
             total_size
         };
@@ -260,31 +238,33 @@ impl DecodeWorker {
         let hint = Hint::new();
 
         // Probe the media source
-        let format_reader = match symphonia::default::get_probe().format(
+        let mut format_reader = match symphonia::default::get_probe().format(
             &hint,
             media_source,
             &FormatOptions::default(),
             &MetadataOptions::default(),
         ) {
-            Ok(probed) => probed,
+            Ok(probed) => probed.format,
             Err(e) => {
                 error!("Failed to probe media source: {}", e);
                 return;
             }
         };
 
-        // Get the default track
-        let track = match format_reader.format.default_track() {
-            Some(track) => track,
-            None => {
-                error!("No default track found");
-                return;
-            }
+        let (track_id, codec_params) = {
+            // Get the default track
+            let track = match format_reader.default_track() {
+                Some(track) => track,
+                None => {
+                    error!("No default track found");
+                    return;
+                }
+            };
+            (track.id, track.codec_params.clone())
         };
 
-        let track_id = track.id;
-        let sample_rate = track.codec_params.sample_rate.unwrap_or(44100);
-        let channels = track.codec_params.channels.unwrap().count();
+        let sample_rate = codec_params.sample_rate.unwrap_or(44100);
+        let channels = codec_params.channels.unwrap().count();
 
         // Get format name
         let format_name = input_track
@@ -294,8 +274,8 @@ impl DecodeWorker {
             .unwrap_or("AUDIO")
             .to_uppercase();
 
-        // Calculate precise duration and estimate bitrate
-        let n_frames = track.codec_params.n_frames.unwrap_or(0);
+        // Try to get duration and estimate bitrate
+        let n_frames = codec_params.n_frames.unwrap_or(0);
         let duration_secs = if n_frames > 0 {
             n_frames as f64 / sample_rate as f64
         } else {
@@ -317,6 +297,21 @@ impl DecodeWorker {
             }
         }
 
+        // Seek if requested
+        if input_track.start_offset_secs > 0 {
+            debug!(
+                "DecodeWorker: Seeking to {}s",
+                input_track.start_offset_secs
+            );
+            let _ = format_reader.seek(
+                SeekMode::Accurate,
+                SeekTo::Time {
+                    time: symphonia::core::units::Time::from(input_track.start_offset_secs),
+                    track_id: Some(track_id),
+                },
+            );
+        }
+
         if self.resampler.is_none() {
             self.resampler = Some(self.create_resampler(sample_rate, 2048));
         }
@@ -333,7 +328,7 @@ impl DecodeWorker {
 
         // Create a decoder for the track
         let mut decoder = match symphonia::default::get_codecs()
-            .make(&track.codec_params, &DecoderOptions::default())
+            .make(&codec_params, &DecoderOptions::default())
         {
             Ok(decoder) => decoder,
             Err(e) => {
@@ -354,16 +349,16 @@ impl DecodeWorker {
                         sample_rate_hz: sample_rate,
                         duration_secs: duration_secs as u64,
                     },
+                    start_offset_secs: input_track.start_offset_secs,
                 },
             )))
             .unwrap();
 
         // Decode in chunks
-        let mut format_reader = format_reader;
         let chunk_size = self.resampler.as_ref().unwrap().input_frames_next() * channels;
         let mut decoded_chunk = Vec::with_capacity(chunk_size);
 
-        while let Ok(packet) = format_reader.format.next_packet() {
+        while let Ok(packet) = format_reader.next_packet() {
             if !self.should_continue() {
                 debug!("DecodeWorker: Stopping");
                 return;
@@ -383,11 +378,6 @@ impl DecodeWorker {
 
                     decoded_chunk.extend_from_slice(sample_buffer.samples());
 
-                    trace!(
-                        "Got chunk of size {} samples, expecting {}",
-                        decoded_chunk.len(),
-                        chunk_size
-                    );
                     self.resample_buffer.extend(decoded_chunk.iter());
                     while self.resample_buffer.len() >= chunk_size {
                         let resampled_samples = self.resample_next_frame(sample_rate);

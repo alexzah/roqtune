@@ -194,6 +194,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let _ = bus_sender_clone.send(Message::Playlist(PlaylistMessage::ToggleRepeat));
     });
 
+    // Wire up seek handler
+    let bus_sender_clone = bus_sender.clone();
+    ui.on_seek_to(move |percentage| {
+        debug!("Seek requested to {}%", percentage * 100.0);
+        let _ = bus_sender_clone.send(Message::Playback(PlaybackMessage::Seek(percentage)));
+    });
+
     // Setup playlist manager
     let playlist_manager_bus_receiver = bus_sender.subscribe();
     let playlist_manager_bus_sender = bus_sender.clone();

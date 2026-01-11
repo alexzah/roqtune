@@ -37,6 +37,7 @@ pub struct AudioPlayer {
     is_playing: Arc<AtomicBool>,
     current_track_id: Arc<Mutex<String>>,
     current_track_position: Arc<AtomicUsize>,
+    current_track_offset_secs: Arc<AtomicUsize>,
     current_metadata: Arc<Mutex<Option<crate::protocol::TechnicalMetadata>>>,
 
     // Setup cache
@@ -55,6 +56,7 @@ impl AudioPlayer {
         let cached_track_indices = Arc::new(Mutex::new(HashMap::new()));
         let current_track_id = Arc::new(Mutex::new(String::new()));
         let current_metadata = Arc::new(Mutex::new(None));
+        let current_track_offset_secs = Arc::new(AtomicUsize::new(0));
         let target_sample_rate = Arc::new(AtomicUsize::new(44100));
         let target_channels = Arc::new(AtomicUsize::new(2));
 
@@ -72,6 +74,7 @@ impl AudioPlayer {
             target_bits_per_sample: 0,
             current_track_id: current_track_id.clone(),
             current_track_position: current_track_position.clone(),
+            current_track_offset_secs: current_track_offset_secs.clone(),
             current_metadata: current_metadata.clone(),
         };
 
@@ -84,6 +87,7 @@ impl AudioPlayer {
         let cached_track_indices_clone = cached_track_indices.clone();
         let current_track_id_clone = current_track_id.clone();
         let current_metadata_clone = current_metadata.clone();
+        let current_track_offset_secs_clone = current_track_offset_secs.clone();
         let target_sample_rate_clone = target_sample_rate.clone();
         let target_channels_clone = target_channels.clone();
 
@@ -94,6 +98,7 @@ impl AudioPlayer {
                 let track_id = current_track_id_clone.lock().unwrap().clone();
                 let sample_rate = target_sample_rate_clone.load(Ordering::Relaxed);
                 let channels = target_channels_clone.load(Ordering::Relaxed);
+                let offset_secs = current_track_offset_secs_clone.load(Ordering::Relaxed) as u64;
 
                 if let Some(meta) = metadata {
                     let current_pos = current_track_position_clone.load(Ordering::Relaxed);
@@ -110,9 +115,9 @@ impl AudioPlayer {
                         0
                     };
                     if sample_rate > 0 && channels > 0 {
-                        let elapsed_secs = (elapsed_samples as f32
-                            / (sample_rate as f32 * channels as f32))
-                            as u64;
+                        let elapsed_secs = offset_secs
+                            + (elapsed_samples as f32 / (sample_rate as f32 * channels as f32))
+                                as u64;
 
                         let _ = bus_sender_clone.send(Message::Playback(
                             PlaybackMessage::PlaybackProgress {
@@ -275,6 +280,7 @@ impl AudioPlayer {
                 id,
                 play_immediately,
                 technical_metadata,
+                start_offset_secs,
             } => {
                 let mut queue = self.sample_queue.lock().unwrap();
                 queue.push_back(AudioSample::TrackHeader(id.clone()));
@@ -293,6 +299,8 @@ impl AudioPlayer {
                 if play_immediately {
                     *self.current_track_id.lock().unwrap() = id.clone();
                     *self.current_metadata.lock().unwrap() = Some(technical_metadata.clone());
+                    self.current_track_offset_secs
+                        .store(start_offset_secs as usize, Ordering::Relaxed);
                     self.current_track_position
                         .store(start_index, Ordering::Relaxed);
                     self.is_playing.store(true, Ordering::Relaxed);

@@ -16,6 +16,8 @@ pub struct PlaylistManager {
     bus_producer: Sender<protocol::Message>,
     cached_track_ids: HashSet<String>,
     max_num_cached_tracks: usize,
+    current_track_duration_secs: u64,
+    last_seek_secs: u64,
 }
 
 impl PlaylistManager {
@@ -30,6 +32,8 @@ impl PlaylistManager {
             bus_producer,
             cached_track_ids: HashSet::new(),
             max_num_cached_tracks: 6,
+            current_track_duration_secs: 0,
+            last_seek_secs: u64::MAX,
         }
     }
 
@@ -165,6 +169,7 @@ impl PlaylistManager {
                     }
                     protocol::Message::Playback(protocol::PlaybackMessage::TrackStarted(id)) => {
                         debug!("PlaylistManager: Received track started command: {}", id);
+                        self.last_seek_secs = u64::MAX;
                         if let Some(playing_idx) = self.playlist.get_playing_track_index() {
                             let _ = self.bus_producer.send(protocol::Message::Playlist(
                                 protocol::PlaylistMessage::TrackStarted(playing_idx),
@@ -246,6 +251,50 @@ impl PlaylistManager {
                             protocol::PlaylistMessage::RepeatModeChanged(repeat_on),
                         ));
                     }
+                    protocol::Message::Playback(
+                        protocol::PlaybackMessage::TechnicalMetadataChanged(meta),
+                    ) => {
+                        self.current_track_duration_secs = meta.duration_secs;
+                    }
+                    protocol::Message::Playback(protocol::PlaybackMessage::Seek(percentage)) => {
+                        let target_secs =
+                            (percentage as f64 * self.current_track_duration_secs as f64) as u64;
+
+                        if target_secs == self.last_seek_secs {
+                            continue;
+                        }
+                        self.last_seek_secs = target_secs;
+
+                        debug!(
+                            "PlaylistManager: Seeking to {}s ({}%)",
+                            target_secs,
+                            percentage * 100.0
+                        );
+
+                        if let Some(playing_idx) = self.playlist.get_playing_track_index() {
+                            let track = self.playlist.get_track(playing_idx);
+                            let track_id = track.id.clone();
+                            let track_path = track.path.clone();
+
+                            // 1. Stop current decoding
+                            self.stop_decoding();
+
+                            // 2. Clear player cache
+                            let _ = self.bus_producer.send(protocol::Message::Playback(
+                                protocol::PlaybackMessage::ClearPlayerCache,
+                            ));
+
+                            // 3. Restart decoding at offset
+                            let _ = self.bus_producer.send(protocol::Message::Audio(
+                                protocol::AudioMessage::DecodeTracks(vec![TrackIdentifier {
+                                    id: track_id,
+                                    path: track_path,
+                                    play_immediately: true,
+                                    start_offset_secs: target_secs,
+                                }]),
+                            ));
+                        }
+                    }
                     _ => trace!("PlaylistManager: ignoring unsupported message"),
                 },
                 Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
@@ -273,6 +322,7 @@ impl PlaylistManager {
                     id: self.playlist.get_track(current_index).id.clone(),
                     path: self.playlist.get_track(current_index).path.clone(),
                     play_immediately: play_immediately && current_index == first_index,
+                    start_offset_secs: 0,
                 });
             }
             if let Some(next_index) = self.playlist.get_next_track_index(current_index) {
