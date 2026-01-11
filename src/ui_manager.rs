@@ -271,10 +271,13 @@ impl UiManager {
                         });
                     }
                     protocol::Message::Playback(protocol::PlaybackMessage::PlaybackProgress {
-                        elapsed_secs,
-                        total_secs,
+                        elapsed_ms,
+                        total_ms,
                     }) => {
                         let _ = self.ui.upgrade_in_event_loop(move |ui| {
+                            let elapsed_secs = elapsed_ms / 1000;
+                            let total_secs = total_ms / 1000;
+
                             let elapsed_mins = elapsed_secs / 60;
                             let elapsed_rem_secs = elapsed_secs % 60;
                             let total_mins = total_secs / 60;
@@ -287,8 +290,8 @@ impl UiManager {
                                 )
                                 .into(),
                             );
-                            if total_secs > 0 {
-                                ui.set_position_percentage(elapsed_secs as f32 / total_secs as f32);
+                            if total_ms > 0 {
+                                ui.set_position_percentage(elapsed_ms as f32 / total_ms as f32);
                             }
                             ui.set_current_position_text(
                                 format!("{:02}:{:02}", elapsed_mins, elapsed_rem_secs).into(),

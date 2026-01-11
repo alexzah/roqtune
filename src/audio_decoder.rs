@@ -274,10 +274,10 @@ impl DecodeWorker {
             .unwrap_or("AUDIO")
             .to_uppercase();
 
-        // Try to get duration and estimate bitrate
+        // Calculate precise duration and estimate bitrate
         let n_frames = codec_params.n_frames.unwrap_or(0);
-        let duration_secs = if n_frames > 0 {
-            n_frames as f64 / sample_rate as f64
+        let duration_ms = if n_frames > 0 {
+            (n_frames as f64 * 1000.0) / sample_rate as f64
         } else {
             0.0
         };
@@ -292,21 +292,20 @@ impl DecodeWorker {
                 file_size
             };
 
-            if duration_secs > 0.0 {
-                bitrate = ((audio_data_size as f64 * 8.0) / duration_secs) as u32;
+            if duration_ms > 0.0 {
+                bitrate = ((audio_data_size as f64 * 8.0) / (duration_ms / 1000.0)) as u32;
             }
         }
 
         // Seek if requested
-        if input_track.start_offset_secs > 0 {
-            debug!(
-                "DecodeWorker: Seeking to {}s",
-                input_track.start_offset_secs
-            );
+        if input_track.start_offset_ms > 0 {
+            debug!("DecodeWorker: Seeking to {}ms", input_track.start_offset_ms);
+            let seconds = input_track.start_offset_ms / 1000;
+            let frac = (input_track.start_offset_ms % 1000) as f64 / 1000.0;
             let _ = format_reader.seek(
                 SeekMode::Accurate,
                 SeekTo::Time {
-                    time: symphonia::core::units::Time::from(input_track.start_offset_secs),
+                    time: symphonia::core::units::Time { seconds, frac },
                     track_id: Some(track_id),
                 },
             );
@@ -322,8 +321,8 @@ impl DecodeWorker {
             .reset();
 
         debug!(
-            "Track info: format={}, sample_rate={}, channels={}, bitrate={}bps, duration={:.2}s",
-            format_name, sample_rate, channels, bitrate, duration_secs
+            "Track info: format={}, sample_rate={}, channels={}, bitrate={}bps, duration={:.2}ms",
+            format_name, sample_rate, channels, bitrate, duration_ms
         );
 
         // Create a decoder for the track
@@ -347,9 +346,9 @@ impl DecodeWorker {
                         format: format_name,
                         bitrate_kbps: (bitrate as f32 / 1000.0).round() as u32,
                         sample_rate_hz: sample_rate,
-                        duration_secs: duration_secs as u64,
+                        duration_ms: duration_ms as u64,
                     },
-                    start_offset_secs: input_track.start_offset_secs,
+                    start_offset_ms: input_track.start_offset_ms,
                 },
             )))
             .unwrap();

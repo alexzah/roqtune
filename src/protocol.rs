@@ -49,7 +49,7 @@ pub struct TechnicalMetadata {
     pub format: String,
     pub bitrate_kbps: u32,
     pub sample_rate_hz: u32,
-    pub duration_secs: u64,
+    pub duration_ms: u64,
 }
 
 #[derive(Debug, Clone)]
@@ -58,7 +58,7 @@ pub enum AudioPacket {
         id: String,
         play_immediately: bool,
         technical_metadata: TechnicalMetadata,
-        start_offset_secs: u64,
+        start_offset_ms: u64,
     },
     Samples {
         samples: Vec<f32>,
@@ -75,7 +75,7 @@ pub struct TrackIdentifier {
     pub id: String,
     pub path: PathBuf,
     pub play_immediately: bool,
-    pub start_offset_secs: u64,
+    pub start_offset_ms: u64,
 }
 
 #[derive(Debug, Clone)]
@@ -102,7 +102,7 @@ pub enum PlaybackMessage {
     ClearPlayerCache,
     Seek(f32),
     TechnicalMetadataChanged(TechnicalMetadata),
-    PlaybackProgress { elapsed_secs: u64, total_secs: u64 },
+    PlaybackProgress { elapsed_ms: u64, total_ms: u64 },
 }
 
 #[derive(Debug, Clone)]
