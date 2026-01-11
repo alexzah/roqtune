@@ -1,22 +1,17 @@
 use crate::protocol::{
-    self, AudioMessage, AudioPacket, Config, ConfigMessage, Message, PlaybackMessage,
-    PlaylistMessage, TrackIdentifier,
+    self, AudioMessage, AudioPacket, Config, ConfigMessage, Message, TrackIdentifier,
 };
 use log::{debug, error, trace};
 use rubato::{
-    FftFixedIn, Resampler, SincFixedIn, SincInterpolationParameters, SincInterpolationType,
-    WindowFunction,
+    Resampler, SincFixedIn, SincInterpolationParameters, SincInterpolationType, WindowFunction,
 };
 use std::cmp::min;
 use std::collections::VecDeque;
-use std::path::{self, PathBuf};
-use std::rc::Rc;
-use std::sync::{Arc, Mutex};
+use std::path::PathBuf;
 use std::thread;
-use std::time::Duration;
-use symphonia::core::audio::{Channels, SampleBuffer};
+use symphonia::core::audio::SampleBuffer;
 use symphonia::core::codecs::DecoderOptions;
-use symphonia::core::formats::{FormatOptions, Track};
+use symphonia::core::formats::FormatOptions;
 use symphonia::core::io::MediaSourceStream;
 use symphonia::core::meta::MetadataOptions;
 use symphonia::core::probe::Hint;
@@ -81,6 +76,7 @@ impl DecodeWorker {
                         self.target_sample_rate = config.output.sample_rate_khz;
                         self.target_channels = config.output.channel_count;
                         self.target_bits_per_sample = config.output.bits_per_sample;
+                        self.resampler = None;
                     }
                 }
             }
@@ -199,6 +195,56 @@ impl DecodeWorker {
 
     pub fn decode_track(&mut self, input_track: TrackIdentifier) {
         debug!("DecodeWorker: Decoding file: {:?}", input_track);
+
+        // Helper to get total metadata size (ID3v2, ID3v1, APE)
+        let get_metadata_size = |path: &PathBuf| -> u64 {
+            let mut total_size = 0;
+            if let Ok(mut file) = std::fs::File::open(path) {
+                let file_size = file.metadata().map(|m| m.len()).unwrap_or(0);
+                if file_size == 0 {
+                    return 0;
+                }
+
+                let mut header = [0u8; 10];
+                use std::io::{Read, Seek, SeekFrom};
+                // Check ID3v2 at start
+                if let Ok(_) = file.read_exact(&mut header) {
+                    if &header[0..3] == b"ID3" {
+                        let size = ((header[6] as u32 & 0x7F) << 21)
+                            | ((header[7] as u32 & 0x7F) << 14)
+                            | ((header[8] as u32 & 0x7F) << 7)
+                            | (header[9] as u32 & 0x7F);
+                        total_size += (size + 10) as u64;
+                    }
+                }
+
+                // Check ID3v1 at end (128 bytes)
+                if file_size > 128 {
+                    let _ = file.seek(SeekFrom::End(-128));
+                    let mut id3v1 = [0u8; 3];
+                    if let Ok(_) = file.read_exact(&mut id3v1) {
+                        if &id3v1 == b"TAG" {
+                            total_size += 128;
+                        }
+                    }
+                }
+
+                // Check APEv2 at end
+                if file_size > 32 {
+                    let _ = file.seek(SeekFrom::End(-32));
+                    let mut ape_footer = [0u8; 8];
+                    if let Ok(_) = file.read_exact(&mut ape_footer) {
+                        if &ape_footer == b"APETAGEX" {
+                            // APE tag is variable size, but usually follows ID3v1 or is at the very end
+                            // For simplicity, we'll just count the ID3v1 which is more common.
+                            // True APE parsing is complex, but this covers most cases.
+                        }
+                    }
+                }
+            }
+            total_size
+        };
+
         let file = match std::fs::File::open(input_track.path.clone()) {
             Ok(file) => file,
             Err(e) => {
@@ -240,6 +286,37 @@ impl DecodeWorker {
         let sample_rate = track.codec_params.sample_rate.unwrap_or(44100);
         let channels = track.codec_params.channels.unwrap().count();
 
+        // Get format name
+        let format_name = input_track
+            .path
+            .extension()
+            .and_then(|ext| ext.to_str())
+            .unwrap_or("AUDIO")
+            .to_uppercase();
+
+        // Calculate precise duration and estimate bitrate
+        let n_frames = track.codec_params.n_frames.unwrap_or(0);
+        let duration_secs = if n_frames > 0 {
+            n_frames as f64 / sample_rate as f64
+        } else {
+            0.0
+        };
+
+        let mut bitrate = 0;
+        if let Ok(file_metadata) = std::fs::metadata(input_track.path.clone()) {
+            let file_size = file_metadata.len();
+            let metadata_size = get_metadata_size(&input_track.path);
+            let audio_data_size = if file_size > metadata_size {
+                file_size - metadata_size
+            } else {
+                file_size
+            };
+
+            if duration_secs > 0.0 {
+                bitrate = ((audio_data_size as f64 * 8.0) / duration_secs) as u32;
+            }
+        }
+
         if self.resampler.is_none() {
             self.resampler = Some(self.create_resampler(sample_rate, 2048));
         }
@@ -249,12 +326,9 @@ impl DecodeWorker {
             .expect("Resampler just initialized")
             .reset();
 
-        let target_sample_rate = 48000;
-        let target_channels = 2;
-
         debug!(
-            "Track info: sample_rate={}, channels={}",
-            sample_rate, channels
+            "Track info: format={}, sample_rate={}, channels={}, bitrate={}bps, duration={:.2}s",
+            format_name, sample_rate, channels, bitrate, duration_secs
         );
 
         // Create a decoder for the track
@@ -274,6 +348,12 @@ impl DecodeWorker {
                 AudioPacket::TrackHeader {
                     id: input_track.id.to_string(),
                     play_immediately: input_track.play_immediately,
+                    technical_metadata: protocol::TechnicalMetadata {
+                        format: format_name,
+                        bitrate_kbps: (bitrate as f32 / 1000.0).round() as u32,
+                        sample_rate_hz: sample_rate,
+                        duration_secs: duration_secs as u64,
+                    },
                 },
             )))
             .unwrap();
@@ -409,6 +489,26 @@ impl AudioDecoder {
                         );
                         self.worker_sender
                             .blocking_send(DecodeWorkItem::ConfigChanged(config))
+                            .unwrap();
+                    }
+                    Message::Config(ConfigMessage::AudioDeviceOpened {
+                        sample_rate,
+                        channels,
+                    }) => {
+                        debug!(
+                            "AudioDecoder: Syncing with actual device config: sr={}, channels={}",
+                            sample_rate, channels
+                        );
+                        // We use a dummy Config object to update the worker
+                        let dummy_config = protocol::Config {
+                            output: protocol::OutputConfig {
+                                channel_count: channels,
+                                sample_rate_khz: sample_rate,
+                                bits_per_sample: 32, // placeholder
+                            },
+                        };
+                        self.worker_sender
+                            .blocking_send(DecodeWorkItem::ConfigChanged(dummy_config))
                             .unwrap();
                     }
                     _ => {} // Ignore other messages for now

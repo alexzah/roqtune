@@ -44,10 +44,19 @@ pub enum PlaylistMessage {
 }
 
 #[derive(Debug, Clone)]
+pub struct TechnicalMetadata {
+    pub format: String,
+    pub bitrate_kbps: u32,
+    pub sample_rate_hz: u32,
+    pub duration_secs: u64,
+}
+
+#[derive(Debug, Clone)]
 pub enum AudioPacket {
     TrackHeader {
         id: String,
         play_immediately: bool,
+        technical_metadata: TechnicalMetadata,
     },
     Samples {
         samples: Vec<f32>,
@@ -88,9 +97,12 @@ pub enum PlaybackMessage {
     TrackFinished(String),
     TrackStarted(String),
     ClearPlayerCache,
+    TechnicalMetadataChanged(TechnicalMetadata),
+    PlaybackProgress { elapsed_secs: u64, total_secs: u64 },
 }
 
 #[derive(Debug, Clone)]
 pub enum ConfigMessage {
     ConfigChanged(Config),
+    AudioDeviceOpened { sample_rate: u32, channels: u16 },
 }

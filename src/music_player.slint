@@ -29,7 +29,7 @@ component PlayerButton inherits Rectangle {
 
 export component AppWindow inherits Window {
     width: 900px;
-    height: 600px;
+    height: 650px;
     title: "fooBar-like Music Player";
     background: #282828;
 
@@ -46,7 +46,7 @@ export component AppWindow inherits Window {
     }
     
     // Status display at the bottom showing the currently playing track
-    property <string> status-display: file_path != "" ? file_path : "No track selected";
+    in-out property <string> status-text: "No track selected";
 
     VerticalLayout {
         // Toolbar with open and playback controls
@@ -208,12 +208,13 @@ export component AppWindow inherits Window {
                     border-radius: 3px;
                     background: #333;
                     horizontal-stretch: 1;
-                    property <length> handle-position: self.width * root.position-percentage;
                     
-                    // Progress indicator - shows playback progress with smooth animation
-                    progress := Rectangle {
+                    // Progress indicator
+                    Rectangle {
+                        x: 0;
+                        y: 0;
+                        width: seekbar.width * root.position-percentage;
                         height: parent.height;
-                        width: seekbar.handle-position;
                         background: #2a6def;
                         border-radius: 3px;
                         animate width {
@@ -231,11 +232,11 @@ export component AppWindow inherits Window {
                         x: seekbar.width / 2 - self.width / 2;
                     }
                     
-                    // Handle over the progress bar with smooth animation
+                    // Handle over the progress bar
                     handle := Rectangle {
                         width: 10px;
                         height: parent.height + 4px;
-                        x: seekbar.handle-position - self.width / 2;
+                        x: (seekbar.width * root.position-percentage) - self.width / 2;
                         y: -2px;
                         background: white;
                         border-radius: 5px;
@@ -292,8 +293,6 @@ export component AppWindow inherits Window {
         
         // Main content: Playlist 
         playlist-view := StandardTableView {
-            width: 100%;
-            height: 100%;
             current-row: playing_track_index;
             columns: [
                 { title: "Playing", width: 200px },
@@ -318,9 +317,24 @@ export component AppWindow inherits Window {
                 padding-left: 10px;
                 padding-right: 10px;
                 Text {
-                    text: "Now Playing: " + root.status-display;
+                    text: "Now Playing: " + root.status-text;
                     color: #bbb;
                     font-size: 13px;
+                }
+                
+                // Technical info area
+                Rectangle { }
+                Text {
+                    text: root.technical-info;
+                    color: #888;
+                    font-size: 12px;
+                }
+                Text {
+                    text: root.time-info;
+                    color: #aaa;
+                    font-size: 13px;
+                    width: 100px;
+                    horizontal-alignment: right;
                 }
             }
         }
@@ -341,6 +355,8 @@ export component AppWindow inherits Window {
     in-out property <float> position-percentage: 0.0; // between 0.0 and 1.0
     in-out property <string> current-position-text: "0:00";
     in-out property <string> total-duration-text: "0:00";
+    in-out property <string> technical-info: "";
+    in-out property <string> time-info: "";
 
     // Callback declarations
     callback open_file();

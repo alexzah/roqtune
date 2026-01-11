@@ -6,40 +6,21 @@ mod protocol;
 mod ui_manager;
 
 use std::{
-    path::PathBuf,
     rc::Rc,
-    sync::Mutex,
     thread,
     time::{Duration, Instant},
 };
 
 use audio_decoder::AudioDecoder;
 use audio_player::AudioPlayer;
-use id3::{Tag, TagLike};
 use log::{debug, info};
 use playlist::Playlist;
 use playlist_manager::PlaylistManager;
 use protocol::{Config, ConfigMessage, Message, PlaybackMessage, PlaylistMessage};
-use slint::{ComponentHandle, ModelRc, StandardListViewItem, VecModel};
+use slint::{ComponentHandle, ModelRc, VecModel};
 use tokio::sync::broadcast;
 use ui_manager::{UiManager, UiState};
 
-// Helper function to format time as MM:SS
-fn format_time(milliseconds: u64) -> String {
-    if milliseconds == 0 {
-        return "0:00".to_string();
-    }
-
-    let total_secs = milliseconds / 1000;
-    let mins = total_secs / 60;
-    let secs = total_secs % 60;
-
-    if secs < 10 {
-        format!("{}:0{}", mins, secs)
-    } else {
-        format!("{}:{}", mins, secs)
-    }
-}
 slint::include_modules!();
 
 fn setup_app_state_associations(ui: &AppWindow, ui_state: &UiState) {
@@ -106,7 +87,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 .unwrap()
                 .set_status("File selected".to_string().into());
             debug!("Sending load track message");
-            bus_sender_clone.send(protocol::Message::Playlist(
+            let _ = bus_sender_clone.send(protocol::Message::Playlist(
                 protocol::PlaylistMessage::LoadTrack(path),
             ));
         }

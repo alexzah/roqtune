@@ -1,11 +1,11 @@
-use std::{cmp::min, collections::HashSet};
+use std::collections::HashSet;
 
 use log::{debug, error, trace};
 use tokio::sync::broadcast::{Receiver, Sender};
 use uuid::Uuid;
 
 use crate::{
-    playlist::{self, Playlist, Track},
+    playlist::{Playlist, Track},
     protocol::{self, TrackIdentifier},
 };
 

@@ -206,7 +206,7 @@ impl Playlist {
                     let mut rng = StdRng::from_seed(self.rng_seed);
                     let mut next_index;
                     loop {
-                        next_index = rng.gen_range(0..self.tracks.len());
+                        next_index = rng.random_range(0..self.tracks.len());
                         if next_index != current_index {
                             break;
                         }
@@ -291,7 +291,7 @@ impl Playlist {
                     let mut rng = StdRng::from_seed(self.rng_seed);
                     let mut next_index;
                     loop {
-                        next_index = rng.gen_range(0..self.tracks.len());
+                        next_index = rng.random_range(0..self.tracks.len());
                         if next_index != current_index {
                             break;
                         }
@@ -328,7 +328,7 @@ impl Playlist {
 
         // Shuffle the indices
         for i in (1..track_count).rev() {
-            let j = rng.gen_range(0..=i);
+            let j = rng.random_range(0..=i);
             indices.swap(i, j);
         }
 
@@ -393,15 +393,7 @@ impl Playlist {
             }
             PlaybackOrder::Random => {
                 let mut rng = StdRng::from_seed(self.rng_seed);
-                let index = rng.gen_range(0..self.tracks.len());
-
-                // Update the seed for next time
-                let mut new_seed = [0u8; 32];
-                for (i, val) in new_seed.iter_mut().enumerate() {
-                    *val = self.rng_seed[i].wrapping_add(1);
-                }
-                self.rng_seed = new_seed;
-
+                let index = rng.random_range(0..self.tracks.len());
                 Some(index)
             }
         }

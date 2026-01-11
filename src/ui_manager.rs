@@ -1,19 +1,11 @@
-use std::{
-    ops::Deref,
-    path::PathBuf,
-    rc::Rc,
-    sync::{Arc, Mutex, RwLock},
-};
+use std::{path::PathBuf, rc::Rc};
 
 use id3::{Tag, TagLike};
 use log::{debug, error, trace};
-use slint::{ComponentHandle, Model, ModelRc, SharedString, StandardListViewItem, VecModel};
+use slint::{Model, ModelRc, StandardListViewItem, VecModel};
 use tokio::sync::broadcast::{Receiver, Sender};
 
-use crate::{
-    playlist::{Playlist, Track},
-    protocol, AppWindow,
-};
+use crate::{protocol, AppWindow};
 
 pub struct UiState {
     pub track_model: Rc<VecModel<ModelRc<StandardListViewItem>>>,
@@ -76,11 +68,11 @@ impl UiManager {
         // Fall back to APE tags
         match ape::read_from_path(path) {
             Ok(ape_tag) => {
-                let title: &str = ape_tag.item("title").unwrap().try_into().unwrap();
+                let title: &str = ape_tag.item("title").unwrap().try_into().unwrap_or("");
 
-                let artist: &str = ape_tag.item("artist").unwrap().try_into().unwrap();
+                let artist: &str = ape_tag.item("artist").unwrap().try_into().unwrap_or("");
 
-                let album: &str = ape_tag.item("album").unwrap().try_into().unwrap();
+                let album: &str = ape_tag.item("album").unwrap().try_into().unwrap_or("");
 
                 if !title.is_empty() || !artist.is_empty() || !album.is_empty() {
                     debug!(
@@ -103,9 +95,18 @@ impl UiManager {
         // Fall back to FLAC tags
         match metaflac::Tag::read_from_path(path) {
             Ok(flac_tag) => {
-                let title = flac_tag.get_vorbis("title").unwrap().next().unwrap_or("");
-                let artist = flac_tag.get_vorbis("artist").unwrap().next().unwrap_or("");
-                let album = flac_tag.get_vorbis("album").unwrap().next().unwrap_or("");
+                let title = flac_tag
+                    .get_vorbis("title")
+                    .and_then(|mut i| i.next())
+                    .unwrap_or("");
+                let artist = flac_tag
+                    .get_vorbis("artist")
+                    .and_then(|mut i| i.next())
+                    .unwrap_or("");
+                let album = flac_tag
+                    .get_vorbis("album")
+                    .and_then(|mut i| i.next())
+                    .unwrap_or("");
 
                 if !title.is_empty() || !artist.is_empty() || !album.is_empty() {
                     debug!(
@@ -186,10 +187,15 @@ impl UiManager {
                                 .downcast_ref::<VecModel<ModelRc<StandardListViewItem>>>()
                                 .expect("We know we set a VecModel earlier");
 
+                            let mut title = String::new();
+                            let mut artist = String::new();
+
                             for i in 0..track_model.row_count() {
                                 if let Some(item) = track_model.row_data(i) {
                                     if i == index {
                                         item.set_row_data(0, StandardListViewItem::from("▶️"));
+                                        title = item.row_data(1).unwrap().text.to_string();
+                                        artist = item.row_data(2).unwrap().text.to_string();
                                     } else {
                                         if let Some(first_col) = item.row_data(0) {
                                             if !first_col.text.is_empty() {
@@ -203,6 +209,11 @@ impl UiManager {
                                 }
                             }
                             ui.set_playing_track_index(index as i32);
+                            if !artist.is_empty() {
+                                ui.set_status_text(format!("{} - {}", artist, title).into());
+                            } else {
+                                ui.set_status_text(title.into());
+                            }
                         });
                     }
                     protocol::Message::Playback(protocol::PlaybackMessage::Play) => {
@@ -218,29 +229,18 @@ impl UiManager {
                                     if let Some(item) = track_model.row_data(playing_index as usize)
                                     {
                                         item.set_row_data(0, StandardListViewItem::from("▶️"));
-                                    }
-                                }
-                            }
-                        });
-                    }
-                    protocol::Message::Playback(protocol::PlaybackMessage::Stop) => {
-                        let _ = self.ui.upgrade_in_event_loop(move |ui| {
-                            let track_model_strong = ui.get_track_model();
-                            let track_model = track_model_strong
-                                .as_any()
-                                .downcast_ref::<VecModel<ModelRc<StandardListViewItem>>>()
-                                .expect("We know we set a VecModel earlier");
-
-                            for i in 0..track_model.row_count() {
-                                if let Some(item) = track_model.row_data(i) {
-                                    if let Some(first_col) = item.row_data(0) {
-                                        if !first_col.text.is_empty() {
-                                            item.set_row_data(0, StandardListViewItem::from(""));
+                                        let title = item.row_data(1).unwrap().text.to_string();
+                                        let artist = item.row_data(2).unwrap().text.to_string();
+                                        if !artist.is_empty() {
+                                            ui.set_status_text(
+                                                format!("{} - {}", artist, title).into(),
+                                            );
+                                        } else {
+                                            ui.set_status_text(title.into());
                                         }
                                     }
                                 }
                             }
-                            ui.set_playing_track_index(-1);
                         });
                     }
                     protocol::Message::Playback(protocol::PlaybackMessage::Pause) => {
@@ -262,6 +262,75 @@ impl UiManager {
                             }
                         });
                     }
+                    protocol::Message::Playback(protocol::PlaybackMessage::PlaybackProgress {
+                        elapsed_secs,
+                        total_secs,
+                    }) => {
+                        let _ = self.ui.upgrade_in_event_loop(move |ui| {
+                            let elapsed_mins = elapsed_secs / 60;
+                            let elapsed_rem_secs = elapsed_secs % 60;
+                            let total_mins = total_secs / 60;
+                            let total_rem_secs = total_secs % 60;
+
+                            ui.set_time_info(
+                                format!(
+                                    "{:02}:{:02} / {:02}:{:02}",
+                                    elapsed_mins, elapsed_rem_secs, total_mins, total_rem_secs
+                                )
+                                .into(),
+                            );
+                            if total_secs > 0 {
+                                ui.set_position_percentage(elapsed_secs as f32 / total_secs as f32);
+                            }
+                            ui.set_current_position_text(
+                                format!("{:02}:{:02}", elapsed_mins, elapsed_rem_secs).into(),
+                            );
+                            ui.set_total_duration_text(
+                                format!("{:02}:{:02}", total_mins, total_rem_secs).into(),
+                            );
+                        });
+                    }
+                    protocol::Message::Playback(
+                        protocol::PlaybackMessage::TechnicalMetadataChanged(meta),
+                    ) => {
+                        debug!("UiManager: Technical metadata changed: {:?}", meta);
+                        let _ = self.ui.upgrade_in_event_loop(move |ui| {
+                            ui.set_technical_info(
+                                format!(
+                                    "{} | {} kbps | {} Hz",
+                                    meta.format, meta.bitrate_kbps, meta.sample_rate_hz
+                                )
+                                .into(),
+                            );
+                        });
+                    }
+                    protocol::Message::Playback(protocol::PlaybackMessage::Stop) => {
+                        let _ = self.ui.upgrade_in_event_loop(move |ui| {
+                            ui.set_technical_info("".into());
+                            ui.set_time_info("".into());
+                            ui.set_status_text("No track selected".into());
+                            ui.set_position_percentage(0.0);
+                            ui.set_current_position_text("0:00".into());
+                            ui.set_total_duration_text("0:00".into());
+
+                            let track_model_strong = ui.get_track_model();
+                            let track_model = track_model_strong
+                                .as_any()
+                                .downcast_ref::<VecModel<ModelRc<StandardListViewItem>>>()
+                                .expect("We know we set a VecModel earlier");
+
+                            for i in 0..track_model.row_count() {
+                                if let Some(item) = track_model.row_data(i) {
+                                    if let Some(first_col) = item.row_data(0) {
+                                        if !first_col.text.is_empty() {
+                                            item.set_row_data(0, StandardListViewItem::from(""));
+                                        }
+                                    }
+                                }
+                            }
+                            ui.set_playing_track_index(-1);
+                        });
+                    }
                     protocol::Message::Playlist(protocol::PlaylistMessage::TrackStarted(index)) => {
                         debug!("UiManager: received TrackStarted message: {}", index);
                         let _ = self.ui.upgrade_in_event_loop(move |ui| {
@@ -271,10 +340,15 @@ impl UiManager {
                                 .downcast_ref::<VecModel<ModelRc<StandardListViewItem>>>()
                                 .expect("We know we set a VecModel earlier");
 
+                            let mut title = String::new();
+                            let mut artist = String::new();
+
                             for i in 0..track_model.row_count() {
                                 if let Some(item) = track_model.row_data(i) {
                                     if i == index {
                                         item.set_row_data(0, StandardListViewItem::from("▶️"));
+                                        title = item.row_data(1).unwrap().text.to_string();
+                                        artist = item.row_data(2).unwrap().text.to_string();
                                     } else {
                                         if let Some(first_col) = item.row_data(0) {
                                             if !first_col.text.is_empty() {
@@ -290,6 +364,11 @@ impl UiManager {
 
                             ui.set_selected_track_index(index as i32);
                             ui.set_playing_track_index(index as i32);
+                            if !artist.is_empty() {
+                                ui.set_status_text(format!("{} - {}", artist, title).into());
+                            } else {
+                                ui.set_status_text(title.into());
+                            }
                         });
                     }
                     protocol::Message::Playlist(protocol::PlaylistMessage::TrackFinished(
