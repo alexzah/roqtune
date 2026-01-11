@@ -304,6 +304,12 @@ impl Playlist {
         }
     }
 
+    pub fn force_re_randomize_shuffle(&mut self) {
+        if self.playback_order == PlaybackOrder::Shuffle {
+            self.generate_shuffle_order(Some(self.selected_track_index));
+        }
+    }
+
     // Generate a random order for all tracks
     fn generate_shuffle_order(&mut self, first_track_index: Option<usize>) {
         let track_count = self.tracks.len();
@@ -314,7 +320,10 @@ impl Playlist {
 
         let mut indices: Vec<usize> = (0..track_count).collect();
 
-        // Create a new RNG with our seed
+        // Use a completely fresh seed from the OS for every new shuffle
+        let mut seed = [0u8; 32];
+        getrandom::fill(&mut seed).expect("Failed to generate random seed");
+        self.rng_seed = seed;
         let mut rng = StdRng::from_seed(self.rng_seed);
 
         // Shuffle the indices
@@ -330,13 +339,6 @@ impl Playlist {
                 indices.insert(0, first_idx);
             }
         }
-
-        // Update the seed for next time
-        let mut new_seed = [0u8; 32];
-        for (i, val) in new_seed.iter_mut().enumerate() {
-            *val = self.rng_seed[i].wrapping_add(1);
-        }
-        self.rng_seed = new_seed;
 
         debug!("Playlist: New shuffle sequence: {:?}", indices);
         self.shuffled_indices = indices;

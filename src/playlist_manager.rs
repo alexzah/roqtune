@@ -71,6 +71,7 @@ impl PlaylistManager {
                     }
                     protocol::Message::Playback(protocol::PlaybackMessage::Play) => {
                         debug!("PlaylistManager: Received play command");
+                        self.playlist.force_re_randomize_shuffle();
                         self.play_selected_track();
                     }
                     protocol::Message::Playback(protocol::PlaybackMessage::PlayTrackByIndex(
@@ -78,6 +79,7 @@ impl PlaylistManager {
                     )) => {
                         debug!("PlaylistManager: Received play track command: {}", index);
                         self.playlist.set_selected_track(index);
+                        self.playlist.force_re_randomize_shuffle();
                         self.play_selected_track();
                     }
                     protocol::Message::Playback(protocol::PlaybackMessage::Stop) => {
