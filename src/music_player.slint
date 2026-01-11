@@ -5,16 +5,16 @@ component TrackRow inherits Rectangle {
     in property <bool> is-playing;
     in property <bool> is-selected;
     in property <bool> is-dragging;
-    in property <bool> is-drop-target;
     in property <int> index;
     
     callback clicked(PointerEvent);
+    callback double-clicked();
     callback drag-started(int);
     callback drag-moved(length);
     callback drag-ended();
     
     height: 30px;
-    background: is-dragging ? #444 : is-selected ? #3d3d3d : is-drop-target ? #2a6def : transparent;
+    background: is-dragging ? #444 : is-selected ? #3d3d3d : transparent;
     
     HorizontalLayout {
         padding-left: 8px;
@@ -67,6 +67,10 @@ component TrackRow inherits Rectangle {
         property <length> start-y;
         property <bool> dragging: false;
         property <bool> was-selected-on-down: false;
+
+        double-clicked => {
+            root.double-clicked();
+        }
 
         pointer-event(event) => {
             if (event.button == PointerEventButton.left) {
@@ -437,6 +441,10 @@ export component AppWindow inherits Window {
                                 key-handler.focus();
                             }
                             
+                            double-clicked() => {
+                                root.playlist_item_double_click(i);
+                            }
+
                             drag-started(idx) => {
                                 root.drag-index = idx;
                             }
@@ -539,6 +547,7 @@ export component AppWindow inherits Window {
     callback next();
     callback previous();
     callback playlist_item_click(int, PointerEvent, Point);
+    callback playlist_item_double_click(int);
     callback playback_order_changed(int);
     callback toggle_repeat();
     callback seek-to(float); // Position between 0.0 and 1.0

@@ -219,11 +219,11 @@ impl Playlist {
 
         // 4. Update indices (playing, selected, shuffle)
         let total_count = self.tracks.len();
-        let mut old_to_new = vec![0; total_count];
+        let mut old_to_new = vec![0; total_count + indices.len()];
         let moved_indices_set: std::collections::HashSet<usize> = indices.iter().cloned().collect();
 
         let mut remaining_old_indices = Vec::new();
-        for i in 0..total_count {
+        for i in 0..(total_count + indices.len()) {
             if !moved_indices_set.contains(&i) {
                 remaining_old_indices.push(i);
             }

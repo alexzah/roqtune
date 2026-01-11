@@ -5,11 +5,7 @@ mod playlist_manager;
 mod protocol;
 mod ui_manager;
 
-use std::{
-    rc::Rc,
-    thread,
-    time::{Duration, Instant},
-};
+use std::{rc::Rc, thread};
 
 use audio_decoder::AudioDecoder;
 use audio_player::AudioPlayer;
@@ -69,7 +65,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let ui_handle_clone = ui.as_weak().clone();
     let bus_sender_clone = bus_sender.clone();
-    let mut last_click_time = Instant::now();
 
     // Setup file dialog
     ui.on_open_file(move || {
@@ -130,34 +125,38 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Handle playlist item clicks
     let bus_sender_clone = bus_sender.clone();
-    let ui_handle_clone = ui.as_weak().clone();
     ui.on_playlist_item_click(move |index, _event, _point| {
-        // Only respond to double-click events
         if _event.button.to_string() == "left" && _event.kind.to_string() == "down" {
             let ctrl = _event.modifiers.control;
             let shift = _event.modifiers.shift;
 
-            if last_click_time.elapsed() < Duration::from_millis(500) {
-                debug!("Playlist item double-clicked: {}", index);
-                let _ = bus_sender_clone.send(Message::Playback(
-                    PlaybackMessage::PlayTrackByIndex(index as usize),
-                ));
-                ui_handle_clone.unwrap().set_selected_track_index(index);
-                ui_handle_clone.unwrap().set_playing_track_index(index);
-            } else {
-                debug!(
-                    "Playlist item clicked at index {:?} (ctrl={}, shift={})",
-                    index, ctrl, shift
-                );
-                let _ =
-                    bus_sender_clone.send(Message::Playlist(PlaylistMessage::SelectTrackMulti {
-                        index: index as usize,
-                        ctrl,
-                        shift,
-                    }));
-            }
-            last_click_time = Instant::now();
+            debug!(
+                "Playlist item clicked at index {:?} (ctrl={}, shift={})",
+                index, ctrl, shift
+            );
+            let _ = bus_sender_clone.send(Message::Playlist(PlaylistMessage::SelectTrackMulti {
+                index: index as usize,
+                ctrl,
+                shift,
+            }));
         }
+    });
+
+    let bus_sender_clone = bus_sender.clone();
+    let ui_handle_clone = ui.as_weak().clone();
+    ui.on_playlist_item_double_click(move |index| {
+        debug!("Playlist item double-clicked: {}", index);
+        let _ = bus_sender_clone.send(Message::Playback(PlaybackMessage::PlayTrackByIndex(
+            index as usize,
+        )));
+        let _ = ui_handle_clone
+            .upgrade()
+            .unwrap()
+            .set_selected_track_index(index);
+        let _ = ui_handle_clone
+            .upgrade()
+            .unwrap()
+            .set_playing_track_index(index);
     });
 
     // Wire up delete track handler
