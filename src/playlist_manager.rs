@@ -91,7 +91,7 @@ impl PlaylistManager {
                         index,
                     )) => {
                         debug!("PlaylistManager: Received play track command: {}", index);
-                        self.playlist.set_selected_track(index);
+                        self.playlist.set_selected_indices(vec![index]);
                         self.playlist.force_re_randomize_shuffle();
                         self.play_selected_track();
                     }
@@ -123,7 +123,7 @@ impl PlaylistManager {
                             .unwrap_or(self.playlist.get_selected_track_index());
                         if let Some(next_index) = self.playlist.get_next_track_index(current_index)
                         {
-                            self.playlist.set_selected_track(next_index);
+                            self.playlist.set_selected_indices(vec![next_index]);
                             self.play_selected_track();
                         }
                     }
@@ -136,7 +136,7 @@ impl PlaylistManager {
                         if let Some(prev_index) =
                             self.playlist.get_previous_track_index(current_index)
                         {
-                            self.playlist.set_selected_track(prev_index);
+                            self.playlist.set_selected_indices(vec![prev_index]);
                             self.play_selected_track();
                         }
                     }
@@ -149,7 +149,7 @@ impl PlaylistManager {
                             if let Some(index) = index {
                                 if index < self.playlist.num_tracks() {
                                     self.playlist.set_playing_track_index(Some(index));
-                                    self.playlist.set_selected_track(index);
+                                    self.playlist.set_selected_indices(vec![index]);
                                     self.cache_tracks(false);
                                     advanced = true;
                                 }
@@ -164,7 +164,7 @@ impl PlaylistManager {
                             }
 
                             let _ = self.bus_producer.send(protocol::Message::Playlist(
-                                protocol::PlaylistMessage::TrackFinished(playing_idx),
+                                protocol::PlaylistMessage::TrackFinished,
                             ));
                         }
                     }
@@ -216,31 +216,51 @@ impl PlaylistManager {
                             let _ = self.bus_producer.send(protocol::Message::Playlist(
                                 protocol::PlaylistMessage::PlaylistIndicesChanged {
                                     playing_index: self.playlist.get_playing_track_index(),
-                                    selected_index: self.playlist.get_selected_track_index(),
+                                    selected_indices: self.playlist.get_selected_indices(),
                                     is_playing: self.playlist.is_playing(),
+                                    repeat_on: self.playlist.get_repeat_mode()
+                                        == crate::playlist::RepeatMode::On,
                                 },
                             ));
                         }
                     }
-                    protocol::Message::Playlist(protocol::PlaylistMessage::SelectTrack(index)) => {
-                        debug!("PlaylistManager: Received select track command: {}", index);
-                        if index != self.playlist.get_selected_track_index() {
-                            self.playlist.set_selected_track(index);
-                        }
+                    protocol::Message::Playlist(protocol::PlaylistMessage::SelectTrackMulti {
+                        index,
+                        ctrl,
+                        shift,
+                    }) => {
+                        debug!(
+                            "PlaylistManager: Received multi-select command: index={}, ctrl={}, shift={}",
+                            index, ctrl, shift
+                        );
+                        self.playlist.select_track_multi(index, ctrl, shift);
+
+                        // Notify other components about the selection change
+                        let _ = self.bus_producer.send(protocol::Message::Playlist(
+                            protocol::PlaylistMessage::PlaylistIndicesChanged {
+                                playing_index: self.playlist.get_playing_track_index(),
+                                selected_indices: self.playlist.get_selected_indices(),
+                                is_playing: self.playlist.is_playing(),
+                                repeat_on: self.playlist.get_repeat_mode()
+                                    == crate::playlist::RepeatMode::On,
+                            },
+                        ));
                     }
-                    protocol::Message::Playlist(protocol::PlaylistMessage::ReorderTrack {
-                        from,
+                    protocol::Message::Playlist(protocol::PlaylistMessage::ReorderTracks {
+                        indices,
                         to,
                     }) => {
-                        debug!("PlaylistManager: Reordering track from {} to {}", from, to);
-                        self.playlist.move_track(from, to);
+                        debug!("PlaylistManager: Reordering tracks {:?} to {}", indices, to);
+                        self.playlist.move_tracks(indices, to);
 
                         // Notify other components about the index shift
                         let _ = self.bus_producer.send(protocol::Message::Playlist(
                             protocol::PlaylistMessage::PlaylistIndicesChanged {
                                 playing_index: self.playlist.get_playing_track_index(),
-                                selected_index: self.playlist.get_selected_track_index(),
+                                selected_indices: self.playlist.get_selected_indices(),
                                 is_playing: self.playlist.is_playing(),
+                                repeat_on: self.playlist.get_repeat_mode()
+                                    == crate::playlist::RepeatMode::On,
                             },
                         ));
 
@@ -264,7 +284,7 @@ impl PlaylistManager {
                         let repeat_on = self.playlist.toggle_repeat();
                         debug!("PlaylistManager: Toggled repeat to {}", repeat_on);
                         let _ = self.bus_producer.send(protocol::Message::Playlist(
-                            protocol::PlaylistMessage::RepeatModeChanged(repeat_on),
+                            protocol::PlaylistMessage::RepeatModeChanged,
                         ));
                     }
                     protocol::Message::Playback(

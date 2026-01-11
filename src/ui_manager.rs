@@ -1,7 +1,7 @@
 use std::{path::PathBuf, rc::Rc};
 
 use id3::{Tag, TagLike};
-use log::{debug, error, trace};
+use log::debug;
 use slint::{Model, ModelRc, StandardListViewItem, VecModel};
 use tokio::sync::broadcast::{Receiver, Sender};
 
@@ -46,48 +46,32 @@ impl UiManager {
                 let album = tag.album().unwrap_or("");
 
                 if !title.is_empty() || !artist.is_empty() || !album.is_empty() {
-                    debug!(
-                        "Found ID3 tags: title='{}', artist='{}', album='{}'",
-                        title, artist, album
-                    );
                     return TrackMetadata {
                         title: title.to_string(),
                         artist: artist.to_string(),
                         album: album.to_string(),
                     };
                 }
-                debug!("ID3 tags were empty or incomplete");
             }
-            Err(e) => {
-                debug!("No ID3 tags found: {}", e);
-            }
+            Err(_) => {}
         }
 
         // Fall back to APE tags
         match ape::read_from_path(path) {
             Ok(ape_tag) => {
                 let title: &str = ape_tag.item("title").unwrap().try_into().unwrap_or("");
-
                 let artist: &str = ape_tag.item("artist").unwrap().try_into().unwrap_or("");
-
                 let album: &str = ape_tag.item("album").unwrap().try_into().unwrap_or("");
 
                 if !title.is_empty() || !artist.is_empty() || !album.is_empty() {
-                    debug!(
-                        "Found APE tags: title='{}', artist='{}', album='{}'",
-                        title, artist, album
-                    );
                     return TrackMetadata {
                         title: title.to_string(),
                         artist: artist.to_string(),
                         album: album.to_string(),
                     };
                 }
-                debug!("APE tags were empty or incomplete");
             }
-            Err(e) => {
-                debug!("No APE tags found: {}", e);
-            }
+            Err(_) => {}
         }
 
         // Fall back to FLAC tags
@@ -107,21 +91,14 @@ impl UiManager {
                     .unwrap_or("");
 
                 if !title.is_empty() || !artist.is_empty() || !album.is_empty() {
-                    debug!(
-                        "Found FLAC tags: title='{}', artist='{}', album='{}'",
-                        title, artist, album
-                    );
                     return TrackMetadata {
                         title: title.to_string(),
                         artist: artist.to_string(),
                         album: album.to_string(),
                     };
                 }
-                debug!("FLAC tags were empty or incomplete");
             }
-            Err(e) => {
-                debug!("No FLAC tags found: {}", e);
-            }
+            Err(_) => {}
         }
 
         // If no tags found, use filename as title
@@ -130,8 +107,6 @@ impl UiManager {
             .and_then(|name| name.to_str())
             .unwrap_or("")
             .to_string();
-
-        debug!("No tags found, using filename: {}", filename);
 
         TrackMetadata {
             title: filename,
@@ -145,22 +120,26 @@ impl UiManager {
             match self.bus_receiver.blocking_recv() {
                 Ok(message) => match message {
                     protocol::Message::Playlist(protocol::PlaylistMessage::LoadTrack(path)) => {
-                        debug!("Loading track: {}", path.display());
-                        let tags: TrackMetadata = self.read_track_metadata(&path);
-
-                        // Push the track to the playlist
+                        let tags = self.read_track_metadata(&path);
                         let _ = self.ui.upgrade_in_event_loop(move |ui| {
                             let track_model_strong = ui.get_track_model();
                             let track_model = track_model_strong
                                 .as_any()
                                 .downcast_ref::<VecModel<ModelRc<StandardListViewItem>>>()
-                                .expect("We know we set a VecModel earlier");
+                                .expect("VecModel expected");
                             track_model.push(ModelRc::new(VecModel::from(vec![
                                 StandardListViewItem::from(""),
                                 StandardListViewItem::from(tags.title.as_str()),
                                 StandardListViewItem::from(tags.artist.as_str()),
                                 StandardListViewItem::from(tags.album.as_str()),
                             ])));
+
+                            let selection_model_strong = ui.get_selection_model();
+                            let selection_model = selection_model_strong
+                                .as_any()
+                                .downcast_ref::<VecModel<bool>>()
+                                .expect("VecModel expected");
+                            selection_model.push(false);
                         });
                     }
                     protocol::Message::Playlist(protocol::PlaylistMessage::DeleteTrack(index)) => {
@@ -169,9 +148,18 @@ impl UiManager {
                             let track_model = track_model_strong
                                 .as_any()
                                 .downcast_ref::<VecModel<ModelRc<StandardListViewItem>>>()
-                                .expect("We know we set a VecModel earlier");
+                                .expect("VecModel expected");
                             if index < track_model.row_count() {
                                 track_model.remove(index);
+                            }
+
+                            let selection_model_strong = ui.get_selection_model();
+                            let selection_model = selection_model_strong
+                                .as_any()
+                                .downcast_ref::<VecModel<bool>>()
+                                .expect("VecModel expected");
+                            if index < selection_model.row_count() {
+                                selection_model.remove(index);
                             }
                         });
                     }
@@ -183,7 +171,7 @@ impl UiManager {
                             let track_model = track_model_strong
                                 .as_any()
                                 .downcast_ref::<VecModel<ModelRc<StandardListViewItem>>>()
-                                .expect("We know we set a VecModel earlier");
+                                .expect("VecModel expected");
 
                             let mut title = String::new();
                             let mut artist = String::new();
@@ -222,7 +210,7 @@ impl UiManager {
                                 let track_model = track_model_strong
                                     .as_any()
                                     .downcast_ref::<VecModel<ModelRc<StandardListViewItem>>>()
-                                    .expect("We know we set a VecModel earlier");
+                                    .expect("VecModel expected");
                                 if (playing_index as usize) < track_model.row_count() {
                                     if let Some(item) = track_model.row_data(playing_index as usize)
                                     {
@@ -248,22 +236,13 @@ impl UiManager {
                             let track_model = track_model_strong
                                 .as_any()
                                 .downcast_ref::<VecModel<ModelRc<StandardListViewItem>>>()
-                                .expect("We know we set a VecModel earlier");
+                                .expect("VecModel expected");
 
-                            for i in 0..track_model.row_count() {
-                                if let Some(item) = track_model.row_data(i) {
-                                    if i as i32 == playing_index && playing_index >= 0 {
-                                        item.set_row_data(0, StandardListViewItem::from("⏸️"));
-                                    } else {
-                                        if let Some(first_col) = item.row_data(0) {
-                                            if !first_col.text.is_empty() {
-                                                item.set_row_data(
-                                                    0,
-                                                    StandardListViewItem::from(""),
-                                                );
-                                            }
-                                        }
-                                    }
+                            if playing_index >= 0
+                                && (playing_index as usize) < track_model.row_count()
+                            {
+                                if let Some(item) = track_model.row_data(playing_index as usize) {
+                                    item.set_row_data(0, StandardListViewItem::from("⏸️"));
                                 }
                             }
                         });
@@ -275,7 +254,6 @@ impl UiManager {
                         let _ = self.ui.upgrade_in_event_loop(move |ui| {
                             let elapsed_secs = elapsed_ms / 1000;
                             let total_secs = total_ms / 1000;
-
                             let elapsed_mins = elapsed_secs / 60;
                             let elapsed_rem_secs = elapsed_secs % 60;
                             let total_mins = total_secs / 60;
@@ -302,7 +280,6 @@ impl UiManager {
                     protocol::Message::Playback(
                         protocol::PlaybackMessage::TechnicalMetadataChanged(meta),
                     ) => {
-                        debug!("UiManager: Technical metadata changed: {:?}", meta);
                         let _ = self.ui.upgrade_in_event_loop(move |ui| {
                             ui.set_technical_info(
                                 format!(
@@ -326,7 +303,7 @@ impl UiManager {
                             let track_model = track_model_strong
                                 .as_any()
                                 .downcast_ref::<VecModel<ModelRc<StandardListViewItem>>>()
-                                .expect("We know we set a VecModel earlier");
+                                .expect("VecModel expected");
 
                             for i in 0..track_model.row_count() {
                                 if let Some(item) = track_model.row_data(i) {
@@ -341,13 +318,12 @@ impl UiManager {
                         });
                     }
                     protocol::Message::Playlist(protocol::PlaylistMessage::TrackStarted(index)) => {
-                        debug!("UiManager: received TrackStarted message: {}", index);
                         let _ = self.ui.upgrade_in_event_loop(move |ui| {
                             let track_model_strong = ui.get_track_model();
                             let track_model = track_model_strong
                                 .as_any()
                                 .downcast_ref::<VecModel<ModelRc<StandardListViewItem>>>()
-                                .expect("We know we set a VecModel earlier");
+                                .expect("VecModel expected");
 
                             let mut title = String::new();
                             let mut artist = String::new();
@@ -370,7 +346,6 @@ impl UiManager {
                                     }
                                 }
                             }
-
                             ui.set_selected_track_index(index as i32);
                             ui.set_playing_track_index(index as i32);
                             if !artist.is_empty() {
@@ -380,48 +355,54 @@ impl UiManager {
                             }
                         });
                     }
-                    protocol::Message::Playlist(protocol::PlaylistMessage::TrackFinished(
-                        index,
-                    )) => {
-                        debug!("UiManager: received TrackFinished message: {}", index);
-                        let _ = self.ui.upgrade_in_event_loop(move |ui| {
-                            let track_model_strong = ui.get_track_model();
-                            let track_model = track_model_strong
-                                .as_any()
-                                .downcast_ref::<VecModel<ModelRc<StandardListViewItem>>>()
-                                .expect("We know we set a VecModel earlier");
-                            let item = track_model.row_data(index);
-                            if let Some(item) = item {
-                                item.set_row_data(0, StandardListViewItem::from(""));
-                            }
-                        });
-                    }
-                    protocol::Message::Playlist(protocol::PlaylistMessage::RepeatModeChanged(
-                        repeat_on,
-                    )) => {
-                        let _ = self.ui.upgrade_in_event_loop(move |ui| {
-                            ui.set_repeat_on(repeat_on);
-                        });
-                    }
                     protocol::Message::Playlist(
                         protocol::PlaylistMessage::PlaylistIndicesChanged {
                             playing_index,
-                            selected_index,
+                            selected_indices,
                             is_playing,
+                            repeat_on,
                         },
                     ) => {
+                        let selected_indices_clone = selected_indices.clone();
                         let _ = self.ui.upgrade_in_event_loop(move |ui| {
                             ui.set_playing_track_index(
                                 playing_index.map(|i| i as i32).unwrap_or(-1),
                             );
-                            ui.set_selected_track_index(selected_index as i32);
+                            ui.set_repeat_on(repeat_on);
 
-                            // Refresh indicators
+                            // Set generic selected index
+                            ui.set_selected_track_index(
+                                selected_indices_clone
+                                    .first()
+                                    .copied()
+                                    .map(|i| i as i32)
+                                    .unwrap_or(-1),
+                            );
+
+                            // Set all selected indices for UI highlighting
+                            let slint_indices: Vec<i32> =
+                                selected_indices_clone.iter().map(|&i| i as i32).collect();
+                            ui.set_selected_indices(slint::ModelRc::from(Rc::new(
+                                slint::VecModel::from(slint_indices),
+                            )));
+
+                            // Update selection models
                             let track_model_strong = ui.get_track_model();
+                            let num_tracks = track_model_strong.row_count();
+                            let mut selections = vec![false; num_tracks];
+                            for &idx in selected_indices_clone.iter() {
+                                if idx < num_tracks {
+                                    selections[idx] = true;
+                                }
+                            }
+                            ui.set_selection_model(ModelRc::from(Rc::new(VecModel::from(
+                                selections,
+                            ))));
+
                             let track_model = track_model_strong
                                 .as_any()
                                 .downcast_ref::<VecModel<ModelRc<StandardListViewItem>>>()
-                                .expect("We know we set a VecModel earlier");
+                                .expect("VecModel expected");
 
                             for i in 0..track_model.row_count() {
                                 if let Some(item) = track_model.row_data(i) {
@@ -442,42 +423,59 @@ impl UiManager {
                             }
                         });
                     }
-                    protocol::Message::Playlist(protocol::PlaylistMessage::ReorderTrack {
-                        from,
+                    protocol::Message::Playlist(protocol::PlaylistMessage::ReorderTracks {
+                        indices,
                         to,
                     }) => {
-                        debug!(
-                            "UiManager: Reordering track in model: from {} to {}",
-                            from, to
-                        );
+                        let indices_clone = indices.clone();
                         let _ = self.ui.upgrade_in_event_loop(move |ui| {
                             let track_model_strong = ui.get_track_model();
                             let track_model = track_model_strong
                                 .as_any()
                                 .downcast_ref::<VecModel<ModelRc<StandardListViewItem>>>()
-                                .expect("We know we set a VecModel earlier");
+                                .expect("VecModel expected");
 
-                            if from < track_model.row_count() && to < track_model.row_count() {
-                                let row = track_model.row_data(from).unwrap();
-                                track_model.remove(from);
-                                track_model.insert(to, row);
+                            let selection_model_strong = ui.get_selection_model();
+                            let selection_model = selection_model_strong
+                                .as_any()
+                                .downcast_ref::<VecModel<bool>>()
+                                .expect("VecModel expected");
+
+                            let mut sorted_indices = indices_clone.clone();
+                            sorted_indices.sort_by(|a, b| b.cmp(a)); // reverse for safe removal
+
+                            let mut moved_rows = Vec::new();
+                            let mut moved_selections = Vec::new();
+
+                            for &idx in sorted_indices.iter() {
+                                if idx < track_model.row_count() {
+                                    moved_rows.push(track_model.row_data(idx).unwrap());
+                                    moved_selections.push(selection_model.row_data(idx).unwrap());
+                                    track_model.remove(idx);
+                                    selection_model.remove(idx);
+                                }
+                            }
+                            moved_rows.reverse();
+                            moved_selections.reverse();
+
+                            let mut actual_to = to;
+                            for &idx in indices_clone.iter() {
+                                if idx < to {
+                                    actual_to -= 1;
+                                }
+                            }
+                            actual_to = actual_to.min(track_model.row_count());
+
+                            for (i, row) in moved_rows.into_iter().enumerate() {
+                                track_model.insert(actual_to + i, row);
+                                selection_model.insert(actual_to + i, moved_selections[i]);
                             }
                         });
                     }
-                    protocol::Message::Playlist(_) => {
-                        trace!("UiManager: received unsupported playlist message");
-                    }
-                    _ => {
-                        trace!("UiManager: received unsupported message {:?}", message);
-                    }
+                    _ => {}
                 },
-                Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
-                    // Ignore lag as we've increased the bus capacity
-                }
-                Err(tokio::sync::broadcast::error::RecvError::Closed) => {
-                    error!("UiManager: bus closed");
-                    break;
-                }
+                Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {}
+                Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
             }
         }
     }

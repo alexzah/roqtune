@@ -66,16 +66,28 @@ component TrackRow inherits Rectangle {
     ta := TouchArea {
         property <length> start-y;
         property <bool> dragging: false;
+        property <bool> was-selected-on-down: false;
 
         pointer-event(event) => {
             if (event.button == PointerEventButton.left) {
                 if (event.kind == PointerEventKind.down) {
                     self.start-y = self.mouse-y;
-                    root.clicked(event);
+                    self.was-selected-on-down = root.is-selected;
+                    
+                    // If not already selected, select it immediately to allow dragging
+                    if (!self.was-selected-on-down) {
+                        root.clicked(event);
+                    }
                 } else if (event.kind == PointerEventKind.up) {
                     if (self.dragging) {
                         self.dragging = false;
                         root.drag-ended();
+                    } else {
+                        // Clicked but didn't drag. 
+                        // If it was already selected, we now clear other selections (if no modifiers)
+                        if (self.was-selected-on-down) {
+                            root.clicked(event);
+                        }
                     }
                 }
             }
@@ -332,9 +344,9 @@ export component AppWindow inherits Window {
                     // Handle over the progress bar
                     handle := Rectangle {
                         width: 10px;
-                        height: parent.height + 4px;
+                        height: parent.height;
                         x: (seekbar.width * root.position-percentage) - self.width / 2;
-                        y: -2px;
+                        y: 0px;
                         background: white;
                         border-radius: 5px;
                         drop-shadow-offset-y: 1px;
@@ -415,9 +427,10 @@ export component AppWindow inherits Window {
                             index: i;
                             data: track;
                             is-playing: root.playing_track_index == i;
-                            is-selected: root.selected_track_index == i;
+                            is-selected: root.selection_model[i];
                             is-dragging: root.drag-index == i;
-                            is-drop-target: root.drop-index == i;
+                            // Dim selected items while dragging to clarify the drop line
+                            opacity: root.drag-index != -1 && root.selection_model[i] ? 0.5 : 1.0;
                             
                             clicked(event) => {
                                 root.playlist_item_click(i, event, {x: 0, y: 0});
@@ -429,13 +442,20 @@ export component AppWindow inherits Window {
                             }
                             
                             drag-moved(y-offset) => {
-                                // y-offset is relative to start of list
-                                root.drop-index = max(0, min(root.track_model.length - 1, floor(y-offset / 30px)));
+                                // y-offset is relative to start of list. 
+                                // (y + half_row) / row_height gives the gap index.
+                                root.drop-index = max(0, min(root.track_model.length, floor((y-offset + 15px) / 30px)));
                             }
                             
                             drag-ended() => {
-                                if (root.drop-index != -1 && root.drop-index != root.drag-index) {
-                                    root.reorder_tracks(root.drag-index, root.drop-index);
+                                if (root.drop-index != -1) {
+                                    // If dragging a selected item, move all selected items
+                                    if (root.selection_model[root.drag-index]) {
+                                        root.reorder_tracks(root.selected_indices, root.drop-index);
+                                    } else {
+                                        // Dragging a non-selected item
+                                        root.reorder_tracks([root.drag-index], root.drop-index);
+                                    }
                                 }
                                 root.drag-index = -1;
                                 root.drop-index = -1;
@@ -443,6 +463,16 @@ export component AppWindow inherits Window {
                         }
                     }
                 }
+            }
+            
+            // Visual Drop Indicator (horizontal line between tracks)
+            if (root.drag-index != -1 && root.drop-index != -1) : Rectangle {
+                x: 0;
+                // Position line between rows. flickering.viewport-y is negative when scrolled down.
+                y: 25px + (root.drop-index * 30px) + flick.viewport-y - 1px;
+                width: 100%;
+                height: 2px;
+                background: #2a6def;
             }
         }
         
@@ -481,9 +511,11 @@ export component AppWindow inherits Window {
     in-out property <string> file_path: "";
     in-out property <string> status: "Ready";
     in-out property <[[StandardListViewItem]]> track_model: []; // holds rows of strings
+    in-out property <[bool]> selection_model: []; 
     in-out property <int> playback_order_index: 0;
     in-out property <bool> repeat_on: false;
     in-out property <int> selected_track_index: -1;
+    in-out property <[int]> selected_indices: [];
     in-out property <int> playing_track_index: -1;
     
     // Drag and drop state
@@ -511,5 +543,5 @@ export component AppWindow inherits Window {
     callback toggle_repeat();
     callback seek-to(float); // Position between 0.0 and 1.0
     callback delete_track(int);
-    callback reorder_tracks(int, int); // from, to
+    callback reorder_tracks([int], int); // indices, to
 }

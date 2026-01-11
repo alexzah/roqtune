@@ -31,19 +31,24 @@ pub enum PlaybackOrder {
 pub enum PlaylistMessage {
     LoadTrack(PathBuf),
     DeleteTrack(usize),
-    SelectTrack(usize),
     TrackStarted(usize),
-    TrackFinished(usize),
+    TrackFinished,
     ChangePlaybackOrder(PlaybackOrder),
     ToggleRepeat,
-    RepeatModeChanged(bool),
+    RepeatModeChanged,
     PlaylistIndicesChanged {
         playing_index: Option<usize>,
-        selected_index: usize,
+        selected_indices: Vec<usize>,
         is_playing: bool,
+        repeat_on: bool,
     },
-    ReorderTrack {
-        from: usize,
+    SelectTrackMulti {
+        index: usize,
+        ctrl: bool,
+        shift: bool,
+    },
+    ReorderTracks {
+        indices: Vec<usize>,
         to: usize,
     },
 }

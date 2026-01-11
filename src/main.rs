@@ -17,7 +17,7 @@ use log::{debug, info};
 use playlist::Playlist;
 use playlist_manager::PlaylistManager;
 use protocol::{Config, ConfigMessage, Message, PlaybackMessage, PlaylistMessage};
-use slint::{ComponentHandle, ModelRc, VecModel};
+use slint::{ComponentHandle, Model, ModelRc, VecModel};
 use tokio::sync::broadcast;
 use ui_manager::{UiManager, UiState};
 
@@ -134,6 +134,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     ui.on_playlist_item_click(move |index, _event, _point| {
         // Only respond to double-click events
         if _event.button.to_string() == "left" && _event.kind.to_string() == "down" {
+            let ctrl = _event.modifiers.control;
+            let shift = _event.modifiers.shift;
+
             if last_click_time.elapsed() < Duration::from_millis(500) {
                 debug!("Playlist item double-clicked: {}", index);
                 let _ = bus_sender_clone.send(Message::Playback(
@@ -142,11 +145,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 ui_handle_clone.unwrap().set_selected_track_index(index);
                 ui_handle_clone.unwrap().set_playing_track_index(index);
             } else {
-                debug!("Playlist item clicked at index {:?}", index);
-                ui_handle_clone.unwrap().set_selected_track_index(index);
-                let _ = bus_sender_clone.send(Message::Playlist(PlaylistMessage::SelectTrack(
-                    index as usize,
-                )));
+                debug!(
+                    "Playlist item clicked at index {:?} (ctrl={}, shift={})",
+                    index, ctrl, shift
+                );
+                let _ =
+                    bus_sender_clone.send(Message::Playlist(PlaylistMessage::SelectTrackMulti {
+                        index: index as usize,
+                        ctrl,
+                        shift,
+                    }));
             }
             last_click_time = Instant::now();
         }
@@ -163,10 +171,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Wire up reorder track handler
     let bus_sender_clone = bus_sender.clone();
-    ui.on_reorder_tracks(move |from, to| {
-        debug!("Reorder track requested: from {} to {}", from, to);
-        let _ = bus_sender_clone.send(Message::Playlist(PlaylistMessage::ReorderTrack {
-            from: from as usize,
+    ui.on_reorder_tracks(move |indices, to| {
+        let indices_vec: Vec<usize> = indices.iter().map(|i| i as usize).collect();
+        debug!("Reorder tracks requested: from {:?} to {}", indices_vec, to);
+        let _ = bus_sender_clone.send(Message::Playlist(PlaylistMessage::ReorderTracks {
+            indices: indices_vec,
             to: to as usize,
         }));
     });
