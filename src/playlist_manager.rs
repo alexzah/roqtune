@@ -114,40 +114,39 @@ impl PlaylistManager {
                     }
                     protocol::Message::Playback(protocol::PlaybackMessage::TrackFinished(id)) => {
                         debug!("PlaylistManager: Received track finished command: {}", id);
-                        let original_index = self.playlist.get_playing_track_index().unwrap();
-                        let index = self.playlist.get_next_track_index(original_index);
+                        if let Some(playing_idx) = self.playlist.get_playing_track_index() {
+                            let index = self.playlist.get_next_track_index(playing_idx);
 
-                        let mut advanced = false;
-                        if let Some(index) = index {
-                            if index < self.playlist.num_tracks() {
-                                self.playlist.set_playing_track_index(Some(index));
-                                self.playlist.set_selected_track(index);
-                                self.cache_tracks(false);
-                                advanced = true;
+                            let mut advanced = false;
+                            if let Some(index) = index {
+                                if index < self.playlist.num_tracks() {
+                                    self.playlist.set_playing_track_index(Some(index));
+                                    self.playlist.set_selected_track(index);
+                                    self.cache_tracks(false);
+                                    advanced = true;
+                                }
                             }
-                        }
 
-                        if !advanced {
-                            self.playlist.set_playing(false);
-                            self.playlist.set_playing_track_index(None);
-                            let _ = self
-                                .bus_producer
-                                .send(protocol::Message::Playback(protocol::PlaybackMessage::Stop));
-                        }
+                            if !advanced {
+                                self.playlist.set_playing(false);
+                                self.playlist.set_playing_track_index(None);
+                                let _ = self.bus_producer.send(protocol::Message::Playback(
+                                    protocol::PlaybackMessage::Stop,
+                                ));
+                            }
 
-                        let _ = self.bus_producer.send(protocol::Message::Playlist(
-                            protocol::PlaylistMessage::TrackFinished(original_index),
-                        ));
+                            let _ = self.bus_producer.send(protocol::Message::Playlist(
+                                protocol::PlaylistMessage::TrackFinished(playing_idx),
+                            ));
+                        }
                     }
                     protocol::Message::Playback(protocol::PlaybackMessage::TrackStarted(id)) => {
                         debug!("PlaylistManager: Received track started command: {}", id);
-                        let _ = self.bus_producer.send(protocol::Message::Playlist(
-                            protocol::PlaylistMessage::TrackStarted(
-                                self.playlist
-                                    .get_playing_track_index()
-                                    .expect("No playing track index"),
-                            ),
-                        ));
+                        if let Some(playing_idx) = self.playlist.get_playing_track_index() {
+                            let _ = self.bus_producer.send(protocol::Message::Playlist(
+                                protocol::PlaylistMessage::TrackStarted(playing_idx),
+                            ));
+                        }
                     }
                     protocol::Message::Playback(protocol::PlaybackMessage::ReadyForPlayback(
                         id,
@@ -159,30 +158,39 @@ impl PlaylistManager {
 
                         // Inform the audio player which track to play from its cache
                         if self.playlist.is_playing() {
-                            let playing_track_id = self
-                                .playlist
-                                .get_track(self.playlist.get_playing_track_index().unwrap())
-                                .id
-                                .clone();
+                            if let Some(playing_idx) = self.playlist.get_playing_track_index() {
+                                let playing_track_id =
+                                    self.playlist.get_track(playing_idx).id.clone();
 
-                            if playing_track_id == id {
-                                let _ = self.bus_producer.send(protocol::Message::Playback(
-                                    protocol::PlaybackMessage::PlayTrackById(id),
-                                ));
+                                if playing_track_id == id {
+                                    let _ = self.bus_producer.send(protocol::Message::Playback(
+                                        protocol::PlaybackMessage::PlayTrackById(id),
+                                    ));
+                                }
                             }
                         }
                     }
                     protocol::Message::Playlist(protocol::PlaylistMessage::DeleteTrack(index)) => {
                         debug!("PlaylistManager: Received delete track command: {}", index);
-                        if self
-                            .cached_track_ids
-                            .contains(&self.playlist.get_track_id(index))
-                        {
-                            self.cached_track_ids
-                                .remove(&self.playlist.get_track_id(index));
-                            self.clear_cached_tracks();
+                        if index < self.playlist.num_tracks() {
+                            if self
+                                .cached_track_ids
+                                .contains(&self.playlist.get_track_id(index))
+                            {
+                                self.cached_track_ids
+                                    .remove(&self.playlist.get_track_id(index));
+                                self.clear_cached_tracks();
+                            }
+                            self.playlist.delete_track(index);
+
+                            // Notify other components about the index shift
+                            let _ = self.bus_producer.send(protocol::Message::Playlist(
+                                protocol::PlaylistMessage::PlaylistIndicesChanged {
+                                    playing_index: self.playlist.get_playing_track_index(),
+                                    selected_index: self.playlist.get_selected_track_index(),
+                                },
+                            ));
                         }
-                        self.playlist.delete_track(index);
                     }
                     protocol::Message::Playlist(protocol::PlaylistMessage::SelectTrack(index)) => {
                         debug!("PlaylistManager: Received select track command: {}", index);

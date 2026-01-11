@@ -86,13 +86,51 @@ impl Playlist {
     }
 
     pub fn delete_track(&mut self, index: usize) {
-        self.tracks.remove(index);
-        // Regenerate shuffle indices if needed
-        if self.playback_order == PlaybackOrder::Shuffle {
-            self.generate_shuffle_order(
-                self.playing_track_index.or(Some(self.selected_track_index)),
-            );
+        if index >= self.tracks.len() {
+            return;
         }
+
+        self.tracks.remove(index);
+
+        // Update playing track index
+        if let Some(playing_idx) = self.playing_track_index {
+            if playing_idx == index {
+                self.playing_track_index = None;
+                self.is_playing = false;
+            } else if playing_idx > index {
+                self.playing_track_index = Some(playing_idx - 1);
+            }
+        }
+
+        // Update selected track index
+        if self.selected_track_index == index {
+            if self.tracks.is_empty() {
+                self.selected_track_index = 0;
+            } else if self.selected_track_index >= self.tracks.len() {
+                self.selected_track_index = self.tracks.len() - 1;
+            }
+        } else if self.selected_track_index > index {
+            self.selected_track_index -= 1;
+        }
+
+        // Update shuffle indices
+        if !self.shuffled_indices.is_empty() {
+            // Remove the deleted index and shift all indices greater than it
+            self.shuffled_indices.retain(|&i| i != index);
+            for i in 0..self.shuffled_indices.len() {
+                if self.shuffled_indices[i] > index {
+                    self.shuffled_indices[i] -= 1;
+                }
+            }
+        }
+
+        debug!(
+            "Playlist: Deleted track at {}. New playing_idx={:?}, selected_idx={}, shuffle_len={}",
+            index,
+            self.playing_track_index,
+            self.selected_track_index,
+            self.shuffled_indices.len()
+        );
     }
 
     pub fn get_track_id(&self, index: usize) -> String {

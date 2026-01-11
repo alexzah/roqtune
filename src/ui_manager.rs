@@ -171,7 +171,9 @@ impl UiManager {
                                 .as_any()
                                 .downcast_ref::<VecModel<ModelRc<StandardListViewItem>>>()
                                 .expect("We know we set a VecModel earlier");
-                            track_model.remove(index);
+                            if index < track_model.row_count() {
+                                track_model.remove(index);
+                            }
                         });
                     }
                     protocol::Message::Playback(protocol::PlaybackMessage::PlayTrackByIndex(
@@ -189,9 +191,13 @@ impl UiManager {
                                     if i == index {
                                         item.set_row_data(0, StandardListViewItem::from("▶️"));
                                     } else {
-                                        let current_text = item.row_data(0).unwrap().text;
-                                        if !current_text.is_empty() {
-                                            item.set_row_data(0, StandardListViewItem::from(""));
+                                        if let Some(first_col) = item.row_data(0) {
+                                            if !first_col.text.is_empty() {
+                                                item.set_row_data(
+                                                    0,
+                                                    StandardListViewItem::from(""),
+                                                );
+                                            }
                                         }
                                     }
                                 }
@@ -209,9 +215,10 @@ impl UiManager {
 
                             for i in 0..track_model.row_count() {
                                 if let Some(item) = track_model.row_data(i) {
-                                    let current_text = item.row_data(0).unwrap().text;
-                                    if !current_text.is_empty() {
-                                        item.set_row_data(0, StandardListViewItem::from(""));
+                                    if let Some(first_col) = item.row_data(0) {
+                                        if !first_col.text.is_empty() {
+                                            item.set_row_data(0, StandardListViewItem::from(""));
+                                        }
                                     }
                                 }
                             }
@@ -232,9 +239,13 @@ impl UiManager {
                                     if i == index {
                                         item.set_row_data(0, StandardListViewItem::from("▶️"));
                                     } else {
-                                        let current_text = item.row_data(0).unwrap().text;
-                                        if !current_text.is_empty() {
-                                            item.set_row_data(0, StandardListViewItem::from(""));
+                                        if let Some(first_col) = item.row_data(0) {
+                                            if !first_col.text.is_empty() {
+                                                item.set_row_data(
+                                                    0,
+                                                    StandardListViewItem::from(""),
+                                                );
+                                            }
                                         }
                                     }
                                 }
@@ -265,6 +276,43 @@ impl UiManager {
                     )) => {
                         let _ = self.ui.upgrade_in_event_loop(move |ui| {
                             ui.set_repeat_on(repeat_on);
+                        });
+                    }
+                    protocol::Message::Playlist(
+                        protocol::PlaylistMessage::PlaylistIndicesChanged {
+                            playing_index,
+                            selected_index,
+                        },
+                    ) => {
+                        let _ = self.ui.upgrade_in_event_loop(move |ui| {
+                            ui.set_playing_track_index(
+                                playing_index.map(|i| i as i32).unwrap_or(-1),
+                            );
+                            ui.set_selected_track_index(selected_index as i32);
+
+                            // Refresh indicators
+                            let track_model_strong = ui.get_track_model();
+                            let track_model = track_model_strong
+                                .as_any()
+                                .downcast_ref::<VecModel<ModelRc<StandardListViewItem>>>()
+                                .expect("We know we set a VecModel earlier");
+
+                            for i in 0..track_model.row_count() {
+                                if let Some(item) = track_model.row_data(i) {
+                                    if playing_index == Some(i) {
+                                        item.set_row_data(0, StandardListViewItem::from("▶️"));
+                                    } else {
+                                        if let Some(first_col) = item.row_data(0) {
+                                            if !first_col.text.is_empty() {
+                                                item.set_row_data(
+                                                    0,
+                                                    StandardListViewItem::from(""),
+                                                );
+                                            }
+                                        }
+                                    }
+                                }
+                            }
                         });
                     }
                     protocol::Message::Playlist(_) => {

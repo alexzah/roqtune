@@ -37,6 +37,10 @@ pub enum PlaylistMessage {
     ChangePlaybackOrder(PlaybackOrder),
     ToggleRepeat,
     RepeatModeChanged(bool),
+    PlaylistIndicesChanged {
+        playing_index: Option<usize>,
+        selected_index: usize,
+    },
 }
 
 #[derive(Debug, Clone)]
