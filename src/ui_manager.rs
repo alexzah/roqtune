@@ -245,6 +245,7 @@ impl UiManager {
                     }
                     protocol::Message::Playback(protocol::PlaybackMessage::Pause) => {
                         let _ = self.ui.upgrade_in_event_loop(move |ui| {
+                            let playing_index = ui.get_playing_track_index();
                             let track_model_strong = ui.get_track_model();
                             let track_model = track_model_strong
                                 .as_any()
@@ -253,9 +254,16 @@ impl UiManager {
 
                             for i in 0..track_model.row_count() {
                                 if let Some(item) = track_model.row_data(i) {
-                                    if let Some(first_col) = item.row_data(0) {
-                                        if !first_col.text.is_empty() {
-                                            item.set_row_data(0, StandardListViewItem::from(""));
+                                    if i as i32 == playing_index && playing_index >= 0 {
+                                        item.set_row_data(0, StandardListViewItem::from("⏸️"));
+                                    } else {
+                                        if let Some(first_col) = item.row_data(0) {
+                                            if !first_col.text.is_empty() {
+                                                item.set_row_data(
+                                                    0,
+                                                    StandardListViewItem::from(""),
+                                                );
+                                            }
                                         }
                                     }
                                 }
@@ -398,6 +406,7 @@ impl UiManager {
                         protocol::PlaylistMessage::PlaylistIndicesChanged {
                             playing_index,
                             selected_index,
+                            is_playing,
                         },
                     ) => {
                         let _ = self.ui.upgrade_in_event_loop(move |ui| {
@@ -416,7 +425,8 @@ impl UiManager {
                             for i in 0..track_model.row_count() {
                                 if let Some(item) = track_model.row_data(i) {
                                     if playing_index == Some(i) {
-                                        item.set_row_data(0, StandardListViewItem::from("▶️"));
+                                        let emoji = if is_playing { "▶️" } else { "⏸️" };
+                                        item.set_row_data(0, StandardListViewItem::from(emoji));
                                     } else {
                                         if let Some(first_col) = item.row_data(0) {
                                             if !first_col.text.is_empty() {

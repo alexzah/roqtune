@@ -40,6 +40,7 @@ pub enum PlaylistMessage {
     PlaylistIndicesChanged {
         playing_index: Option<usize>,
         selected_index: usize,
+        is_playing: bool,
     },
 }
 

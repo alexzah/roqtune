@@ -49,7 +49,7 @@ impl PlaylistManager {
             ));
             self.cache_tracks(true);
         } else {
-            self.bus_producer.send(protocol::Message::Playback(
+            let _ = self.bus_producer.send(protocol::Message::Playback(
                 protocol::PlaybackMessage::PlayTrackById(
                     self.playlist
                         .get_track_id(self.playlist.get_selected_track_index()),
@@ -211,6 +211,7 @@ impl PlaylistManager {
                                 protocol::PlaylistMessage::PlaylistIndicesChanged {
                                     playing_index: self.playlist.get_playing_track_index(),
                                     selected_index: self.playlist.get_selected_track_index(),
+                                    is_playing: self.playlist.is_playing(),
                                 },
                             ));
                         }

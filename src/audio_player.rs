@@ -1,6 +1,6 @@
 use crate::protocol::{AudioMessage, AudioPacket, ConfigMessage, Message, PlaybackMessage};
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
-use log::{debug, error, trace};
+use log::{debug, error};
 use std::{
     collections::{HashMap, VecDeque},
     sync::{

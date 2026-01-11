@@ -365,37 +365,11 @@ impl Playlist {
         self.repeat_mode == RepeatMode::On
     }
 
-    pub fn get_playback_order(&self) -> PlaybackOrder {
-        self.playback_order
-    }
-
     pub fn set_repeat_mode(&mut self, mode: RepeatMode) {
         self.repeat_mode = mode;
     }
 
     pub fn get_repeat_mode(&self) -> RepeatMode {
         self.repeat_mode
-    }
-
-    // Get first track index based on current playback order
-    pub fn get_first_track_index(&mut self) -> Option<usize> {
-        if self.tracks.is_empty() {
-            return None;
-        }
-
-        match self.playback_order {
-            PlaybackOrder::Default => Some(0),
-            PlaybackOrder::Shuffle => {
-                if self.shuffled_indices.is_empty() {
-                    self.generate_shuffle_order(None);
-                }
-                self.shuffled_indices.first().copied()
-            }
-            PlaybackOrder::Random => {
-                let mut rng = StdRng::from_seed(self.rng_seed);
-                let index = rng.random_range(0..self.tracks.len());
-                Some(index)
-            }
-        }
     }
 }
