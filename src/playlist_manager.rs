@@ -99,7 +99,16 @@ impl PlaylistManager {
                     }
                     protocol::Message::Playback(protocol::PlaybackMessage::Pause) => {
                         debug!("PlaylistManager: Received pause command");
-                        self.playlist.set_playing(false);
+                        if self.playlist.is_playing() {
+                            self.playlist.set_playing(false);
+                        } else if self.playlist.get_playing_track_index()
+                            == Some(self.playlist.get_selected_track_index())
+                        {
+                            debug!("PlaylistManager: Resuming playback via Pause button");
+                            let _ = self
+                                .bus_producer
+                                .send(protocol::Message::Playback(protocol::PlaybackMessage::Play));
+                        }
                     }
                     protocol::Message::Playback(protocol::PlaybackMessage::Next) => {
                         debug!("PlaylistManager: Received next command");
