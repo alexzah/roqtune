@@ -172,6 +172,61 @@ impl Playlist {
         }
     }
 
+    pub fn get_previous_track_index(&mut self, current_index: usize) -> Option<usize> {
+        if self.tracks.is_empty() {
+            return None;
+        }
+
+        match self.playback_order {
+            PlaybackOrder::Default => {
+                if current_index > 0 {
+                    Some(current_index - 1)
+                } else if self.repeat_mode == RepeatMode::On {
+                    Some(self.tracks.len() - 1)
+                } else {
+                    None
+                }
+            }
+            PlaybackOrder::Shuffle => {
+                if self.shuffled_indices.is_empty() {
+                    self.generate_shuffle_order();
+                }
+
+                if let Some(position) = self
+                    .shuffled_indices
+                    .iter()
+                    .position(|&i| i == current_index)
+                {
+                    if position > 0 {
+                        Some(self.shuffled_indices[position - 1])
+                    } else if self.repeat_mode == RepeatMode::On {
+                        self.shuffled_indices.last().copied()
+                    } else {
+                        None
+                    }
+                } else {
+                    self.shuffled_indices.first().copied()
+                }
+            }
+            PlaybackOrder::Random => {
+                // Random doesn't really have a "previous", just pick another random one
+                if self.tracks.len() > 1 {
+                    let mut rng = StdRng::from_seed(self.rng_seed);
+                    let mut next_index;
+                    loop {
+                        next_index = rng.gen_range(0..self.tracks.len());
+                        if next_index != current_index {
+                            break;
+                        }
+                    }
+                    Some(next_index)
+                } else {
+                    Some(0)
+                }
+            }
+        }
+    }
+
     // Generate a random order for all tracks
     fn generate_shuffle_order(&mut self) {
         let track_count = self.tracks.len();

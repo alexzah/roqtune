@@ -126,6 +126,28 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let _ = bus_sender_clone.send(Message::Playback(PlaybackMessage::Stop));
     });
 
+    // Wire up next button
+    let bus_sender_clone = bus_sender.clone();
+    ui.on_next(move || {
+        debug!("Next button clicked");
+        let _ = bus_sender_clone.send(Message::Playback(PlaybackMessage::Next));
+    });
+
+    // Wire up previous button
+    let bus_sender_clone = bus_sender.clone();
+    ui.on_previous(move || {
+        debug!("Previous button clicked");
+        let _ = bus_sender_clone.send(Message::Playback(PlaybackMessage::Previous));
+    });
+
+    // Wire up pause button
+    let bus_sender_clone = bus_sender.clone();
+    ui.on_pause(move || {
+        debug!("Pause button clicked");
+        let _ = bus_sender_clone.send(Message::Playback(PlaybackMessage::Stop));
+        // Pause is just Stop for now
+    });
+
     // Handle playlist item clicks
     let bus_sender_clone = bus_sender.clone();
     let ui_handle_clone = ui.as_weak().clone();

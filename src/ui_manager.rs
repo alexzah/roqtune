@@ -183,31 +183,65 @@ impl UiManager {
                                 .as_any()
                                 .downcast_ref::<VecModel<ModelRc<StandardListViewItem>>>()
                                 .expect("We know we set a VecModel earlier");
-                            let item = track_model.row_data(index);
-                            if let Some(item) = item {
-                                item.set_row_data(0, StandardListViewItem::from("▶️"));
+
+                            for i in 0..track_model.row_count() {
+                                if let Some(item) = track_model.row_data(i) {
+                                    if i == index {
+                                        item.set_row_data(0, StandardListViewItem::from("▶️"));
+                                    } else {
+                                        let current_text = item.row_data(0).unwrap().text;
+                                        if !current_text.is_empty() {
+                                            item.set_row_data(0, StandardListViewItem::from(""));
+                                        }
+                                    }
+                                }
                             }
+                            ui.set_playing_track_index(index as i32);
                         });
                     }
-                    protocol::Message::Playlist(protocol::PlaylistMessage::TrackStarted(index)) => {
-                        debug!("UiManager: received TrackFinished message: {}", index);
+                    protocol::Message::Playback(protocol::PlaybackMessage::Stop) => {
                         let _ = self.ui.upgrade_in_event_loop(move |ui| {
-                            ui.set_selected_track_index(index as i32);
-                            ui.set_playing_track_index(index as i32);
-                            debug!(
-                                "UiManager: updated selected and playing track indices: {}",
-                                ui.get_playing_track_index()
-                            );
-
                             let track_model_strong = ui.get_track_model();
                             let track_model = track_model_strong
                                 .as_any()
                                 .downcast_ref::<VecModel<ModelRc<StandardListViewItem>>>()
                                 .expect("We know we set a VecModel earlier");
-                            let item = track_model.row_data(index);
-                            if let Some(item) = item {
-                                item.set_row_data(0, StandardListViewItem::from("▶️"));
+
+                            for i in 0..track_model.row_count() {
+                                if let Some(item) = track_model.row_data(i) {
+                                    let current_text = item.row_data(0).unwrap().text;
+                                    if !current_text.is_empty() {
+                                        item.set_row_data(0, StandardListViewItem::from(""));
+                                    }
+                                }
                             }
+                            ui.set_playing_track_index(-1);
+                        });
+                    }
+                    protocol::Message::Playlist(protocol::PlaylistMessage::TrackStarted(index)) => {
+                        debug!("UiManager: received TrackStarted message: {}", index);
+                        let _ = self.ui.upgrade_in_event_loop(move |ui| {
+                            let track_model_strong = ui.get_track_model();
+                            let track_model = track_model_strong
+                                .as_any()
+                                .downcast_ref::<VecModel<ModelRc<StandardListViewItem>>>()
+                                .expect("We know we set a VecModel earlier");
+
+                            for i in 0..track_model.row_count() {
+                                if let Some(item) = track_model.row_data(i) {
+                                    if i == index {
+                                        item.set_row_data(0, StandardListViewItem::from("▶️"));
+                                    } else {
+                                        let current_text = item.row_data(0).unwrap().text;
+                                        if !current_text.is_empty() {
+                                            item.set_row_data(0, StandardListViewItem::from(""));
+                                        }
+                                    }
+                                }
+                            }
+
+                            ui.set_selected_track_index(index as i32);
+                            ui.set_playing_track_index(index as i32);
                         });
                     }
                     protocol::Message::Playlist(protocol::PlaylistMessage::TrackFinished(

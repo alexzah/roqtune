@@ -76,6 +76,8 @@ pub enum PlaybackMessage {
     PlayTrackByIndex(usize), // play a specific track by index
     PlayTrackById(String),   // play a specific track by identifier
     Stop,
+    Next,
+    Previous,
     TrackFinished(String),
     TrackStarted(String),
     ClearPlayerCache,

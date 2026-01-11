@@ -87,18 +87,52 @@ impl PlaylistManager {
                         self.clear_cached_tracks();
                         self.cache_tracks(false);
                     }
+                    protocol::Message::Playback(protocol::PlaybackMessage::Next) => {
+                        debug!("PlaylistManager: Received next command");
+                        let current_index = self
+                            .playlist
+                            .get_playing_track_index()
+                            .unwrap_or(self.playlist.get_selected_track_index());
+                        if let Some(next_index) = self.playlist.get_next_track_index(current_index)
+                        {
+                            self.playlist.set_selected_track(next_index);
+                            self.play_selected_track();
+                        }
+                    }
+                    protocol::Message::Playback(protocol::PlaybackMessage::Previous) => {
+                        debug!("PlaylistManager: Received previous command");
+                        let current_index = self
+                            .playlist
+                            .get_playing_track_index()
+                            .unwrap_or(self.playlist.get_selected_track_index());
+                        if let Some(prev_index) =
+                            self.playlist.get_previous_track_index(current_index)
+                        {
+                            self.playlist.set_selected_track(prev_index);
+                            self.play_selected_track();
+                        }
+                    }
                     protocol::Message::Playback(protocol::PlaybackMessage::TrackFinished(id)) => {
                         debug!("PlaylistManager: Received track finished command: {}", id);
                         let original_index = self.playlist.get_playing_track_index().unwrap();
-                        let index = self
-                            .playlist
-                            .get_next_track_index(self.playlist.get_playing_track_index().unwrap());
+                        let index = self.playlist.get_next_track_index(original_index);
+
+                        let mut advanced = false;
                         if let Some(index) = index {
                             if index < self.playlist.num_tracks() {
                                 self.playlist.set_playing_track_index(Some(index));
                                 self.playlist.set_selected_track(index);
                                 self.cache_tracks(false);
+                                advanced = true;
                             }
+                        }
+
+                        if !advanced {
+                            self.playlist.set_playing(false);
+                            self.playlist.set_playing_track_index(None);
+                            let _ = self
+                                .bus_producer
+                                .send(protocol::Message::Playback(protocol::PlaybackMessage::Stop));
                         }
 
                         let _ = self.bus_producer.send(protocol::Message::Playlist(
