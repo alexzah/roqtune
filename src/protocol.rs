@@ -35,6 +35,8 @@ pub enum PlaylistMessage {
     TrackStarted(usize),
     TrackFinished(usize),
     ChangePlaybackOrder(PlaybackOrder),
+    ToggleRepeat,
+    RepeatModeChanged(bool),
 }
 
 #[derive(Debug, Clone)]

@@ -207,6 +207,13 @@ impl PlaylistManager {
                         );
                         self.playlist.set_playback_order(order);
                     }
+                    protocol::Message::Playlist(protocol::PlaylistMessage::ToggleRepeat) => {
+                        let repeat_on = self.playlist.toggle_repeat();
+                        debug!("PlaylistManager: Toggled repeat to {}", repeat_on);
+                        let _ = self.bus_producer.send(protocol::Message::Playlist(
+                            protocol::PlaylistMessage::RepeatModeChanged(repeat_on),
+                        ));
+                    }
                     _ => trace!("PlaylistManager: ignoring unsupported message"),
                 },
                 Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {

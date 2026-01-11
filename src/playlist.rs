@@ -262,6 +262,14 @@ impl Playlist {
         }
     }
 
+    pub fn toggle_repeat(&mut self) -> bool {
+        self.repeat_mode = match self.repeat_mode {
+            RepeatMode::Off => RepeatMode::On,
+            RepeatMode::On => RepeatMode::Off,
+        };
+        self.repeat_mode == RepeatMode::On
+    }
+
     pub fn get_playback_order(&self) -> PlaybackOrder {
         self.playback_order
     }

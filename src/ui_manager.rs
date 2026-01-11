@@ -260,6 +260,13 @@ impl UiManager {
                             }
                         });
                     }
+                    protocol::Message::Playlist(protocol::PlaylistMessage::RepeatModeChanged(
+                        repeat_on,
+                    )) => {
+                        let _ = self.ui.upgrade_in_event_loop(move |ui| {
+                            ui.set_repeat_on(repeat_on);
+                        });
+                    }
                     protocol::Message::Playlist(_) => {
                         trace!("UiManager: received unsupported playlist message");
                     }

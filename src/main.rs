@@ -207,6 +207,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     });
 
+    // Wire up repeat toggle
+    let bus_sender_clone = bus_sender.clone();
+    ui.on_toggle_repeat(move || {
+        debug!("Repeat toggle clicked");
+        let _ = bus_sender_clone.send(Message::Playlist(PlaylistMessage::ToggleRepeat));
+    });
+
     // Setup playlist manager
     let playlist_manager_bus_receiver = bus_sender.subscribe();
     let playlist_manager_bus_sender = bus_sender.clone();
