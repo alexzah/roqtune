@@ -1,7 +1,7 @@
 use crate::protocol::{
     self, AudioMessage, AudioPacket, Config, ConfigMessage, Message, TrackIdentifier,
 };
-use log::{debug, error, trace};
+use log::{debug, error};
 use rubato::{
     Resampler, SincFixedIn, SincInterpolationParameters, SincInterpolationType, WindowFunction,
 };
@@ -385,8 +385,6 @@ impl DecodeWorker {
                             .send(Message::Audio(AudioMessage::AudioPacket(
                                 AudioPacket::Samples {
                                     samples: resampled_samples,
-                                    sample_rate,
-                                    channels: channels as u16,
                                 },
                             )));
                     }
@@ -421,8 +419,6 @@ impl DecodeWorker {
                 .send(Message::Audio(AudioMessage::AudioPacket(
                     AudioPacket::Samples {
                         samples: resampled_samples,
-                        sample_rate,
-                        channels: channels as u16,
                     },
                 )));
         }

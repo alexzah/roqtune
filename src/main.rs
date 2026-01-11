@@ -161,6 +161,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         )));
     });
 
+    // Wire up reorder track handler
+    let bus_sender_clone = bus_sender.clone();
+    ui.on_reorder_tracks(move |from, to| {
+        debug!("Reorder track requested: from {} to {}", from, to);
+        let _ = bus_sender_clone.send(Message::Playlist(PlaylistMessage::ReorderTrack {
+            from: from as usize,
+            to: to as usize,
+        }));
+    });
+
     // Wire up sequence selector
     let bus_sender_clone = bus_sender.clone();
     ui.on_playback_order_changed(move |index| {

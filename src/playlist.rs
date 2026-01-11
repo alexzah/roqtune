@@ -137,6 +137,53 @@ impl Playlist {
         return self.tracks[index].id.clone();
     }
 
+    pub fn move_track(&mut self, from: usize, to: usize) {
+        if from >= self.tracks.len() || to >= self.tracks.len() || from == to {
+            return;
+        }
+
+        let track = self.tracks.remove(from);
+        self.tracks.insert(to, track);
+
+        // Helper to update an index after a move
+        let update_idx = |idx: usize| -> usize {
+            if idx == from {
+                to
+            } else if from < to {
+                if idx > from && idx <= to {
+                    idx - 1
+                } else {
+                    idx
+                }
+            } else {
+                // from > to
+                if idx >= to && idx < from {
+                    idx + 1
+                } else {
+                    idx
+                }
+            }
+        };
+
+        // Update playing track index
+        if let Some(playing_idx) = self.playing_track_index {
+            self.playing_track_index = Some(update_idx(playing_idx));
+        }
+
+        // Update selected track index
+        self.selected_track_index = update_idx(self.selected_track_index);
+
+        // Update shuffle indices
+        for i in 0..self.shuffled_indices.len() {
+            self.shuffled_indices[i] = update_idx(self.shuffled_indices[i]);
+        }
+
+        debug!(
+            "Playlist: Moved track from {} to {}. New playing_idx={:?}, selected_idx={}",
+            from, to, self.playing_track_index, self.selected_track_index
+        );
+    }
+
     // Get the next track index based on the current playback order and repeat mode
     pub fn get_next_track_index(&mut self, current_index: usize) -> Option<usize> {
         if self.tracks.is_empty() {
@@ -363,13 +410,5 @@ impl Playlist {
             RepeatMode::On => RepeatMode::Off,
         };
         self.repeat_mode == RepeatMode::On
-    }
-
-    pub fn set_repeat_mode(&mut self, mode: RepeatMode) {
-        self.repeat_mode = mode;
-    }
-
-    pub fn get_repeat_mode(&self) -> RepeatMode {
-        self.repeat_mode
     }
 }

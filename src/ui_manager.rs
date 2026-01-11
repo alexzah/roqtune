@@ -15,7 +15,6 @@ pub struct UiState {
 pub struct UiManager {
     ui: slint::Weak<AppWindow>,
     bus_receiver: Receiver<protocol::Message>,
-    bus_sender: Sender<protocol::Message>,
 }
 
 struct TrackMetadata {
@@ -28,12 +27,11 @@ impl UiManager {
     pub fn new(
         ui: slint::Weak<AppWindow>,
         bus_receiver: Receiver<protocol::Message>,
-        bus_sender: Sender<protocol::Message>,
+        _bus_sender: Sender<protocol::Message>,
     ) -> Self {
         Self {
             ui: ui.clone(),
             bus_receiver: bus_receiver,
-            bus_sender: bus_sender,
         }
     }
 
@@ -441,6 +439,28 @@ impl UiManager {
                                         }
                                     }
                                 }
+                            }
+                        });
+                    }
+                    protocol::Message::Playlist(protocol::PlaylistMessage::ReorderTrack {
+                        from,
+                        to,
+                    }) => {
+                        debug!(
+                            "UiManager: Reordering track in model: from {} to {}",
+                            from, to
+                        );
+                        let _ = self.ui.upgrade_in_event_loop(move |ui| {
+                            let track_model_strong = ui.get_track_model();
+                            let track_model = track_model_strong
+                                .as_any()
+                                .downcast_ref::<VecModel<ModelRc<StandardListViewItem>>>()
+                                .expect("We know we set a VecModel earlier");
+
+                            if from < track_model.row_count() && to < track_model.row_count() {
+                                let row = track_model.row_data(from).unwrap();
+                                track_model.remove(from);
+                                track_model.insert(to, row);
                             }
                         });
                     }

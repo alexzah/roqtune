@@ -1,5 +1,102 @@
 import { Button, VerticalBox, StandardTableView, ComboBox } from "std-widgets.slint";
 
+component TrackRow inherits Rectangle {
+    in property <[StandardListViewItem]> data;
+    in property <bool> is-playing;
+    in property <bool> is-selected;
+    in property <bool> is-dragging;
+    in property <bool> is-drop-target;
+    in property <int> index;
+    
+    callback clicked(PointerEvent);
+    callback drag-started(int);
+    callback drag-moved(length);
+    callback drag-ended();
+    
+    height: 30px;
+    background: is-dragging ? #444 : is-selected ? #3d3d3d : is-drop-target ? #2a6def : transparent;
+    
+    HorizontalLayout {
+        padding-left: 8px;
+        padding-right: 8px;
+        spacing: 10px;
+        
+        // Status Column
+        Rectangle {
+            width: 40px;
+            Text {
+                text: root.data[0].text;
+                color: #2a6def;
+                font-size: 14px;
+                horizontal-alignment: center;
+            }
+        }
+        
+        // Title Column
+        Text {
+            text: root.data[1].text;
+            color: #eee;
+            font-size: 13px;
+            vertical-alignment: center;
+            horizontal-stretch: 1;
+            overflow: elide;
+        }
+        
+        // Artist Column
+        Text {
+            text: root.data[2].text;
+            color: #aaa;
+            font-size: 13px;
+            vertical-alignment: center;
+            width: 200px;
+            overflow: elide;
+        }
+        
+        // Album Column
+        Text {
+            text: root.data[3].text;
+            color: #888;
+            font-size: 13px;
+            vertical-alignment: center;
+            width: 200px;
+            overflow: elide;
+        }
+    }
+    
+    ta := TouchArea {
+        property <length> start-y;
+        property <bool> dragging: false;
+
+        pointer-event(event) => {
+            if (event.button == PointerEventButton.left) {
+                if (event.kind == PointerEventKind.down) {
+                    self.start-y = self.mouse-y;
+                    root.clicked(event);
+                } else if (event.kind == PointerEventKind.up) {
+                    if (self.dragging) {
+                        self.dragging = false;
+                        root.drag-ended();
+                    }
+                }
+            }
+        }
+        
+        moved => {
+            if (self.pressed) {
+                if (!self.dragging && abs(self.mouse-y - self.start-y) > 5px) {
+                    self.dragging = true;
+                    root.drag-started(root.index);
+                }
+                
+                if (self.dragging) {
+                    // Send total Y offset relative to start of list
+                    root.drag-moved(root.index * 30px + self.mouse-y);
+                }
+            }
+        }
+    }
+}
+
 component PlayerButton inherits Rectangle {
     width: 32px;
     height: 32px;
@@ -249,19 +346,17 @@ export component AppWindow inherits Window {
                             duration: 150ms;
                             easing: ease-out;
                         }
-                        animate height { duration: 80ms; }
-                        animate y { duration: 80ms; }
                     }
                     
                     // Focus highlighting when hovering
                     states [
-                        hover when ta.has-hover || ta.pressed: {
+                        hover when ta-seek.has-hover || ta-seek.pressed: {
                             handle.background: #ffffff;
                         }
                     ]
                     
                     // Simple touch area for seeking
-                    ta := TouchArea {
+                    ta-seek := TouchArea {
                         width: parent.width;
                         height: parent.height + 10px; // Make touch area slightly larger
                         mouse-cursor: pointer;
@@ -290,20 +385,64 @@ export component AppWindow inherits Window {
         }
         
         // Main content: Playlist 
-        playlist-view := StandardTableView {
-            current-row: playing_track_index;
-            columns: [
-                { title: "Playing", width: 200px },
-                { title: "Title", width: 250px },
-                { title: "Artist", width: 250px },
-                { title: "Album", width: 250px },
-            ];
-            rows: track_model;
-            horizontal-stretch: 1;
+        Rectangle {
             vertical-stretch: 1;
-            row-pointer-event(int, PointerEvent, Point) => {
-                root.playlist_item_click(int, PointerEvent, Point);
-                key-handler.focus();
+            background: #282828;
+            
+            VerticalLayout {
+                // Header
+                Rectangle {
+                    height: 25px;
+                    background: #202020;
+                    HorizontalLayout {
+                        padding-left: 8px;
+                        padding-right: 8px;
+                        spacing: 10px;
+                        Text { text: ""; width: 40px; }
+                        Text { text: "Title"; color: #888; font-size: 12px; horizontal-stretch: 1; }
+                        Text { text: "Artist"; color: #888; font-size: 12px; width: 200px; }
+                        Text { text: "Album"; color: #888; font-size: 12px; width: 200px; }
+                    }
+                }
+                
+                flick := Flickable {
+                    interactive: root.drag-index == -1;
+                    viewport-height: root.track_model.length * 30px;
+                    
+                    VerticalLayout {
+                        alignment: start;
+                        for track[i] in root.track_model : TrackRow {
+                            index: i;
+                            data: track;
+                            is-playing: root.playing_track_index == i;
+                            is-selected: root.selected_track_index == i;
+                            is-dragging: root.drag-index == i;
+                            is-drop-target: root.drop-index == i;
+                            
+                            clicked(event) => {
+                                root.playlist_item_click(i, event, {x: 0, y: 0});
+                                key-handler.focus();
+                            }
+                            
+                            drag-started(idx) => {
+                                root.drag-index = idx;
+                            }
+                            
+                            drag-moved(y-offset) => {
+                                // y-offset is relative to start of list
+                                root.drop-index = max(0, min(root.track_model.length - 1, floor(y-offset / 30px)));
+                            }
+                            
+                            drag-ended() => {
+                                if (root.drop-index != -1 && root.drop-index != root.drag-index) {
+                                    root.reorder_tracks(root.drag-index, root.drop-index);
+                                }
+                                root.drag-index = -1;
+                                root.drop-index = -1;
+                            }
+                        }
+                    }
+                }
             }
         }
         
@@ -347,6 +486,10 @@ export component AppWindow inherits Window {
     in-out property <int> selected_track_index: -1;
     in-out property <int> playing_track_index: -1;
     
+    // Drag and drop state
+    property <int> drag-index: -1;
+    property <int> drop-index: -1;
+    
     // Seek bar properties
     in-out property <float> current-position: 0.0; // in seconds
     in-out property <float> total-duration: 0.0; // in seconds
@@ -368,4 +511,5 @@ export component AppWindow inherits Window {
     callback toggle_repeat();
     callback seek-to(float); // Position between 0.0 and 1.0
     callback delete_track(int);
+    callback reorder_tracks(int, int); // from, to
 }

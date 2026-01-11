@@ -42,6 +42,10 @@ pub enum PlaylistMessage {
         selected_index: usize,
         is_playing: bool,
     },
+    ReorderTrack {
+        from: usize,
+        to: usize,
+    },
 }
 
 #[derive(Debug, Clone)]
@@ -62,8 +66,6 @@ pub enum AudioPacket {
     },
     Samples {
         samples: Vec<f32>,
-        sample_rate: u32,
-        channels: u16,
     },
     TrackFooter {
         id: String,
@@ -82,9 +84,8 @@ pub struct TrackIdentifier {
 pub enum AudioMessage {
     DecodeTracks(Vec<TrackIdentifier>),
     StopDecoding,
-    AudioPacket(AudioPacket),
     TrackCached(String),
-    TrackEvictedFromCache(String),
+    AudioPacket(AudioPacket),
 }
 
 #[derive(Debug, Clone)]

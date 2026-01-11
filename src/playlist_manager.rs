@@ -228,13 +228,28 @@ impl PlaylistManager {
                             self.playlist.set_selected_track(index);
                         }
                     }
+                    protocol::Message::Playlist(protocol::PlaylistMessage::ReorderTrack {
+                        from,
+                        to,
+                    }) => {
+                        debug!("PlaylistManager: Reordering track from {} to {}", from, to);
+                        self.playlist.move_track(from, to);
+
+                        // Notify other components about the index shift
+                        let _ = self.bus_producer.send(protocol::Message::Playlist(
+                            protocol::PlaylistMessage::PlaylistIndicesChanged {
+                                playing_index: self.playlist.get_playing_track_index(),
+                                selected_index: self.playlist.get_selected_track_index(),
+                                is_playing: self.playlist.is_playing(),
+                            },
+                        ));
+
+                        // Re-cache to ensure next tracks are correct
+                        self.cache_tracks(false);
+                    }
                     protocol::Message::Audio(protocol::AudioMessage::TrackCached(id)) => {
                         debug!("PlaylistManager: Received TrackCached: {}", id);
                         self.cached_track_ids.insert(id);
-                    }
-                    protocol::Message::Audio(protocol::AudioMessage::TrackEvictedFromCache(id)) => {
-                        debug!("PlaylistManager: Received TrackEvictedFromCache: {}", id);
-                        self.cached_track_ids.remove(&id);
                     }
                     protocol::Message::Playlist(
                         protocol::PlaylistMessage::ChangePlaybackOrder(order),
