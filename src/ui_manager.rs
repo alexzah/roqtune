@@ -205,6 +205,24 @@ impl UiManager {
                             ui.set_playing_track_index(index as i32);
                         });
                     }
+                    protocol::Message::Playback(protocol::PlaybackMessage::Play) => {
+                        let _ = self.ui.upgrade_in_event_loop(move |ui| {
+                            let playing_index = ui.get_playing_track_index();
+                            if playing_index >= 0 {
+                                let track_model_strong = ui.get_track_model();
+                                let track_model = track_model_strong
+                                    .as_any()
+                                    .downcast_ref::<VecModel<ModelRc<StandardListViewItem>>>()
+                                    .expect("We know we set a VecModel earlier");
+                                if (playing_index as usize) < track_model.row_count() {
+                                    if let Some(item) = track_model.row_data(playing_index as usize)
+                                    {
+                                        item.set_row_data(0, StandardListViewItem::from("▶️"));
+                                    }
+                                }
+                            }
+                        });
+                    }
                     protocol::Message::Playback(protocol::PlaybackMessage::Stop) => {
                         let _ = self.ui.upgrade_in_event_loop(move |ui| {
                             let track_model_strong = ui.get_track_model();
@@ -223,6 +241,25 @@ impl UiManager {
                                 }
                             }
                             ui.set_playing_track_index(-1);
+                        });
+                    }
+                    protocol::Message::Playback(protocol::PlaybackMessage::Pause) => {
+                        let _ = self.ui.upgrade_in_event_loop(move |ui| {
+                            let track_model_strong = ui.get_track_model();
+                            let track_model = track_model_strong
+                                .as_any()
+                                .downcast_ref::<VecModel<ModelRc<StandardListViewItem>>>()
+                                .expect("We know we set a VecModel earlier");
+
+                            for i in 0..track_model.row_count() {
+                                if let Some(item) = track_model.row_data(i) {
+                                    if let Some(first_col) = item.row_data(0) {
+                                        if !first_col.text.is_empty() {
+                                            item.set_row_data(0, StandardListViewItem::from(""));
+                                        }
+                                    }
+                                }
+                            }
                         });
                     }
                     protocol::Message::Playlist(protocol::PlaylistMessage::TrackStarted(index)) => {

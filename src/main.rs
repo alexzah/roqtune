@@ -144,8 +144,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let bus_sender_clone = bus_sender.clone();
     ui.on_pause(move || {
         debug!("Pause button clicked");
-        let _ = bus_sender_clone.send(Message::Playback(PlaybackMessage::Stop));
-        // Pause is just Stop for now
+        let _ = bus_sender_clone.send(Message::Playback(PlaybackMessage::Pause));
     });
 
     // Handle playlist item clicks

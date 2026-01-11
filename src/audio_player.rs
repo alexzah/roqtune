@@ -275,12 +275,6 @@ impl AudioPlayer {
                     } else {
                         debug!("No audio stream available to play");
                     }
-
-                    self.bus_sender
-                        .send(Message::Playback(PlaybackMessage::ReadyForPlayback(
-                            id.clone(),
-                        )))
-                        .unwrap();
                 }
             }
             AudioPacket::TrackFooter { id } => {
@@ -306,9 +300,15 @@ impl AudioPlayer {
                     .send(Message::Audio(AudioMessage::TrackCached(id.clone())))
                     .unwrap();
 
-                self.bus_sender
-                    .send(Message::Playback(PlaybackMessage::ReadyForPlayback(id)))
-                    .unwrap();
+                // Only send ReadyForPlayback if we're NOT already playing this track
+                // This prevents redundant PlayTrackById messages from the manager
+                let already_playing =
+                    self.current_track_id == id && self.is_playing.load(Ordering::Relaxed);
+                if !already_playing {
+                    self.bus_sender
+                        .send(Message::Playback(PlaybackMessage::ReadyForPlayback(id)))
+                        .unwrap();
+                }
             }
         }
     }
@@ -406,110 +406,94 @@ impl AudioPlayer {
     pub fn run(&mut self) {
         loop {
             match self.bus_receiver.blocking_recv() {
-                Ok(message) => {
-                    match message {
-                        Message::Audio(AudioMessage::AudioPacket(buffer)) => {
-                            trace!("AudioPlayer: Received {:?} samples", buffer);
-                            self.load_samples(buffer);
-                        }
-                        Message::Playback(PlaybackMessage::Play) => {
-                            if let Some(stream) = &self.stream {
-                                if let Err(e) = stream.play() {
-                                    error!("AudioPlayer: Failed to start playback: {}", e);
-                                } else {
-                                    self.is_playing.store(true, Ordering::Relaxed);
-                                    debug!("AudioPlayer: Playback started");
-                                }
-                            } else {
-                                debug!("No audio stream available to play");
-                            }
-                        }
-                        Message::Playback(PlaybackMessage::PlayTrackByIndex(_)) => {
-                            if let Some(stream) = &self.stream {
-                                if let Err(e) = stream.play() {
-                                    error!("AudioPlayer: Failed to start playback: {}", e);
-                                } else {
-                                    self.is_playing.store(true, Ordering::Relaxed);
-                                    debug!("AudioPlayer: Playback started");
-                                }
-                            } else {
-                                debug!("No audio stream available to play");
-                            }
-                        }
-                        Message::Playback(PlaybackMessage::PlayTrackById(id)) => {
-                            if self.current_track_id == id
-                                && self.is_playing.load(Ordering::Relaxed)
-                            {
-                                debug!("AudioPlayer: Already playing track {}, ignoring redundant PlayTrackById", id);
-                                continue;
-                            }
-                            self.current_track_id = id.clone();
-                            let start_index = self
-                                .cached_track_indices
-                                .lock()
-                                .unwrap()
-                                .get(&id)
-                                .map(|idx| idx.start);
-
-                            if let Some(current_track_index) = start_index {
-                                self.current_track_position
-                                    .store(current_track_index, Ordering::Relaxed);
-                                if let Some(stream) = &self.stream {
-                                    if let Err(e) = stream.play() {
-                                        error!("AudioPlayer: Failed to start playback: {}", e);
-                                    } else {
-                                        self.is_playing.store(true, Ordering::Relaxed);
-                                        debug!("AudioPlayer: Playback started");
-                                    }
-                                } else {
-                                    debug!("No audio stream available to play");
-                                }
-                            } else {
-                                error!(
-                                    "AudioPlayer: Attempted to play track {} but it's not in cache",
-                                    id
-                                );
-                            }
-                        }
-                        Message::Playback(PlaybackMessage::Stop) => {
-                            if let Some(stream) = &self.stream {
-                                let _ = stream.pause();
-                                self.is_playing.store(false, Ordering::Relaxed);
-                            }
-                        }
-                        Message::Playback(PlaybackMessage::Next) => {
-                            // Handled by PlaylistManager
-                        }
-                        Message::Playback(PlaybackMessage::Previous) => {
-                            // Handled by PlaylistManager
-                        }
-                        Message::Playback(PlaybackMessage::ClearPlayerCache) => {
-                            debug!("AudioPlayer: Clearing cache");
-                            self.sample_queue.lock().unwrap().clear();
-                            self.cached_track_indices.lock().unwrap().clear();
-                            self.current_track_position.store(0, Ordering::Relaxed);
-                            self.create_stream();
-
-                            debug!("AudioPlayer: Cache cleared");
-                        }
-                        Message::Playback(PlaybackMessage::TrackStarted(id)) => {
-                            debug!("AudioPlayer: Received track started command: {}", id);
-                            self.current_track_id = id.clone();
-                        }
-                        Message::Playback(PlaybackMessage::TrackFinished(id)) => {
-                            debug!("AudioPlayer: Received track finished command: {}", id);
-                        }
-                        Message::Config(ConfigMessage::ConfigChanged(config)) => {
-                            debug!("AudioPlayer: Received config changed command: {:?}", config);
-                            self.target_channels = config.output.channel_count;
-                            self.target_sample_rate = config.output.sample_rate_khz;
-                            self.target_bits_per_sample = config.output.bits_per_sample;
-                            self.setup_audio_device();
-                            self.create_stream();
-                        }
-                        _ => {} // Ignore other messages
+                Ok(message) => match message {
+                    Message::Audio(AudioMessage::AudioPacket(buffer)) => {
+                        trace!("AudioPlayer: Received {:?} samples", buffer);
+                        self.load_samples(buffer);
                     }
-                }
+                    Message::Playback(PlaybackMessage::Play) => {
+                        if let Some(stream) = &self.stream {
+                            if let Err(e) = stream.play() {
+                                error!("AudioPlayer: Failed to start playback: {}", e);
+                            } else {
+                                self.is_playing.store(true, Ordering::Relaxed);
+                                debug!("AudioPlayer: Playback started");
+                            }
+                        } else {
+                            debug!("No audio stream available to play");
+                        }
+                    }
+                    Message::Playback(PlaybackMessage::Pause) => {
+                        if let Some(stream) = &self.stream {
+                            let _ = stream.pause();
+                            self.is_playing.store(false, Ordering::Relaxed);
+                            debug!("AudioPlayer: Playback paused");
+                        }
+                    }
+                    Message::Playback(PlaybackMessage::Stop) => {
+                        if let Some(stream) = &self.stream {
+                            let _ = stream.pause();
+                            self.is_playing.store(false, Ordering::Relaxed);
+                            debug!("AudioPlayer: Playback stopped");
+                        }
+                    }
+                    Message::Playback(PlaybackMessage::PlayTrackByIndex(_)) => {
+                        // Handled by PlaylistManager which sends PlayTrackById
+                    }
+                    Message::Playback(PlaybackMessage::PlayTrackById(id)) => {
+                        self.current_track_id = id.clone();
+                        let start_index = self
+                            .cached_track_indices
+                            .lock()
+                            .unwrap()
+                            .get(&id)
+                            .map(|idx| idx.start);
+
+                        if let Some(current_track_index) = start_index {
+                            self.current_track_position
+                                .store(current_track_index, Ordering::Relaxed);
+                            if let Some(stream) = &self.stream {
+                                if let Err(e) = stream.play() {
+                                    error!("AudioPlayer: Failed to start playback: {}", e);
+                                } else {
+                                    self.is_playing.store(true, Ordering::Relaxed);
+                                    debug!("AudioPlayer: Playback started (manual)");
+                                }
+                            } else {
+                                debug!("No audio stream available to play");
+                            }
+                        } else {
+                            error!(
+                                "AudioPlayer: Attempted to play track {} but it's not in cache",
+                                id
+                            );
+                        }
+                    }
+                    Message::Playback(PlaybackMessage::ClearPlayerCache) => {
+                        debug!("AudioPlayer: Clearing cache");
+                        self.sample_queue.lock().unwrap().clear();
+                        self.cached_track_indices.lock().unwrap().clear();
+                        self.current_track_position.store(0, Ordering::Relaxed);
+                        self.create_stream();
+                        debug!("AudioPlayer: Cache cleared");
+                    }
+                    Message::Playback(PlaybackMessage::TrackStarted(id)) => {
+                        debug!("AudioPlayer: Received track started command: {}", id);
+                        self.current_track_id = id.clone();
+                    }
+                    Message::Playback(PlaybackMessage::TrackFinished(id)) => {
+                        debug!("AudioPlayer: Received track finished command: {}", id);
+                    }
+                    Message::Config(ConfigMessage::ConfigChanged(config)) => {
+                        debug!("AudioPlayer: Received config changed command: {:?}", config);
+                        self.target_channels = config.output.channel_count;
+                        self.target_sample_rate = config.output.sample_rate_khz;
+                        self.target_bits_per_sample = config.output.bits_per_sample;
+                        self.setup_audio_device();
+                        self.create_stream();
+                    }
+                    _ => {} // Ignore other messages
+                },
                 Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
                     // Ignore lag as we've increased the bus capacity
                 }

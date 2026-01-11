@@ -71,8 +71,16 @@ impl PlaylistManager {
                     }
                     protocol::Message::Playback(protocol::PlaybackMessage::Play) => {
                         debug!("PlaylistManager: Received play command");
-                        self.playlist.force_re_randomize_shuffle();
-                        self.play_selected_track();
+                        if !self.playlist.is_playing()
+                            && self.playlist.get_playing_track_index()
+                                == Some(self.playlist.get_selected_track_index())
+                        {
+                            debug!("PlaylistManager: Resuming playback");
+                            self.playlist.set_playing(true);
+                        } else {
+                            self.playlist.force_re_randomize_shuffle();
+                            self.play_selected_track();
+                        }
                     }
                     protocol::Message::Playback(protocol::PlaybackMessage::PlayTrackByIndex(
                         index,
@@ -88,6 +96,10 @@ impl PlaylistManager {
                         self.playlist.set_playing_track_index(None);
                         self.clear_cached_tracks();
                         self.cache_tracks(false);
+                    }
+                    protocol::Message::Playback(protocol::PlaybackMessage::Pause) => {
+                        debug!("PlaylistManager: Received pause command");
+                        self.playlist.set_playing(false);
                     }
                     protocol::Message::Playback(protocol::PlaybackMessage::Next) => {
                         debug!("PlaylistManager: Received next command");
