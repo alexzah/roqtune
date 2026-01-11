@@ -6,7 +6,7 @@ build = "build.rs"
 
 [dependencies]
 slint = "1.10.0" # UI framework
-rfd = "0.15.2"   # For file dialogs
+rfd = "0.17.1"   # For file dialogs
 id3 = "1.16.2" # Metadata tags
 ape = "0.6.0" # Metadata tags
 metaflac = "0.2.8" # Metadata tags
