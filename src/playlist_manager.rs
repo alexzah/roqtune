@@ -42,6 +42,10 @@ impl PlaylistManager {
         self.playlist
             .set_playing_track_index(Some(self.playlist.get_selected_track_index()));
         self.playlist.force_re_randomize_shuffle();
+
+        // Notify other components about the selection and playing change
+        self.broadcast_playlist_changed();
+
         if !self.cached_track_ids.contains(
             &self
                 .playlist
@@ -101,6 +105,9 @@ impl PlaylistManager {
                         self.playlist.set_playing_track_index(None);
                         self.clear_cached_tracks();
                         self.cache_tracks(false);
+
+                        // Notify other components about the selection and playing change
+                        self.broadcast_playlist_changed();
                     }
                     protocol::Message::Playback(protocol::PlaybackMessage::Pause) => {
                         debug!("PlaylistManager: Received pause command");
@@ -163,6 +170,9 @@ impl PlaylistManager {
                                 ));
                             }
 
+                            // Notify other components about the selection and playing change
+                            self.broadcast_playlist_changed();
+
                             let _ = self.bus_producer.send(protocol::Message::Playlist(
                                 protocol::PlaylistMessage::TrackFinished,
                             ));
@@ -218,15 +228,7 @@ impl PlaylistManager {
                             self.playlist.delete_track(index);
 
                             // Notify other components about the index shift
-                            let _ = self.bus_producer.send(protocol::Message::Playlist(
-                                protocol::PlaylistMessage::PlaylistIndicesChanged {
-                                    playing_index: self.playlist.get_playing_track_index(),
-                                    selected_indices: self.playlist.get_selected_indices(),
-                                    is_playing: self.playlist.is_playing(),
-                                    repeat_on: self.playlist.get_repeat_mode()
-                                        == crate::playlist::RepeatMode::On,
-                                },
-                            ));
+                            self.broadcast_playlist_changed();
                         }
                     }
                     protocol::Message::Playlist(protocol::PlaylistMessage::SelectTrackMulti {
@@ -241,30 +243,14 @@ impl PlaylistManager {
                         self.playlist.select_track_multi(index, ctrl, shift);
 
                         // Notify other components about the selection change
-                        let _ = self.bus_producer.send(protocol::Message::Playlist(
-                            protocol::PlaylistMessage::PlaylistIndicesChanged {
-                                playing_index: self.playlist.get_playing_track_index(),
-                                selected_indices: self.playlist.get_selected_indices(),
-                                is_playing: self.playlist.is_playing(),
-                                repeat_on: self.playlist.get_repeat_mode()
-                                    == crate::playlist::RepeatMode::On,
-                            },
-                        ));
+                        self.broadcast_playlist_changed();
                     }
                     protocol::Message::Playlist(protocol::PlaylistMessage::DeselectAll) => {
                         debug!("PlaylistManager: Received deselect all command");
                         self.playlist.deselect_all();
 
                         // Notify other components about the selection change
-                        let _ = self.bus_producer.send(protocol::Message::Playlist(
-                            protocol::PlaylistMessage::PlaylistIndicesChanged {
-                                playing_index: self.playlist.get_playing_track_index(),
-                                selected_indices: self.playlist.get_selected_indices(),
-                                is_playing: self.playlist.is_playing(),
-                                repeat_on: self.playlist.get_repeat_mode()
-                                    == crate::playlist::RepeatMode::On,
-                            },
-                        ));
+                        self.broadcast_playlist_changed();
                     }
                     protocol::Message::Playlist(protocol::PlaylistMessage::ReorderTracks {
                         indices,
@@ -274,15 +260,7 @@ impl PlaylistManager {
                         self.playlist.move_tracks(indices, to);
 
                         // Notify other components about the index shift
-                        let _ = self.bus_producer.send(protocol::Message::Playlist(
-                            protocol::PlaylistMessage::PlaylistIndicesChanged {
-                                playing_index: self.playlist.get_playing_track_index(),
-                                selected_indices: self.playlist.get_selected_indices(),
-                                is_playing: self.playlist.is_playing(),
-                                repeat_on: self.playlist.get_repeat_mode()
-                                    == crate::playlist::RepeatMode::On,
-                            },
-                        ));
+                        self.broadcast_playlist_changed();
 
                         // Re-cache to ensure next tracks are correct
                         self.cache_tracks(false);
@@ -417,6 +395,17 @@ impl PlaylistManager {
     fn stop_decoding(&mut self) {
         let _ = self.bus_producer.send(protocol::Message::Audio(
             protocol::AudioMessage::StopDecoding,
+        ));
+    }
+
+    fn broadcast_playlist_changed(&self) {
+        let _ = self.bus_producer.send(protocol::Message::Playlist(
+            protocol::PlaylistMessage::PlaylistIndicesChanged {
+                playing_index: self.playlist.get_playing_track_index(),
+                selected_indices: self.playlist.get_selected_indices(),
+                is_playing: self.playlist.is_playing(),
+                repeat_on: self.playlist.get_repeat_mode() == crate::playlist::RepeatMode::On,
+            },
         ));
     }
 }

@@ -250,9 +250,6 @@ impl UiManager {
                     protocol::Message::Playback(protocol::PlaybackMessage::PlayTrackByIndex(
                         index,
                     )) => {
-                        if let Some(path) = self.track_paths.get(index) {
-                            self.update_cover_art(Some(path));
-                        }
                         let _ = self.ui.upgrade_in_event_loop(move |ui| {
                             let track_model_strong = ui.get_track_model();
                             let track_model = track_model_strong
@@ -378,7 +375,6 @@ impl UiManager {
                         });
                     }
                     protocol::Message::Playback(protocol::PlaybackMessage::Stop) => {
-                        self.update_cover_art(None);
                         let _ = self.ui.upgrade_in_event_loop(move |ui| {
                             ui.set_technical_info("".into());
                             ui.set_time_info("".into());
@@ -406,9 +402,6 @@ impl UiManager {
                         });
                     }
                     protocol::Message::Playlist(protocol::PlaylistMessage::TrackStarted(index)) => {
-                        if let Some(path) = self.track_paths.get(index) {
-                            self.update_cover_art(Some(path));
-                        }
                         let _ = self.ui.upgrade_in_event_loop(move |ui| {
                             let track_model_strong = ui.get_track_model();
                             let track_model = track_model_strong
@@ -450,6 +443,22 @@ impl UiManager {
                         },
                     ) => {
                         let selected_indices_clone = selected_indices.clone();
+
+                        // Priority: 1. First selected track, 2. Playing track, 3. None
+                        let display_index = if !selected_indices.is_empty() {
+                            Some(selected_indices[0])
+                        } else {
+                            playing_index
+                        };
+
+                        if let Some(idx) = display_index {
+                            if let Some(path) = self.track_paths.get(idx) {
+                                self.update_cover_art(Some(path));
+                            }
+                        } else {
+                            self.update_cover_art(None);
+                        }
+
                         let _ = self.ui.upgrade_in_event_loop(move |ui| {
                             ui.set_playing_track_index(
                                 playing_index.map(|i| i as i32).unwrap_or(-1),
