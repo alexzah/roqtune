@@ -409,10 +409,9 @@ export component AppWindow inherits Window {
                 
                 flick := Flickable {
                     interactive: root.drag-index == -1;
-                    viewport-height: root.track_model.length * 30px;
+                    viewport-height: max(self.height, root.track_model.length * 30px);
                     
                     VerticalLayout {
-                        alignment: start;
                         for track[i] in root.track_model : TrackRow {
                             index: i;
                             data: track;
@@ -453,6 +452,17 @@ export component AppWindow inherits Window {
                                 }
                                 root.drag-index = -1;
                                 root.drop-index = -1;
+                            }
+                        }
+
+                        // Filler to capture clicks on empty space
+                        Rectangle {
+                            vertical-stretch: 1;
+                            TouchArea {
+                                clicked => {
+                                    root.deselect_all();
+                                    key-handler.focus();
+                                }
                             }
                         }
                     }
@@ -549,4 +559,5 @@ export component AppWindow inherits Window {
     callback seek-to(float); // Position between 0.0 and 1.0
     callback delete_track(int);
     callback reorder_tracks([int], int); // indices, to
+    callback deselect_all();
 }

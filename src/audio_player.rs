@@ -1,4 +1,6 @@
-use crate::protocol::{AudioMessage, AudioPacket, ConfigMessage, Message, PlaybackMessage, TrackStarted};
+use crate::protocol::{
+    AudioMessage, AudioPacket, ConfigMessage, Message, PlaybackMessage, TrackStarted,
+};
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use log::{debug, error};
 use std::{
@@ -115,11 +117,7 @@ impl AudioPlayer {
                         .map(|i| i.start)
                         .unwrap_or(0);
 
-                    let elapsed_samples = if current_pos > start_pos {
-                        current_pos - start_pos
-                    } else {
-                        0
-                    };
+                    let elapsed_samples = current_pos.saturating_sub(start_pos);
                     if sample_rate > 0 && channels > 0 {
                         let elapsed_ms = offset_ms
                             + (elapsed_samples as f64 * 1000.0
@@ -239,7 +237,10 @@ impl AudioPlayer {
                                 input_current_position += 1;
                                 *s
                             }
-                            AudioSample::TrackHeader(TrackHeader { id, start_offset_ms }) => {
+                            AudioSample::TrackHeader(TrackHeader {
+                                id,
+                                start_offset_ms,
+                            }) => {
                                 let _ = bus_sender_clone.send(Message::Playback(
                                     PlaybackMessage::TrackStarted(TrackStarted {
                                         id: id.clone(),
@@ -295,7 +296,10 @@ impl AudioPlayer {
                 start_offset_ms,
             } => {
                 let mut queue = self.sample_queue.lock().unwrap();
-                queue.push_back(AudioSample::TrackHeader(TrackHeader{id: id.clone(), start_offset_ms: start_offset_ms}));
+                queue.push_back(AudioSample::TrackHeader(TrackHeader {
+                    id: id.clone(),
+                    start_offset_ms,
+                }));
                 let start_index = queue.len() - 1;
                 drop(queue);
 
@@ -375,8 +379,7 @@ impl AudioPlayer {
                                 Some(info.technical_metadata.clone());
                             self.current_track_position
                                 .store(info.start, Ordering::Relaxed);
-                            self.current_track_offset_ms
-                                .store(0, Ordering::Relaxed);
+                            self.current_track_offset_ms.store(0, Ordering::Relaxed);
                             self.is_playing.store(true, Ordering::Relaxed);
                             debug!("AudioPlayer: Playback started (manual)");
                             let _ = self.bus_sender.send(Message::Playback(
@@ -407,14 +410,24 @@ impl AudioPlayer {
                     Message::Playback(PlaybackMessage::TrackStarted(track_started)) => {
                         debug!("AudioPlayer: Track started: {}", track_started.id);
                         // Handle the case when a track automatically starts playing (not caused by a user action)
-                        self.current_track_id.lock().unwrap().clone_from(&track_started.id);
-                        self.current_track_offset_ms.store(track_started.start_offset_ms as usize, Ordering::Relaxed);
-                        let track_info =
-                            self.cached_track_indices.lock().unwrap().get(&track_started.id).cloned();
+                        self.current_track_id
+                            .lock()
+                            .unwrap()
+                            .clone_from(&track_started.id);
+                        self.current_track_offset_ms
+                            .store(track_started.start_offset_ms as usize, Ordering::Relaxed);
+                        let track_info = self
+                            .cached_track_indices
+                            .lock()
+                            .unwrap()
+                            .get(&track_started.id)
+                            .cloned();
                         if let Some(info) = track_info {
                             let _ = self.bus_sender.send(Message::Playback(
-                                    PlaybackMessage::TechnicalMetadataChanged(info.technical_metadata.clone()),
-                                ));
+                                PlaybackMessage::TechnicalMetadataChanged(
+                                    info.technical_metadata.clone(),
+                                ),
+                            ));
                             *self.current_metadata.lock().unwrap() = Some(info.technical_metadata);
                         }
                     }

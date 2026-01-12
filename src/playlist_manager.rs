@@ -27,7 +27,7 @@ impl PlaylistManager {
         bus_producer: Sender<protocol::Message>,
     ) -> Self {
         Self {
-            playlist: playlist,
+            playlist,
             bus_consumer,
             bus_producer,
             cached_track_ids: HashSet::new(),
@@ -70,7 +70,7 @@ impl PlaylistManager {
                     protocol::Message::Playlist(protocol::PlaylistMessage::LoadTrack(path)) => {
                         debug!("PlaylistManager: Loading track {:?}", path);
                         self.playlist.add_track(Track {
-                            path: path,
+                            path,
                             id: Uuid::new_v4().to_string(),
                         });
                     }
@@ -168,8 +168,13 @@ impl PlaylistManager {
                             ));
                         }
                     }
-                    protocol::Message::Playback(protocol::PlaybackMessage::TrackStarted(track_started)) => {
-                        debug!("PlaylistManager: Received track started command: {}", track_started.id);
+                    protocol::Message::Playback(protocol::PlaybackMessage::TrackStarted(
+                        track_started,
+                    )) => {
+                        debug!(
+                            "PlaylistManager: Received track started command: {}",
+                            track_started.id
+                        );
                         self.last_seek_ms = u64::MAX;
                         if let Some(playing_idx) = self.playlist.get_playing_track_index() {
                             let _ = self.bus_producer.send(protocol::Message::Playlist(
@@ -234,6 +239,21 @@ impl PlaylistManager {
                             index, ctrl, shift
                         );
                         self.playlist.select_track_multi(index, ctrl, shift);
+
+                        // Notify other components about the selection change
+                        let _ = self.bus_producer.send(protocol::Message::Playlist(
+                            protocol::PlaylistMessage::PlaylistIndicesChanged {
+                                playing_index: self.playlist.get_playing_track_index(),
+                                selected_indices: self.playlist.get_selected_indices(),
+                                is_playing: self.playlist.is_playing(),
+                                repeat_on: self.playlist.get_repeat_mode()
+                                    == crate::playlist::RepeatMode::On,
+                            },
+                        ));
+                    }
+                    protocol::Message::Playlist(protocol::PlaylistMessage::DeselectAll) => {
+                        debug!("PlaylistManager: Received deselect all command");
+                        self.playlist.deselect_all();
 
                         // Notify other components about the selection change
                         let _ = self.bus_producer.send(protocol::Message::Playlist(

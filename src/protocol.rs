@@ -53,6 +53,7 @@ pub enum PlaylistMessage {
         ctrl: bool,
         shift: bool,
     },
+    DeselectAll,
     ReorderTracks {
         indices: Vec<usize>,
         to: usize,

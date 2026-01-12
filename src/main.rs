@@ -136,17 +136,23 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     });
 
     let bus_sender_clone = bus_sender.clone();
+    ui.on_deselect_all(move || {
+        debug!("Deselect all requested");
+        let _ = bus_sender_clone.send(Message::Playlist(PlaylistMessage::DeselectAll));
+    });
+
+    let bus_sender_clone = bus_sender.clone();
     let ui_handle_clone = ui.as_weak().clone();
     ui.on_playlist_item_double_click(move |index| {
         debug!("Playlist item double-clicked: {}", index);
         let _ = bus_sender_clone.send(Message::Playback(PlaybackMessage::PlayTrackByIndex(
             index as usize,
         )));
-        let _ = ui_handle_clone
+        ui_handle_clone
             .upgrade()
             .unwrap()
             .set_selected_track_index(index);
-        let _ = ui_handle_clone
+        ui_handle_clone
             .upgrade()
             .unwrap()
             .set_playing_track_index(index);

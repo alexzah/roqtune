@@ -33,7 +33,7 @@ impl Playlist {
         let mut seed = [0u8; 32];
         getrandom::fill(&mut seed).expect("Failed to generate random seed");
 
-        return Playlist {
+        Playlist {
             tracks: Vec::new(),
             playing_track_index: None,
             selected_indices: Vec::new(),
@@ -43,7 +43,7 @@ impl Playlist {
             repeat_mode: RepeatMode::Off,
             shuffled_indices: Vec::new(),
             rng_seed: seed,
-        };
+        }
     }
 
     pub fn add_track(&mut self, track: Track) {
@@ -69,15 +69,15 @@ impl Playlist {
     }
 
     pub fn get_selected_indices(&self) -> Vec<usize> {
-        return self.selected_indices.clone();
+        self.selected_indices.clone()
     }
 
     pub fn get_selected_track_index(&self) -> usize {
-        return self.selected_indices.first().copied().unwrap_or(0);
+        self.selected_indices.first().copied().unwrap_or(0)
     }
 
     pub fn get_playing_track_index(&self) -> Option<usize> {
-        return self.playing_track_index;
+        self.playing_track_index
     }
 
     pub fn set_playing_track_index(&mut self, index: Option<usize>) {
@@ -117,16 +117,21 @@ impl Playlist {
         self.selected_indices.dedup();
     }
 
+    pub fn deselect_all(&mut self) {
+        self.selected_indices.clear();
+        self.anchor_index = None;
+    }
+
     pub fn is_playing(&self) -> bool {
-        return self.is_playing;
+        self.is_playing
     }
 
     pub fn get_track(&self, index: usize) -> &Track {
-        return &self.tracks[index];
+        &self.tracks[index]
     }
 
     pub fn num_tracks(&self) -> usize {
-        return self.tracks.len();
+        self.tracks.len()
     }
 
     pub fn delete_track(&mut self, index: usize) {
@@ -183,7 +188,7 @@ impl Playlist {
     }
 
     pub fn get_track_id(&self, index: usize) -> String {
-        return self.tracks[index].id.clone();
+        self.tracks[index].id.clone()
     }
 
     pub fn move_tracks(&mut self, mut indices: Vec<usize>, to: usize) {

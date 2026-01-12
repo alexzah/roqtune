@@ -31,7 +31,7 @@ impl UiManager {
     ) -> Self {
         Self {
             ui: ui.clone(),
-            bus_receiver: bus_receiver,
+            bus_receiver,
         }
     }
 
@@ -39,66 +39,57 @@ impl UiManager {
         debug!("Reading metadata for: {}", path.display());
 
         // Try ID3 tags first
-        match Tag::read_from_path(path) {
-            Ok(tag) => {
-                let title = tag.title().unwrap_or("");
-                let artist = tag.artist().unwrap_or("");
-                let album = tag.album().unwrap_or("");
+        if let Ok(tag) = Tag::read_from_path(path) {
+            let title = tag.title().unwrap_or("");
+            let artist = tag.artist().unwrap_or("");
+            let album = tag.album().unwrap_or("");
 
-                if !title.is_empty() || !artist.is_empty() || !album.is_empty() {
-                    return TrackMetadata {
-                        title: title.to_string(),
-                        artist: artist.to_string(),
-                        album: album.to_string(),
-                    };
-                }
+            if !title.is_empty() || !artist.is_empty() || !album.is_empty() {
+                return TrackMetadata {
+                    title: title.to_string(),
+                    artist: artist.to_string(),
+                    album: album.to_string(),
+                };
             }
-            Err(_) => {}
         }
 
         // Fall back to APE tags
-        match ape::read_from_path(path) {
-            Ok(ape_tag) => {
-                let title: &str = ape_tag.item("title").unwrap().try_into().unwrap_or("");
-                let artist: &str = ape_tag.item("artist").unwrap().try_into().unwrap_or("");
-                let album: &str = ape_tag.item("album").unwrap().try_into().unwrap_or("");
+        if let Ok(ape_tag) = ape::read_from_path(path) {
+            let title: &str = ape_tag.item("title").unwrap().try_into().unwrap_or("");
+            let artist: &str = ape_tag.item("artist").unwrap().try_into().unwrap_or("");
+            let album: &str = ape_tag.item("album").unwrap().try_into().unwrap_or("");
 
-                if !title.is_empty() || !artist.is_empty() || !album.is_empty() {
-                    return TrackMetadata {
-                        title: title.to_string(),
-                        artist: artist.to_string(),
-                        album: album.to_string(),
-                    };
-                }
+            if !title.is_empty() || !artist.is_empty() || !album.is_empty() {
+                return TrackMetadata {
+                    title: title.to_string(),
+                    artist: artist.to_string(),
+                    album: album.to_string(),
+                };
             }
-            Err(_) => {}
         }
 
         // Fall back to FLAC tags
-        match metaflac::Tag::read_from_path(path) {
-            Ok(flac_tag) => {
-                let title = flac_tag
-                    .get_vorbis("title")
-                    .and_then(|mut i| i.next())
-                    .unwrap_or("");
-                let artist = flac_tag
-                    .get_vorbis("artist")
-                    .and_then(|mut i| i.next())
-                    .unwrap_or("");
-                let album = flac_tag
-                    .get_vorbis("album")
-                    .and_then(|mut i| i.next())
-                    .unwrap_or("");
+        if let Ok(flac_tag) = metaflac::Tag::read_from_path(path) {
+            let title = flac_tag
+                .get_vorbis("title")
+                .and_then(|mut i| i.next())
+                .unwrap_or("");
+            let artist = flac_tag
+                .get_vorbis("artist")
+                .and_then(|mut i| i.next())
+                .unwrap_or("");
+            let album = flac_tag
+                .get_vorbis("album")
+                .and_then(|mut i| i.next())
+                .unwrap_or("");
 
-                if !title.is_empty() || !artist.is_empty() || !album.is_empty() {
-                    return TrackMetadata {
-                        title: title.to_string(),
-                        artist: artist.to_string(),
-                        album: album.to_string(),
-                    };
-                }
+            if !title.is_empty() || !artist.is_empty() || !album.is_empty() {
+                return TrackMetadata {
+                    title: title.to_string(),
+                    artist: artist.to_string(),
+                    album: album.to_string(),
+                };
             }
-            Err(_) => {}
         }
 
         // If no tags found, use filename as title
@@ -182,14 +173,9 @@ impl UiManager {
                                         item.set_row_data(0, StandardListViewItem::from("▶️"));
                                         title = item.row_data(1).unwrap().text.to_string();
                                         artist = item.row_data(2).unwrap().text.to_string();
-                                    } else {
-                                        if let Some(first_col) = item.row_data(0) {
-                                            if !first_col.text.is_empty() {
-                                                item.set_row_data(
-                                                    0,
-                                                    StandardListViewItem::from(""),
-                                                );
-                                            }
+                                    } else if let Some(first_col) = item.row_data(0) {
+                                        if !first_col.text.is_empty() {
+                                            item.set_row_data(0, StandardListViewItem::from(""));
                                         }
                                     }
                                 }
@@ -284,10 +270,7 @@ impl UiManager {
                     protocol::Message::Playback(
                         protocol::PlaybackMessage::TechnicalMetadataChanged(meta),
                     ) => {
-                        debug!(
-                            "UiManager: Technical metadata changed: {:?}",
-                            meta
-                        );
+                        debug!("UiManager: Technical metadata changed: {:?}", meta);
                         let _ = self.ui.upgrade_in_event_loop(move |ui| {
                             ui.set_technical_info(
                                 format!(
@@ -342,14 +325,9 @@ impl UiManager {
                                         item.set_row_data(0, StandardListViewItem::from("▶️"));
                                         title = item.row_data(1).unwrap().text.to_string();
                                         artist = item.row_data(2).unwrap().text.to_string();
-                                    } else {
-                                        if let Some(first_col) = item.row_data(0) {
-                                            if !first_col.text.is_empty() {
-                                                item.set_row_data(
-                                                    0,
-                                                    StandardListViewItem::from(""),
-                                                );
-                                            }
+                                    } else if let Some(first_col) = item.row_data(0) {
+                                        if !first_col.text.is_empty() {
+                                            item.set_row_data(0, StandardListViewItem::from(""));
                                         }
                                     }
                                 }
@@ -417,14 +395,9 @@ impl UiManager {
                                     if playing_index == Some(i) {
                                         let emoji = if is_playing { "▶️" } else { "⏸️" };
                                         item.set_row_data(0, StandardListViewItem::from(emoji));
-                                    } else {
-                                        if let Some(first_col) = item.row_data(0) {
-                                            if !first_col.text.is_empty() {
-                                                item.set_row_data(
-                                                    0,
-                                                    StandardListViewItem::from(""),
-                                                );
-                                            }
+                                    } else if let Some(first_col) = item.row_data(0) {
+                                        if !first_col.text.is_empty() {
+                                            item.set_row_data(0, StandardListViewItem::from(""));
                                         }
                                     }
                                 }

@@ -42,7 +42,7 @@ impl DecodeWorker {
     pub fn new(bus_sender: Sender<Message>, work_receiver: MpscReceiver<DecodeWorkItem>) -> Self {
         Self {
             bus_sender,
-            work_receiver: work_receiver,
+            work_receiver,
             work_queue: VecDeque::new(),
             resampler: None,
             resample_buffer: VecDeque::new(),
@@ -199,24 +199,20 @@ impl DecodeWorker {
                 let mut header = [0u8; 10];
                 use std::io::{Read, Seek, SeekFrom};
                 // Check ID3v2 at start
-                if let Ok(_) = file.read_exact(&mut header) {
-                    if &header[0..3] == b"ID3" {
-                        let size = ((header[6] as u32 & 0x7F) << 21)
-                            | ((header[7] as u32 & 0x7F) << 14)
-                            | ((header[8] as u32 & 0x7F) << 7)
-                            | (header[9] as u32 & 0x7F);
-                        total_size += (size + 10) as u64;
-                    }
+                if file.read_exact(&mut header).is_ok() && &header[0..3] == b"ID3" {
+                    let size = ((header[6] as u32 & 0x7F) << 21)
+                        | ((header[7] as u32 & 0x7F) << 14)
+                        | ((header[8] as u32 & 0x7F) << 7)
+                        | (header[9] as u32 & 0x7F);
+                    total_size += (size + 10) as u64;
                 }
 
                 // Check ID3v1 at end (128 bytes)
                 if file_size > 128 {
                     let _ = file.seek(SeekFrom::End(-128));
                     let mut id3v1 = [0u8; 3];
-                    if let Ok(_) = file.read_exact(&mut id3v1) {
-                        if &id3v1 == b"TAG" {
-                            total_size += 128;
-                        }
+                    if file.read_exact(&mut id3v1).is_ok() && &id3v1 == b"TAG" {
+                        total_size += 128;
                     }
                 }
             }
@@ -408,7 +404,7 @@ impl DecodeWorker {
         }
 
         // Flush resampler queue
-        while self.resample_buffer.len() > 0 {
+        while !self.resample_buffer.is_empty() {
             if !self.should_continue() {
                 debug!("DecodeWorker: Stopping");
                 return;
@@ -447,7 +443,7 @@ impl AudioDecoder {
         let mut audio_decoder = Self {
             bus_receiver,
             bus_sender,
-            worker_sender: worker_sender,
+            worker_sender,
         };
         audio_decoder.spawn_decode_worker(worker_receiver);
         audio_decoder
