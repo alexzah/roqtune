@@ -69,22 +69,29 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Setup file dialog
     ui.on_open_file(move || {
         debug!("Opening file dialog");
-        if let Some(path) = rfd::FileDialog::new()
+        if let Some(paths) = rfd::FileDialog::new()
             .add_filter("Audio Files", &["mp3", "wav", "ogg", "flac"])
-            .pick_file()
+            .pick_files()
         {
+            if let Some(first_path) = paths.first() {
+                ui_handle_clone
+                    .upgrade()
+                    .unwrap()
+                    .set_file_path(first_path.to_string_lossy().to_string().into());
+            }
+
+            let count = paths.len();
             ui_handle_clone
                 .upgrade()
                 .unwrap()
-                .set_file_path(path.to_string_lossy().to_string().into());
-            ui_handle_clone
-                .upgrade()
-                .unwrap()
-                .set_status("File selected".to_string().into());
-            debug!("Sending load track message");
-            let _ = bus_sender_clone.send(protocol::Message::Playlist(
-                protocol::PlaylistMessage::LoadTrack(path),
-            ));
+                .set_status(format!("{} files selected", count).into());
+
+            for path in paths {
+                debug!("Sending load track message for {:?}", path);
+                let _ = bus_sender_clone.send(protocol::Message::Playlist(
+                    protocol::PlaylistMessage::LoadTrack(path),
+                ));
+            }
         }
     });
 
