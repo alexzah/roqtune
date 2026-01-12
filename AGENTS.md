@@ -141,7 +141,6 @@ Adhere strictly to the following conventions to maintain codebase consistency.
 - Never commit anything to git. I will manage committing the work once I am satisfied with the quality
 - Make sure you fully understand all the components involved in your change. Each change usually involves touching several different components which run on separate threads and talk to each other over an event bus
 - Consider whether your change would affect flows that require complex orchestration of multiple components: track automatically advancing, skipping a track, seeking, etc.
-- Be smart about your inputs and outputs to keep them concise and conserve tokens
 
 ### When implementing features or fixing bugs:
 1.  **Analyze**: Understand the component interaction via the Event Bus (`protocol.rs`).
