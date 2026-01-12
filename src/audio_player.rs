@@ -297,6 +297,9 @@ impl AudioPlayer {
                     },
                 );
 
+                self.current_track_offset_ms
+                                .store(0, Ordering::Relaxed);
+
                 if play_immediately {
                     *self.current_track_id.lock().unwrap() = id.clone();
                     *self.current_metadata.lock().unwrap() = Some(technical_metadata.clone());
@@ -362,6 +365,8 @@ impl AudioPlayer {
                                 Some(info.technical_metadata.clone());
                             self.current_track_position
                                 .store(info.start, Ordering::Relaxed);
+                            self.current_track_offset_ms
+                                .store(0, Ordering::Relaxed);
                             self.is_playing.store(true, Ordering::Relaxed);
                             debug!("AudioPlayer: Playback started (manual)");
                             let _ = self.bus_sender.send(Message::Playback(
@@ -374,6 +379,8 @@ impl AudioPlayer {
                         self.sample_queue.lock().unwrap().clear();
                         self.cached_track_indices.lock().unwrap().clear();
                         self.current_track_position.store(0, Ordering::Relaxed);
+                        self.current_track_offset_ms
+                                .store(0, Ordering::Relaxed);
                         *self.current_metadata.lock().unwrap() = None;
                         debug!("AudioPlayer: Cache cleared");
                     }
