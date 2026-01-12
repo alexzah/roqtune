@@ -409,9 +409,12 @@ impl AudioPlayer {
                         self.current_track_offset_ms.store(track_started.start_offset_ms as usize, Ordering::Relaxed);
                         let track_info =
                             self.cached_track_indices.lock().unwrap().get(&track_started.id).cloned();
-                        let _ = self.bus_sender.send(Message::Playback(
-                                PlaybackMessage::TechnicalMetadataChanged(track_info.unwrap().technical_metadata),
-                            ));
+                        if let Some(info) = track_info {
+                            let _ = self.bus_sender.send(Message::Playback(
+                                    PlaybackMessage::TechnicalMetadataChanged(info.technical_metadata.clone()),
+                                ));
+                            *self.current_metadata.lock().unwrap() = Some(info.technical_metadata);
+                        }
                     }
                     _ => {}
                 },

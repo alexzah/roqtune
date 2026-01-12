@@ -251,15 +251,15 @@ impl UiManager {
                         elapsed_ms,
                         total_ms,
                     }) => {
-                        // debug!(
-                        //     "UiManager: Playback progress: {}/{} ms",
-                        //     elapsed_ms, total_ms
-                        // );
+                        debug!(
+                            "UiManager: Playback progress: {}/{} ms",
+                            elapsed_ms, total_ms
+                        );
                         let _ = self.ui.upgrade_in_event_loop(move |ui| {
                             let elapsed_secs = elapsed_ms / 1000;
-                            let total_secs = total_ms / 1000;
                             let elapsed_mins = elapsed_secs / 60;
                             let elapsed_rem_secs = elapsed_secs % 60;
+                            let total_secs = total_ms / 1000;
                             let total_mins = total_secs / 60;
                             let total_rem_secs = total_secs % 60;
 
