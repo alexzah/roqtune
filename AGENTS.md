@@ -3,9 +3,14 @@
 This document provides instructions and guidelines for AI agents and developers working on the Music Player project.
 It aims to ensure consistency, quality, and adherence to the project's architectural standards.
 
-## 1. Build, Lint, and Test Commands
+## 1. Project Overview
 
-The project uses standard Cargo commands. Ensure you run these checks before submitting changes.
+### Project Structure
+- This project is a fast, efficient, flexible, and powerful music player designed for desktop usage, akin to something like foobar2000 for the modern era. 
+- The project is written in Rust and uses the Slint framework for UI.
+- UI can be changed by editing the .slint files
+- The project uses the standard cargo package manager and build system.
+- The project uses standard Cargo commands. Ensure you run these checks before submitting changes.
 
 ### Build
 - **Debug Build**: `cargo build`
@@ -102,7 +107,7 @@ Adhere strictly to the following conventions to maintain codebase consistency.
 - **Concurrency**:
   - Use `tokio` for async operations where suitable.
   - Use `std::thread` for dedicated long-running background workers (decoder, player).
-  - **Communication**: Use `tokio::sync::broadcast` for messaging between components (Event Bus pattern).
+  - **Communication**: Use `tokio::sync::broadcast` for messaging between components (Event Bus pattern). Be sure to check protocol.rs to see if the current protocol messages are sufficient to pass along the data you need or if a schema change might be necessary
   - **Shared State**: Use `Arc<Mutex<T>>` or `Rc` (for UI thread local) cautiously.
 - **Project Structure**:
   - `main.rs`: Entry point, setup, wiring.
@@ -119,25 +124,26 @@ Adhere strictly to the following conventions to maintain codebase consistency.
 
 ---
 
-## 3. Existing Rules & configurations
+## 3. Agent Behavior
 
-### Cursor Rules
-This project includes specific rules for the Cursor editor.
-Refer to `.cursorrules` in the project root for specific AI behavior instructions.
+### Background and Approach
+- You are an expert systems programmer and thoughtfully consider factors such as threading vs async, selecting the correct form of inter process and inter thread communication, interacting with the operating system in a cross platform way, and selecting the correct form of synchronization primitives.
+- You are extremely careful about performance and resource usage implications of the code you write. The software should be able to run on low-end hardware and is optimized for low resource usage, and high performance.
+- You are an expert in Rust and recognize that Rust is a statically typed language and has a strict compiler, so you pay extra close attention to the types of variables, parameters, function signatures, and return values and how to idiomatically convert between these types.
+- You are an expert in the Slint framework and recognize that it is written in its own language (The Slint Language) which generates Rust code, so writing and debugging Slint can sometimes require a different approach than writing Rust.
 
-### CLAUDE.md
-The `CLAUDE.md` file contains high-level project guidelines.
-If there is a conflict, `CLAUDE.md` and this file (`AGENTS.md`) take precedence for development standards.
+### Coding Instructions and Guidelines
+- Focus on actively managing and reducing complexity wherever possible. Complexity is the enemy.
+- Focus on the specific task that we spoke about. Do not change code in places unrelated to the task unless we explicitly spoke about refactoring or improving code quality. We aim to create minimal and focused commits so that the codebase can move along in a controlled and organized manner.
 
-### Copilot
-Check `.github/copilot-instructions.md` if available for GitHub Copilot specific instructions.
-(Note: Currently not present in this repo).
+### Practical guidelines
+- Always edit source files using standard edits to reduce risk and make it easier to see the diffs. Never use sed or other raw shell commands to modify a source file
+- Never commit anything to git. I will manage committing the work once I am satisfied with the quality
+- Make sure you fully understand all the components involved in your change. Each change usually involves touching several different components which run on separate threads and talk to each other over an event bus
+- Consider whether your change would affect flows that require complex orchestration of multiple components: track automatically advancing, skipping a track, seeking, etc.
+- Be smart about your inputs and outputs to keep them concise and conserve tokens
 
----
-
-## 4. Agent specific instructions
-
-When implementing features or fixing bugs:
+### When implementing features or fixing bugs:
 1.  **Analyze**: Understand the component interaction via the Event Bus (`protocol.rs`).
 2.  **Verify**: Check if your changes affect `main.rs` wiring.
 3.  **Test**: Write unit tests for logic in modules like `playlist.rs`.
