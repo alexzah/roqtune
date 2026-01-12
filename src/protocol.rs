@@ -48,18 +48,7 @@ pub struct TrackStarted {
 #[derive(Debug, Clone)]
 pub enum PlaylistMessage {
     LoadTrack(PathBuf),
-    DeleteTrack(usize),
-    TrackStarted(usize),
-    TrackFinished,
-    ChangePlaybackOrder(PlaybackOrder),
-    ToggleRepeat,
-    RepeatModeChanged(bool),
-    PlaylistIndicesChanged {
-        playing_index: Option<usize>,
-        selected_indices: Vec<usize>,
-        is_playing: bool,
-        repeat_on: bool,
-    },
+    DeleteTracks(Vec<usize>),
     SelectTrackMulti {
         index: usize,
         ctrl: bool,
@@ -79,6 +68,17 @@ pub enum PlaylistMessage {
         id: String,
         metadata: DetailedMetadata,
     },
+    TrackFinished,
+    TrackStarted(usize),
+    PlaylistIndicesChanged {
+        playing_index: Option<usize>,
+        selected_indices: Vec<usize>,
+        is_playing: bool,
+        repeat_on: bool,
+    },
+    ChangePlaybackOrder(PlaybackOrder),
+    ToggleRepeat,
+    RepeatModeChanged(bool),
 }
 
 #[derive(Debug, Clone, serde::Deserialize, serde::Serialize)]

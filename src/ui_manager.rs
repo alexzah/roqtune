@@ -248,6 +248,7 @@ impl UiManager {
                     protocol::Message::Playlist(protocol::PlaylistMessage::PlaylistRestored(
                         tracks,
                     )) => {
+                        let mut track_data = Vec::new();
                         for track in tracks {
                             self.track_ids.push(track.id.clone());
                             self.track_paths.push(track.path.clone());
@@ -259,28 +260,36 @@ impl UiManager {
                                 genre: track.metadata.genre.clone(),
                             });
 
-                            let tags = track.metadata;
-                            let _ = self.ui.upgrade_in_event_loop(move |ui| {
-                                let track_model_strong = ui.get_track_model();
-                                let track_model = track_model_strong
-                                    .as_any()
-                                    .downcast_ref::<VecModel<ModelRc<StandardListViewItem>>>()
-                                    .expect("VecModel expected");
+                            track_data.push((
+                                track.metadata.title.clone(),
+                                track.metadata.artist.clone(),
+                                track.metadata.album.clone(),
+                            ));
+                        }
+
+                        let _ = self.ui.upgrade_in_event_loop(move |ui| {
+                            let track_model_strong = ui.get_track_model();
+                            let track_model = track_model_strong
+                                .as_any()
+                                .downcast_ref::<VecModel<ModelRc<StandardListViewItem>>>()
+                                .expect("VecModel expected");
+
+                            let selection_model_strong = ui.get_selection_model();
+                            let selection_model = selection_model_strong
+                                .as_any()
+                                .downcast_ref::<VecModel<bool>>()
+                                .expect("VecModel expected");
+
+                            for (title, artist, album) in track_data {
                                 track_model.push(ModelRc::new(VecModel::from(vec![
                                     StandardListViewItem::from(""),
-                                    StandardListViewItem::from(tags.title.as_str()),
-                                    StandardListViewItem::from(tags.artist.as_str()),
-                                    StandardListViewItem::from(tags.album.as_str()),
+                                    StandardListViewItem::from(title.as_str()),
+                                    StandardListViewItem::from(artist.as_str()),
+                                    StandardListViewItem::from(album.as_str()),
                                 ])));
-
-                                let selection_model_strong = ui.get_selection_model();
-                                let selection_model = selection_model_strong
-                                    .as_any()
-                                    .downcast_ref::<VecModel<bool>>()
-                                    .expect("VecModel expected");
                                 selection_model.push(false);
-                            });
-                        }
+                            }
+                        });
                     }
                     protocol::Message::Playlist(protocol::PlaylistMessage::TrackAdded {
                         id,
@@ -326,33 +335,44 @@ impl UiManager {
                             selection_model.push(false);
                         });
                     }
-                    protocol::Message::Playlist(protocol::PlaylistMessage::DeleteTrack(index)) => {
-                        if index < self.track_ids.len() {
-                            self.track_ids.remove(index);
+                    protocol::Message::Playlist(protocol::PlaylistMessage::DeleteTracks(
+                        mut indices,
+                    )) => {
+                        indices.sort_by(|a, b| b.cmp(a));
+                        let indices_to_remove = indices.clone();
+
+                        for index in indices {
+                            if index < self.track_ids.len() {
+                                self.track_ids.remove(index);
+                            }
+                            if index < self.track_paths.len() {
+                                self.track_paths.remove(index);
+                            }
+                            if index < self.track_metadata.len() {
+                                self.track_metadata.remove(index);
+                            }
                         }
-                        if index < self.track_paths.len() {
-                            self.track_paths.remove(index);
-                        }
-                        if index < self.track_metadata.len() {
-                            self.track_metadata.remove(index);
-                        }
+
                         let _ = self.ui.upgrade_in_event_loop(move |ui| {
                             let track_model_strong = ui.get_track_model();
                             let track_model = track_model_strong
                                 .as_any()
                                 .downcast_ref::<VecModel<ModelRc<StandardListViewItem>>>()
                                 .expect("VecModel expected");
-                            if index < track_model.row_count() {
-                                track_model.remove(index);
-                            }
 
                             let selection_model_strong = ui.get_selection_model();
                             let selection_model = selection_model_strong
                                 .as_any()
                                 .downcast_ref::<VecModel<bool>>()
                                 .expect("VecModel expected");
-                            if index < selection_model.row_count() {
-                                selection_model.remove(index);
+
+                            for index in indices_to_remove {
+                                if index < track_model.row_count() {
+                                    track_model.remove(index);
+                                }
+                                if index < selection_model.row_count() {
+                                    selection_model.remove(index);
+                                }
                             }
                         });
                     }

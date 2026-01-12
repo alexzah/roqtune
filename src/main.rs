@@ -169,10 +169,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Wire up delete track handler
     let bus_sender_clone = bus_sender.clone();
-    ui.on_delete_track(move |index| {
-        debug!("Delete track button clicked: {}", index);
-        let _ = bus_sender_clone.send(Message::Playlist(PlaylistMessage::DeleteTrack(
-            index as usize,
+    ui.on_delete_track(move |indices| {
+        let indices_vec: Vec<usize> = indices.iter().map(|i| i as usize).collect();
+        debug!("Delete tracks requested: {:?}", indices_vec);
+        let _ = bus_sender_clone.send(Message::Playlist(PlaylistMessage::DeleteTracks(
+            indices_vec,
         )));
     });
 

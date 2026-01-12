@@ -254,32 +254,41 @@ impl PlaylistManager {
                             }
                         }
                     }
-                    protocol::Message::Playlist(protocol::PlaylistMessage::DeleteTrack(index)) => {
-                        debug!("PlaylistManager: Received delete track command: {}", index);
-                        if index < self.playlist.num_tracks() {
-                            let id = self.playlist.get_track_id(index);
-                            if self.cached_track_ids.contains(&id) {
-                                self.cached_track_ids.remove(&id);
-                                self.clear_cached_tracks();
+                    protocol::Message::Playlist(protocol::PlaylistMessage::DeleteTracks(
+                        mut indices,
+                    )) => {
+                        debug!(
+                            "PlaylistManager: Received delete tracks command: {:?}",
+                            indices
+                        );
+                        indices.sort_by(|a, b| b.cmp(a));
+
+                        for index in indices {
+                            if index < self.playlist.num_tracks() {
+                                let id = self.playlist.get_track_id(index);
+                                if self.cached_track_ids.contains(&id) {
+                                    self.cached_track_ids.remove(&id);
+                                    self.clear_cached_tracks();
+                                }
+
+                                if let Err(e) = self.db_manager.delete_track(&id) {
+                                    error!("Failed to delete track from database: {}", e);
+                                }
+
+                                self.playlist.delete_track(index);
                             }
-
-                            if let Err(e) = self.db_manager.delete_track(&id) {
-                                error!("Failed to delete track from database: {}", e);
-                            }
-
-                            self.playlist.delete_track(index);
-
-                            // Update positions for remaining tracks
-                            let all_ids: Vec<String> = (0..self.playlist.num_tracks())
-                                .map(|i| self.playlist.get_track_id(i))
-                                .collect();
-                            if let Err(e) = self.db_manager.update_positions(all_ids) {
-                                error!("Failed to update positions in database: {}", e);
-                            }
-
-                            // Notify other components about the index shift
-                            self.broadcast_playlist_changed();
                         }
+
+                        // Update positions for remaining tracks
+                        let all_ids: Vec<String> = (0..self.playlist.num_tracks())
+                            .map(|i| self.playlist.get_track_id(i))
+                            .collect();
+                        if let Err(e) = self.db_manager.update_positions(all_ids) {
+                            error!("Failed to update positions in database: {}", e);
+                        }
+
+                        // Notify other components about the index shift
+                        self.broadcast_playlist_changed();
                     }
                     protocol::Message::Playlist(protocol::PlaylistMessage::SelectTrackMulti {
                         index,

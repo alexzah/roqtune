@@ -153,7 +153,7 @@ export component AppWindow inherits Window {
         height: 0px;
         key-pressed(event) => {
             if (event.text == Key.Delete) {
-                root.delete_track(root.selected_track_index);
+                root.delete_track(root.selected_indices);
                 return accept;
             }
             reject
@@ -636,7 +636,7 @@ export component AppWindow inherits Window {
     callback playback_order_changed(int);
     callback toggle_repeat();
     callback seek-to(float); // Position between 0.0 and 1.0
-    callback delete_track(int);
+    callback delete_track([int]);
     callback reorder_tracks([int], int); // indices, to
     callback deselect_all();
 }
