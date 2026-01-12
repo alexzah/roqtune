@@ -487,6 +487,7 @@ impl AudioDecoder {
                                 sample_rate_khz: sample_rate,
                                 bits_per_sample: 32, // placeholder
                             },
+                            ui: protocol::UiConfig::default(),
                         };
                         self.worker_sender
                             .blocking_send(DecodeWorkItem::ConfigChanged(dummy_config))

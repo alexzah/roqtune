@@ -1,4 +1,6 @@
-use std::{path::PathBuf, rc::Rc};
+use std::hash::{Hash, Hasher};
+use std::io::Write;
+use std::{collections::hash_map::DefaultHasher, path::PathBuf, rc::Rc};
 
 use id3::{Tag, TagLike};
 use log::debug;
@@ -15,6 +17,8 @@ pub struct UiState {
 pub struct UiManager {
     ui: slint::Weak<AppWindow>,
     bus_receiver: Receiver<protocol::Message>,
+    bus_sender: Sender<protocol::Message>,
+    track_paths: Vec<PathBuf>,
 }
 
 struct TrackMetadata {
@@ -27,12 +31,97 @@ impl UiManager {
     pub fn new(
         ui: slint::Weak<AppWindow>,
         bus_receiver: Receiver<protocol::Message>,
-        _bus_sender: Sender<protocol::Message>,
+        bus_sender: Sender<protocol::Message>,
     ) -> Self {
         Self {
             ui: ui.clone(),
             bus_receiver,
+            bus_sender,
+            track_paths: Vec::new(),
         }
+    }
+
+    fn find_cover_art(&self, track_path: &PathBuf) -> Option<PathBuf> {
+        let parent = track_path.parent()?;
+        let names = ["cover", "front", "folder", "album", "art"];
+        let extensions = ["jpg", "jpeg", "png", "webp"];
+
+        // Priority 1: External files
+        if let Ok(entries) = std::fs::read_dir(parent) {
+            let mut found_files = Vec::new();
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if path.is_file() {
+                    if let Some(file_stem) = path.file_stem().and_then(|s| s.to_str()) {
+                        let file_stem_lower = file_stem.to_lowercase();
+                        if names.iter().any(|&n| file_stem_lower == n) {
+                            if let Some(ext) = path.extension().and_then(|e| e.to_str()) {
+                                let ext_lower = ext.to_lowercase();
+                                if extensions.iter().any(|&e| ext_lower == e) {
+                                    found_files.push(path);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            // Sort to have some deterministic behavior if multiple files exist
+            found_files.sort();
+            if let Some(found) = found_files.into_iter().next() {
+                return Some(found);
+            }
+        }
+
+        // Priority 2: Embedded art
+        self.extract_embedded_art(track_path)
+    }
+
+    fn extract_embedded_art(&self, track_path: &PathBuf) -> Option<PathBuf> {
+        let mut hasher = DefaultHasher::new();
+        track_path.hash(&mut hasher);
+        let hash = hasher.finish();
+        let cache_dir = dirs::cache_dir()?.join("music_player").join("covers");
+        if !cache_dir.exists() {
+            std::fs::create_dir_all(&cache_dir).ok()?;
+        }
+
+        let cache_path = cache_dir.join(format!("{:x}.png", hash));
+
+        // If already cached, return it
+        if cache_path.exists() {
+            return Some(cache_path);
+        }
+
+        // Try extracting from ID3
+        if let Ok(tag) = Tag::read_from_path(track_path) {
+            if let Some(pic) = tag.pictures().next() {
+                if let Ok(mut file) = std::fs::File::create(&cache_path) {
+                    if file.write_all(&pic.data).is_ok() {
+                        return Some(cache_path);
+                    }
+                }
+            }
+        }
+
+        // Try extracting from FLAC
+        if let Ok(tag) = metaflac::Tag::read_from_path(track_path) {
+            if let Some(pic) = tag.pictures().next() {
+                if let Ok(mut file) = std::fs::File::create(&cache_path) {
+                    if file.write_all(&pic.data).is_ok() {
+                        return Some(cache_path);
+                    }
+                }
+            }
+        }
+
+        None
+    }
+
+    fn update_cover_art(&self, track_path: Option<&PathBuf>) {
+        let cover_art_path = track_path.and_then(|p| self.find_cover_art(p));
+        let _ = self.bus_sender.send(protocol::Message::Playback(
+            protocol::PlaybackMessage::CoverArtChanged(cover_art_path),
+        ));
     }
 
     fn read_track_metadata(&self, path: &PathBuf) -> TrackMetadata {
@@ -111,6 +200,7 @@ impl UiManager {
             match self.bus_receiver.blocking_recv() {
                 Ok(message) => match message {
                     protocol::Message::Playlist(protocol::PlaylistMessage::LoadTrack(path)) => {
+                        self.track_paths.push(path.clone());
                         let tags = self.read_track_metadata(&path);
                         let _ = self.ui.upgrade_in_event_loop(move |ui| {
                             let track_model_strong = ui.get_track_model();
@@ -134,6 +224,9 @@ impl UiManager {
                         });
                     }
                     protocol::Message::Playlist(protocol::PlaylistMessage::DeleteTrack(index)) => {
+                        if index < self.track_paths.len() {
+                            self.track_paths.remove(index);
+                        }
                         let _ = self.ui.upgrade_in_event_loop(move |ui| {
                             let track_model_strong = ui.get_track_model();
                             let track_model = track_model_strong
@@ -157,6 +250,9 @@ impl UiManager {
                     protocol::Message::Playback(protocol::PlaybackMessage::PlayTrackByIndex(
                         index,
                     )) => {
+                        if let Some(path) = self.track_paths.get(index) {
+                            self.update_cover_art(Some(path));
+                        }
                         let _ = self.ui.upgrade_in_event_loop(move |ui| {
                             let track_model_strong = ui.get_track_model();
                             let track_model = track_model_strong
@@ -282,6 +378,7 @@ impl UiManager {
                         });
                     }
                     protocol::Message::Playback(protocol::PlaybackMessage::Stop) => {
+                        self.update_cover_art(None);
                         let _ = self.ui.upgrade_in_event_loop(move |ui| {
                             ui.set_technical_info("".into());
                             ui.set_time_info("".into());
@@ -309,6 +406,9 @@ impl UiManager {
                         });
                     }
                     protocol::Message::Playlist(protocol::PlaylistMessage::TrackStarted(index)) => {
+                        if let Some(path) = self.track_paths.get(index) {
+                            self.update_cover_art(Some(path));
+                        }
                         let _ = self.ui.upgrade_in_event_loop(move |ui| {
                             let track_model_strong = ui.get_track_model();
                             let track_model = track_model_strong
@@ -409,6 +509,28 @@ impl UiManager {
                         to,
                     }) => {
                         let indices_clone = indices.clone();
+
+                        // Update track_paths
+                        let mut sorted_indices = indices.clone();
+                        sorted_indices.sort_by(|a, b| b.cmp(a));
+                        let mut moved_paths = Vec::new();
+                        for &idx in sorted_indices.iter() {
+                            if idx < self.track_paths.len() {
+                                moved_paths.push(self.track_paths.remove(idx));
+                            }
+                        }
+                        moved_paths.reverse();
+                        let mut actual_to = to;
+                        for &idx in indices.iter() {
+                            if idx < to {
+                                actual_to -= 1;
+                            }
+                        }
+                        actual_to = actual_to.min(self.track_paths.len());
+                        for (i, path) in moved_paths.into_iter().enumerate() {
+                            self.track_paths.insert(actual_to + i, path);
+                        }
+
                         let _ = self.ui.upgrade_in_event_loop(move |ui| {
                             let track_model_strong = ui.get_track_model();
                             let track_model = track_model_strong
@@ -450,6 +572,21 @@ impl UiManager {
                             for (i, row) in moved_rows.into_iter().enumerate() {
                                 track_model.insert(actual_to + i, row);
                                 selection_model.insert(actual_to + i, moved_selections[i]);
+                            }
+                        });
+                    }
+                    protocol::Message::Playback(protocol::PlaybackMessage::CoverArtChanged(
+                        path,
+                    )) => {
+                        let _ = self.ui.upgrade_in_event_loop(move |ui| {
+                            if let Some(path) = path {
+                                if let Ok(img) = slint::Image::load_from_path(&path) {
+                                    ui.set_current_cover_art(img);
+                                } else {
+                                    ui.set_current_cover_art(slint::Image::default());
+                                }
+                            } else {
+                                ui.set_current_cover_art(slint::Image::default());
                             }
                         });
                     }

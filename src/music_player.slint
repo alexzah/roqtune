@@ -386,97 +386,122 @@ export component AppWindow inherits Window {
             }
         }
         
-        // Main content: Playlist 
-        Rectangle {
+        // Main content: Playlist and Album Art
+        HorizontalLayout {
             vertical-stretch: 1;
-            background: #282828;
             
-            VerticalLayout {
-                // Header
-                Rectangle {
-                    height: 28px;
-                    background: #202020;
-                    HorizontalLayout {
-                        padding-left: 8px;
-                        padding-right: 8px;
-                        spacing: 10px;
-                        Rectangle { width: 40px; Text { text: "#"; color: #555; font-size: 11px; horizontal-alignment: center; vertical-alignment: center; } }
-                        Text { text: "Title"; color: #888; font-size: 12px; horizontal-stretch: 1; vertical-alignment: center; }
-                        Text { text: "Artist"; color: #888; font-size: 12px; width: 200px; vertical-alignment: center; }
-                        Text { text: "Album"; color: #888; font-size: 12px; width: 200px; vertical-alignment: center; }
-                    }
-                }
+            // Left Sidebar: Album Art
+            if root.show_album_art : VerticalLayout {
+                width: 200px;
+                padding: 10px;
+                alignment: end;
                 
-                flick := Flickable {
-                    interactive: root.drag-index == -1;
-                    viewport-height: max(self.height, root.track_model.length * 30px);
+                Rectangle {
+                    height: 180px;
+                    width: 180px;
+                    background: #202020;
+                    border-radius: 4px;
                     
-                    VerticalLayout {
-                        for track[i] in root.track_model : TrackRow {
-                            index: i;
-                            data: track;
-                            is-playing: root.playing_track_index == i;
-                            is-selected: root.selection_model[i];
-                            is-dragging: root.drag-index == i;
-                            // Dim selected items while dragging to clarify the drop line
-                            opacity: root.drag-index != -1 && root.selection_model[i] ? 0.5 : 1.0;
-                            
-                            clicked(event) => {
-                                root.playlist_item_click(i, event, {x: 0, y: 0});
-                                key-handler.focus();
-                            }
-                            
-                            double-clicked() => {
-                                root.playlist_item_double_click(i);
-                            }
-
-                            drag-started(idx) => {
-                                root.drag-index = idx;
-                            }
-                            
-                            drag-moved(y-offset) => {
-                                // y-offset is relative to start of list. 
-                                // (y + half_row) / row_height gives the gap index.
-                                root.drop-index = max(0, min(root.track_model.length, floor((y-offset + 15px) / 30px)));
-                            }
-                            
-                            drag-ended() => {
-                                if (root.drop-index != -1) {
-                                    // If dragging a selected item, move all selected items
-                                    if (root.selection_model[root.drag-index]) {
-                                        root.reorder_tracks(root.selected_indices, root.drop-index);
-                                    } else {
-                                        // Dragging a non-selected item
-                                        root.reorder_tracks([root.drag-index], root.drop-index);
-                                    }
-                                }
-                                root.drag-index = -1;
-                                root.drop-index = -1;
-                            }
-                        }
-
-                        // Filler to capture clicks on empty space
-                        Rectangle {
-                            vertical-stretch: 1;
-                            TouchArea {
-                                clicked => {
-                                    root.deselect_all();
-                                    key-handler.focus();
-                                }
-                            }
-                        }
+                    Image {
+                        source: root.current_cover_art;
+                        width: parent.width;
+                        height: parent.height;
+                        image-fit: contain;
                     }
                 }
             }
-            
-            // Visual Drop Indicator (horizontal line between tracks)
-            if (root.drag-index != -1 && root.drop-index != -1) : Rectangle {
-                x: 0;
-                // Position line between rows. flickering.viewport-y is negative when scrolled down.
-                y: 25px + (root.drop-index * 30px) + flick.viewport-y - 1px;
-                width: 100%;
-                height: 2px;
-                background: #2a6def;
+
+            Rectangle {
+                horizontal-stretch: 1;
+                background: #282828;
+                
+                VerticalLayout {
+                    // Header
+                    Rectangle {
+                        height: 28px;
+                        background: #202020;
+                        HorizontalLayout {
+                            padding-left: 8px;
+                            padding-right: 8px;
+                            spacing: 10px;
+                            Rectangle { width: 40px; Text { text: "#"; color: #555; font-size: 11px; horizontal-alignment: center; vertical-alignment: center; } }
+                            Text { text: "Title"; color: #888; font-size: 12px; horizontal-stretch: 1; vertical-alignment: center; }
+                            Text { text: "Artist"; color: #888; font-size: 12px; width: 200px; vertical-alignment: center; }
+                            Text { text: "Album"; color: #888; font-size: 12px; width: 200px; vertical-alignment: center; }
+                        }
+                    }
+                    
+                    flick := Flickable {
+                        interactive: root.drag-index == -1;
+                        viewport-height: max(self.height, root.track_model.length * 30px);
+                        
+                        VerticalLayout {
+                            for track[i] in root.track_model : TrackRow {
+                                index: i;
+                                data: track;
+                                is-playing: root.playing_track_index == i;
+                                is-selected: root.selection_model[i];
+                                is-dragging: root.drag-index == i;
+                                // Dim selected items while dragging to clarify the drop line
+                                opacity: root.drag-index != -1 && root.selection_model[i] ? 0.5 : 1.0;
+                                
+                                clicked(event) => {
+                                    root.playlist_item_click(i, event, {x: 0, y: 0});
+                                    key-handler.focus();
+                                }
+                                
+                                double-clicked() => {
+                                    root.playlist_item_double_click(i);
+                                }
+
+                                drag-started(idx) => {
+                                    root.drag-index = idx;
+                                }
+                                
+                                drag-moved(y-offset) => {
+                                    // y-offset is relative to start of list. 
+                                    // (y + half_row) / row_height gives the gap index.
+                                    root.drop-index = max(0, min(root.track_model.length, floor((y-offset + 15px) / 30px)));
+                                }
+                                
+                                drag-ended() => {
+                                    if (root.drop-index != -1) {
+                                        // If dragging a selected item, move all selected items
+                                        if (root.selection_model[root.drag-index]) {
+                                            root.reorder_tracks(root.selected_indices, root.drop-index);
+                                        } else {
+                                            // Dragging a non-selected item
+                                            root.reorder_tracks([root.drag-index], root.drop-index);
+                                        }
+                                    }
+                                    root.drag-index = -1;
+                                    root.drop-index = -1;
+                                }
+                            }
+
+                            // Filler to capture clicks on empty space
+                            Rectangle {
+                                vertical-stretch: 1;
+                                TouchArea {
+                                    clicked => {
+                                        root.deselect_all();
+                                        key-handler.focus();
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                
+                // Visual Drop Indicator (horizontal line between tracks)
+                if (root.drag-index != -1 && root.drop-index != -1) : Rectangle {
+                    x: 0;
+                    // Position line between rows. flickering.viewport-y is negative when scrolled down.
+                    y: 25px + (root.drop-index * 30px) + flick.viewport-y - 1px;
+                    width: 100%;
+                    height: 2px;
+                    background: #2a6def;
+                }
             }
         }
         
@@ -531,6 +556,10 @@ export component AppWindow inherits Window {
     in-out property <int> selected_track_index: -1;
     in-out property <[int]> selected_indices: [];
     in-out property <int> playing_track_index: -1;
+    
+    // Album art properties
+    in-out property <bool> show_album_art: true;
+    in-out property <image> current_cover_art;
     
     // Drag and drop state
     property <int> drag-index: -1;

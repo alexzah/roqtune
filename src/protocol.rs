@@ -1,15 +1,27 @@
 use std::path::PathBuf;
 
-#[derive(Debug, Clone, serde::Deserialize)]
+#[derive(Debug, Clone, serde::Deserialize, serde::Serialize)]
 pub struct Config {
     pub output: OutputConfig,
+    #[serde(default)]
+    pub ui: UiConfig,
 }
 
-#[derive(Debug, Clone, serde::Deserialize)]
+#[derive(Debug, Clone, serde::Deserialize, serde::Serialize)]
 pub struct OutputConfig {
     pub channel_count: u16,
     pub sample_rate_khz: u32,
     pub bits_per_sample: u16,
+}
+
+#[derive(Debug, Clone, serde::Deserialize, serde::Serialize, Default)]
+pub struct UiConfig {
+    #[serde(default = "default_true")]
+    pub show_album_art: bool,
+}
+
+fn default_true() -> bool {
+    true
 }
 
 #[derive(Debug, Clone)]
@@ -116,6 +128,7 @@ pub enum PlaybackMessage {
     Seek(f32),
     TechnicalMetadataChanged(TechnicalMetadata),
     PlaybackProgress { elapsed_ms: u64, total_ms: u64 },
+    CoverArtChanged(Option<PathBuf>),
 }
 
 #[derive(Debug, Clone)]

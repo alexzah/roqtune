@@ -39,9 +39,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let config_file = config_dir.join("music_player.toml");
 
     if !config_file.exists() {
-        let default_config = toml::toml! {
-            [output]
-            channel_count = 2
+        let default_config = protocol::Config {
+            output: protocol::OutputConfig {
+                channel_count: 2,
+                sample_rate_khz: 44100,
+                bits_per_sample: 16,
+            },
+            ui: protocol::UiConfig {
+                show_album_art: true,
+            },
         };
 
         info!(
@@ -55,10 +61,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .unwrap();
     }
 
-    let config =
-        toml::from_str::<Config>(&std::fs::read_to_string(config_file.clone()).unwrap()).unwrap();
+    let config_content = std::fs::read_to_string(config_file.clone()).unwrap();
+    let config = toml::from_str::<Config>(&config_content).unwrap();
 
     setup_app_state_associations(&ui, &ui_state);
+    ui.set_show_album_art(config.ui.show_album_art);
 
     // Bus for communication between components
     let (bus_sender, _) = broadcast::channel(1024);
