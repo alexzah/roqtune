@@ -1,7 +1,7 @@
 use crate::protocol::{
     self, AudioMessage, AudioPacket, Config, ConfigMessage, Message, TrackIdentifier,
 };
-use log::{debug, error};
+use log::{debug, error, warn};
 use rubato::{
     Resampler, SincFixedIn, SincInterpolationParameters, SincInterpolationType, WindowFunction,
 };
@@ -11,6 +11,7 @@ use std::path::PathBuf;
 use std::thread;
 use symphonia::core::audio::SampleBuffer;
 use symphonia::core::codecs::DecoderOptions;
+use symphonia::core::errors::Error;
 use symphonia::core::formats::{FormatOptions, SeekMode, SeekTo};
 use symphonia::core::io::MediaSourceStream;
 use symphonia::core::meta::MetadataOptions;
@@ -298,13 +299,15 @@ impl DecodeWorker {
             debug!("DecodeWorker: Seeking to {}ms", input_track.start_offset_ms);
             let seconds = input_track.start_offset_ms / 1000;
             let frac = (input_track.start_offset_ms % 1000) as f64 / 1000.0;
-            let _ = format_reader.seek(
+            if let Err(e) = format_reader.seek(
                 SeekMode::Accurate,
                 SeekTo::Time {
                     time: symphonia::core::units::Time { seconds, frac },
                     track_id: Some(track_id),
                 },
-            );
+            ) {
+                error!("Seek failed: {}", e);
+            }
         }
 
         if self.resampler.is_none() {
@@ -352,6 +355,7 @@ impl DecodeWorker {
         // Decode in chunks
         let chunk_size = self.resampler.as_ref().unwrap().input_frames_next() * channels;
         let mut decoded_chunk = Vec::with_capacity(chunk_size);
+        let mut consecutive_errors = 0;
 
         while let Ok(packet) = format_reader.next_packet() {
             if !self.should_continue() {
@@ -365,6 +369,7 @@ impl DecodeWorker {
 
             match decoder.decode(&packet) {
                 Ok(decoded) => {
+                    consecutive_errors = 0;
                     let spec = decoded.spec();
                     let duration = decoded.capacity() as u64;
 
@@ -387,8 +392,25 @@ impl DecodeWorker {
 
                     decoded_chunk = Vec::with_capacity(chunk_size);
                 }
+                Err(Error::DecodeError(msg)) => {
+                    warn!("Decode error (skipping frame): {}", msg);
+                    consecutive_errors += 1;
+                    if consecutive_errors > 50 {
+                        error!("Too many consecutive decode errors. Giving up on track.");
+                        break;
+                    }
+                    continue;
+                }
+                Err(Error::ResetRequired) => {
+                    debug!("DecodeWorker: Reset required. Re-creating decoder.");
+                    decoder = symphonia::default::get_codecs()
+                        .make(&codec_params, &DecoderOptions::default())
+                        .expect("Failed to re-create decoder");
+                    consecutive_errors = 0;
+                    continue;
+                }
                 Err(e) => {
-                    error!("Decode error: {}", e);
+                    error!("Fatal decode error: {}", e);
                     break;
                 }
             }
