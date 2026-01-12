@@ -28,6 +28,12 @@ pub enum PlaybackOrder {
 }
 
 #[derive(Debug, Clone)]
+pub struct TrackStarted {
+    pub id: String,
+    pub start_offset_ms: u64,
+}
+
+#[derive(Debug, Clone)]
 pub enum PlaylistMessage {
     LoadTrack(PathBuf),
     DeleteTrack(usize),
@@ -104,7 +110,7 @@ pub enum PlaybackMessage {
     Next,
     Previous,
     TrackFinished(String),
-    TrackStarted(String),
+    TrackStarted(TrackStarted),
     ClearPlayerCache,
     Seek(f32),
     TechnicalMetadataChanged(TechnicalMetadata),

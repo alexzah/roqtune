@@ -168,8 +168,8 @@ impl PlaylistManager {
                             ));
                         }
                     }
-                    protocol::Message::Playback(protocol::PlaybackMessage::TrackStarted(id)) => {
-                        debug!("PlaylistManager: Received track started command: {}", id);
+                    protocol::Message::Playback(protocol::PlaybackMessage::TrackStarted(track_started)) => {
+                        debug!("PlaylistManager: Received track started command: {}", track_started.id);
                         self.last_seek_ms = u64::MAX;
                         if let Some(playing_idx) = self.playlist.get_playing_track_index() {
                             let _ = self.bus_producer.send(protocol::Message::Playlist(
@@ -290,6 +290,10 @@ impl PlaylistManager {
                     protocol::Message::Playback(
                         protocol::PlaybackMessage::TechnicalMetadataChanged(meta),
                     ) => {
+                        debug!(
+                            "PlaylistManager: Received technical metadata changed for track: {:?}",
+                            meta
+                        );
                         self.current_track_duration_ms = meta.duration_ms;
                     }
                     protocol::Message::Playback(protocol::PlaybackMessage::Seek(percentage)) => {
@@ -302,9 +306,10 @@ impl PlaylistManager {
                         self.last_seek_ms = target_ms;
 
                         debug!(
-                            "PlaylistManager: Seeking to {}ms ({}%)",
+                            "PlaylistManager: Seeking to {}ms ({}% of {})",
                             target_ms,
-                            percentage * 100.0
+                            percentage * 100.0,
+                            self.current_track_duration_ms
                         );
 
                         if let Some(playing_idx) = self.playlist.get_playing_track_index() {

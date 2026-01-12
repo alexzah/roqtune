@@ -1,4 +1,4 @@
-use crate::protocol::{AudioMessage, AudioPacket, ConfigMessage, Message, PlaybackMessage};
+use crate::protocol::{AudioMessage, AudioPacket, ConfigMessage, Message, PlaybackMessage, TrackStarted};
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use log::{debug, error};
 use std::{
@@ -13,9 +13,15 @@ use std::{
 use tokio::sync::broadcast::{Receiver, Sender};
 
 #[derive(Debug, Clone)]
+pub struct TrackHeader {
+    pub id: String,
+    pub start_offset_ms: u64,
+}
+
+#[derive(Debug, Clone)]
 enum AudioSample {
     Sample(f32),
-    TrackHeader(String),
+    TrackHeader(TrackHeader),
     TrackFooter(String),
 }
 
@@ -119,6 +125,8 @@ impl AudioPlayer {
                             + (elapsed_samples as f64 * 1000.0
                                 / (sample_rate as f64 * channels as f64))
                                 as u64;
+
+                        // debug!("Track id {} current_pos: {}, start_pos: {}, elapsed_samples: {}, offset_ms: {} elapsed_ms: {}", track_id, current_pos, start_pos, elapsed_samples, offset_ms, elapsed_ms);
 
                         let _ = bus_sender_clone.send(Message::Playback(
                             PlaybackMessage::PlaybackProgress {
@@ -231,9 +239,12 @@ impl AudioPlayer {
                                 input_current_position += 1;
                                 *s
                             }
-                            AudioSample::TrackHeader(id) => {
+                            AudioSample::TrackHeader(TrackHeader { id, start_offset_ms }) => {
                                 let _ = bus_sender_clone.send(Message::Playback(
-                                    PlaybackMessage::TrackStarted(id.clone()),
+                                    PlaybackMessage::TrackStarted(TrackStarted {
+                                        id: id.clone(),
+                                        start_offset_ms: *start_offset_ms,
+                                    }),
                                 ));
                                 input_current_position += 1;
                                 continue;
@@ -284,10 +295,11 @@ impl AudioPlayer {
                 start_offset_ms,
             } => {
                 let mut queue = self.sample_queue.lock().unwrap();
-                queue.push_back(AudioSample::TrackHeader(id.clone()));
+                queue.push_back(AudioSample::TrackHeader(TrackHeader{id: id.clone(), start_offset_ms: start_offset_ms}));
                 let start_index = queue.len() - 1;
                 drop(queue);
 
+                // debug!("AudioPlayer: Loaded track header: id {} technical metadata {:?}", id, technical_metadata);
                 self.cached_track_indices.lock().unwrap().insert(
                     id.clone(),
                     TrackIndex {
@@ -296,9 +308,6 @@ impl AudioPlayer {
                         technical_metadata: technical_metadata.clone(),
                     },
                 );
-
-                self.current_track_offset_ms
-                                .store(0, Ordering::Relaxed);
 
                 if play_immediately {
                     *self.current_track_id.lock().unwrap() = id.clone();
@@ -379,8 +388,6 @@ impl AudioPlayer {
                         self.sample_queue.lock().unwrap().clear();
                         self.cached_track_indices.lock().unwrap().clear();
                         self.current_track_position.store(0, Ordering::Relaxed);
-                        self.current_track_offset_ms
-                                .store(0, Ordering::Relaxed);
                         *self.current_metadata.lock().unwrap() = None;
                         debug!("AudioPlayer: Cache cleared");
                     }
@@ -395,6 +402,16 @@ impl AudioPlayer {
                             self.stream = None;
                             self.create_stream();
                         }
+                    }
+                    Message::Playback(PlaybackMessage::TrackStarted(track_started)) => {
+                        debug!("AudioPlayer: Track started: {}", track_started.id);
+                        self.current_track_id.lock().unwrap().clone_from(&track_started.id);
+                        self.current_track_offset_ms.store(track_started.start_offset_ms as usize, Ordering::Relaxed);
+                        let track_info =
+                            self.cached_track_indices.lock().unwrap().get(&track_started.id).cloned();
+                        let _ = self.bus_sender.send(Message::Playback(
+                                PlaybackMessage::TechnicalMetadataChanged(track_info.unwrap().technical_metadata),
+                            ));
                     }
                     _ => {}
                 },

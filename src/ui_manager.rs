@@ -251,10 +251,10 @@ impl UiManager {
                         elapsed_ms,
                         total_ms,
                     }) => {
-                        debug!(
-                            "UiManager: Playback progress: {}/{} ms",
-                            elapsed_ms, total_ms
-                        );
+                        // debug!(
+                        //     "UiManager: Playback progress: {}/{} ms",
+                        //     elapsed_ms, total_ms
+                        // );
                         let _ = self.ui.upgrade_in_event_loop(move |ui| {
                             let elapsed_secs = elapsed_ms / 1000;
                             let total_secs = total_ms / 1000;
@@ -284,6 +284,10 @@ impl UiManager {
                     protocol::Message::Playback(
                         protocol::PlaybackMessage::TechnicalMetadataChanged(meta),
                     ) => {
+                        debug!(
+                            "UiManager: Technical metadata changed: {:?}",
+                            meta
+                        );
                         let _ = self.ui.upgrade_in_event_loop(move |ui| {
                             ui.set_technical_info(
                                 format!(
