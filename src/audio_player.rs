@@ -310,6 +310,7 @@ impl AudioPlayer {
                 );
 
                 if play_immediately {
+                    // This is the case where some kind of user action caused immediate playback
                     *self.current_track_id.lock().unwrap() = id.clone();
                     *self.current_metadata.lock().unwrap() = Some(technical_metadata.clone());
                     self.current_track_offset_ms
@@ -405,6 +406,7 @@ impl AudioPlayer {
                     }
                     Message::Playback(PlaybackMessage::TrackStarted(track_started)) => {
                         debug!("AudioPlayer: Track started: {}", track_started.id);
+                        // Handle the case when a track automatically starts playing (not caused by a user action)
                         self.current_track_id.lock().unwrap().clone_from(&track_started.id);
                         self.current_track_offset_ms.store(track_started.start_offset_ms as usize, Ordering::Relaxed);
                         let track_info =
