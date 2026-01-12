@@ -141,7 +141,7 @@ Adhere strictly to the following conventions to maintain codebase consistency.
 - Never commit anything to git. I will manage committing the work once I am satisfied with the quality
 - Make sure you fully understand all the components involved in your change. Each change usually involves touching several different components which run on separate threads and talk to each other over an event bus
 - Consider whether your change would affect flows that require complex orchestration of multiple components: track automatically advancing, skipping a track, seeking, etc.
-- Only work on the current task, from the latest prompt. You should not touch or optimize anything with the previous tasks unless explicitly asked to do so
+- Only work on the current task, from the latest prompt. You should not think about, touch, or optimize anything to do with the previous tasks unless required for the current task or if you were explicitly asked to do so
 ### When implementing features or fixing bugs:
 1.  **Analyze**: Understand the component interaction via the Event Bus (`protocol.rs`).
 2.  **Verify**: Check if your changes affect `main.rs` wiring.
