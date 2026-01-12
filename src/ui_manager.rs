@@ -472,6 +472,14 @@ impl UiManager {
                             }
                         });
                     }
+                    protocol::Message::Playlist(protocol::PlaylistMessage::RepeatModeChanged(
+                        repeat_on,
+                    )) => {
+                        debug!("UiManager: Repeat mode changed: {}", repeat_on);
+                        let _ = self.ui.upgrade_in_event_loop(move |ui| {
+                            ui.set_repeat_on(repeat_on);
+                        });
+                    }
                     _ => {}
                 },
                 Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {}

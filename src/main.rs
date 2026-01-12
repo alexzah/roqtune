@@ -63,7 +63,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Bus for communication between components
     let (bus_sender, _) = broadcast::channel(1024);
 
-    let ui_handle_clone = ui.as_weak().clone();
     let bus_sender_clone = bus_sender.clone();
 
     // Setup file dialog
@@ -73,19 +72,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             .add_filter("Audio Files", &["mp3", "wav", "ogg", "flac"])
             .pick_files()
         {
-            if let Some(first_path) = paths.first() {
-                ui_handle_clone
-                    .upgrade()
-                    .unwrap()
-                    .set_file_path(first_path.to_string_lossy().to_string().into());
-            }
-
-            let count = paths.len();
-            ui_handle_clone
-                .upgrade()
-                .unwrap()
-                .set_status(format!("{} files selected", count).into());
-
             for path in paths {
                 debug!("Sending load track message for {:?}", path);
                 let _ = bus_sender_clone.send(protocol::Message::Playlist(

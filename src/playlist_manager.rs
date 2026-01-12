@@ -284,7 +284,7 @@ impl PlaylistManager {
                         let repeat_on = self.playlist.toggle_repeat();
                         debug!("PlaylistManager: Toggled repeat to {}", repeat_on);
                         let _ = self.bus_producer.send(protocol::Message::Playlist(
-                            protocol::PlaylistMessage::RepeatModeChanged,
+                            protocol::PlaylistMessage::RepeatModeChanged(repeat_on),
                         ));
                     }
                     protocol::Message::Playback(

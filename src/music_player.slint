@@ -14,7 +14,8 @@ component TrackRow inherits Rectangle {
     callback drag-ended();
     
     height: 30px;
-    background: is-dragging ? #444 : is-selected ? #3d3d3d : transparent;
+    background: is-dragging ? #444 : is-selected ? #3d3d3d : ta.has-hover ? #333 : transparent;
+    animate background { duration: 100ms; }
     
     HorizontalLayout {
         padding-left: 8px;
@@ -29,6 +30,7 @@ component TrackRow inherits Rectangle {
                 color: #2a6def;
                 font-size: 14px;
                 horizontal-alignment: center;
+                vertical-alignment: center;
             }
         }
         
@@ -159,7 +161,7 @@ export component AppWindow inherits Window {
     }
     
     // Status display at the bottom showing the currently playing track
-    in-out property <string> status-text: "No track selected";
+    in-out property <string> status-text: "";
 
     VerticalLayout {
         // Toolbar with open and playback controls
@@ -167,47 +169,44 @@ export component AppWindow inherits Window {
             height: 42px;
             background: #202020;
             HorizontalLayout {
-                padding-left: 8px;
-                padding-right: 8px;
+                padding-left: 12px;
+                padding-right: 12px;
                 padding-top: 8px;
                 padding-bottom: 8px;
-                spacing: 8px;
+                spacing: 12px;
                 
-                // Open file button
+                // Left Group: Open
                 Rectangle {
-                    width: 80px;
-                    height: 28px;
+                    width: 70px;
+                    height: 26px;
                     border-radius: 2px;
-                    background: #373737;
-                    HorizontalLayout {
-                        alignment: center;
-                        spacing: 4px;
-                        Text {
-                            text: "📂"; 
-                            color: #ddd;
-                            font-size: 14px;
-                        }
-
-                        Text {
-                            text: "Open";
-                            color: #ddd;
-                            font-size: 14px;
-                        }
+                    background: touch-area-open.pressed ? #444 : touch-area-open.has-hover ? #555 : #373737;
+                    animate background { duration: 150ms; }
+                    
+                    Text {
+                        text: "Open";
+                        color: #eee;
+                        font-size: 13px;
+                        vertical-alignment: center;
+                        horizontal-alignment: center;
                     }
 
-                    TouchArea {
+                    touch-area-open := TouchArea {
                         clicked => {
                             root.open_file();
                         }
                     }
                 }
+
+                // Spacer 1
+                Rectangle { horizontal-stretch: 1; }
                 
-                // Playback controls
+                // Center Group: Playback controls
                 HorizontalLayout {
-                    alignment: center;
-                    spacing: 14px;
+                    spacing: 12px;
                     PlayerButton {
                         icon-text: "⏮";
+                        font-size: 18px;
                         clicked => {
                             root.previous();
                         }
@@ -216,6 +215,7 @@ export component AppWindow inherits Window {
                     PlayerButton {
                         icon-text: "▶";
                         is-primary: true;
+                        font-size: 20px;
                         clicked => {
                             root.play();
                         }
@@ -223,6 +223,7 @@ export component AppWindow inherits Window {
 
                     PlayerButton {
                         icon-text: "⏸";
+                        font-size: 18px;
                         clicked => {
                             root.pause();
                         }
@@ -230,6 +231,7 @@ export component AppWindow inherits Window {
 
                     PlayerButton {
                         icon-text: "⏹";
+                        font-size: 18px;
                         clicked => {
                             root.stop();
                         }
@@ -237,24 +239,30 @@ export component AppWindow inherits Window {
 
                     PlayerButton {
                         icon-text: "⏭";
+                        font-size: 18px;
                         clicked => {
                             root.next();
                         }
                     }
                 }
+
+                // Spacer 2
+                Rectangle { horizontal-stretch: 1; }
                 
-                // Playback mode selection
+                // Right Group: Playback mode selection
                 HorizontalLayout {
-                    spacing: 8px;
+                    spacing: 12px;
+                    
                     Text {
                         text: "Order:";
-                        color: #aaa;
-                        font-size: 14px;
+                        color: #888;
+                        font-size: 13px;
+                        vertical-alignment: center;
                     }
 
                     ComboBox {
-                        width: 200px;
-                        height: 28px;
+                        width: 180px;
+                        height: 26px;
                         model: ["Default", "Shuffle", "Random"];
                         current-index: root.playback_order_index;
                         selected => {
@@ -264,60 +272,47 @@ export component AppWindow inherits Window {
 
                     Text {
                         text: "Repeat:";
-                        color: #aaa;
-                        font-size: 14px;
+                        color: #888;
+                        font-size: 13px;
+                        vertical-alignment: center;
                     }
 
                     PlayerButton {
-                        icon-text: root.repeat_on ? "🔁" : "↩";
-                        font-size: 14px;
+                        icon-text: "⟳";
+                        font-size: 20px;
                         is-primary: root.repeat_on;
                         clicked => {
                             root.toggle_repeat();
                         }
                     }
                 }
-                
-                // Spacer to push notification area to the right
-                Rectangle { }
-                
-                // Status area
-                Text {
-                    text: status;
-                    color: #aaa;
-                    font-size: 13px;
-                }
             }
         }
         
         // Progress bar section
         Rectangle {
-            height: 36px;
+            height: 32px;
             background: #242424;
             HorizontalLayout {
-                padding-left: 16px;
-                padding-right: 16px;
-                padding-top: 10px;
-                padding-bottom: 10px;
-                spacing: 8px;
+                padding-left: 12px;
+                padding-right: 12px;
+                padding-top: 8px;
+                padding-bottom: 8px;
+                spacing: 10px;
                 
                 // Current time display
-                Rectangle {
-                    background: #444;
-                    border-radius: 2px;
-                    width: 70px;
-                    Text {
-                        text: root.current-position-text;
-                        color: #bbb;
-                        font-size: 13px;
-                        vertical-alignment: center;
-                        horizontal-alignment: center;
-                    }
+                Text {
+                    text: root.current-position-text;
+                    color: #888;
+                    font-size: 12px;
+                    vertical-alignment: center;
+                    horizontal-alignment: right;
+                    width: 45px;
                 }
                 
                 // Improved interactive seek bar
                 seekbar := Rectangle {
-                    height: 16px;
+                    height: 6px;
                     border-radius: 3px;
                     background: #333;
                     horizontal-stretch: 1;
@@ -336,23 +331,14 @@ export component AppWindow inherits Window {
                         }
                     }
                     
-                    // Position percentage label for debugging
-                    Text {
-                        text: round(root.position-percentage * 100) + "%";
-                        color: white;
-                        font-size: 10px;
-                        y: -16px;
-                        x: seekbar.width / 2 - self.width / 2;
-                    }
-                    
                     // Handle over the progress bar
                     handle := Rectangle {
-                        width: 10px;
-                        height: parent.height;
+                        width: 12px;
+                        height: 12px;
                         x: (seekbar.width * root.position-percentage) - self.width / 2;
-                        y: 0px;
+                        y: (parent.height - self.height) / 2;
                         background: white;
-                        border-radius: 5px;
+                        border-radius: 6px;
                         drop-shadow-offset-y: 1px;
                         drop-shadow-blur: 2px;
                         drop-shadow-color: #00000080;
@@ -368,21 +354,21 @@ export component AppWindow inherits Window {
                     states [
                         hover when ta-seek.has-hover || ta-seek.pressed: {
                             handle.background: #ffffff;
+                            handle.width: 14px;
+                            handle.height: 14px;
                         }
                     ]
                     
                     // Simple touch area for seeking
                     ta-seek := TouchArea {
                         width: parent.width;
-                        height: parent.height + 10px; // Make touch area slightly larger
+                        height: 20px; 
                         mouse-cursor: pointer;
                         clicked => {
-                            // Calculate position as percentage of width and send seek command
                             root.seek-to(max(0, min(1, self.mouse-x / seekbar.width)));
                         }
                         moved => {
                             if (self.pressed) {
-                                // Update while dragging
                                 root.seek-to(max(0, min(1, self.mouse-x / seekbar.width)));
                             }
                         }
@@ -392,8 +378,8 @@ export component AppWindow inherits Window {
                 // Total duration display
                 Text {
                     text: root.total-duration-text;
-                    color: #bbb;
-                    font-size: 13px;
+                    color: #888;
+                    font-size: 12px;
                     vertical-alignment: center;
                     width: 45px;
                 }
@@ -408,16 +394,16 @@ export component AppWindow inherits Window {
             VerticalLayout {
                 // Header
                 Rectangle {
-                    height: 25px;
+                    height: 28px;
                     background: #202020;
                     HorizontalLayout {
                         padding-left: 8px;
                         padding-right: 8px;
                         spacing: 10px;
-                        Text { text: ""; width: 40px; }
-                        Text { text: "Title"; color: #888; font-size: 12px; horizontal-stretch: 1; }
-                        Text { text: "Artist"; color: #888; font-size: 12px; width: 200px; }
-                        Text { text: "Album"; color: #888; font-size: 12px; width: 200px; }
+                        Rectangle { width: 40px; Text { text: "#"; color: #555; font-size: 11px; horizontal-alignment: center; vertical-alignment: center; } }
+                        Text { text: "Title"; color: #888; font-size: 12px; horizontal-stretch: 1; vertical-alignment: center; }
+                        Text { text: "Artist"; color: #888; font-size: 12px; width: 200px; vertical-alignment: center; }
+                        Text { text: "Album"; color: #888; font-size: 12px; width: 200px; vertical-alignment: center; }
                     }
                 }
                 
@@ -486,28 +472,40 @@ export component AppWindow inherits Window {
         
         // Status bar
         Rectangle {
-            height: 28px;
+            height: 24px;
             background: #1a1a1a;
             HorizontalLayout {
-                padding-left: 10px;
-                padding-right: 10px;
+                padding-left: 12px;
+                padding-right: 12px;
+                spacing: 15px;
+                
                 Text {
-                    text: "Now Playing: " + root.status-text;
-                    color: #bbb;
-                    font-size: 13px;
+                    text: root.status-text == "" ? "" : "Now Playing: " + root.status-text;
+                    color: #aaa;
+                    font-size: 12px;
+                    vertical-alignment: center;
                 }
                 
                 // Technical info area
-                Rectangle { }
+                Rectangle { horizontal-stretch: 1; }
+                
                 Text {
                     text: root.technical-info;
-                    color: #888;
-                    font-size: 12px;
+                    color: #777;
+                    font-size: 11px;
+                    vertical-alignment: center;
                 }
+                
+                VerticalLayout {
+                    alignment: center;
+                    Rectangle { width: 1px; background: #333; height: 12px; }
+                }
+                
                 Text {
                     text: root.time-info;
-                    color: #aaa;
-                    font-size: 13px;
+                    color: #999;
+                    font-size: 12px;
+                    vertical-alignment: center;
                     width: 100px;
                     horizontal-alignment: right;
                 }
@@ -516,8 +514,6 @@ export component AppWindow inherits Window {
     }
 
     // Properties to communicate with Rust
-    in-out property <string> file_path: "";
-    in-out property <string> status: "Ready";
     in-out property <[[StandardListViewItem]]> track_model: []; // holds rows of strings
     in-out property <[bool]> selection_model: []; 
     in-out property <int> playback_order_index: 0;

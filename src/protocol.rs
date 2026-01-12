@@ -35,7 +35,7 @@ pub enum PlaylistMessage {
     TrackFinished,
     ChangePlaybackOrder(PlaybackOrder),
     ToggleRepeat,
-    RepeatModeChanged,
+    RepeatModeChanged(bool),
     PlaylistIndicesChanged {
         playing_index: Option<usize>,
         selected_indices: Vec<usize>,
