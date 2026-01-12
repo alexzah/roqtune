@@ -146,5 +146,5 @@ Adhere strictly to the following conventions to maintain codebase consistency.
 ### When implementing features or fixing bugs:
 1.  **Analyze**: Understand the component interaction via the Event Bus (`protocol.rs`).
 2.  **Verify**: Check if your changes affect `main.rs` wiring.
-3.  **Test**: Write unit tests for logic in modules like `playlist.rs`.
+3.  **Test**: Write unit tests for logic in modules like `playlist.rs` if applicable to your change. Additionally, if desired, you may add debug logs and do a cargo run to allow the user to manually test something for you
 4.  **UI**: If modifying UI, ensure `.slint` files compile and bindings match `main.rs`.
