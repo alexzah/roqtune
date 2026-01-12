@@ -190,6 +190,8 @@ impl PlaylistManager {
                             let _ = self.bus_producer.send(protocol::Message::Playlist(
                                 protocol::PlaylistMessage::TrackStarted(playing_idx),
                             ));
+                            // Also notify UI to update metadata/art if selection is empty
+                            self.broadcast_playlist_changed();
                         }
                     }
                     protocol::Message::Playback(protocol::PlaybackMessage::ReadyForPlayback(

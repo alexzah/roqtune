@@ -129,6 +129,16 @@ pub enum PlaybackMessage {
     TechnicalMetadataChanged(TechnicalMetadata),
     PlaybackProgress { elapsed_ms: u64, total_ms: u64 },
     CoverArtChanged(Option<PathBuf>),
+    MetadataDisplayChanged(Option<DetailedMetadata>),
+}
+
+#[derive(Debug, Clone, serde::Deserialize, serde::Serialize)]
+pub struct DetailedMetadata {
+    pub title: String,
+    pub artist: String,
+    pub album: String,
+    pub date: String,
+    pub genre: String,
 }
 
 #[derive(Debug, Clone)]

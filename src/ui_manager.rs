@@ -19,12 +19,16 @@ pub struct UiManager {
     bus_receiver: Receiver<protocol::Message>,
     bus_sender: Sender<protocol::Message>,
     track_paths: Vec<PathBuf>,
+    track_metadata: Vec<TrackMetadata>,
 }
 
+#[derive(Clone)]
 struct TrackMetadata {
     title: String,
     artist: String,
     album: String,
+    date: String,
+    genre: String,
 }
 
 impl UiManager {
@@ -38,6 +42,7 @@ impl UiManager {
             bus_receiver,
             bus_sender,
             track_paths: Vec::new(),
+            track_metadata: Vec::new(),
         }
     }
 
@@ -132,27 +137,54 @@ impl UiManager {
             let title = tag.title().unwrap_or("");
             let artist = tag.artist().unwrap_or("");
             let album = tag.album().unwrap_or("");
+            let date = tag
+                .date_recorded()
+                .map(|d| d.to_string())
+                .or_else(|| tag.year().map(|y| y.to_string()))
+                .unwrap_or_default();
+            let genre = tag.genre().unwrap_or("").to_string();
 
             if !title.is_empty() || !artist.is_empty() || !album.is_empty() {
                 return TrackMetadata {
                     title: title.to_string(),
                     artist: artist.to_string(),
                     album: album.to_string(),
+                    date,
+                    genre,
                 };
             }
         }
 
         // Fall back to APE tags
         if let Ok(ape_tag) = ape::read_from_path(path) {
-            let title: &str = ape_tag.item("title").unwrap().try_into().unwrap_or("");
-            let artist: &str = ape_tag.item("artist").unwrap().try_into().unwrap_or("");
-            let album: &str = ape_tag.item("album").unwrap().try_into().unwrap_or("");
+            let title: &str = ape_tag
+                .item("title")
+                .and_then(|i| i.try_into().ok())
+                .unwrap_or("");
+            let artist: &str = ape_tag
+                .item("artist")
+                .and_then(|i| i.try_into().ok())
+                .unwrap_or("");
+            let album: &str = ape_tag
+                .item("album")
+                .and_then(|i| i.try_into().ok())
+                .unwrap_or("");
+            let date: &str = ape_tag
+                .item("year")
+                .and_then(|i| i.try_into().ok())
+                .unwrap_or("");
+            let genre: &str = ape_tag
+                .item("genre")
+                .and_then(|i| i.try_into().ok())
+                .unwrap_or("");
 
             if !title.is_empty() || !artist.is_empty() || !album.is_empty() {
                 return TrackMetadata {
                     title: title.to_string(),
                     artist: artist.to_string(),
                     album: album.to_string(),
+                    date: date.to_string(),
+                    genre: genre.to_string(),
                 };
             }
         }
@@ -171,12 +203,22 @@ impl UiManager {
                 .get_vorbis("album")
                 .and_then(|mut i| i.next())
                 .unwrap_or("");
+            let date = flac_tag
+                .get_vorbis("date")
+                .and_then(|mut i| i.next())
+                .unwrap_or("");
+            let genre = flac_tag
+                .get_vorbis("genre")
+                .and_then(|mut i| i.next())
+                .unwrap_or("");
 
             if !title.is_empty() || !artist.is_empty() || !album.is_empty() {
                 return TrackMetadata {
                     title: title.to_string(),
                     artist: artist.to_string(),
                     album: album.to_string(),
+                    date: date.to_string(),
+                    genre: genre.to_string(),
                 };
             }
         }
@@ -192,6 +234,8 @@ impl UiManager {
             title: filename,
             artist: "".to_string(),
             album: "".to_string(),
+            date: "".to_string(),
+            genre: "".to_string(),
         }
     }
 
@@ -202,6 +246,7 @@ impl UiManager {
                     protocol::Message::Playlist(protocol::PlaylistMessage::LoadTrack(path)) => {
                         self.track_paths.push(path.clone());
                         let tags = self.read_track_metadata(&path);
+                        self.track_metadata.push(tags.clone());
                         let _ = self.ui.upgrade_in_event_loop(move |ui| {
                             let track_model_strong = ui.get_track_model();
                             let track_model = track_model_strong
@@ -226,6 +271,9 @@ impl UiManager {
                     protocol::Message::Playlist(protocol::PlaylistMessage::DeleteTrack(index)) => {
                         if index < self.track_paths.len() {
                             self.track_paths.remove(index);
+                        }
+                        if index < self.track_metadata.len() {
+                            self.track_metadata.remove(index);
                         }
                         let _ = self.ui.upgrade_in_event_loop(move |ui| {
                             let track_model_strong = ui.get_track_model();
@@ -455,8 +503,24 @@ impl UiManager {
                             if let Some(path) = self.track_paths.get(idx) {
                                 self.update_cover_art(Some(path));
                             }
+                            if let Some(meta) = self.track_metadata.get(idx) {
+                                let _ = self.bus_sender.send(protocol::Message::Playback(
+                                    protocol::PlaybackMessage::MetadataDisplayChanged(Some(
+                                        protocol::DetailedMetadata {
+                                            title: meta.title.clone(),
+                                            artist: meta.artist.clone(),
+                                            album: meta.album.clone(),
+                                            date: meta.date.clone(),
+                                            genre: meta.genre.clone(),
+                                        },
+                                    )),
+                                ));
+                            }
                         } else {
                             self.update_cover_art(None);
+                            let _ = self.bus_sender.send(protocol::Message::Playback(
+                                protocol::PlaybackMessage::MetadataDisplayChanged(None),
+                            ));
                         }
 
                         let _ = self.ui.upgrade_in_event_loop(move |ui| {
@@ -523,12 +587,17 @@ impl UiManager {
                         let mut sorted_indices = indices.clone();
                         sorted_indices.sort_by(|a, b| b.cmp(a));
                         let mut moved_paths = Vec::new();
+                        let mut moved_metadata = Vec::new();
                         for &idx in sorted_indices.iter() {
                             if idx < self.track_paths.len() {
                                 moved_paths.push(self.track_paths.remove(idx));
                             }
+                            if idx < self.track_metadata.len() {
+                                moved_metadata.push(self.track_metadata.remove(idx));
+                            }
                         }
                         moved_paths.reverse();
+                        moved_metadata.reverse();
                         let mut actual_to = to;
                         for &idx in indices.iter() {
                             if idx < to {
@@ -538,6 +607,9 @@ impl UiManager {
                         actual_to = actual_to.min(self.track_paths.len());
                         for (i, path) in moved_paths.into_iter().enumerate() {
                             self.track_paths.insert(actual_to + i, path);
+                        }
+                        for (i, metadata) in moved_metadata.into_iter().enumerate() {
+                            self.track_metadata.insert(actual_to + i, metadata);
                         }
 
                         let _ = self.ui.upgrade_in_event_loop(move |ui| {
@@ -596,6 +668,25 @@ impl UiManager {
                                 }
                             } else {
                                 ui.set_current_cover_art(slint::Image::default());
+                            }
+                        });
+                    }
+                    protocol::Message::Playback(
+                        protocol::PlaybackMessage::MetadataDisplayChanged(meta),
+                    ) => {
+                        let _ = self.ui.upgrade_in_event_loop(move |ui| {
+                            if let Some(meta) = meta {
+                                ui.set_display_title(meta.title.into());
+                                ui.set_display_artist(meta.artist.into());
+                                ui.set_display_album(meta.album.into());
+                                ui.set_display_date(meta.date.into());
+                                ui.set_display_genre(meta.genre.into());
+                            } else {
+                                ui.set_display_title("".into());
+                                ui.set_display_artist("".into());
+                                ui.set_display_album("".into());
+                                ui.set_display_date("".into());
+                                ui.set_display_genre("".into());
                             }
                         });
                     }

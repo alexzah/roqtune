@@ -395,6 +395,49 @@ export component AppWindow inherits Window {
                 width: 200px;
                 padding: 10px;
                 alignment: end;
+                spacing: 10px;
+                
+                // Metadata display
+                VerticalLayout {
+                    spacing: 4px;
+                    if root.display_title != "" : Text {
+                        text: root.display_title;
+                        color: #eee;
+                        font-size: 14px;
+                        font-weight: 700;
+                        wrap: word-wrap;
+                        overflow: elide;
+                    }
+                    if root.display_artist != "" : Text {
+                        text: root.display_artist;
+                        color: #ccc;
+                        font-size: 13px;
+                        wrap: word-wrap;
+                        overflow: elide;
+                    }
+                    if root.display_album != "" : Text {
+                        text: root.display_album;
+                        color: #aaa;
+                        font-size: 12px;
+                        wrap: word-wrap;
+                        overflow: elide;
+                    }
+                    HorizontalLayout {
+                        spacing: 8px;
+                        if root.display_date != "" : Text {
+                            text: root.display_date;
+                            color: #888;
+                            font-size: 11px;
+                        }
+                        if root.display_genre != "" : Text {
+                            text: root.display_genre;
+                            color: #888;
+                            font-size: 11px;
+                            horizontal-stretch: 1;
+                            overflow: elide;
+                        }
+                    }
+                }
                 
                 Rectangle {
                     height: 180px;
@@ -560,6 +603,13 @@ export component AppWindow inherits Window {
     // Album art properties
     in-out property <bool> show_album_art: true;
     in-out property <image> current_cover_art;
+    
+    // Metadata display properties
+    in-out property <string> display_title: "";
+    in-out property <string> display_artist: "";
+    in-out property <string> display_album: "";
+    in-out property <string> display_date: "";
+    in-out property <string> display_genre: "";
     
     // Drag and drop state
     property <int> drag-index: -1;
