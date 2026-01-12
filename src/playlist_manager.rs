@@ -1,10 +1,11 @@
 use std::collections::HashSet;
 
-use log::{debug, error, trace};
+use log::{debug, error, info, trace};
 use tokio::sync::broadcast::{Receiver, Sender};
 use uuid::Uuid;
 
 use crate::{
+    db_manager::DbManager,
     playlist::{Playlist, Track},
     protocol::{self, TrackIdentifier},
 };
@@ -14,6 +15,7 @@ pub struct PlaylistManager {
     playlist: Playlist,
     bus_consumer: Receiver<protocol::Message>,
     bus_producer: Sender<protocol::Message>,
+    db_manager: DbManager,
     cached_track_ids: HashSet<String>,
     max_num_cached_tracks: usize,
     current_track_duration_ms: u64,
@@ -25,11 +27,13 @@ impl PlaylistManager {
         playlist: Playlist,
         bus_consumer: Receiver<protocol::Message>,
         bus_producer: Sender<protocol::Message>,
+        db_manager: DbManager,
     ) -> Self {
         Self {
             playlist,
             bus_consumer,
             bus_producer,
+            db_manager,
             cached_track_ids: HashSet::new(),
             max_num_cached_tracks: 6,
             current_track_duration_ms: 0,
@@ -68,15 +72,49 @@ impl PlaylistManager {
     }
 
     pub fn run(&mut self) {
+        // Restore playlist from database
+        match self.db_manager.get_all_tracks() {
+            Ok(tracks) => {
+                info!("Restoring {} tracks from database", tracks.len());
+                for track in tracks.iter() {
+                    self.playlist.add_track(Track {
+                        path: track.path.clone(),
+                        id: track.id.clone(),
+                    });
+                }
+
+                let _ = self.bus_producer.send(protocol::Message::Playlist(
+                    protocol::PlaylistMessage::PlaylistRestored(tracks),
+                ));
+            }
+            Err(e) => {
+                error!("Failed to restore playlist from database: {}", e);
+            }
+        }
+
         loop {
             match self.bus_consumer.blocking_recv() {
                 Ok(message) => match message {
                     protocol::Message::Playlist(protocol::PlaylistMessage::LoadTrack(path)) => {
                         debug!("PlaylistManager: Loading track {:?}", path);
+                        let id = Uuid::new_v4().to_string();
+                        let position = self.playlist.num_tracks();
+
+                        if let Err(e) =
+                            self.db_manager
+                                .save_track(&id, path.to_str().unwrap_or(""), position)
+                        {
+                            error!("Failed to save track to database: {}", e);
+                        }
+
                         self.playlist.add_track(Track {
-                            path,
-                            id: Uuid::new_v4().to_string(),
+                            path: path.clone(),
+                            id: id.clone(),
                         });
+
+                        let _ = self.bus_producer.send(protocol::Message::Playlist(
+                            protocol::PlaylistMessage::TrackAdded { id, path },
+                        ));
                     }
                     protocol::Message::Playback(protocol::PlaybackMessage::Play) => {
                         debug!("PlaylistManager: Received play command");
@@ -219,15 +257,25 @@ impl PlaylistManager {
                     protocol::Message::Playlist(protocol::PlaylistMessage::DeleteTrack(index)) => {
                         debug!("PlaylistManager: Received delete track command: {}", index);
                         if index < self.playlist.num_tracks() {
-                            if self
-                                .cached_track_ids
-                                .contains(&self.playlist.get_track_id(index))
-                            {
-                                self.cached_track_ids
-                                    .remove(&self.playlist.get_track_id(index));
+                            let id = self.playlist.get_track_id(index);
+                            if self.cached_track_ids.contains(&id) {
+                                self.cached_track_ids.remove(&id);
                                 self.clear_cached_tracks();
                             }
+
+                            if let Err(e) = self.db_manager.delete_track(&id) {
+                                error!("Failed to delete track from database: {}", e);
+                            }
+
                             self.playlist.delete_track(index);
+
+                            // Update positions for remaining tracks
+                            let all_ids: Vec<String> = (0..self.playlist.num_tracks())
+                                .map(|i| self.playlist.get_track_id(i))
+                                .collect();
+                            if let Err(e) = self.db_manager.update_positions(all_ids) {
+                                error!("Failed to update positions in database: {}", e);
+                            }
 
                             // Notify other components about the index shift
                             self.broadcast_playlist_changed();
@@ -261,11 +309,28 @@ impl PlaylistManager {
                         debug!("PlaylistManager: Reordering tracks {:?} to {}", indices, to);
                         self.playlist.move_tracks(indices, to);
 
+                        // Update positions in database
+                        let all_ids: Vec<String> = (0..self.playlist.num_tracks())
+                            .map(|i| self.playlist.get_track_id(i))
+                            .collect();
+                        if let Err(e) = self.db_manager.update_positions(all_ids) {
+                            error!("Failed to update positions in database: {}", e);
+                        }
+
                         // Notify other components about the index shift
                         self.broadcast_playlist_changed();
 
                         // Re-cache to ensure next tracks are correct
                         self.cache_tracks(false);
+                    }
+                    protocol::Message::Playlist(protocol::PlaylistMessage::UpdateMetadata {
+                        id,
+                        metadata,
+                    }) => {
+                        debug!("PlaylistManager: Updating metadata for track {}", id);
+                        if let Err(e) = self.db_manager.update_metadata(&id, &metadata) {
+                            error!("Failed to update metadata in database: {}", e);
+                        }
                     }
                     protocol::Message::Audio(protocol::AudioMessage::TrackCached(id)) => {
                         debug!("PlaylistManager: Received TrackCached: {}", id);

@@ -1,5 +1,6 @@
 mod audio_decoder;
 mod audio_player;
+mod db_manager;
 mod playlist;
 mod playlist_manager;
 mod protocol;
@@ -9,6 +10,7 @@ use std::{rc::Rc, thread};
 
 use audio_decoder::AudioDecoder;
 use audio_player::AudioPlayer;
+use db_manager::DbManager;
 use log::{debug, info};
 use playlist::Playlist;
 use playlist_manager::PlaylistManager;
@@ -228,11 +230,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Setup playlist manager
     let playlist_manager_bus_receiver = bus_sender.subscribe();
     let playlist_manager_bus_sender = bus_sender.clone();
+    let db_manager = DbManager::new().expect("Failed to initialize database");
     thread::spawn(move || {
         let mut playlist_manager = PlaylistManager::new(
             Playlist::new(),
             playlist_manager_bus_receiver,
             playlist_manager_bus_sender,
+            db_manager,
         );
         playlist_manager.run();
     });

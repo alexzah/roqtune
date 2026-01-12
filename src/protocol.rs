@@ -70,6 +70,22 @@ pub enum PlaylistMessage {
         indices: Vec<usize>,
         to: usize,
     },
+    PlaylistRestored(Vec<RestoredTrack>),
+    TrackAdded {
+        id: String,
+        path: PathBuf,
+    },
+    UpdateMetadata {
+        id: String,
+        metadata: DetailedMetadata,
+    },
+}
+
+#[derive(Debug, Clone, serde::Deserialize, serde::Serialize)]
+pub struct RestoredTrack {
+    pub id: String,
+    pub path: PathBuf,
+    pub metadata: DetailedMetadata,
 }
 
 #[derive(Debug, Clone)]

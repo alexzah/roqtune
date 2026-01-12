@@ -28,6 +28,7 @@ rubato = "0.16.1" # For audio resampling
 dirs = "6.0.0" # For getting user's home directory
 toml = "0.8.20" # For reading and writing toml files
 serde = "1.0.219"
+rusqlite = { version = "0.32.1", features = ["bundled"] }
 
 [build-dependencies]
 slint-build = "1.10.0"

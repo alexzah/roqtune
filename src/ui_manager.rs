@@ -18,6 +18,7 @@ pub struct UiManager {
     ui: slint::Weak<AppWindow>,
     bus_receiver: Receiver<protocol::Message>,
     bus_sender: Sender<protocol::Message>,
+    track_ids: Vec<String>,
     track_paths: Vec<PathBuf>,
     track_metadata: Vec<TrackMetadata>,
 }
@@ -41,6 +42,7 @@ impl UiManager {
             ui: ui.clone(),
             bus_receiver,
             bus_sender,
+            track_ids: Vec::new(),
             track_paths: Vec::new(),
             track_metadata: Vec::new(),
         }
@@ -243,10 +245,66 @@ impl UiManager {
         loop {
             match self.bus_receiver.blocking_recv() {
                 Ok(message) => match message {
-                    protocol::Message::Playlist(protocol::PlaylistMessage::LoadTrack(path)) => {
+                    protocol::Message::Playlist(protocol::PlaylistMessage::PlaylistRestored(
+                        tracks,
+                    )) => {
+                        for track in tracks {
+                            self.track_ids.push(track.id.clone());
+                            self.track_paths.push(track.path.clone());
+                            self.track_metadata.push(TrackMetadata {
+                                title: track.metadata.title.clone(),
+                                artist: track.metadata.artist.clone(),
+                                album: track.metadata.album.clone(),
+                                date: track.metadata.date.clone(),
+                                genre: track.metadata.genre.clone(),
+                            });
+
+                            let tags = track.metadata;
+                            let _ = self.ui.upgrade_in_event_loop(move |ui| {
+                                let track_model_strong = ui.get_track_model();
+                                let track_model = track_model_strong
+                                    .as_any()
+                                    .downcast_ref::<VecModel<ModelRc<StandardListViewItem>>>()
+                                    .expect("VecModel expected");
+                                track_model.push(ModelRc::new(VecModel::from(vec![
+                                    StandardListViewItem::from(""),
+                                    StandardListViewItem::from(tags.title.as_str()),
+                                    StandardListViewItem::from(tags.artist.as_str()),
+                                    StandardListViewItem::from(tags.album.as_str()),
+                                ])));
+
+                                let selection_model_strong = ui.get_selection_model();
+                                let selection_model = selection_model_strong
+                                    .as_any()
+                                    .downcast_ref::<VecModel<bool>>()
+                                    .expect("VecModel expected");
+                                selection_model.push(false);
+                            });
+                        }
+                    }
+                    protocol::Message::Playlist(protocol::PlaylistMessage::TrackAdded {
+                        id,
+                        path,
+                    }) => {
+                        self.track_ids.push(id.clone());
                         self.track_paths.push(path.clone());
                         let tags = self.read_track_metadata(&path);
                         self.track_metadata.push(tags.clone());
+
+                        // Send metadata update back to bus for persistence
+                        let _ = self.bus_sender.send(protocol::Message::Playlist(
+                            protocol::PlaylistMessage::UpdateMetadata {
+                                id,
+                                metadata: protocol::DetailedMetadata {
+                                    title: tags.title.clone(),
+                                    artist: tags.artist.clone(),
+                                    album: tags.album.clone(),
+                                    date: tags.date.clone(),
+                                    genre: tags.genre.clone(),
+                                },
+                            },
+                        ));
+
                         let _ = self.ui.upgrade_in_event_loop(move |ui| {
                             let track_model_strong = ui.get_track_model();
                             let track_model = track_model_strong
@@ -269,6 +327,9 @@ impl UiManager {
                         });
                     }
                     protocol::Message::Playlist(protocol::PlaylistMessage::DeleteTrack(index)) => {
+                        if index < self.track_ids.len() {
+                            self.track_ids.remove(index);
+                        }
                         if index < self.track_paths.len() {
                             self.track_paths.remove(index);
                         }
@@ -583,20 +644,25 @@ impl UiManager {
                     }) => {
                         let indices_clone = indices.clone();
 
-                        // Update track_paths
+                        // Update track_paths, track_ids, track_metadata
                         let mut sorted_indices = indices.clone();
                         sorted_indices.sort_by(|a, b| b.cmp(a));
                         let mut moved_paths = Vec::new();
+                        let mut moved_ids = Vec::new();
                         let mut moved_metadata = Vec::new();
                         for &idx in sorted_indices.iter() {
                             if idx < self.track_paths.len() {
                                 moved_paths.push(self.track_paths.remove(idx));
+                            }
+                            if idx < self.track_ids.len() {
+                                moved_ids.push(self.track_ids.remove(idx));
                             }
                             if idx < self.track_metadata.len() {
                                 moved_metadata.push(self.track_metadata.remove(idx));
                             }
                         }
                         moved_paths.reverse();
+                        moved_ids.reverse();
                         moved_metadata.reverse();
                         let mut actual_to = to;
                         for &idx in indices.iter() {
@@ -607,6 +673,9 @@ impl UiManager {
                         actual_to = actual_to.min(self.track_paths.len());
                         for (i, path) in moved_paths.into_iter().enumerate() {
                             self.track_paths.insert(actual_to + i, path);
+                        }
+                        for (i, id) in moved_ids.into_iter().enumerate() {
+                            self.track_ids.insert(actual_to + i, id);
                         }
                         for (i, metadata) in moved_metadata.into_iter().enumerate() {
                             self.track_metadata.insert(actual_to + i, metadata);
