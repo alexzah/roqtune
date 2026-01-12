@@ -17,10 +17,11 @@ The project uses standard Cargo commands. Ensure you run these checks before sub
 
 ### Run
 - **Run Application**: `cargo run`
-  - Runs the debug build.
+  - Runs the debug build. For longer debugging sessions, it is preferred that you add logs, run the build, and instruct me what to manually test so that you can verify the output
 - **Run Release**: `cargo run --release`
 
 ### Testing
+- There are currently no unit tests, so you will have to add them for the below commands to work properly
 - **Run All Tests**: `cargo test`
   - Executes unit and integration tests.
 - **Run Single Test**: `cargo test <test_name>`
