@@ -71,6 +71,11 @@ pub enum PlaylistMessage {
     CreatePlaylist {
         name: String,
     },
+    RenamePlaylist {
+        id: String,
+        name: String,
+    },
+    RenamePlaylistByIndex(usize, String),
     SwitchPlaylist {
         id: String,
     },

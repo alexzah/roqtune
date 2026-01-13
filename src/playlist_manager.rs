@@ -451,6 +451,31 @@ impl PlaylistManager {
                         }
                     }
                     protocol::Message::Playlist(
+                        protocol::PlaylistMessage::RenamePlaylistByIndex(index, name),
+                    ) => {
+                        let playlists = self.db_manager.get_all_playlists().unwrap_or_default();
+                        if let Some(p) = playlists.get(index) {
+                            let id = p.id.clone();
+                            let _ = self.bus_producer.send(protocol::Message::Playlist(
+                                protocol::PlaylistMessage::RenamePlaylist { id, name },
+                            ));
+                        }
+                    }
+                    protocol::Message::Playlist(protocol::PlaylistMessage::RenamePlaylist {
+                        id,
+                        name,
+                    }) => {
+                        debug!("PlaylistManager: Renaming playlist {} to {}", id, name);
+                        if let Err(e) = self.db_manager.rename_playlist(&id, &name) {
+                            error!("Failed to rename playlist in database: {}", e);
+                        } else {
+                            let playlists = self.db_manager.get_all_playlists().unwrap_or_default();
+                            let _ = self.bus_producer.send(protocol::Message::Playlist(
+                                protocol::PlaylistMessage::PlaylistsRestored(playlists),
+                            ));
+                        }
+                    }
+                    protocol::Message::Playlist(
                         protocol::PlaylistMessage::SwitchPlaylistByIndex(index),
                     ) => {
                         let playlists = self.db_manager.get_all_playlists().unwrap_or_default();

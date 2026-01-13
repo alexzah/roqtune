@@ -247,6 +247,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         )));
     });
 
+    let bus_sender_clone = bus_sender.clone();
+    ui.on_rename_playlist(move |index, name| {
+        debug!("Rename playlist requested: index={}, name={}", index, name);
+        let _ = bus_sender_clone.send(Message::Playlist(PlaylistMessage::RenamePlaylistByIndex(
+            index as usize,
+            name.to_string(),
+        )));
+    });
+
     // Setup playlist manager
     let playlist_manager_bus_receiver = bus_sender.subscribe();
     let playlist_manager_bus_sender = bus_sender.clone();

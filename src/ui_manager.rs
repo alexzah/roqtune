@@ -252,7 +252,9 @@ impl UiManager {
                     protocol::Message::Playlist(protocol::PlaylistMessage::PlaylistsRestored(
                         playlists,
                     )) => {
+                        let old_len = self.playlist_ids.len();
                         self.playlist_ids = playlists.iter().map(|p| p.id.clone()).collect();
+                        let new_len = self.playlist_ids.len();
                         let mut slint_playlists = Vec::new();
                         for p in playlists {
                             slint_playlists.push(StandardListViewItem::from(p.name.as_str()));
@@ -262,6 +264,9 @@ impl UiManager {
                             ui.set_playlists(ModelRc::from(Rc::new(VecModel::from(
                                 slint_playlists,
                             ))));
+                            if new_len > old_len && old_len > 0 {
+                                ui.set_editing_playlist_index((new_len - 1) as i32);
+                            }
                         });
                     }
                     protocol::Message::Playlist(

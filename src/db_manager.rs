@@ -107,6 +107,14 @@ impl DbManager {
         Ok(())
     }
 
+    pub fn rename_playlist(&self, id: &str, name: &str) -> Result<(), rusqlite::Error> {
+        self.conn.execute(
+            "UPDATE playlists SET name = ?1 WHERE id = ?2",
+            params![name, id],
+        )?;
+        Ok(())
+    }
+
     pub fn get_all_playlists(&self) -> Result<Vec<PlaylistInfo>, rusqlite::Error> {
         let mut stmt = self.conn.prepare("SELECT id, name FROM playlists")?;
         let playlist_iter = stmt.query_map([], |row| {
