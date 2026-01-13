@@ -91,6 +91,8 @@ pub enum PlaylistMessage {
     PlaylistIndicesChanged {
         playing_playlist_id: Option<String>,
         playing_index: Option<usize>,
+        playing_track_path: Option<PathBuf>,
+        playing_track_metadata: Option<DetailedMetadata>,
         selected_indices: Vec<usize>,
         is_playing: bool,
         repeat_on: bool,

@@ -664,10 +664,23 @@ impl PlaylistManager {
     }
 
     fn broadcast_playlist_changed(&self) {
+        let mut playing_track_path = None;
+        let mut playing_track_metadata = None;
+
+        if let Some(playing_idx) = self.playback_playlist.get_playing_track_index() {
+            if playing_idx < self.playback_playlist.num_tracks() {
+                let track = self.playback_playlist.get_track(playing_idx);
+                playing_track_path = Some(track.path.clone());
+                playing_track_metadata = self.db_manager.get_track_metadata(&track.id).ok();
+            }
+        }
+
         let _ = self.bus_producer.send(protocol::Message::Playlist(
             protocol::PlaylistMessage::PlaylistIndicesChanged {
                 playing_playlist_id: self.playback_playlist_id.clone(),
                 playing_index: self.playback_playlist.get_playing_track_index(),
+                playing_track_path,
+                playing_track_metadata,
                 selected_indices: self.editing_playlist.get_selected_indices(),
                 is_playing: self.playback_playlist.is_playing(),
                 repeat_on: self.playback_playlist.get_repeat_mode()

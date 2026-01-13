@@ -620,6 +620,8 @@ impl UiManager {
                         protocol::PlaylistMessage::PlaylistIndicesChanged {
                             playing_playlist_id,
                             playing_index,
+                            playing_track_path,
+                            playing_track_metadata,
                             selected_indices,
                             is_playing,
                             repeat_on,
@@ -629,16 +631,9 @@ impl UiManager {
                         let is_playing_active_playlist =
                             playing_playlist_id.as_ref() == Some(&self.active_playlist_id);
 
-                        // Priority: 1. First selected track, 2. Playing track (if active), 3. None
-                        let display_index = if !selected_indices.is_empty() {
-                            Some(selected_indices[0])
-                        } else if is_playing_active_playlist {
-                            playing_index
-                        } else {
-                            None
-                        };
-
-                        if let Some(idx) = display_index {
+                        // Priority: 1. First selected track, 2. Playing track (global fallback), 3. None
+                        if !selected_indices.is_empty() {
+                            let idx = selected_indices[0];
                             if let Some(path) = self.track_paths.get(idx) {
                                 self.update_cover_art(Some(path));
                             }
@@ -655,6 +650,13 @@ impl UiManager {
                                     )),
                                 ));
                             }
+                        } else if let (Some(path), Some(meta)) =
+                            (playing_track_path, playing_track_metadata)
+                        {
+                            self.update_cover_art(Some(&path));
+                            let _ = self.bus_sender.send(protocol::Message::Playback(
+                                protocol::PlaybackMessage::MetadataDisplayChanged(Some(meta)),
+                            ));
                         } else {
                             self.update_cover_art(None);
                             let _ = self.bus_sender.send(protocol::Message::Playback(
