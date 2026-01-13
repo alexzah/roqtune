@@ -40,7 +40,8 @@ component TrackRow inherits Rectangle {
             color: #eee;
             font-size: 13px;
             vertical-alignment: center;
-            horizontal-stretch: 1;
+            horizontal-stretch: 2;
+            min-width: 150px;
             overflow: elide;
         }
         
@@ -50,7 +51,8 @@ component TrackRow inherits Rectangle {
             color: #aaa;
             font-size: 13px;
             vertical-alignment: center;
-            width: 200px;
+            horizontal-stretch: 1;
+            min-width: 100px;
             overflow: elide;
         }
         
@@ -60,8 +62,14 @@ component TrackRow inherits Rectangle {
             color: #888;
             font-size: 13px;
             vertical-alignment: center;
-            width: 200px;
+            horizontal-stretch: 1;
+            min-width: 100px;
             overflow: elide;
+        }
+
+        // Empty grow column
+        Rectangle {
+            horizontal-stretch: 3;
         }
     }
     
@@ -143,8 +151,10 @@ component PlayerButton inherits Rectangle {
 }
 
 export component AppWindow inherits Window {
-    width: 900px;
-    height: 650px;
+    preferred-width: 900px;
+    preferred-height: 650px;
+    min-width: 600px;
+    min-height: 400px;
     title: "fooBar-like Music Player";
     background: #282828;
 
@@ -392,7 +402,9 @@ export component AppWindow inherits Window {
             
             // Left Sidebar: Album Art
             if root.show_album_art : VerticalLayout {
-                width: 200px;
+                horizontal-stretch: 1;
+                min-width: 150px;
+                max-width: 250px;
                 padding: 10px;
                 alignment: center;
                 spacing: 10px;
@@ -440,8 +452,7 @@ export component AppWindow inherits Window {
                 }
                 
                 Rectangle {
-                    height: 180px;
-                    width: 180px;
+                    height: self.width;
                     background: #202020;
                     border-radius: 4px;
                     
@@ -455,7 +466,7 @@ export component AppWindow inherits Window {
             }
 
             Rectangle {
-                horizontal-stretch: 1;
+                horizontal-stretch: 4;
                 background: #282828;
                 
                 VerticalLayout {
@@ -468,9 +479,10 @@ export component AppWindow inherits Window {
                             padding-right: 8px;
                             spacing: 10px;
                             Rectangle { width: 40px; Text { text: "#"; color: #555; font-size: 11px; horizontal-alignment: center; vertical-alignment: center; } }
-                            Text { text: "Title"; color: #888; font-size: 12px; horizontal-stretch: 1; vertical-alignment: center; }
-                            Text { text: "Artist"; color: #888; font-size: 12px; width: 200px; vertical-alignment: center; }
-                            Text { text: "Album"; color: #888; font-size: 12px; width: 200px; vertical-alignment: center; }
+                            Text { text: "Title"; color: #888; font-size: 12px; horizontal-stretch: 2; min-width: 150px; vertical-alignment: center; }
+                            Text { text: "Artist"; color: #888; font-size: 12px; horizontal-stretch: 1; min-width: 100px; vertical-alignment: center; }
+                            Text { text: "Album"; color: #888; font-size: 12px; horizontal-stretch: 1; min-width: 100px; vertical-alignment: center; }
+                            Rectangle { horizontal-stretch: 3; }
                         }
                     }
                     
@@ -562,6 +574,8 @@ export component AppWindow inherits Window {
                     color: #aaa;
                     font-size: 12px;
                     vertical-alignment: center;
+                    overflow: elide;
+                    horizontal-stretch: 1;
                 }
                 
                 // Technical info area
@@ -572,6 +586,7 @@ export component AppWindow inherits Window {
                     color: #777;
                     font-size: 11px;
                     vertical-alignment: center;
+                    overflow: elide;
                 }
                 
                 VerticalLayout {
