@@ -756,7 +756,7 @@ export component AppWindow inherits Window {
 
                             property <length> row-height: 30px;
                             property <length> header-height: 28px;
-                            property <length> content-y: self.mouse-y - track-list.viewport-y - self.header-height;
+                            property <length> content-y: self.mouse-y - track-list.viewport-y;
                             property <int> hovered-row: max(-1, min(root.track_model.length - 1, floor(content-y / row-height)));
                             property <int> drop-gap: max(0, min(root.track_model.length, floor((content-y + row-height / 2) / row-height)));
 
@@ -765,17 +765,12 @@ export component AppWindow inherits Window {
                                     if (event.kind == PointerEventKind.down) {
                                         root.pressed-index = self.hovered-row;
                                         root.press-y = self.mouse-y;
-                                        root.sidebar_has_focus = false;
+                                        root.sidebar-has-focus = false;
                                         key-handler.focus();
-                                        root.handle_track_click(self.hovered-row, event.modifiers.control, event.modifiers.shift);
+                                        root.on_pointer_down(self.hovered-row, event.modifiers.control, event.modifiers.shift, root.track-model[root.pressed-index].selected);
                                     } else if (event.kind == PointerEventKind.up) {
-                                        if (root.is-dragging) {
-                                            root.reorder_tracks(root.drag_indices, root.drop-index);
-                                        }
-                                        root.is-dragging = false;
-                                        root.pressed-index = -1;
-                                        root.drop-index = -1;
-                                        root.drag_indices = [];
+                                        root.on_drag_end(self.drop-gap);
+                                        root.hover-index = -1;
                                     }
                                 }
                             }
@@ -786,14 +781,10 @@ export component AppWindow inherits Window {
                                 } else {
                                     if (!root.is-dragging && abs(self.mouse-y - root.press-y) > 5px) {
                                         root.is-dragging = true;
-                                        if (root.pressed-index >= 0 && root.track_model[root.pressed-index].selected) {
-                                            root.drag_indices = root.selected_indices;
-                                        } else {
-                                            root.drag_indices = [root.pressed-index];
-                                        }
+                                        root.on_drag_start(root.pressed-index);
                                     }
                                     if (root.is-dragging) {
-                                        root.drop-index = self.drop-gap;
+                                        root.on_drag_move(self.drop-gap);
                                     }
                                 }
                             }
@@ -900,11 +891,11 @@ export component AppWindow inherits Window {
     in-out property <string> display_genre: "";
 
     // Drag and drop state
-    property <int> pressed-index: -1;
+    in-out property <int> pressed-index: -1;
     property <length> press-y: 0;
-    property <bool> is-dragging: false;
-    property <[int]> drag_indices: [];
-    property <int> drop-index: -1;
+    in-out property <bool> is-dragging: false;
+    in-out property <[int]> drag_indices: [];
+    in-out property <int> drop-index: -1;
     property <int> hover-index: -1;
 
     // Seek bar properties
@@ -924,6 +915,10 @@ export component AppWindow inherits Window {
     callback next();
     callback previous();
     callback handle_track_click(int, bool, bool);
+    callback on_pointer_down(int, bool, bool, bool);
+    callback on_drag_start(int);
+    callback on_drag_move(int);
+    callback on_drag_end(int);
     callback playlist_item_double_click(int);
     callback playback_order_changed(int);
     callback toggle_repeat();

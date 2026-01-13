@@ -400,6 +400,9 @@ impl PlaylistManager {
 
                         // Notify other components about the index shift
                         self.broadcast_playlist_changed();
+
+                        // Notify UI manager about selection change (delete modifies selection)
+                        self.broadcast_selection_changed();
                     }
                     protocol::Message::Playlist(protocol::PlaylistMessage::SelectTrackMulti {
                         index,
@@ -412,15 +415,13 @@ impl PlaylistManager {
                         );
                         self.editing_playlist.select_track_multi(index, ctrl, shift);
 
-                        // Notify other components about the selection change
-                        self.broadcast_playlist_changed();
+                        self.broadcast_selection_changed();
                     }
                     protocol::Message::Playlist(protocol::PlaylistMessage::DeselectAll) => {
                         debug!("PlaylistManager: Received deselect all command");
                         self.editing_playlist.deselect_all();
 
-                        // Notify other components about the selection change
-                        self.broadcast_playlist_changed();
+                        self.broadcast_selection_changed();
                     }
                     protocol::Message::Playlist(protocol::PlaylistMessage::ReorderTracks {
                         indices,
@@ -830,6 +831,13 @@ impl PlaylistManager {
                 playback_order: self.playback_order,
                 repeat_mode: self.repeat_mode,
             },
+        ));
+    }
+
+    fn broadcast_selection_changed(&self) {
+        let selected_indices = self.editing_playlist.get_selected_indices();
+        let _ = self.bus_producer.send(protocol::Message::Playlist(
+            protocol::PlaylistMessage::SelectionChanged(selected_indices),
         ));
     }
 }

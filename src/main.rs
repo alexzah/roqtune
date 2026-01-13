@@ -183,6 +183,48 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }));
     });
 
+    // Wire up pointer down handler
+    let bus_sender_clone = bus_sender.clone();
+    ui.on_on_pointer_down(move |index, ctrl, shift, is_already_selected| {
+        debug!(
+            "Pointer down at index {:?} (ctrl={}, shift={}, is_already_selected={})",
+            index, ctrl, shift, is_already_selected
+        );
+        let _ = bus_sender_clone.send(Message::Playlist(PlaylistMessage::OnPointerDown {
+            index: index as usize,
+            ctrl,
+            shift,
+            is_already_selected,
+        }));
+    });
+
+    // Wire up drag start handler
+    let bus_sender_clone = bus_sender.clone();
+    ui.on_on_drag_start(move |pressed_index| {
+        debug!("Drag start at index {:?}", pressed_index);
+        let _ = bus_sender_clone.send(Message::Playlist(PlaylistMessage::OnDragStart {
+            pressed_index: pressed_index as usize,
+        }));
+    });
+
+    // Wire up drag move handler
+    let bus_sender_clone = bus_sender.clone();
+    ui.on_on_drag_move(move |drop_gap| {
+        debug!("Drag move to gap {:?}", drop_gap);
+        let _ = bus_sender_clone.send(Message::Playlist(PlaylistMessage::OnDragMove {
+            drop_gap: drop_gap as usize,
+        }));
+    });
+
+    // Wire up drag end handler
+    let bus_sender_clone = bus_sender.clone();
+    ui.on_on_drag_end(move |drop_gap| {
+        debug!("Drag end at gap {:?}", drop_gap);
+        let _ = bus_sender_clone.send(Message::Playlist(PlaylistMessage::OnDragEnd {
+            drop_gap: drop_gap as usize,
+        }));
+    });
+
     // Wire up sequence selector
     let bus_sender_clone = bus_sender.clone();
     ui.on_playback_order_changed(move |index| {

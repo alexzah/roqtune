@@ -61,6 +61,22 @@ pub enum PlaylistMessage {
         ctrl: bool,
         shift: bool,
     },
+    SelectionChanged(Vec<usize>),
+    OnPointerDown {
+        index: usize,
+        ctrl: bool,
+        shift: bool,
+        is_already_selected: bool,
+    },
+    OnDragStart {
+        pressed_index: usize,
+    },
+    OnDragMove {
+        drop_gap: usize,
+    },
+    OnDragEnd {
+        drop_gap: usize,
+    },
     DeselectAll,
     ReorderTracks {
         indices: Vec<usize>,

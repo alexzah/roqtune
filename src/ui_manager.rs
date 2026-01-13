@@ -23,6 +23,10 @@ pub struct UiManager {
     track_ids: Vec<String>,
     track_paths: Vec<PathBuf>,
     track_metadata: Vec<TrackMetadata>,
+    selected_indices: Vec<usize>,
+    drag_indices: Vec<usize>,
+    is_dragging: bool,
+    pressed_index: Option<usize>,
 }
 
 #[derive(Clone)]
@@ -49,6 +53,10 @@ impl UiManager {
             track_ids: Vec::new(),
             track_paths: Vec::new(),
             track_metadata: Vec::new(),
+            selected_indices: Vec::new(),
+            drag_indices: Vec::new(),
+            is_dragging: false,
+            pressed_index: None,
         }
     }
 
@@ -243,6 +251,91 @@ impl UiManager {
             date: "".to_string(),
             genre: "".to_string(),
         }
+    }
+
+    pub fn on_pointer_down(
+        &mut self,
+        pressed_index: usize,
+        ctrl: bool,
+        shift: bool,
+        is_already_selected: bool,
+    ) {
+        debug!(
+            "on_pointer_down: index={}, ctrl={}, shift={}, is_already_selected={}",
+            pressed_index, ctrl, shift, is_already_selected
+        );
+        self.pressed_index = Some(pressed_index);
+
+        if !is_already_selected || ctrl || shift {
+            let _ = self.bus_sender.send(protocol::Message::Playlist(
+                protocol::PlaylistMessage::SelectTrackMulti {
+                    index: pressed_index,
+                    ctrl,
+                    shift,
+                },
+            ));
+        }
+    }
+
+    pub fn on_drag_start(&mut self, pressed_index: usize) {
+        debug!(
+            ">>> on_drag_start START: pressed_index={}, self.selected_indices={:?}",
+            pressed_index, self.selected_indices
+        );
+        if self.selected_indices.contains(&pressed_index) {
+            self.drag_indices = self.selected_indices.clone();
+            debug!(
+                ">>> MULTI-SELECT DRAG: using drag_indices {:?}",
+                self.drag_indices
+            );
+        } else {
+            self.drag_indices = vec![pressed_index];
+            debug!(">>> SINGLE DRAG: using index {:?}", self.drag_indices);
+        }
+        self.drag_indices.sort();
+        debug!(
+            ">>> on_drag_start END: drag_indices={:?}",
+            self.drag_indices
+        );
+        self.is_dragging = true;
+    }
+
+    pub fn on_drag_move(&mut self, drop_gap: usize) {
+        if self.is_dragging {
+            let _ = self.ui.upgrade_in_event_loop(move |ui| {
+                ui.set_drop_index(drop_gap as i32);
+            });
+        }
+    }
+
+    pub fn on_drag_end(&mut self, drop_gap: usize) {
+        debug!(
+            ">>> on_drag_end START: drop_gap={}, is_dragging={}, drag_indices={:?}",
+            drop_gap, self.is_dragging, self.drag_indices
+        );
+        if self.is_dragging && !self.drag_indices.is_empty() {
+            let indices = self.drag_indices.clone();
+            let to = drop_gap;
+            debug!(
+                ">>> on_drag_end SENDING ReorderTracks: indices={:?}, to={}",
+                indices, to
+            );
+
+            let _ = self.bus_sender.send(protocol::Message::Playlist(
+                protocol::PlaylistMessage::ReorderTracks { indices, to },
+            ));
+        }
+
+        self.drag_indices.clear();
+        self.is_dragging = false;
+        self.pressed_index = None;
+
+        let _ = self.ui.upgrade_in_event_loop(move |ui| {
+            ui.set_is_dragging(false);
+            ui.set_drop_index(-1);
+            ui.set_pressed_index(-1);
+            ui.set_drag_indices(slint::ModelRc::from(Rc::new(slint::VecModel::from(vec![]))));
+        });
     }
 
     pub fn run(&mut self) {
@@ -694,10 +787,74 @@ impl UiManager {
                             }
                         });
                     }
+                    protocol::Message::Playlist(protocol::PlaylistMessage::SelectionChanged(
+                        indices,
+                    )) => {
+                        debug!(
+                            "SelectionChanged: setting selected_indices to {:?}",
+                            indices
+                        );
+                        let indices_clone = indices.clone();
+                        self.selected_indices = indices_clone.clone();
+                        debug!(
+                            "After SelectionChanged: self.selected_indices = {:?}",
+                            self.selected_indices
+                        );
+
+                        let _ = self.ui.upgrade_in_event_loop(move |ui| {
+                            let track_model_strong = ui.get_track_model();
+                            let track_model = track_model_strong
+                                .as_any()
+                                .downcast_ref::<VecModel<TrackRowData>>()
+                                .expect("VecModel<TrackRowData> expected");
+
+                            for i in 0..track_model.row_count() {
+                                let mut row = track_model.row_data(i).unwrap();
+                                let should_be_selected = indices_clone.contains(&i);
+                                if row.selected != should_be_selected {
+                                    row.selected = should_be_selected;
+                                    track_model.set_row_data(i, row);
+                                }
+                            }
+
+                            let slint_indices: Vec<i32> =
+                                indices_clone.iter().map(|&i| i as i32).collect();
+                            ui.set_selected_indices(slint::ModelRc::from(Rc::new(
+                                slint::VecModel::from(slint_indices),
+                            )));
+                        });
+                    }
+                    protocol::Message::Playlist(protocol::PlaylistMessage::OnPointerDown {
+                        index,
+                        ctrl,
+                        shift,
+                        is_already_selected,
+                    }) => {
+                        self.on_pointer_down(index, ctrl, shift, is_already_selected);
+                    }
+                    protocol::Message::Playlist(protocol::PlaylistMessage::OnDragStart {
+                        pressed_index,
+                    }) => {
+                        self.on_drag_start(pressed_index);
+                    }
+                    protocol::Message::Playlist(protocol::PlaylistMessage::OnDragMove {
+                        drop_gap,
+                    }) => {
+                        self.on_drag_move(drop_gap);
+                    }
+                    protocol::Message::Playlist(protocol::PlaylistMessage::OnDragEnd {
+                        drop_gap,
+                    }) => {
+                        self.on_drag_end(drop_gap);
+                    }
                     protocol::Message::Playlist(protocol::PlaylistMessage::ReorderTracks {
                         indices,
                         to,
                     }) => {
+                        debug!(
+                            ">>> ReorderTracks HANDLER: indices={:?}, to={}",
+                            indices, to
+                        );
                         let indices_clone = indices.clone();
 
                         let mut sorted_indices = indices.clone();
