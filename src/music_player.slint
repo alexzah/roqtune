@@ -1,11 +1,46 @@
 import { Button, VerticalBox, StandardTableView, ComboBox, ScrollView, LineEdit } from "std-widgets.slint";
 
+component ContextMenu inherits PopupWindow {
+    callback rename();
+    width: 120px;
+    height: 32px;
+    
+    Rectangle {
+        background: #333;
+        border-width: 1px;
+        border-color: #444;
+        
+        VerticalLayout {
+            padding: 4px;
+            Rectangle {
+                height: 24px;
+                background: item-ta.has-hover ? #444 : transparent;
+                border-radius: 2px;
+                Text {
+                    x: 8px;
+                    text: "Rename";
+                    color: #eee;
+                    font-size: 13px;
+                    vertical-alignment: center;
+                }
+                item-ta := TouchArea {
+                    clicked => {
+                        root.rename();
+                    }
+                }
+            }
+        }
+    }
+}
+
 component PlaylistRow inherits Rectangle {
     in property <string> name;
     in property <bool> is-active;
     in property <bool> is-editing;
     callback clicked();
     callback renamed(string);
+    callback context-menu-action();
+    callback cancel-edit();
     
     height: 24px;
     background: is-active ? #3d3d3d : ta.has-hover ? #333 : transparent;
@@ -17,9 +52,10 @@ component PlaylistRow inherits Rectangle {
         color: is-active ? #eee : #aaa;
         font-size: 13px;
         vertical-alignment: center;
+        horizontal-alignment: left;
     }
     
-    if is-editing : edit-box := LineEdit {
+    if is-editing : LineEdit {
         x: 4px;
         width: parent.width - 8px;
         height: parent.height - 4px;
@@ -35,6 +71,28 @@ component PlaylistRow inherits Rectangle {
     ta := TouchArea {
         visible: !is-editing;
         clicked => { root.clicked(); }
+        pointer-event(event) => {
+            if (event.button == PointerEventButton.right && event.kind == PointerEventKind.down) {
+                menu.show();
+            }
+        }
+    }
+
+    menu := ContextMenu {
+        rename => {
+            root.context-menu-action();
+        }
+    }
+
+    FocusScope {
+        visible: root.is-editing;
+        key-pressed(event) => {
+            if (event.text == Key.Escape) {
+                root.cancel-edit();
+                return accept;
+            }
+            reject
+        }
     }
 }
 
@@ -215,6 +273,10 @@ export component AppWindow inherits Window {
         }
     }
     
+    public function refocus_main() {
+        key-handler.focus();
+    }
+
     // Status display at the bottom showing the currently playing track
     in-out property <string> status-text: "";
 
@@ -500,10 +562,19 @@ export component AppWindow inherits Window {
                                     clicked => { 
                                         root.switch_playlist(i); 
                                         root.editing_playlist_index = -1;
+                                        root.refocus_main();
                                     }
                                     renamed(new-name) => {
                                         root.rename_playlist(i, new-name);
                                         root.editing_playlist_index = -1;
+                                        root.refocus_main();
+                                    }
+                                    cancel-edit() => {
+                                        root.editing_playlist_index = -1;
+                                        root.refocus_main();
+                                    }
+                                    context-menu-action() => {
+                                        root.editing_playlist_index = i;
                                     }
                                 }
                             }
