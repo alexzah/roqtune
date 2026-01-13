@@ -5,7 +5,7 @@ edition = "2021"
 build = "build.rs"
 
 [dependencies]
-slint = "1.10.0" # UI framework
+slint = "1.14.1" # UI framework
 rfd = "0.17.1"   # For file dialogs
 id3 = "1.16.2" # Metadata tags
 ape = "0.6.0" # Metadata tags
@@ -31,7 +31,7 @@ serde = "1.0.219"
 rusqlite = { version = "0.32.1", features = ["bundled"] }
 
 [build-dependencies]
-slint-build = "1.10.0"
+slint-build = "1.14.1"
 
 [dependencies.uuid]
 version = "1.15.1"

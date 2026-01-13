@@ -7,10 +7,10 @@ use log::debug;
 use slint::{Model, ModelRc, StandardListViewItem, VecModel};
 use tokio::sync::broadcast::{Receiver, Sender};
 
-use crate::{protocol, AppWindow};
+use crate::{protocol, AppWindow, TrackRowData};
 
 pub struct UiState {
-    pub track_model: Rc<VecModel<ModelRc<StandardListViewItem>>>,
+    pub track_model: Rc<VecModel<TrackRowData>>,
 }
 
 // Manages the playlist
@@ -298,19 +298,20 @@ impl UiManager {
                                 genre: track.metadata.genre.clone(),
                             });
 
-                            track_data.push((
-                                track.metadata.title.clone(),
-                                track.metadata.artist.clone(),
-                                track.metadata.album.clone(),
-                            ));
+                            track_data.push(TrackRowData {
+                                status: "".into(),
+                                title: track.metadata.title.clone().into(),
+                                artist: track.metadata.artist.clone().into(),
+                                album: track.metadata.album.clone().into(),
+                            });
                         }
 
                         let _ = self.ui.upgrade_in_event_loop(move |ui| {
                             let track_model_strong = ui.get_track_model();
                             let track_model = track_model_strong
                                 .as_any()
-                                .downcast_ref::<VecModel<ModelRc<StandardListViewItem>>>()
-                                .expect("VecModel expected");
+                                .downcast_ref::<VecModel<TrackRowData>>()
+                                .expect("VecModel<TrackRowData> expected");
 
                             let selection_model_strong = ui.get_selection_model();
                             let selection_model = selection_model_strong
@@ -318,7 +319,6 @@ impl UiManager {
                                 .downcast_ref::<VecModel<bool>>()
                                 .expect("VecModel expected");
 
-                            // Clear existing models
                             while track_model.row_count() > 0 {
                                 track_model.remove(0);
                             }
@@ -326,13 +326,8 @@ impl UiManager {
                                 selection_model.remove(0);
                             }
 
-                            for (title, artist, album) in track_data {
-                                track_model.push(ModelRc::new(VecModel::from(vec![
-                                    StandardListViewItem::from(""),
-                                    StandardListViewItem::from(title.as_str()),
-                                    StandardListViewItem::from(artist.as_str()),
-                                    StandardListViewItem::from(album.as_str()),
-                                ])));
+                            for track in track_data {
+                                track_model.push(track);
                                 selection_model.push(false);
                             }
                         });
@@ -346,7 +341,6 @@ impl UiManager {
                         let tags = self.read_track_metadata(&path);
                         self.track_metadata.push(tags.clone());
 
-                        // Send metadata update back to bus for persistence
                         let _ = self.bus_sender.send(protocol::Message::Playlist(
                             protocol::PlaylistMessage::UpdateMetadata {
                                 id,
@@ -364,14 +358,14 @@ impl UiManager {
                             let track_model_strong = ui.get_track_model();
                             let track_model = track_model_strong
                                 .as_any()
-                                .downcast_ref::<VecModel<ModelRc<StandardListViewItem>>>()
-                                .expect("VecModel expected");
-                            track_model.push(ModelRc::new(VecModel::from(vec![
-                                StandardListViewItem::from(""),
-                                StandardListViewItem::from(tags.title.as_str()),
-                                StandardListViewItem::from(tags.artist.as_str()),
-                                StandardListViewItem::from(tags.album.as_str()),
-                            ])));
+                                .downcast_ref::<VecModel<TrackRowData>>()
+                                .expect("VecModel<TrackRowData> expected");
+                            track_model.push(TrackRowData {
+                                status: "".into(),
+                                title: tags.title.clone().into(),
+                                artist: tags.artist.clone().into(),
+                                album: tags.album.clone().into(),
+                            });
 
                             let selection_model_strong = ui.get_selection_model();
                             let selection_model = selection_model_strong
@@ -403,8 +397,8 @@ impl UiManager {
                             let track_model_strong = ui.get_track_model();
                             let track_model = track_model_strong
                                 .as_any()
-                                .downcast_ref::<VecModel<ModelRc<StandardListViewItem>>>()
-                                .expect("VecModel expected");
+                                .downcast_ref::<VecModel<TrackRowData>>()
+                                .expect("VecModel<TrackRowData> expected");
 
                             let selection_model_strong = ui.get_selection_model();
                             let selection_model = selection_model_strong
@@ -429,23 +423,22 @@ impl UiManager {
                             let track_model_strong = ui.get_track_model();
                             let track_model = track_model_strong
                                 .as_any()
-                                .downcast_ref::<VecModel<ModelRc<StandardListViewItem>>>()
-                                .expect("VecModel expected");
+                                .downcast_ref::<VecModel<TrackRowData>>()
+                                .expect("VecModel<TrackRowData> expected");
 
-                            let mut title = String::new();
-                            let mut artist = String::new();
+                            let mut title = slint::SharedString::new();
+                            let mut artist = slint::SharedString::new();
 
                             for i in 0..track_model.row_count() {
-                                if let Some(item) = track_model.row_data(i) {
-                                    if i == index {
-                                        item.set_row_data(0, StandardListViewItem::from("▶️"));
-                                        title = item.row_data(1).unwrap().text.to_string();
-                                        artist = item.row_data(2).unwrap().text.to_string();
-                                    } else if let Some(first_col) = item.row_data(0) {
-                                        if !first_col.text.is_empty() {
-                                            item.set_row_data(0, StandardListViewItem::from(""));
-                                        }
-                                    }
+                                let mut row = track_model.row_data(i).unwrap();
+                                if i == index {
+                                    row.status = "▶️".into();
+                                    title = row.title.clone();
+                                    artist = row.artist.clone();
+                                    track_model.set_row_data(i, row);
+                                } else if !row.status.is_empty() {
+                                    row.status = "".into();
+                                    track_model.set_row_data(i, row);
                                 }
                             }
                             ui.set_playing_track_index(index as i32);
@@ -463,21 +456,21 @@ impl UiManager {
                                 let track_model_strong = ui.get_track_model();
                                 let track_model = track_model_strong
                                     .as_any()
-                                    .downcast_ref::<VecModel<ModelRc<StandardListViewItem>>>()
-                                    .expect("VecModel expected");
+                                    .downcast_ref::<VecModel<TrackRowData>>()
+                                    .expect("VecModel<TrackRowData> expected");
                                 if (playing_index as usize) < track_model.row_count() {
-                                    if let Some(item) = track_model.row_data(playing_index as usize)
-                                    {
-                                        item.set_row_data(0, StandardListViewItem::from("▶️"));
-                                        let title = item.row_data(1).unwrap().text.to_string();
-                                        let artist = item.row_data(2).unwrap().text.to_string();
-                                        if !artist.is_empty() {
-                                            ui.set_status_text(
-                                                format!("{} - {}", artist, title).into(),
-                                            );
-                                        } else {
-                                            ui.set_status_text(title.into());
-                                        }
+                                    let mut row =
+                                        track_model.row_data(playing_index as usize).unwrap();
+                                    let title = row.title.clone();
+                                    let artist = row.artist.clone();
+                                    row.status = "▶️".into();
+                                    track_model.set_row_data(playing_index as usize, row);
+                                    if !artist.is_empty() {
+                                        ui.set_status_text(
+                                            format!("{} - {}", artist, title).into(),
+                                        );
+                                    } else {
+                                        ui.set_status_text(title.into());
                                     }
                                 }
                             }
@@ -489,15 +482,15 @@ impl UiManager {
                             let track_model_strong = ui.get_track_model();
                             let track_model = track_model_strong
                                 .as_any()
-                                .downcast_ref::<VecModel<ModelRc<StandardListViewItem>>>()
-                                .expect("VecModel expected");
+                                .downcast_ref::<VecModel<TrackRowData>>()
+                                .expect("VecModel<TrackRowData> expected");
 
                             if playing_index >= 0
                                 && (playing_index as usize) < track_model.row_count()
                             {
-                                if let Some(item) = track_model.row_data(playing_index as usize) {
-                                    item.set_row_data(0, StandardListViewItem::from("⏸️"));
-                                }
+                                let mut row = track_model.row_data(playing_index as usize).unwrap();
+                                row.status = "⏸️".into();
+                                track_model.set_row_data(playing_index as usize, row);
                             }
                         });
                     }
@@ -557,16 +550,14 @@ impl UiManager {
                             let track_model_strong = ui.get_track_model();
                             let track_model = track_model_strong
                                 .as_any()
-                                .downcast_ref::<VecModel<ModelRc<StandardListViewItem>>>()
-                                .expect("VecModel expected");
+                                .downcast_ref::<VecModel<TrackRowData>>()
+                                .expect("VecModel<TrackRowData> expected");
 
                             for i in 0..track_model.row_count() {
-                                if let Some(item) = track_model.row_data(i) {
-                                    if let Some(first_col) = item.row_data(0) {
-                                        if !first_col.text.is_empty() {
-                                            item.set_row_data(0, StandardListViewItem::from(""));
-                                        }
-                                    }
+                                let mut row = track_model.row_data(i).unwrap();
+                                if !row.status.is_empty() {
+                                    row.status = "".into();
+                                    track_model.set_row_data(i, row);
                                 }
                             }
                             ui.set_playing_track_index(-1);
@@ -586,21 +577,17 @@ impl UiManager {
                                 let track_model_strong = ui.get_track_model();
                                 let track_model = track_model_strong
                                     .as_any()
-                                    .downcast_ref::<VecModel<ModelRc<StandardListViewItem>>>()
-                                    .expect("VecModel expected");
+                                    .downcast_ref::<VecModel<TrackRowData>>()
+                                    .expect("VecModel<TrackRowData> expected");
 
                                 for i in 0..track_model.row_count() {
-                                    if let Some(item) = track_model.row_data(i) {
-                                        if i == index {
-                                            item.set_row_data(0, StandardListViewItem::from("▶️"));
-                                        } else if let Some(first_col) = item.row_data(0) {
-                                            if !first_col.text.is_empty() {
-                                                item.set_row_data(
-                                                    0,
-                                                    StandardListViewItem::from(""),
-                                                );
-                                            }
-                                        }
+                                    let mut row = track_model.row_data(i).unwrap();
+                                    if i == index {
+                                        row.status = "▶️".into();
+                                        track_model.set_row_data(i, row);
+                                    } else if !row.status.is_empty() {
+                                        row.status = "".into();
+                                        track_model.set_row_data(i, row);
                                     }
                                 }
                                 ui.set_selected_track_index(index as i32);
@@ -632,7 +619,6 @@ impl UiManager {
                         let is_playing_active_playlist =
                             playing_playlist_id.as_ref() == Some(&self.active_playlist_id);
 
-                        // Priority: 1. First selected track, 2. Playing track (global fallback), 3. None
                         if !selected_indices.is_empty() {
                             let idx = selected_indices[0];
                             if let Some(path) = self.track_paths.get(idx) {
@@ -688,7 +674,6 @@ impl UiManager {
                             };
                             ui.set_playback_order_index(order_int);
 
-                            // Set generic selected index
                             ui.set_selected_track_index(
                                 selected_indices_clone
                                     .first()
@@ -697,14 +682,12 @@ impl UiManager {
                                     .unwrap_or(-1),
                             );
 
-                            // Set all selected indices for UI highlighting
                             let slint_indices: Vec<i32> =
                                 selected_indices_clone.iter().map(|&i| i as i32).collect();
                             ui.set_selected_indices(slint::ModelRc::from(Rc::new(
                                 slint::VecModel::from(slint_indices),
                             )));
 
-                            // Update selection models
                             let track_model_strong = ui.get_track_model();
                             let num_tracks = track_model_strong.row_count();
                             let mut selections = vec![false; num_tracks];
@@ -719,19 +702,18 @@ impl UiManager {
 
                             let track_model = track_model_strong
                                 .as_any()
-                                .downcast_ref::<VecModel<ModelRc<StandardListViewItem>>>()
-                                .expect("VecModel expected");
+                                .downcast_ref::<VecModel<TrackRowData>>()
+                                .expect("VecModel<TrackRowData> expected");
 
                             for i in 0..track_model.row_count() {
-                                if let Some(item) = track_model.row_data(i) {
-                                    if is_playing_active_playlist && playing_index == Some(i) {
-                                        let emoji = if is_playing { "▶️" } else { "⏸️" };
-                                        item.set_row_data(0, StandardListViewItem::from(emoji));
-                                    } else if let Some(first_col) = item.row_data(0) {
-                                        if !first_col.text.is_empty() {
-                                            item.set_row_data(0, StandardListViewItem::from(""));
-                                        }
-                                    }
+                                let mut row = track_model.row_data(i).unwrap();
+                                if is_playing_active_playlist && playing_index == Some(i) {
+                                    let emoji = if is_playing { "▶️" } else { "⏸️" };
+                                    row.status = emoji.into();
+                                    track_model.set_row_data(i, row);
+                                } else if !row.status.is_empty() {
+                                    row.status = "".into();
+                                    track_model.set_row_data(i, row);
                                 }
                             }
                         });
@@ -742,7 +724,6 @@ impl UiManager {
                     }) => {
                         let indices_clone = indices.clone();
 
-                        // Update track_paths, track_ids, track_metadata
                         let mut sorted_indices = indices.clone();
                         sorted_indices.sort_by(|a, b| b.cmp(a));
                         let mut moved_paths = Vec::new();
@@ -783,8 +764,8 @@ impl UiManager {
                             let track_model_strong = ui.get_track_model();
                             let track_model = track_model_strong
                                 .as_any()
-                                .downcast_ref::<VecModel<ModelRc<StandardListViewItem>>>()
-                                .expect("VecModel expected");
+                                .downcast_ref::<VecModel<TrackRowData>>()
+                                .expect("VecModel<TrackRowData> expected");
 
                             let selection_model_strong = ui.get_selection_model();
                             let selection_model = selection_model_strong
@@ -793,7 +774,7 @@ impl UiManager {
                                 .expect("VecModel expected");
 
                             let mut sorted_indices = indices_clone.clone();
-                            sorted_indices.sort_by(|a, b| b.cmp(a)); // reverse for safe removal
+                            sorted_indices.sort_by(|a, b| b.cmp(a));
 
                             let mut moved_rows = Vec::new();
                             let mut moved_selections = Vec::new();
