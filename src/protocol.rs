@@ -159,7 +159,7 @@ pub struct TrackIdentifier {
 pub enum AudioMessage {
     DecodeTracks(Vec<TrackIdentifier>),
     StopDecoding,
-    TrackCached(String),
+    TrackCached(String, u64), // id, start_offset_ms
     AudioPacket(AudioPacket),
 }
 
@@ -176,6 +176,7 @@ pub enum PlaybackMessage {
     TrackFinished(String),
     TrackStarted(TrackStarted),
     ClearPlayerCache,
+    ClearNextTracks,
     Seek(f32),
     TechnicalMetadataChanged(TechnicalMetadata),
     PlaybackProgress { elapsed_ms: u64, total_ms: u64 },

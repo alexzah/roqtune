@@ -31,6 +31,7 @@ enum AudioSample {
 struct TrackIndex {
     start: usize,
     end: Option<usize>,
+    start_offset_ms: u64,
     technical_metadata: crate::protocol::TechnicalMetadata,
 }
 
@@ -309,6 +310,7 @@ impl AudioPlayer {
                     TrackIndex {
                         start: start_index,
                         end: None,
+                        start_offset_ms,
                         technical_metadata: technical_metadata.clone(),
                     },
                 );
@@ -333,12 +335,19 @@ impl AudioPlayer {
                 let footer_index = queue.len() - 1;
                 drop(queue);
 
-                if let Some(info) = self.cached_track_indices.lock().unwrap().get_mut(&id) {
-                    info.end = Some(footer_index);
-                }
+                let start_offset_ms =
+                    if let Some(info) = self.cached_track_indices.lock().unwrap().get_mut(&id) {
+                        info.end = Some(footer_index);
+                        info.start_offset_ms
+                    } else {
+                        0
+                    };
 
                 self.bus_sender
-                    .send(Message::Audio(AudioMessage::TrackCached(id.clone())))
+                    .send(Message::Audio(AudioMessage::TrackCached(
+                        id.clone(),
+                        start_offset_ms,
+                    )))
                     .unwrap();
 
                 let is_current = *self.current_track_id.lock().unwrap() == id;
@@ -385,6 +394,22 @@ impl AudioPlayer {
                             let _ = self.bus_sender.send(Message::Playback(
                                 PlaybackMessage::TechnicalMetadataChanged(info.technical_metadata),
                             ));
+                        }
+                    }
+                    Message::Playback(PlaybackMessage::ClearNextTracks) => {
+                        let current_id = self.current_track_id.lock().unwrap().clone();
+                        let mut indices = self.cached_track_indices.lock().unwrap();
+                        let mut queue = self.sample_queue.lock().unwrap();
+
+                        if let Some(info) = indices.get(&current_id) {
+                            if let Some(footer_pos) = info.end {
+                                // Truncate queue after current track's footer
+                                queue.truncate(footer_pos + 1);
+
+                                // Remove all other tracks from indices
+                                indices.retain(|id, _| id == &current_id);
+                                debug!("AudioPlayer: Cleared next tracks after {}", current_id);
+                            }
                         }
                     }
                     Message::Playback(PlaybackMessage::ClearPlayerCache) => {

@@ -1,4 +1,4 @@
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 use log::{debug, error, info, trace};
 use tokio::sync::broadcast::{Receiver, Sender};
@@ -21,7 +21,9 @@ pub struct PlaylistManager {
     bus_consumer: Receiver<protocol::Message>,
     bus_producer: Sender<protocol::Message>,
     db_manager: DbManager,
-    cached_track_ids: HashSet<String>,
+    cached_track_ids: HashMap<String, u64>, // id -> start_offset_ms
+    fully_cached_track_ids: HashSet<String>,
+    pending_order_change: Option<protocol::PlaybackOrder>,
     max_num_cached_tracks: usize,
     current_track_duration_ms: u64,
     last_seek_ms: u64,
@@ -44,7 +46,9 @@ impl PlaylistManager {
             bus_consumer,
             bus_producer,
             db_manager,
-            cached_track_ids: HashSet::new(),
+            cached_track_ids: HashMap::new(),
+            fully_cached_track_ids: HashSet::new(),
+            pending_order_change: None,
             max_num_cached_tracks: 6,
             current_track_duration_ms: 0,
             last_seek_ms: u64::MAX,
@@ -62,15 +66,16 @@ impl PlaylistManager {
 
         let track_id = self.playback_playlist.get_track_id(index);
 
-        if self.cached_track_ids.contains(&track_id) {
-            // Already cached, tell player to switch immediately
+        if self.cached_track_ids.get(&track_id) == Some(&0) {
+            // Already cached at start, tell player to switch immediately
             let _ = self.bus_producer.send(protocol::Message::Playback(
                 protocol::PlaybackMessage::PlayTrackById(track_id),
             ));
         } else {
-            // Not cached, start decoding process
+            // Not cached or cached at wrong offset, start decoding process
             self.stop_decoding();
             self.cached_track_ids.clear();
+            self.fully_cached_track_ids.clear();
             let _ = self.bus_producer.send(protocol::Message::Playback(
                 protocol::PlaybackMessage::ClearPlayerCache,
             ));
@@ -365,8 +370,9 @@ impl PlaylistManager {
                             if index < self.editing_playlist.num_tracks() {
                                 let id = self.editing_playlist.get_track_id(index);
 
-                                if self.cached_track_ids.contains(&id) {
+                                if self.cached_track_ids.contains_key(&id) {
                                     self.cached_track_ids.remove(&id);
+                                    self.fully_cached_track_ids.remove(&id);
                                     self.clear_cached_tracks();
                                 }
 
@@ -537,9 +543,25 @@ impl PlaylistManager {
                         ));
                         self.broadcast_playlist_changed();
                     }
-                    protocol::Message::Audio(protocol::AudioMessage::TrackCached(id)) => {
-                        debug!("PlaylistManager: Received TrackCached: {}", id);
-                        self.cached_track_ids.insert(id);
+                    protocol::Message::Audio(protocol::AudioMessage::TrackCached(id, offset)) => {
+                        debug!(
+                            "PlaylistManager: Received TrackCached: {} at offset {}",
+                            id, offset
+                        );
+                        self.cached_track_ids.insert(id.clone(), offset);
+                        self.fully_cached_track_ids.insert(id.clone());
+
+                        // Check if this was the track we were waiting for to change playback order
+                        if let Some(playing_idx) = self.playback_playlist.get_playing_track_index()
+                        {
+                            let current_id = self.playback_playlist.get_track_id(playing_idx);
+                            if current_id == id {
+                                if let Some(pending_order) = self.pending_order_change.take() {
+                                    debug!("PlaylistManager: Current track fully cached, applying pending order change: {:?}", pending_order);
+                                    self.apply_playback_order_change(pending_order);
+                                }
+                            }
+                        }
                     }
                     protocol::Message::Playlist(
                         protocol::PlaylistMessage::ChangePlaybackOrder(order),
@@ -551,6 +573,25 @@ impl PlaylistManager {
                         self.playback_order = order;
                         self.playback_playlist.set_playback_order(order);
                         self.editing_playlist.set_playback_order(order);
+
+                        // If something is playing, clear the "next" tracks and re-cache
+                        if let Some(playing_idx) = self.playback_playlist.get_playing_track_index()
+                        {
+                            let current_id = self.playback_playlist.get_track_id(playing_idx);
+
+                            if self.fully_cached_track_ids.contains(&current_id) {
+                                // Current track is already fully buffered, we can swap the queue now
+                                self.apply_playback_order_change(order);
+                            } else {
+                                // Wait for the current track to finish buffering before swapping queue
+                                debug!("PlaylistManager: Delaying order change until {} is fully cached", current_id);
+                                self.pending_order_change = Some(order);
+                            }
+                        } else {
+                            // Nothing playing, clear all and re-cache
+                            self.clear_cached_tracks();
+                            self.cache_tracks(false);
+                        }
                     }
                     protocol::Message::Playlist(protocol::PlaylistMessage::ToggleRepeat) => {
                         let repeat_mode = self.playback_playlist.toggle_repeat();
@@ -593,6 +634,10 @@ impl PlaylistManager {
                                 let track_id = track.id.clone();
                                 let track_path = track.path.clone();
 
+                                // Remove from cached list since it's no longer cached at offset 0
+                                self.cached_track_ids.remove(&track_id);
+                                self.fully_cached_track_ids.remove(&track_id);
+
                                 // 1. Stop current decoding
                                 self.stop_decoding();
 
@@ -626,6 +671,31 @@ impl PlaylistManager {
         }
     }
 
+    fn apply_playback_order_change(&mut self, _order: protocol::PlaybackOrder) {
+        if let Some(playing_idx) = self.playback_playlist.get_playing_track_index() {
+            let current_id = self.playback_playlist.get_track_id(playing_idx);
+
+            // 1. Stop current decoding
+            self.stop_decoding();
+
+            // 2. Clear our knowledge of cached tracks except current
+            let current_offset = self.cached_track_ids.get(&current_id).cloned().unwrap_or(0);
+            self.cached_track_ids.clear();
+            self.fully_cached_track_ids.clear();
+            self.cached_track_ids
+                .insert(current_id.clone(), current_offset);
+            self.fully_cached_track_ids.insert(current_id);
+
+            // 3. Tell player to clear its buffer after the current track
+            let _ = self.bus_producer.send(protocol::Message::Playback(
+                protocol::PlaybackMessage::ClearNextTracks,
+            ));
+
+            // 4. Start caching according to new order
+            self.cache_tracks(false);
+        }
+    }
+
     fn cache_tracks(&mut self, play_immediately: bool) {
         if self.playback_playlist.num_tracks() == 0 {
             return;
@@ -642,7 +712,7 @@ impl PlaylistManager {
             if current_index < self.playback_playlist.num_tracks()
                 && !self
                     .cached_track_ids
-                    .contains(&self.playback_playlist.get_track_id(current_index))
+                    .contains_key(&self.playback_playlist.get_track_id(current_index))
             {
                 track_paths.push(TrackIdentifier {
                     id: self.playback_playlist.get_track(current_index).id.clone(),
@@ -671,6 +741,7 @@ impl PlaylistManager {
 
     fn clear_cached_tracks(&mut self) {
         self.cached_track_ids.clear();
+        self.fully_cached_track_ids.clear();
         let _ = self.bus_producer.send(protocol::Message::Audio(
             protocol::AudioMessage::StopDecoding,
         ));
