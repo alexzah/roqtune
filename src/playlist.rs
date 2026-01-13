@@ -9,11 +9,13 @@ pub enum RepeatMode {
     On,  // Repeat playlist from the beginning
 }
 
+#[derive(Clone)]
 pub struct Track {
     pub path: PathBuf,
     pub id: String,
 }
 
+#[derive(Clone)]
 pub struct Playlist {
     tracks: Vec<Track>,
     playing_track_index: Option<usize>,

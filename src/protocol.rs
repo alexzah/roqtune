@@ -78,8 +78,13 @@ pub enum PlaylistMessage {
     PlaylistsRestored(Vec<PlaylistInfo>),
     ActivePlaylistChanged(String),
     TrackFinished,
-    TrackStarted(usize),
+    TrackStarted {
+        index: usize,
+        playlist_id: String,
+        metadata: DetailedMetadata,
+    },
     PlaylistIndicesChanged {
+        playing_playlist_id: Option<String>,
         playing_index: Option<usize>,
         selected_indices: Vec<usize>,
         is_playing: bool,

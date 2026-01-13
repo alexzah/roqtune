@@ -190,6 +190,22 @@ impl DbManager {
         Ok(tracks)
     }
 
+    pub fn get_track_metadata(&self, id: &str) -> Result<DetailedMetadata, rusqlite::Error> {
+        self.conn.query_row(
+            "SELECT title, artist, album, date, genre FROM tracks WHERE id = ?1",
+            params![id],
+            |row| {
+                Ok(DetailedMetadata {
+                    title: row.get(0).unwrap_or_default(),
+                    artist: row.get(1).unwrap_or_default(),
+                    album: row.get(2).unwrap_or_default(),
+                    date: row.get(3).unwrap_or_default(),
+                    genre: row.get(4).unwrap_or_default(),
+                })
+            },
+        )
+    }
+
     pub fn update_positions(&self, ids: Vec<String>) -> Result<(), rusqlite::Error> {
         let mut stmt = self
             .conn

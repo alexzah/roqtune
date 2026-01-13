@@ -18,6 +18,7 @@ pub struct UiManager {
     ui: slint::Weak<AppWindow>,
     bus_receiver: Receiver<protocol::Message>,
     bus_sender: Sender<protocol::Message>,
+    active_playlist_id: String,
     playlist_ids: Vec<String>,
     track_ids: Vec<String>,
     track_paths: Vec<PathBuf>,
@@ -43,6 +44,7 @@ impl UiManager {
             ui: ui.clone(),
             bus_receiver,
             bus_sender,
+            active_playlist_id: String::new(),
             playlist_ids: Vec::new(),
             track_ids: Vec::new(),
             track_paths: Vec::new(),
@@ -265,6 +267,7 @@ impl UiManager {
                     protocol::Message::Playlist(
                         protocol::PlaylistMessage::ActivePlaylistChanged(id),
                     ) => {
+                        self.active_playlist_id = id.clone();
                         if let Some(index) = self.playlist_ids.iter().position(|p_id| p_id == &id) {
                             let _ = self.ui.upgrade_in_event_loop(move |ui| {
                                 ui.set_active_playlist_index(index as i32);
@@ -564,32 +567,43 @@ impl UiManager {
                             ui.set_playing_track_index(-1);
                         });
                     }
-                    protocol::Message::Playlist(protocol::PlaylistMessage::TrackStarted(index)) => {
+                    protocol::Message::Playlist(protocol::PlaylistMessage::TrackStarted {
+                        index,
+                        playlist_id,
+                        metadata,
+                    }) => {
+                        let is_active_playlist = playlist_id == self.active_playlist_id;
+                        let title = metadata.title.clone();
+                        let artist = metadata.artist.clone();
+
                         let _ = self.ui.upgrade_in_event_loop(move |ui| {
-                            let track_model_strong = ui.get_track_model();
-                            let track_model = track_model_strong
-                                .as_any()
-                                .downcast_ref::<VecModel<ModelRc<StandardListViewItem>>>()
-                                .expect("VecModel expected");
+                            if is_active_playlist {
+                                let track_model_strong = ui.get_track_model();
+                                let track_model = track_model_strong
+                                    .as_any()
+                                    .downcast_ref::<VecModel<ModelRc<StandardListViewItem>>>()
+                                    .expect("VecModel expected");
 
-                            let mut title = String::new();
-                            let mut artist = String::new();
-
-                            for i in 0..track_model.row_count() {
-                                if let Some(item) = track_model.row_data(i) {
-                                    if i == index {
-                                        item.set_row_data(0, StandardListViewItem::from("▶️"));
-                                        title = item.row_data(1).unwrap().text.to_string();
-                                        artist = item.row_data(2).unwrap().text.to_string();
-                                    } else if let Some(first_col) = item.row_data(0) {
-                                        if !first_col.text.is_empty() {
-                                            item.set_row_data(0, StandardListViewItem::from(""));
+                                for i in 0..track_model.row_count() {
+                                    if let Some(item) = track_model.row_data(i) {
+                                        if i == index {
+                                            item.set_row_data(0, StandardListViewItem::from("▶️"));
+                                        } else if let Some(first_col) = item.row_data(0) {
+                                            if !first_col.text.is_empty() {
+                                                item.set_row_data(
+                                                    0,
+                                                    StandardListViewItem::from(""),
+                                                );
+                                            }
                                         }
                                     }
                                 }
+                                ui.set_selected_track_index(index as i32);
+                                ui.set_playing_track_index(index as i32);
+                            } else {
+                                ui.set_playing_track_index(-1);
                             }
-                            ui.set_selected_track_index(index as i32);
-                            ui.set_playing_track_index(index as i32);
+
                             if !artist.is_empty() {
                                 ui.set_status_text(format!("{} - {}", artist, title).into());
                             } else {
@@ -599,6 +613,7 @@ impl UiManager {
                     }
                     protocol::Message::Playlist(
                         protocol::PlaylistMessage::PlaylistIndicesChanged {
+                            playing_playlist_id,
                             playing_index,
                             selected_indices,
                             is_playing,
@@ -606,12 +621,16 @@ impl UiManager {
                         },
                     ) => {
                         let selected_indices_clone = selected_indices.clone();
+                        let is_playing_active_playlist =
+                            playing_playlist_id.as_ref() == Some(&self.active_playlist_id);
 
-                        // Priority: 1. First selected track, 2. Playing track, 3. None
+                        // Priority: 1. First selected track, 2. Playing track (if active), 3. None
                         let display_index = if !selected_indices.is_empty() {
                             Some(selected_indices[0])
-                        } else {
+                        } else if is_playing_active_playlist {
                             playing_index
+                        } else {
+                            None
                         };
 
                         if let Some(idx) = display_index {
@@ -639,9 +658,13 @@ impl UiManager {
                         }
 
                         let _ = self.ui.upgrade_in_event_loop(move |ui| {
-                            ui.set_playing_track_index(
-                                playing_index.map(|i| i as i32).unwrap_or(-1),
-                            );
+                            if is_playing_active_playlist {
+                                ui.set_playing_track_index(
+                                    playing_index.map(|i| i as i32).unwrap_or(-1),
+                                );
+                            } else {
+                                ui.set_playing_track_index(-1);
+                            }
                             ui.set_repeat_on(repeat_on);
 
                             // Set generic selected index
@@ -680,7 +703,7 @@ impl UiManager {
 
                             for i in 0..track_model.row_count() {
                                 if let Some(item) = track_model.row_data(i) {
-                                    if playing_index == Some(i) {
+                                    if is_playing_active_playlist && playing_index == Some(i) {
                                         let emoji = if is_playing { "▶️" } else { "⏸️" };
                                         item.set_row_data(0, StandardListViewItem::from(emoji));
                                     } else if let Some(first_col) = item.row_data(0) {

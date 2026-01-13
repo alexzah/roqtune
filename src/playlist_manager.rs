@@ -12,8 +12,10 @@ use crate::{
 
 // Manages the playlist
 pub struct PlaylistManager {
-    playlist: Playlist,
+    editing_playlist: Playlist,
     active_playlist_id: String,
+    playback_playlist: Playlist,
+    playback_playlist_id: Option<String>,
     bus_consumer: Receiver<protocol::Message>,
     bus_producer: Sender<protocol::Message>,
     db_manager: DbManager,
@@ -31,8 +33,10 @@ impl PlaylistManager {
         db_manager: DbManager,
     ) -> Self {
         Self {
-            playlist,
+            editing_playlist: playlist.clone(),
             active_playlist_id: String::new(),
+            playback_playlist: playlist,
+            playback_playlist_id: None,
             bus_consumer,
             bus_producer,
             db_manager,
@@ -43,34 +47,32 @@ impl PlaylistManager {
         }
     }
 
-    fn play_selected_track(&mut self) {
-        self.playlist.set_playing(true);
-        self.playlist
-            .set_playing_track_index(Some(self.playlist.get_selected_track_index()));
-        self.playlist.force_re_randomize_shuffle();
+    fn play_playback_track(&mut self, index: usize) {
+        if index >= self.playback_playlist.num_tracks() {
+            debug!("play_playback_track: Index {} out of bounds", index);
+            return;
+        }
 
-        // Notify other components about the selection and playing change
-        self.broadcast_playlist_changed();
+        self.playback_playlist.set_playing(true);
+        self.playback_playlist.set_playing_track_index(Some(index));
 
-        if !self.cached_track_ids.contains(
-            &self
-                .playlist
-                .get_track_id(self.playlist.get_selected_track_index()),
-        ) {
+        let track_id = self.playback_playlist.get_track_id(index);
+
+        if self.cached_track_ids.contains(&track_id) {
+            // Already cached, tell player to switch immediately
+            let _ = self.bus_producer.send(protocol::Message::Playback(
+                protocol::PlaybackMessage::PlayTrackById(track_id),
+            ));
+        } else {
+            // Not cached, start decoding process
             self.stop_decoding();
             self.cached_track_ids.clear();
             let _ = self.bus_producer.send(protocol::Message::Playback(
                 protocol::PlaybackMessage::ClearPlayerCache,
             ));
             self.cache_tracks(true);
-        } else {
-            let _ = self.bus_producer.send(protocol::Message::Playback(
-                protocol::PlaybackMessage::PlayTrackById(
-                    self.playlist
-                        .get_track_id(self.playlist.get_selected_track_index()),
-                ),
-            ));
         }
+        self.broadcast_playlist_changed();
     }
 
     pub fn run(&mut self) {
@@ -98,7 +100,7 @@ impl PlaylistManager {
                 Ok(tracks) => {
                     info!("Restoring {} tracks from database", tracks.len());
                     for track in tracks.iter() {
-                        self.playlist.add_track(Track {
+                        self.editing_playlist.add_track(Track {
                             path: track.path.clone(),
                             id: track.id.clone(),
                         });
@@ -126,7 +128,7 @@ impl PlaylistManager {
                     protocol::Message::Playlist(protocol::PlaylistMessage::LoadTrack(path)) => {
                         debug!("PlaylistManager: Loading track {:?}", path);
                         let id = Uuid::new_v4().to_string();
-                        let position = self.playlist.num_tracks();
+                        let position = self.editing_playlist.num_tracks();
 
                         if let Err(e) = self.db_manager.save_track(
                             &id,
@@ -137,10 +139,17 @@ impl PlaylistManager {
                             error!("Failed to save track to database: {}", e);
                         }
 
-                        self.playlist.add_track(Track {
+                        self.editing_playlist.add_track(Track {
                             path: path.clone(),
                             id: id.clone(),
                         });
+
+                        if Some(&self.active_playlist_id) == self.playback_playlist_id.as_ref() {
+                            self.playback_playlist.add_track(Track {
+                                path: path.clone(),
+                                id: id.clone(),
+                            });
+                        }
 
                         let _ = self.bus_producer.send(protocol::Message::Playlist(
                             protocol::PlaylistMessage::TrackAdded { id, path },
@@ -148,29 +157,42 @@ impl PlaylistManager {
                     }
                     protocol::Message::Playback(protocol::PlaybackMessage::Play) => {
                         debug!("PlaylistManager: Received play command");
-                        if !self.playlist.is_playing()
-                            && self.playlist.get_playing_track_index()
-                                == Some(self.playlist.get_selected_track_index())
+                        if !self.playback_playlist.is_playing()
+                            && self.playback_playlist_id == Some(self.active_playlist_id.clone())
+                            && self.playback_playlist.num_tracks() > 0
+                            && self.playback_playlist.get_playing_track_index()
+                                == Some(self.editing_playlist.get_selected_track_index())
                         {
                             debug!("PlaylistManager: Resuming playback");
-                            self.playlist.set_playing(true);
-                        } else {
-                            self.playlist.force_re_randomize_shuffle();
-                            self.play_selected_track();
+                            self.playback_playlist.set_playing(true);
+                            self.broadcast_playlist_changed();
+                        } else if self.editing_playlist.num_tracks() > 0 {
+                            self.editing_playlist.force_re_randomize_shuffle();
+                            // Set playback playlist to editing playlist
+                            self.playback_playlist = self.editing_playlist.clone();
+                            self.playback_playlist_id = Some(self.active_playlist_id.clone());
+                            let index = self.playback_playlist.get_selected_track_index();
+                            self.play_playback_track(index);
                         }
                     }
                     protocol::Message::Playback(protocol::PlaybackMessage::PlayTrackByIndex(
                         index,
                     )) => {
                         debug!("PlaylistManager: Received play track command: {}", index);
-                        self.playlist.set_selected_indices(vec![index]);
-                        self.playlist.force_re_randomize_shuffle();
-                        self.play_selected_track();
+                        if index < self.editing_playlist.num_tracks() {
+                            self.editing_playlist.set_selected_indices(vec![index]);
+                            self.editing_playlist.force_re_randomize_shuffle();
+                            // Set playback playlist to editing playlist
+                            self.playback_playlist = self.editing_playlist.clone();
+                            self.playback_playlist_id = Some(self.active_playlist_id.clone());
+                            self.play_playback_track(index);
+                        }
                     }
                     protocol::Message::Playback(protocol::PlaybackMessage::Stop) => {
                         debug!("PlaylistManager: Received stop command");
-                        self.playlist.set_playing(false);
-                        self.playlist.set_playing_track_index(None);
+                        self.playback_playlist.set_playing(false);
+                        self.playback_playlist.set_playing_track_index(None);
+                        self.playback_playlist_id = None;
                         self.clear_cached_tracks();
                         self.cache_tracks(false);
 
@@ -179,10 +201,13 @@ impl PlaylistManager {
                     }
                     protocol::Message::Playback(protocol::PlaybackMessage::Pause) => {
                         debug!("PlaylistManager: Received pause command");
-                        if self.playlist.is_playing() {
-                            self.playlist.set_playing(false);
-                        } else if self.playlist.get_playing_track_index()
-                            == Some(self.playlist.get_selected_track_index())
+                        if self.playback_playlist.is_playing() {
+                            self.playback_playlist.set_playing(false);
+                            self.broadcast_playlist_changed();
+                        } else if self.playback_playlist_id == Some(self.active_playlist_id.clone())
+                            && self.playback_playlist.num_tracks() > 0
+                            && self.playback_playlist.get_playing_track_index()
+                                == Some(self.editing_playlist.get_selected_track_index())
                         {
                             debug!("PlaylistManager: Resuming playback via Pause button");
                             let _ = self
@@ -192,47 +217,52 @@ impl PlaylistManager {
                     }
                     protocol::Message::Playback(protocol::PlaybackMessage::Next) => {
                         debug!("PlaylistManager: Received next command");
-                        let current_index = self
-                            .playlist
-                            .get_playing_track_index()
-                            .unwrap_or(self.playlist.get_selected_track_index());
-                        if let Some(next_index) = self.playlist.get_next_track_index(current_index)
-                        {
-                            self.playlist.set_selected_indices(vec![next_index]);
-                            self.play_selected_track();
+                        if self.playback_playlist.num_tracks() > 0 {
+                            let current_index = self
+                                .playback_playlist
+                                .get_playing_track_index()
+                                .unwrap_or(0); // fallback to 0 if nothing playing
+                            if let Some(next_index) =
+                                self.playback_playlist.get_next_track_index(current_index)
+                            {
+                                self.play_playback_track(next_index);
+                            }
                         }
                     }
                     protocol::Message::Playback(protocol::PlaybackMessage::Previous) => {
                         debug!("PlaylistManager: Received previous command");
-                        let current_index = self
-                            .playlist
-                            .get_playing_track_index()
-                            .unwrap_or(self.playlist.get_selected_track_index());
-                        if let Some(prev_index) =
-                            self.playlist.get_previous_track_index(current_index)
-                        {
-                            self.playlist.set_selected_indices(vec![prev_index]);
-                            self.play_selected_track();
+                        if self.playback_playlist.num_tracks() > 0 {
+                            let current_index = self
+                                .playback_playlist
+                                .get_playing_track_index()
+                                .unwrap_or(0);
+                            if let Some(prev_index) = self
+                                .playback_playlist
+                                .get_previous_track_index(current_index)
+                            {
+                                self.play_playback_track(prev_index);
+                            }
                         }
                     }
                     protocol::Message::Playback(protocol::PlaybackMessage::TrackFinished(id)) => {
                         debug!("PlaylistManager: Received track finished command: {}", id);
-                        if let Some(playing_idx) = self.playlist.get_playing_track_index() {
-                            let index = self.playlist.get_next_track_index(playing_idx);
+                        if let Some(playing_idx) = self.playback_playlist.get_playing_track_index()
+                        {
+                            let index = self.playback_playlist.get_next_track_index(playing_idx);
 
                             let mut advanced = false;
                             if let Some(index) = index {
-                                if index < self.playlist.num_tracks() {
-                                    self.playlist.set_playing_track_index(Some(index));
-                                    self.playlist.set_selected_indices(vec![index]);
+                                if index < self.playback_playlist.num_tracks() {
+                                    self.playback_playlist.set_playing_track_index(Some(index));
+                                    self.playback_playlist.set_selected_indices(vec![index]);
                                     self.cache_tracks(false);
                                     advanced = true;
                                 }
                             }
 
                             if !advanced {
-                                self.playlist.set_playing(false);
-                                self.playlist.set_playing_track_index(None);
+                                self.playback_playlist.set_playing(false);
+                                self.playback_playlist.set_playing_track_index(None);
                                 let _ = self.bus_producer.send(protocol::Message::Playback(
                                     protocol::PlaybackMessage::Stop,
                                 ));
@@ -254,9 +284,28 @@ impl PlaylistManager {
                             track_started.id
                         );
                         self.last_seek_ms = u64::MAX;
-                        if let Some(playing_idx) = self.playlist.get_playing_track_index() {
+                        if let Some(playing_idx) = self.playback_playlist.get_playing_track_index()
+                        {
+                            let metadata = self
+                                .db_manager
+                                .get_track_metadata(&track_started.id)
+                                .unwrap_or(protocol::DetailedMetadata {
+                                    title: "Unknown".to_string(),
+                                    artist: "".to_string(),
+                                    album: "".to_string(),
+                                    date: "".to_string(),
+                                    genre: "".to_string(),
+                                });
+
                             let _ = self.bus_producer.send(protocol::Message::Playlist(
-                                protocol::PlaylistMessage::TrackStarted(playing_idx),
+                                protocol::PlaylistMessage::TrackStarted {
+                                    index: playing_idx,
+                                    playlist_id: self
+                                        .playback_playlist_id
+                                        .clone()
+                                        .unwrap_or_default(),
+                                    metadata,
+                                },
                             ));
                             // Also notify UI to update metadata/art if selection is empty
                             self.broadcast_playlist_changed();
@@ -271,15 +320,20 @@ impl PlaylistManager {
                         );
 
                         // Inform the audio player which track to play from its cache
-                        if self.playlist.is_playing() {
-                            if let Some(playing_idx) = self.playlist.get_playing_track_index() {
-                                let playing_track_id =
-                                    self.playlist.get_track(playing_idx).id.clone();
+                        if self.playback_playlist.is_playing() {
+                            if let Some(playing_idx) =
+                                self.playback_playlist.get_playing_track_index()
+                            {
+                                if playing_idx < self.playback_playlist.num_tracks() {
+                                    let playing_track_id =
+                                        self.playback_playlist.get_track(playing_idx).id.clone();
 
-                                if playing_track_id == id {
-                                    let _ = self.bus_producer.send(protocol::Message::Playback(
-                                        protocol::PlaybackMessage::PlayTrackById(id),
-                                    ));
+                                    if playing_track_id == id {
+                                        let _ =
+                                            self.bus_producer.send(protocol::Message::Playback(
+                                                protocol::PlaybackMessage::PlayTrackById(id),
+                                            ));
+                                    }
                                 }
                             }
                         }
@@ -294,8 +348,9 @@ impl PlaylistManager {
                         indices.sort_by(|a, b| b.cmp(a));
 
                         for index in indices {
-                            if index < self.playlist.num_tracks() {
-                                let id = self.playlist.get_track_id(index);
+                            if index < self.editing_playlist.num_tracks() {
+                                let id = self.editing_playlist.get_track_id(index);
+
                                 if self.cached_track_ids.contains(&id) {
                                     self.cached_track_ids.remove(&id);
                                     self.clear_cached_tracks();
@@ -305,13 +360,19 @@ impl PlaylistManager {
                                     error!("Failed to delete track from database: {}", e);
                                 }
 
-                                self.playlist.delete_track(index);
+                                self.editing_playlist.delete_track(index);
+
+                                if Some(&self.active_playlist_id)
+                                    == self.playback_playlist_id.as_ref()
+                                {
+                                    self.playback_playlist.delete_track(index);
+                                }
                             }
                         }
 
-                        // Update positions for remaining tracks
-                        let all_ids: Vec<String> = (0..self.playlist.num_tracks())
-                            .map(|i| self.playlist.get_track_id(i))
+                        // Update positions for remaining tracks in DB
+                        let all_ids: Vec<String> = (0..self.editing_playlist.num_tracks())
+                            .map(|i| self.editing_playlist.get_track_id(i))
                             .collect();
                         if let Err(e) = self.db_manager.update_positions(all_ids) {
                             error!("Failed to update positions in database: {}", e);
@@ -329,14 +390,14 @@ impl PlaylistManager {
                             "PlaylistManager: Received multi-select command: index={}, ctrl={}, shift={}",
                             index, ctrl, shift
                         );
-                        self.playlist.select_track_multi(index, ctrl, shift);
+                        self.editing_playlist.select_track_multi(index, ctrl, shift);
 
                         // Notify other components about the selection change
                         self.broadcast_playlist_changed();
                     }
                     protocol::Message::Playlist(protocol::PlaylistMessage::DeselectAll) => {
                         debug!("PlaylistManager: Received deselect all command");
-                        self.playlist.deselect_all();
+                        self.editing_playlist.deselect_all();
 
                         // Notify other components about the selection change
                         self.broadcast_playlist_changed();
@@ -346,11 +407,15 @@ impl PlaylistManager {
                         to,
                     }) => {
                         debug!("PlaylistManager: Reordering tracks {:?} to {}", indices, to);
-                        self.playlist.move_tracks(indices, to);
+                        self.editing_playlist.move_tracks(indices.clone(), to);
+
+                        if Some(&self.active_playlist_id) == self.playback_playlist_id.as_ref() {
+                            self.playback_playlist.move_tracks(indices, to);
+                        }
 
                         // Update positions in database
-                        let all_ids: Vec<String> = (0..self.playlist.num_tracks())
-                            .map(|i| self.playlist.get_track_id(i))
+                        let all_ids: Vec<String> = (0..self.editing_playlist.num_tracks())
+                            .map(|i| self.editing_playlist.get_track_id(i))
                             .collect();
                         if let Err(e) = self.db_manager.update_positions(all_ids) {
                             error!("Failed to update positions in database: {}", e);
@@ -404,18 +469,13 @@ impl PlaylistManager {
                             continue;
                         }
 
-                        // Stop current playback/decoding
-                        self.playlist.set_playing(false);
-                        self.playlist.set_playing_track_index(None);
-                        self.clear_cached_tracks();
-
                         self.active_playlist_id = id.clone();
-                        self.playlist = Playlist::new(); // Clear in-memory playlist
+                        self.editing_playlist = Playlist::new(); // Clear in-memory editing playlist
 
                         match self.db_manager.get_tracks_for_playlist(&id) {
                             Ok(tracks) => {
                                 for track in tracks.iter() {
-                                    self.playlist.add_track(Track {
+                                    self.editing_playlist.add_track(Track {
                                         path: track.path.clone(),
                                         id: track.id.clone(),
                                     });
@@ -445,10 +505,10 @@ impl PlaylistManager {
                             "PlaylistManager: Received change playback order command: {:?}",
                             order
                         );
-                        self.playlist.set_playback_order(order);
+                        self.playback_playlist.set_playback_order(order);
                     }
                     protocol::Message::Playlist(protocol::PlaylistMessage::ToggleRepeat) => {
-                        let repeat_on = self.playlist.toggle_repeat();
+                        let repeat_on = self.playback_playlist.toggle_repeat();
                         debug!("PlaylistManager: Toggled repeat to {}", repeat_on);
                         let _ = self.bus_producer.send(protocol::Message::Playlist(
                             protocol::PlaylistMessage::RepeatModeChanged(repeat_on),
@@ -479,28 +539,31 @@ impl PlaylistManager {
                             self.current_track_duration_ms
                         );
 
-                        if let Some(playing_idx) = self.playlist.get_playing_track_index() {
-                            let track = self.playlist.get_track(playing_idx);
-                            let track_id = track.id.clone();
-                            let track_path = track.path.clone();
+                        if let Some(playing_idx) = self.playback_playlist.get_playing_track_index()
+                        {
+                            if playing_idx < self.playback_playlist.num_tracks() {
+                                let track = self.playback_playlist.get_track(playing_idx);
+                                let track_id = track.id.clone();
+                                let track_path = track.path.clone();
 
-                            // 1. Stop current decoding
-                            self.stop_decoding();
+                                // 1. Stop current decoding
+                                self.stop_decoding();
 
-                            // 2. Clear player cache
-                            let _ = self.bus_producer.send(protocol::Message::Playback(
-                                protocol::PlaybackMessage::ClearPlayerCache,
-                            ));
+                                // 2. Clear player cache
+                                let _ = self.bus_producer.send(protocol::Message::Playback(
+                                    protocol::PlaybackMessage::ClearPlayerCache,
+                                ));
 
-                            // 3. Restart decoding at offset
-                            let _ = self.bus_producer.send(protocol::Message::Audio(
-                                protocol::AudioMessage::DecodeTracks(vec![TrackIdentifier {
-                                    id: track_id,
-                                    path: track_path,
-                                    play_immediately: true,
-                                    start_offset_ms: target_ms,
-                                }]),
-                            ));
+                                // 3. Restart decoding at offset
+                                let _ = self.bus_producer.send(protocol::Message::Audio(
+                                    protocol::AudioMessage::DecodeTracks(vec![TrackIdentifier {
+                                        id: track_id,
+                                        path: track_path,
+                                        play_immediately: true,
+                                        start_offset_ms: target_ms,
+                                    }]),
+                                ));
+                            }
                         }
                     }
                     _ => trace!("PlaylistManager: ignoring unsupported message"),
@@ -517,25 +580,33 @@ impl PlaylistManager {
     }
 
     fn cache_tracks(&mut self, play_immediately: bool) {
-        let first_index = self.playlist.get_selected_track_index();
-        let mut current_index = self.playlist.get_selected_track_index();
+        if self.playback_playlist.num_tracks() == 0 {
+            return;
+        }
+
+        let first_index = self
+            .playback_playlist
+            .get_playing_track_index()
+            .unwrap_or(0);
+        let mut current_index = first_index;
         let mut track_paths = Vec::new();
 
         for _ in 0..self.max_num_cached_tracks {
-            if !self
-                .cached_track_ids
-                .contains(&self.playlist.get_track_id(current_index))
+            if current_index < self.playback_playlist.num_tracks()
+                && !self
+                    .cached_track_ids
+                    .contains(&self.playback_playlist.get_track_id(current_index))
             {
                 track_paths.push(TrackIdentifier {
-                    id: self.playlist.get_track(current_index).id.clone(),
-                    path: self.playlist.get_track(current_index).path.clone(),
+                    id: self.playback_playlist.get_track(current_index).id.clone(),
+                    path: self.playback_playlist.get_track(current_index).path.clone(),
                     play_immediately: play_immediately && current_index == first_index,
                     start_offset_ms: 0,
                 });
             }
-            if let Some(next_index) = self.playlist.get_next_track_index(current_index) {
+            if let Some(next_index) = self.playback_playlist.get_next_track_index(current_index) {
                 current_index = next_index;
-                if next_index >= self.playlist.num_tracks() {
+                if next_index >= self.playback_playlist.num_tracks() {
                     break;
                 }
             } else {
@@ -570,10 +641,12 @@ impl PlaylistManager {
     fn broadcast_playlist_changed(&self) {
         let _ = self.bus_producer.send(protocol::Message::Playlist(
             protocol::PlaylistMessage::PlaylistIndicesChanged {
-                playing_index: self.playlist.get_playing_track_index(),
-                selected_indices: self.playlist.get_selected_indices(),
-                is_playing: self.playlist.is_playing(),
-                repeat_on: self.playlist.get_repeat_mode() == crate::playlist::RepeatMode::On,
+                playing_playlist_id: self.playback_playlist_id.clone(),
+                playing_index: self.playback_playlist.get_playing_track_index(),
+                selected_indices: self.editing_playlist.get_selected_indices(),
+                is_playing: self.playback_playlist.is_playing(),
+                repeat_on: self.playback_playlist.get_repeat_mode()
+                    == crate::playlist::RepeatMode::On,
             },
         ));
     }
