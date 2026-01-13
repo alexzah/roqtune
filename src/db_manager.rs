@@ -170,6 +170,15 @@ impl DbManager {
         Ok(())
     }
 
+    pub fn delete_playlist(&self, id: &str) -> Result<(), rusqlite::Error> {
+        // Delete tracks first due to foreign key (even if not enforced, it's good practice)
+        self.conn
+            .execute("DELETE FROM tracks WHERE playlist_id = ?1", params![id])?;
+        self.conn
+            .execute("DELETE FROM playlists WHERE id = ?1", params![id])?;
+        Ok(())
+    }
+
     pub fn get_tracks_for_playlist(
         &self,
         playlist_id: &str,

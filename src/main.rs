@@ -256,6 +256,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         )));
     });
 
+    let bus_sender_clone = bus_sender.clone();
+    ui.on_delete_playlist(move |index| {
+        debug!("Delete playlist requested: index={}", index);
+        let _ = bus_sender_clone.send(Message::Playlist(PlaylistMessage::DeletePlaylistByIndex(
+            index as usize,
+        )));
+    });
+
     // Setup playlist manager
     let playlist_manager_bus_receiver = bus_sender.subscribe();
     let playlist_manager_bus_sender = bus_sender.clone();

@@ -83,6 +83,10 @@ pub enum PlaylistMessage {
         name: String,
     },
     RenamePlaylistByIndex(usize, String),
+    DeletePlaylist {
+        id: String,
+    },
+    DeletePlaylistByIndex(usize),
     SwitchPlaylist {
         id: String,
     },

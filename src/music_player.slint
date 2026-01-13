@@ -2,8 +2,10 @@ import { Button, VerticalBox, StandardTableView, ComboBox, ScrollView, LineEdit 
 
 component ContextMenu inherits PopupWindow {
     callback rename();
+    callback delete();
+    in property <bool> is-playlist: false;
     width: 120px;
-    height: 32px;
+    height: is-playlist ? 56px : 32px;
     
     Rectangle {
         background: #333;
@@ -12,9 +14,10 @@ component ContextMenu inherits PopupWindow {
         
         VerticalLayout {
             padding: 4px;
+            spacing: 4px;
             Rectangle {
                 height: 24px;
-                background: item-ta.has-hover ? #444 : transparent;
+                background: item-ta-rename.has-hover ? #444 : transparent;
                 border-radius: 2px;
                 Text {
                     x: 8px;
@@ -23,10 +26,78 @@ component ContextMenu inherits PopupWindow {
                     font-size: 13px;
                     vertical-alignment: center;
                 }
-                item-ta := TouchArea {
+                item-ta-rename := TouchArea {
                     clicked => {
                         root.rename();
                     }
+                }
+            }
+            if is-playlist : Rectangle {
+                height: 24px;
+                background: item-ta-delete.has-hover ? #444 : transparent;
+                border-radius: 2px;
+                Text {
+                    x: 8px;
+                    text: "Delete";
+                    color: #ff5555;
+                    font-size: 13px;
+                    vertical-alignment: center;
+                }
+                item-ta-delete := TouchArea {
+                    clicked => {
+                        root.delete();
+                    }
+                }
+            }
+        }
+    }
+}
+
+component ConfirmationDialog inherits Rectangle {
+    callback confirmed();
+    callback cancelled();
+    in property <string> message: "Are you sure?";
+    in property <bool> is-visible: false;
+    
+    visible: is-visible;
+    background: #00000080;
+    
+    // Prevent clicks from passing through
+    TouchArea {}
+    
+    Rectangle {
+        width: 350px;
+        height: 150px;
+        background: #282828;
+        border-width: 1px;
+        border-color: #444;
+        border-radius: 4px;
+        
+        VerticalLayout {
+            padding: 20px;
+            spacing: 20px;
+            
+            Text {
+                text: root.message;
+                color: #eee;
+                font-size: 14px;
+                horizontal-alignment: center;
+                wrap: word-wrap;
+            }
+            
+            HorizontalLayout {
+                spacing: 15px;
+                alignment: center;
+                
+                Button {
+                    text: "Cancel";
+                    clicked => { root.cancelled(); }
+                }
+                
+                Button {
+                    text: "Delete";
+                    primary: true;
+                    clicked => { root.confirmed(); }
                 }
             }
         }
@@ -39,8 +110,12 @@ component PlaylistRow inherits Rectangle {
     in property <bool> is-editing;
     callback clicked();
     callback renamed(string);
-    callback context-menu-action();
+    callback context-menu-rename();
+    callback context-menu-delete();
     callback cancel-edit();
+    
+    property <length> menu-x;
+    property <length> menu-y;
     
     height: 24px;
     background: is-active ? #3d3d3d : ta.has-hover ? #333 : transparent;
@@ -73,14 +148,22 @@ component PlaylistRow inherits Rectangle {
         clicked => { root.clicked(); }
         pointer-event(event) => {
             if (event.button == PointerEventButton.right && event.kind == PointerEventKind.down) {
+                root.menu-x = self.mouse-x;
+                root.menu-y = self.mouse-y;
                 menu.show();
             }
         }
     }
 
     menu := ContextMenu {
+        is-playlist: true;
+        x: root.menu-x;
+        y: root.menu-y;
         rename => {
-            root.context-menu-action();
+            root.context-menu-rename();
+        }
+        delete => {
+            root.context-menu-delete();
         }
     }
 
@@ -262,7 +345,14 @@ export component AppWindow inherits Window {
         height: 0px;
         key-pressed(event) => {
             if (event.text == Key.Delete) {
-                root.delete_track(root.selected_indices);
+                if (root.editing_playlist_index != -1 || root.show_confirm_dialog) {
+                    return reject;
+                }
+                if (root.sidebar_has_focus) {
+                    root.confirm_delete_playlist(root.active_playlist_index);
+                } else {
+                    root.delete_track(root.selected_indices);
+                }
                 return accept;
             }
             if (event.text == Key.F2) {
@@ -276,6 +366,19 @@ export component AppWindow inherits Window {
     public function refocus_main() {
         key-handler.focus();
     }
+
+    public function confirm_delete_playlist(index: int) {
+        if (index >= 0 && index < root.playlists.length) {
+            root.delete_target_index = index;
+            root.delete_confirm_message = "Are you sure you want to delete the playlist '" + root.playlists[index].text + "'?";
+            root.show_confirm_dialog = true;
+        }
+    }
+
+    property <int> delete_target_index: -1;
+    property <string> delete_confirm_message: "";
+    in-out property <bool> show_confirm_dialog: false;
+    in-out property <bool> sidebar_has_focus: false;
 
     // Status display at the bottom showing the currently playing track
     in-out property <string> status-text: "";
@@ -525,6 +628,13 @@ export component AppWindow inherits Window {
                 min-width: 150px;
                 max-width: 250px;
                 background: #202020;
+                
+                sidebar-ta := TouchArea {
+                    clicked => {
+                        root.sidebar_has_focus = true;
+                        root.refocus_main();
+                    }
+                }
 
                 VerticalLayout {
                     // Top Half: Playlist Picker
@@ -562,6 +672,7 @@ export component AppWindow inherits Window {
                                     clicked => { 
                                         root.switch_playlist(i); 
                                         root.editing_playlist_index = -1;
+                                        root.sidebar_has_focus = true;
                                         root.refocus_main();
                                     }
                                     renamed(new-name) => {
@@ -573,8 +684,11 @@ export component AppWindow inherits Window {
                                         root.editing_playlist_index = -1;
                                         root.refocus_main();
                                     }
-                                    context-menu-action() => {
+                                    context-menu-rename() => {
                                         root.editing_playlist_index = i;
+                                    }
+                                    context-menu-delete() => {
+                                        root.confirm_delete_playlist(i);
                                     }
                                 }
                             }
@@ -650,6 +764,13 @@ export component AppWindow inherits Window {
                 horizontal-stretch: 4;
                 background: #282828;
                 
+                TouchArea {
+                    clicked => {
+                        root.sidebar_has_focus = false;
+                        root.refocus_main();
+                    }
+                }
+
                 VerticalLayout {
                     // Header
                     Rectangle {
@@ -683,6 +804,7 @@ export component AppWindow inherits Window {
                                 
                                 clicked(event) => {
                                     root.playlist_item_click(i, event, {x: 0, y: 0});
+                                    root.sidebar_has_focus = false;
                                     key-handler.focus();
                                 }
                                 
@@ -721,6 +843,7 @@ export component AppWindow inherits Window {
                                 TouchArea {
                                     clicked => {
                                         root.deselect_all();
+                                        root.sidebar_has_focus = false;
                                         key-handler.focus();
                                     }
                                 }
@@ -787,6 +910,21 @@ export component AppWindow inherits Window {
         }
     }
 
+    // Modal overlay for confirmation
+    confirm_overlay := ConfirmationDialog {
+        is-visible: root.show_confirm_dialog;
+        message: root.delete_confirm_message;
+        confirmed => {
+            root.delete_playlist(root.delete_target_index);
+            root.show_confirm_dialog = false;
+            root.refocus_main();
+        }
+        cancelled => {
+            root.show_confirm_dialog = false;
+            root.refocus_main();
+        }
+    }
+
     // Properties to communicate with Rust
     in-out property <[StandardListViewItem]> playlists: [];
     in-out property <int> active_playlist_index: 0;
@@ -841,4 +979,5 @@ export component AppWindow inherits Window {
     callback create_playlist();
     callback switch_playlist(int);
     callback rename_playlist(int, string);
+    callback delete_playlist(int);
 }

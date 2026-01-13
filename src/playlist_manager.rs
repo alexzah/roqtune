@@ -496,6 +496,57 @@ impl PlaylistManager {
                         }
                     }
                     protocol::Message::Playlist(
+                        protocol::PlaylistMessage::DeletePlaylistByIndex(index),
+                    ) => {
+                        let playlists = self.db_manager.get_all_playlists().unwrap_or_default();
+                        if let Some(p) = playlists.get(index) {
+                            let id = p.id.clone();
+                            let _ = self.bus_producer.send(protocol::Message::Playlist(
+                                protocol::PlaylistMessage::DeletePlaylist { id },
+                            ));
+                        }
+                    }
+                    protocol::Message::Playlist(protocol::PlaylistMessage::DeletePlaylist {
+                        id,
+                    }) => {
+                        debug!("PlaylistManager: Deleting playlist {}", id);
+
+                        // If deleting the currently playing playlist, stop it
+                        if Some(&id) == self.playback_playlist_id.as_ref() {
+                            self.playback_playlist.set_playing(false);
+                            self.playback_playlist.set_playing_track_index(None);
+                            self.playback_playlist_id = None;
+                            self.clear_cached_tracks();
+                        }
+
+                        if let Err(e) = self.db_manager.delete_playlist(&id) {
+                            error!("Failed to delete playlist from database: {}", e);
+                        } else {
+                            let playlists = self.db_manager.get_all_playlists().unwrap_or_default();
+
+                            // If we just deleted the playlist we were editing, switch to another one
+                            if id == self.active_playlist_id {
+                                if !playlists.is_empty() {
+                                    let new_id = playlists[0].id.clone();
+                                    let _ = self.bus_producer.send(protocol::Message::Playlist(
+                                        protocol::PlaylistMessage::SwitchPlaylist { id: new_id },
+                                    ));
+                                } else {
+                                    // No playlists left, create a default one
+                                    let _ = self.bus_producer.send(protocol::Message::Playlist(
+                                        protocol::PlaylistMessage::CreatePlaylist {
+                                            name: "Default".to_string(),
+                                        },
+                                    ));
+                                }
+                            }
+
+                            let _ = self.bus_producer.send(protocol::Message::Playlist(
+                                protocol::PlaylistMessage::PlaylistsRestored(playlists),
+                            ));
+                        }
+                    }
+                    protocol::Message::Playlist(
                         protocol::PlaylistMessage::SwitchPlaylistByIndex(index),
                     ) => {
                         let playlists = self.db_manager.get_all_playlists().unwrap_or_default();
