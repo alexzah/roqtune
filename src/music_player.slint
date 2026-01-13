@@ -5,6 +5,7 @@ struct TrackRowData {
     title: string,
     artist: string,
     album: string,
+    selected: bool,
 }
 
 component ContextMenu inherits PopupWindow {
@@ -189,18 +190,10 @@ component PlaylistRow inherits Rectangle {
 component TrackRow inherits Rectangle {
     in property <TrackRowData> data;
     in property <bool> is-playing;
-    in property <bool> is-selected;
-    in property <bool> is-dragging;
-    in property <int> index;
-
-    callback clicked(PointerEvent);
-    callback double-clicked();
-    callback drag-started(int);
-    callback drag-moved(length);
-    callback drag-ended();
+    in property <bool> is-hover;
 
     height: 30px;
-    background: is-dragging ? #444 : is-selected ? #3d3d3d : ta.has-hover ? #333 : transparent;
+    background: data.selected ? #3d3d3d : is-hover ? #333 : transparent;
     animate background { duration: 100ms; }
 
     HorizontalLayout {
@@ -254,55 +247,6 @@ component TrackRow inherits Rectangle {
 
         Rectangle {
             horizontal-stretch: 3;
-        }
-    }
-
-    ta := TouchArea {
-        property <length> start-y;
-        property <bool> dragging: false;
-        property <bool> was-selected-on-down: false;
-
-        double-clicked => {
-            root.double-clicked();
-        }
-
-        pointer-event(event) => {
-            if (event.button == PointerEventButton.left) {
-                if (event.kind == PointerEventKind.down) {
-                    self.start-y = self.mouse-y;
-                    self.was-selected-on-down = root.is-selected;
-
-                    // If not already selected, select it immediately to allow dragging
-                    if (!self.was-selected-on-down) {
-                        root.clicked(event);
-                    }
-                } else if (event.kind == PointerEventKind.up) {
-                    if (self.dragging) {
-                        self.dragging = false;
-                        root.drag-ended();
-                    } else {
-                        // Clicked but didn't drag.
-                        // If it was already selected, we now clear other selections (if no modifiers)
-                        if (self.was-selected-on-down) {
-                            root.clicked(event);
-                        }
-                    }
-                }
-            }
-        }
-
-        moved => {
-            if (self.pressed) {
-                if (!self.dragging && abs(self.mouse-y - self.start-y) > 5px) {
-                    self.dragging = true;
-                    root.drag-started(root.index);
-                }
-
-                if (self.dragging) {
-                    // Send total Y offset relative to start of list
-                    root.drag-moved(root.index * 30px + self.mouse-y);
-                }
-            }
         }
     }
 }
@@ -790,55 +734,84 @@ export component AppWindow inherits Window {
                         }
                     }
 
-                    track-list := ListView {
-                        for track[i] in root.track_model : TrackRow {
-                            index: i;
-                            data: track;
-                            is-playing: root.playing_track_index == i;
-                            is-selected: root.selection_model[i];
-                            is-dragging: root.drag-index == i;
-                            opacity: root.drag-index != -1 && root.selection_model[i] ? 0.5 : 1.0;
+                    track-list-container := Rectangle {
+                        clip: true;
 
-                            clicked(event) => {
-                                root.playlist_item_click(i, event, {x: 0, y: 0});
-                                root.sidebar_has_focus = false;
-                                key-handler.focus();
-                            }
+                        track-list := ListView {
+                            property <length> row-height: 30px;
+                            property <length> header-height: 28px;
 
-                            double-clicked() => {
-                                root.playlist_item_double_click(i);
-                            }
-
-                            drag-started(idx) => {
-                                root.drag-index = idx;
-                            }
-
-                            drag-moved(y-offset) => {
-                                root.drop-index = max(0, min(root.track_model.length, floor((y-offset + 15px) / 30px)));
-                            }
-
-                            drag-ended() => {
-                                if (root.drop-index != -1) {
-                                    if (root.selection_model[root.drag-index]) {
-                                        root.reorder_tracks(root.selected_indices, root.drop-index);
-                                    } else {
-                                        root.reorder_tracks([root.drag-index], root.drop-index);
-                                    }
-                                }
-                                root.drag-index = -1;
-                                root.drop-index = -1;
+                            for track[i] in root.track_model : TrackRow {
+                                data: track;
+                                is-playing: root.playing_track_index == i;
+                                is-hover: root.hover-index == i && !root.is-dragging;
                             }
                         }
-                    }
-                }
 
-                // Visual Drop Indicator (horizontal line between tracks)
-                if (root.drag-index != -1 && root.drop-index != -1) : Rectangle {
-                    x: 0;
-                    y: 28px + root.drop-index * 30px;
-                    width: 100%;
-                    height: 2px;
-                    background: #2a6def;
+                        track-list-overlay := TouchArea {
+                            x: 0;
+                            y: 0;
+                            width: parent.width;
+                            height: parent.height;
+
+                            property <length> row-height: 30px;
+                            property <length> header-height: 28px;
+                            property <length> content-y: self.mouse-y - track-list.viewport-y - self.header-height;
+                            property <int> hovered-row: max(-1, min(root.track_model.length - 1, floor(content-y / row-height)));
+                            property <int> drop-gap: max(0, min(root.track_model.length, floor((content-y + row-height / 2) / row-height)));
+
+                            pointer-event(event) => {
+                                if (event.button == PointerEventButton.left) {
+                                    if (event.kind == PointerEventKind.down) {
+                                        root.pressed-index = self.hovered-row;
+                                        root.press-y = self.mouse-y;
+                                        root.sidebar_has_focus = false;
+                                        key-handler.focus();
+                                        root.handle_track_click(self.hovered-row, event.modifiers.control, event.modifiers.shift);
+                                    } else if (event.kind == PointerEventKind.up) {
+                                        if (root.is-dragging) {
+                                            root.reorder_tracks(root.drag_indices, root.drop-index);
+                                        }
+                                        root.is-dragging = false;
+                                        root.pressed-index = -1;
+                                        root.drop-index = -1;
+                                        root.drag_indices = [];
+                                    }
+                                }
+                            }
+
+                            moved => {
+                                if (!self.pressed) {
+                                    root.hover-index = self.hovered-row;
+                                } else {
+                                    if (!root.is-dragging && abs(self.mouse-y - root.press-y) > 5px) {
+                                        root.is-dragging = true;
+                                        if (root.pressed-index >= 0 && root.track_model[root.pressed-index].selected) {
+                                            root.drag_indices = root.selected_indices;
+                                        } else {
+                                            root.drag_indices = [root.pressed-index];
+                                        }
+                                    }
+                                    if (root.is-dragging) {
+                                        root.drop-index = self.drop-gap;
+                                    }
+                                }
+                            }
+
+                            double-clicked => {
+                                root.playlist_item_double_click(self.hovered-row);
+                            }
+                        }
+
+                        // Visual Drop Indicator
+                        if (root.is-dragging && root.drop-index != -1) : Rectangle {
+                            x: 0;
+                            y: track-list.header-height + root.drop-index * 30px + track-list.viewport-y;
+                            width: 100%;
+                            height: 2px;
+                            background: #2a6def;
+                        }
+                    }
                 }
             }
         }
@@ -909,28 +882,31 @@ export component AppWindow inherits Window {
     in-out property <int> active_playlist_index: 0;
     in-out property <int> editing_playlist_index: -1;
     in-out property <[TrackRowData]> track_model: [];
-    in-out property <[bool]> selection_model: []; 
     in-out property <int> playback_order_index: 0;
     in-out property <int> repeat_mode: 0; // 0: Off, 1: Playlist, 2: Track
     in-out property <int> selected_track_index: -1;
     in-out property <[int]> selected_indices: [];
     in-out property <int> playing_track_index: -1;
-    
+
     // Album art properties
     in-out property <bool> show_album_art: true;
     in-out property <image> current_cover_art;
-    
+
     // Metadata display properties
     in-out property <string> display_title: "";
     in-out property <string> display_artist: "";
     in-out property <string> display_album: "";
     in-out property <string> display_date: "";
     in-out property <string> display_genre: "";
-    
+
     // Drag and drop state
-    property <int> drag-index: -1;
+    property <int> pressed-index: -1;
+    property <length> press-y: 0;
+    property <bool> is-dragging: false;
+    property <[int]> drag_indices: [];
     property <int> drop-index: -1;
-    
+    property <int> hover-index: -1;
+
     // Seek bar properties
     in-out property <float> current-position: 0.0; // in seconds
     in-out property <float> total-duration: 0.0; // in seconds
@@ -947,7 +923,7 @@ export component AppWindow inherits Window {
     callback stop();
     callback next();
     callback previous();
-    callback playlist_item_click(int, PointerEvent, Point);
+    callback handle_track_click(int, bool, bool);
     callback playlist_item_double_click(int);
     callback playback_order_changed(int);
     callback toggle_repeat();

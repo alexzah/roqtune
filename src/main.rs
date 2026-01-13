@@ -125,23 +125,18 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let _ = bus_sender_clone.send(Message::Playback(PlaybackMessage::Pause));
     });
 
-    // Handle playlist item clicks
+    // Handle track click from overlay
     let bus_sender_clone = bus_sender.clone();
-    ui.on_playlist_item_click(move |index, _event, _point| {
-        if _event.button.to_string() == "left" && _event.kind.to_string() == "down" {
-            let ctrl = _event.modifiers.control;
-            let shift = _event.modifiers.shift;
-
-            debug!(
-                "Playlist item clicked at index {:?} (ctrl={}, shift={})",
-                index, ctrl, shift
-            );
-            let _ = bus_sender_clone.send(Message::Playlist(PlaylistMessage::SelectTrackMulti {
-                index: index as usize,
-                ctrl,
-                shift,
-            }));
-        }
+    ui.on_handle_track_click(move |index, ctrl, shift| {
+        debug!(
+            "Track clicked at index {:?} (ctrl={}, shift={})",
+            index, ctrl, shift
+        );
+        let _ = bus_sender_clone.send(Message::Playlist(PlaylistMessage::SelectTrackMulti {
+            index: index as usize,
+            ctrl,
+            shift,
+        }));
     });
 
     let bus_sender_clone = bus_sender.clone();

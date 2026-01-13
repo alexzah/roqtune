@@ -303,6 +303,7 @@ impl UiManager {
                                 title: track.metadata.title.clone().into(),
                                 artist: track.metadata.artist.clone().into(),
                                 album: track.metadata.album.clone().into(),
+                                selected: false,
                             });
                         }
 
@@ -313,22 +314,12 @@ impl UiManager {
                                 .downcast_ref::<VecModel<TrackRowData>>()
                                 .expect("VecModel<TrackRowData> expected");
 
-                            let selection_model_strong = ui.get_selection_model();
-                            let selection_model = selection_model_strong
-                                .as_any()
-                                .downcast_ref::<VecModel<bool>>()
-                                .expect("VecModel expected");
-
                             while track_model.row_count() > 0 {
                                 track_model.remove(0);
-                            }
-                            while selection_model.row_count() > 0 {
-                                selection_model.remove(0);
                             }
 
                             for track in track_data {
                                 track_model.push(track);
-                                selection_model.push(false);
                             }
                         });
                     }
@@ -365,14 +356,8 @@ impl UiManager {
                                 title: tags.title.clone().into(),
                                 artist: tags.artist.clone().into(),
                                 album: tags.album.clone().into(),
+                                selected: false,
                             });
-
-                            let selection_model_strong = ui.get_selection_model();
-                            let selection_model = selection_model_strong
-                                .as_any()
-                                .downcast_ref::<VecModel<bool>>()
-                                .expect("VecModel expected");
-                            selection_model.push(false);
                         });
                     }
                     protocol::Message::Playlist(protocol::PlaylistMessage::DeleteTracks(
@@ -400,18 +385,9 @@ impl UiManager {
                                 .downcast_ref::<VecModel<TrackRowData>>()
                                 .expect("VecModel<TrackRowData> expected");
 
-                            let selection_model_strong = ui.get_selection_model();
-                            let selection_model = selection_model_strong
-                                .as_any()
-                                .downcast_ref::<VecModel<bool>>()
-                                .expect("VecModel expected");
-
                             for index in indices_to_remove {
                                 if index < track_model.row_count() {
                                     track_model.remove(index);
-                                }
-                                if index < selection_model.row_count() {
-                                    selection_model.remove(index);
                                 }
                             }
                         });
@@ -689,21 +665,21 @@ impl UiManager {
                             )));
 
                             let track_model_strong = ui.get_track_model();
-                            let num_tracks = track_model_strong.row_count();
-                            let mut selections = vec![false; num_tracks];
-                            for &idx in selected_indices_clone.iter() {
-                                if idx < num_tracks {
-                                    selections[idx] = true;
-                                }
-                            }
-                            ui.set_selection_model(ModelRc::from(Rc::new(VecModel::from(
-                                selections,
-                            ))));
-
                             let track_model = track_model_strong
                                 .as_any()
                                 .downcast_ref::<VecModel<TrackRowData>>()
                                 .expect("VecModel<TrackRowData> expected");
+
+                            for i in 0..track_model.row_count() {
+                                let mut row = track_model.row_data(i).unwrap();
+                                let was_selected = row.selected;
+                                let should_be_selected = selected_indices_clone.contains(&i);
+
+                                if was_selected != should_be_selected {
+                                    row.selected = should_be_selected;
+                                    track_model.set_row_data(i, row);
+                                }
+                            }
 
                             for i in 0..track_model.row_count() {
                                 let mut row = track_model.row_data(i).unwrap();
@@ -767,28 +743,18 @@ impl UiManager {
                                 .downcast_ref::<VecModel<TrackRowData>>()
                                 .expect("VecModel<TrackRowData> expected");
 
-                            let selection_model_strong = ui.get_selection_model();
-                            let selection_model = selection_model_strong
-                                .as_any()
-                                .downcast_ref::<VecModel<bool>>()
-                                .expect("VecModel expected");
-
                             let mut sorted_indices = indices_clone.clone();
                             sorted_indices.sort_by(|a, b| b.cmp(a));
 
                             let mut moved_rows = Vec::new();
-                            let mut moved_selections = Vec::new();
 
                             for &idx in sorted_indices.iter() {
                                 if idx < track_model.row_count() {
                                     moved_rows.push(track_model.row_data(idx).unwrap());
-                                    moved_selections.push(selection_model.row_data(idx).unwrap());
                                     track_model.remove(idx);
-                                    selection_model.remove(idx);
                                 }
                             }
                             moved_rows.reverse();
-                            moved_selections.reverse();
 
                             let mut actual_to = to;
                             for &idx in indices_clone.iter() {
@@ -800,7 +766,6 @@ impl UiManager {
 
                             for (i, row) in moved_rows.into_iter().enumerate() {
                                 track_model.insert(actual_to + i, row);
-                                selection_model.insert(actual_to + i, moved_selections[i]);
                             }
                         });
                     }
