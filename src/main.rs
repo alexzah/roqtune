@@ -228,6 +228,25 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let _ = bus_sender_clone.send(Message::Playback(PlaybackMessage::Seek(percentage)));
     });
 
+    // Wire up playlist management
+    let bus_sender_clone = bus_sender.clone();
+    ui.on_create_playlist(move || {
+        debug!("Create playlist requested");
+        // For now let's just create one with a default name.
+        // We could add a dialog later if the framework supports it easily or just prompt in CLI.
+        let _ = bus_sender_clone.send(Message::Playlist(PlaylistMessage::CreatePlaylist {
+            name: "New Playlist".to_string(),
+        }));
+    });
+
+    let bus_sender_clone = bus_sender.clone();
+    ui.on_switch_playlist(move |index| {
+        debug!("Switch playlist requested: {}", index);
+        let _ = bus_sender_clone.send(Message::Playlist(PlaylistMessage::SwitchPlaylistByIndex(
+            index as usize,
+        )));
+    });
+
     // Setup playlist manager
     let playlist_manager_bus_receiver = bus_sender.subscribe();
     let playlist_manager_bus_sender = bus_sender.clone();

@@ -1,4 +1,26 @@
-import { Button, VerticalBox, StandardTableView, ComboBox } from "std-widgets.slint";
+import { Button, VerticalBox, StandardTableView, ComboBox, ScrollView } from "std-widgets.slint";
+
+component PlaylistRow inherits Rectangle {
+    in property <string> name;
+    in property <bool> is-active;
+    callback clicked();
+    
+    height: 24px;
+    background: is-active ? #3d3d3d : ta.has-hover ? #333 : transparent;
+    border-radius: 2px;
+    
+    Text {
+        x: 8px;
+        text: root.name;
+        color: is-active ? #eee : #aaa;
+        font-size: 13px;
+        vertical-alignment: center;
+    }
+    
+    ta := TouchArea {
+        clicked => { root.clicked(); }
+    }
+}
 
 component TrackRow inherits Rectangle {
     in property <[StandardListViewItem]> data;
@@ -43,6 +65,7 @@ component TrackRow inherits Rectangle {
             horizontal-stretch: 2;
             min-width: 150px;
             overflow: elide;
+            horizontal-alignment: left;
         }
         
         // Artist Column
@@ -54,6 +77,7 @@ component TrackRow inherits Rectangle {
             horizontal-stretch: 1;
             min-width: 100px;
             overflow: elide;
+            horizontal-alignment: left;
         }
         
         // Album Column
@@ -65,6 +89,7 @@ component TrackRow inherits Rectangle {
             horizontal-stretch: 1;
             min-width: 100px;
             overflow: elide;
+            horizontal-alignment: left;
         }
 
         // Empty grow column
@@ -396,71 +421,116 @@ export component AppWindow inherits Window {
             }
         }
         
-        // Main content: Playlist and Album Art
+        // Main content: Sidebar and Playlist
         HorizontalLayout {
             vertical-stretch: 1;
             
-            // Left Sidebar: Album Art
-            if root.show_album_art : VerticalLayout {
+            // Left Sidebar
+            Rectangle {
                 horizontal-stretch: 1;
                 min-width: 150px;
                 max-width: 250px;
-                padding: 10px;
-                alignment: center;
-                spacing: 10px;
-                
-                // Metadata display
+                background: #202020;
+
                 VerticalLayout {
-                    spacing: 4px;
-                    if root.display_title != "" : Text {
-                        text: root.display_title;
-                        color: #eee;
-                        font-size: 14px;
-                        font-weight: 700;
-                        wrap: word-wrap;
-                        overflow: elide;
-                    }
-                    if root.display_artist != "" : Text {
-                        text: root.display_artist;
-                        color: #ccc;
-                        font-size: 13px;
-                        wrap: word-wrap;
-                        overflow: elide;
-                    }
-                    if root.display_album != "" : Text {
-                        text: root.display_album;
-                        color: #aaa;
-                        font-size: 12px;
-                        wrap: word-wrap;
-                        overflow: elide;
-                    }
-                    HorizontalLayout {
-                        spacing: 8px;
-                        if root.display_date != "" : Text {
-                            text: root.display_date;
-                            color: #888;
-                            font-size: 11px;
+                    // Top Half: Playlist Picker
+                    VerticalLayout {
+                        vertical-stretch: 1;
+                        padding: 8px;
+                        spacing: 4px;
+                        
+                        HorizontalLayout {
+                            Text {
+                                text: "Playlists";
+                                color: #888;
+                                font-size: 12px;
+                                font-weight: 700;
+                                vertical-alignment: center;
+                            }
+                            Rectangle { horizontal-stretch: 1; }
+                            PlayerButton {
+                                icon-text: "+";
+                                font-size: 18px;
+                                clicked => { root.create_playlist(); }
+                            }
                         }
-                        if root.display_genre != "" : Text {
-                            text: root.display_genre;
-                            color: #888;
-                            font-size: 11px;
-                            horizontal-stretch: 1;
-                            overflow: elide;
+                        
+                        Rectangle { height: 1px; background: #333; }
+                        
+                        ScrollView {
+                            vertical-stretch: 1;
+                            VerticalLayout {
+                                alignment: start;
+                                for p[i] in root.playlists : PlaylistRow {
+                                    name: p.text;
+                                    is-active: root.active_playlist_index == i;
+                                    clicked => { root.switch_playlist(i); }
+                                }
+                            }
                         }
                     }
-                }
-                
-                Rectangle {
-                    height: self.width;
-                    background: #202020;
-                    border-radius: 4px;
                     
-                    Image {
-                        source: root.current_cover_art;
-                        width: parent.width;
-                        height: parent.height;
-                        image-fit: contain;
+                    // Bottom Half: Metadata and Album Art
+                    VerticalLayout {
+                        vertical-stretch: 1;
+                        padding: 10px;
+                        alignment: end;
+                        spacing: 10px;
+                        
+                        // Metadata display
+                        VerticalLayout {
+                            spacing: 4px;
+                            if root.display_title != "" : Text {
+                                text: root.display_title;
+                                color: #eee;
+                                font-size: 14px;
+                                font-weight: 700;
+                                wrap: word-wrap;
+                                overflow: elide;
+                            }
+                            if root.display_artist != "" : Text {
+                                text: root.display_artist;
+                                color: #ccc;
+                                font-size: 13px;
+                                wrap: word-wrap;
+                                overflow: elide;
+                            }
+                            if root.display_album != "" : Text {
+                                text: root.display_album;
+                                color: #aaa;
+                                font-size: 12px;
+                                wrap: word-wrap;
+                                overflow: elide;
+                            }
+                            HorizontalLayout {
+                                spacing: 8px;
+                                if root.display_date != "" : Text {
+                                    text: root.display_date;
+                                    color: #888;
+                                    font-size: 11px;
+                                }
+                                if root.display_genre != "" : Text {
+                                    text: root.display_genre;
+                                    color: #888;
+                                    font-size: 11px;
+                                    horizontal-stretch: 1;
+                                    overflow: elide;
+                                }
+                            }
+                        }
+                        
+                        Rectangle {
+                            height: self.width;
+                            background: #202020;
+                            border-radius: 4px;
+                            
+                            Image {
+                                source: root.current_cover_art;
+                                width: parent.width;
+                                height: parent.height;
+                                image-fit: contain;
+                            }
+                        }
                     }
                 }
             }
@@ -479,9 +549,9 @@ export component AppWindow inherits Window {
                             padding-right: 8px;
                             spacing: 10px;
                             Rectangle { width: 40px; Text { text: "#"; color: #555; font-size: 11px; horizontal-alignment: center; vertical-alignment: center; } }
-                            Text { text: "Title"; color: #888; font-size: 12px; horizontal-stretch: 2; min-width: 150px; vertical-alignment: center; }
-                            Text { text: "Artist"; color: #888; font-size: 12px; horizontal-stretch: 1; min-width: 100px; vertical-alignment: center; }
-                            Text { text: "Album"; color: #888; font-size: 12px; horizontal-stretch: 1; min-width: 100px; vertical-alignment: center; }
+                            Text { text: "Title"; color: #888; font-size: 12px; horizontal-stretch: 2; min-width: 150px; vertical-alignment: center; horizontal-alignment: left; }
+                            Text { text: "Artist"; color: #888; font-size: 12px; horizontal-stretch: 1; min-width: 100px; vertical-alignment: center; horizontal-alignment: left; }
+                            Text { text: "Album"; color: #888; font-size: 12px; horizontal-stretch: 1; min-width: 100px; vertical-alignment: center; horizontal-alignment: left; }
                             Rectangle { horizontal-stretch: 3; }
                         }
                     }
@@ -607,6 +677,8 @@ export component AppWindow inherits Window {
     }
 
     // Properties to communicate with Rust
+    in-out property <[StandardListViewItem]> playlists: [];
+    in-out property <int> active_playlist_index: 0;
     in-out property <[[StandardListViewItem]]> track_model: []; // holds rows of strings
     in-out property <[bool]> selection_model: []; 
     in-out property <int> playback_order_index: 0;
@@ -654,4 +726,6 @@ export component AppWindow inherits Window {
     callback delete_track([int]);
     callback reorder_tracks([int], int); // indices, to
     callback deselect_all();
+    callback create_playlist();
+    callback switch_playlist(int);
 }

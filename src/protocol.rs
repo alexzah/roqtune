@@ -68,6 +68,15 @@ pub enum PlaylistMessage {
         id: String,
         metadata: DetailedMetadata,
     },
+    CreatePlaylist {
+        name: String,
+    },
+    SwitchPlaylist {
+        id: String,
+    },
+    SwitchPlaylistByIndex(usize),
+    PlaylistsRestored(Vec<PlaylistInfo>),
+    ActivePlaylistChanged(String),
     TrackFinished,
     TrackStarted(usize),
     PlaylistIndicesChanged {
@@ -86,6 +95,12 @@ pub struct RestoredTrack {
     pub id: String,
     pub path: PathBuf,
     pub metadata: DetailedMetadata,
+}
+
+#[derive(Debug, Clone, serde::Deserialize, serde::Serialize)]
+pub struct PlaylistInfo {
+    pub id: String,
+    pub name: String,
 }
 
 #[derive(Debug, Clone)]

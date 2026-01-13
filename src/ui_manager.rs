@@ -18,6 +18,7 @@ pub struct UiManager {
     ui: slint::Weak<AppWindow>,
     bus_receiver: Receiver<protocol::Message>,
     bus_sender: Sender<protocol::Message>,
+    playlist_ids: Vec<String>,
     track_ids: Vec<String>,
     track_paths: Vec<PathBuf>,
     track_metadata: Vec<TrackMetadata>,
@@ -42,6 +43,7 @@ impl UiManager {
             ui: ui.clone(),
             bus_receiver,
             bus_sender,
+            playlist_ids: Vec::new(),
             track_ids: Vec::new(),
             track_paths: Vec::new(),
             track_metadata: Vec::new(),
@@ -245,9 +247,37 @@ impl UiManager {
         loop {
             match self.bus_receiver.blocking_recv() {
                 Ok(message) => match message {
+                    protocol::Message::Playlist(protocol::PlaylistMessage::PlaylistsRestored(
+                        playlists,
+                    )) => {
+                        self.playlist_ids = playlists.iter().map(|p| p.id.clone()).collect();
+                        let mut slint_playlists = Vec::new();
+                        for p in playlists {
+                            slint_playlists.push(StandardListViewItem::from(p.name.as_str()));
+                        }
+
+                        let _ = self.ui.upgrade_in_event_loop(move |ui| {
+                            ui.set_playlists(ModelRc::from(Rc::new(VecModel::from(
+                                slint_playlists,
+                            ))));
+                        });
+                    }
+                    protocol::Message::Playlist(
+                        protocol::PlaylistMessage::ActivePlaylistChanged(id),
+                    ) => {
+                        if let Some(index) = self.playlist_ids.iter().position(|p_id| p_id == &id) {
+                            let _ = self.ui.upgrade_in_event_loop(move |ui| {
+                                ui.set_active_playlist_index(index as i32);
+                            });
+                        }
+                    }
                     protocol::Message::Playlist(protocol::PlaylistMessage::PlaylistRestored(
                         tracks,
                     )) => {
+                        self.track_ids.clear();
+                        self.track_paths.clear();
+                        self.track_metadata.clear();
+
                         let mut track_data = Vec::new();
                         for track in tracks {
                             self.track_ids.push(track.id.clone());
@@ -279,6 +309,14 @@ impl UiManager {
                                 .as_any()
                                 .downcast_ref::<VecModel<bool>>()
                                 .expect("VecModel expected");
+
+                            // Clear existing models
+                            while track_model.row_count() > 0 {
+                                track_model.remove(0);
+                            }
+                            while selection_model.row_count() > 0 {
+                                selection_model.remove(0);
+                            }
 
                             for (title, artist, album) in track_data {
                                 track_model.push(ModelRc::new(VecModel::from(vec![
@@ -459,10 +497,6 @@ impl UiManager {
                         elapsed_ms,
                         total_ms,
                     }) => {
-                        // debug!(
-                        //     "UiManager: Playback progress: {}/{} ms",
-                        //     elapsed_ms, total_ms
-                        // );
                         let _ = self.ui.upgrade_in_event_loop(move |ui| {
                             let elapsed_secs = elapsed_ms / 1000;
                             let elapsed_mins = elapsed_secs / 60;

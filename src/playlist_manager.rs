@@ -13,6 +13,7 @@ use crate::{
 // Manages the playlist
 pub struct PlaylistManager {
     playlist: Playlist,
+    active_playlist_id: String,
     bus_consumer: Receiver<protocol::Message>,
     bus_producer: Sender<protocol::Message>,
     db_manager: DbManager,
@@ -31,6 +32,7 @@ impl PlaylistManager {
     ) -> Self {
         Self {
             playlist,
+            active_playlist_id: String::new(),
             bus_consumer,
             bus_producer,
             db_manager,
@@ -72,24 +74,50 @@ impl PlaylistManager {
     }
 
     pub fn run(&mut self) {
-        // Restore playlist from database
-        match self.db_manager.get_all_tracks() {
-            Ok(tracks) => {
-                info!("Restoring {} tracks from database", tracks.len());
-                for track in tracks.iter() {
-                    self.playlist.add_track(Track {
-                        path: track.path.clone(),
-                        id: track.id.clone(),
-                    });
-                }
-
-                let _ = self.bus_producer.send(protocol::Message::Playlist(
-                    protocol::PlaylistMessage::PlaylistRestored(tracks),
-                ));
-            }
+        // Restore playlists from database
+        let playlists = match self.db_manager.get_all_playlists() {
+            Ok(p) => p,
             Err(e) => {
-                error!("Failed to restore playlist from database: {}", e);
+                error!("Failed to get playlists from database: {}", e);
+                Vec::new()
             }
+        };
+
+        if !playlists.is_empty() {
+            self.active_playlist_id = playlists[0].id.clone();
+            info!(
+                "Restoring playlists. Active: {} ({})",
+                playlists[0].name, playlists[0].id
+            );
+
+            // Restore tracks for active playlist
+            match self
+                .db_manager
+                .get_tracks_for_playlist(&self.active_playlist_id)
+            {
+                Ok(tracks) => {
+                    info!("Restoring {} tracks from database", tracks.len());
+                    for track in tracks.iter() {
+                        self.playlist.add_track(Track {
+                            path: track.path.clone(),
+                            id: track.id.clone(),
+                        });
+                    }
+                    let _ = self.bus_producer.send(protocol::Message::Playlist(
+                        protocol::PlaylistMessage::PlaylistRestored(tracks),
+                    ));
+                }
+                Err(e) => {
+                    error!("Failed to restore tracks from database: {}", e);
+                }
+            }
+
+            let _ = self.bus_producer.send(protocol::Message::Playlist(
+                protocol::PlaylistMessage::PlaylistsRestored(playlists),
+            ));
+            let _ = self.bus_producer.send(protocol::Message::Playlist(
+                protocol::PlaylistMessage::ActivePlaylistChanged(self.active_playlist_id.clone()),
+            ));
         }
 
         loop {
@@ -100,10 +128,12 @@ impl PlaylistManager {
                         let id = Uuid::new_v4().to_string();
                         let position = self.playlist.num_tracks();
 
-                        if let Err(e) =
-                            self.db_manager
-                                .save_track(&id, path.to_str().unwrap_or(""), position)
-                        {
+                        if let Err(e) = self.db_manager.save_track(
+                            &id,
+                            &self.active_playlist_id,
+                            path.to_str().unwrap_or(""),
+                            position,
+                        ) {
                             error!("Failed to save track to database: {}", e);
                         }
 
@@ -340,6 +370,69 @@ impl PlaylistManager {
                         if let Err(e) = self.db_manager.update_metadata(&id, &metadata) {
                             error!("Failed to update metadata in database: {}", e);
                         }
+                    }
+                    protocol::Message::Playlist(protocol::PlaylistMessage::CreatePlaylist {
+                        name,
+                    }) => {
+                        let id = Uuid::new_v4().to_string();
+                        debug!("PlaylistManager: Creating playlist {} ({})", name, id);
+                        if let Err(e) = self.db_manager.create_playlist(&id, &name) {
+                            error!("Failed to create playlist in database: {}", e);
+                        } else {
+                            let playlists = self.db_manager.get_all_playlists().unwrap_or_default();
+                            let _ = self.bus_producer.send(protocol::Message::Playlist(
+                                protocol::PlaylistMessage::PlaylistsRestored(playlists),
+                            ));
+                        }
+                    }
+                    protocol::Message::Playlist(
+                        protocol::PlaylistMessage::SwitchPlaylistByIndex(index),
+                    ) => {
+                        let playlists = self.db_manager.get_all_playlists().unwrap_or_default();
+                        if let Some(p) = playlists.get(index) {
+                            let id = p.id.clone();
+                            let _ = self.bus_producer.send(protocol::Message::Playlist(
+                                protocol::PlaylistMessage::SwitchPlaylist { id },
+                            ));
+                        }
+                    }
+                    protocol::Message::Playlist(protocol::PlaylistMessage::SwitchPlaylist {
+                        id,
+                    }) => {
+                        debug!("PlaylistManager: Switching to playlist {}", id);
+                        if id == self.active_playlist_id {
+                            continue;
+                        }
+
+                        // Stop current playback/decoding
+                        self.playlist.set_playing(false);
+                        self.playlist.set_playing_track_index(None);
+                        self.clear_cached_tracks();
+
+                        self.active_playlist_id = id.clone();
+                        self.playlist = Playlist::new(); // Clear in-memory playlist
+
+                        match self.db_manager.get_tracks_for_playlist(&id) {
+                            Ok(tracks) => {
+                                for track in tracks.iter() {
+                                    self.playlist.add_track(Track {
+                                        path: track.path.clone(),
+                                        id: track.id.clone(),
+                                    });
+                                }
+                                let _ = self.bus_producer.send(protocol::Message::Playlist(
+                                    protocol::PlaylistMessage::PlaylistRestored(tracks),
+                                ));
+                            }
+                            Err(e) => {
+                                error!("Failed to switch playlist: {}", e);
+                            }
+                        }
+
+                        let _ = self.bus_producer.send(protocol::Message::Playlist(
+                            protocol::PlaylistMessage::ActivePlaylistChanged(id),
+                        ));
+                        self.broadcast_playlist_changed();
                     }
                     protocol::Message::Audio(protocol::AudioMessage::TrackCached(id)) => {
                         debug!("PlaylistManager: Received TrackCached: {}", id);

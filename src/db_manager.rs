@@ -1,6 +1,7 @@
-use crate::protocol::{DetailedMetadata, RestoredTrack};
+use crate::protocol::{DetailedMetadata, PlaylistInfo, RestoredTrack};
 use rusqlite::{params, Connection};
 use std::path::PathBuf;
+use uuid::Uuid;
 
 pub struct DbManager {
     conn: Connection,
@@ -21,30 +22,117 @@ impl DbManager {
 
         let db_manager = Self { conn };
         db_manager.initialize_schema()?;
+        db_manager.migrate()?;
         Ok(db_manager)
     }
 
     fn initialize_schema(&self) -> Result<(), rusqlite::Error> {
         self.conn.execute(
+            "CREATE TABLE IF NOT EXISTS playlists (
+                id TEXT PRIMARY KEY,
+                name TEXT NOT NULL
+            )",
+            [],
+        )?;
+
+        self.conn.execute(
             "CREATE TABLE IF NOT EXISTS tracks (
                 id TEXT PRIMARY KEY,
+                playlist_id TEXT NOT NULL,
                 path TEXT NOT NULL,
                 position INTEGER NOT NULL,
                 title TEXT,
                 artist TEXT,
                 album TEXT,
                 date TEXT,
-                genre TEXT
+                genre TEXT,
+                FOREIGN KEY(playlist_id) REFERENCES playlists(id)
             )",
             [],
         )?;
         Ok(())
     }
 
-    pub fn save_track(&self, id: &str, path: &str, position: usize) -> Result<(), rusqlite::Error> {
+    fn migrate(&self) -> Result<(), rusqlite::Error> {
+        // Check if we need to add playlist_id column to tracks (for existing databases)
+        let mut stmt = self.conn.prepare("PRAGMA table_info(tracks)")?;
+        let columns = stmt.query_map([], |row| row.get::<_, String>(1))?;
+        let mut has_playlist_id = false;
+        for col in columns {
+            if col? == "playlist_id" {
+                has_playlist_id = true;
+                break;
+            }
+        }
+
+        if !has_playlist_id {
+            // This is a migration from the old schema
+            self.conn
+                .execute("ALTER TABLE tracks ADD COLUMN playlist_id TEXT", [])?;
+
+            // Create default playlist
+            let default_id = Uuid::new_v4().to_string();
+            self.conn.execute(
+                "INSERT INTO playlists (id, name) VALUES (?1, ?2)",
+                params![default_id, "Default"],
+            )?;
+
+            // Assign all existing tracks to default playlist
+            self.conn.execute(
+                "UPDATE tracks SET playlist_id = ?1 WHERE playlist_id IS NULL",
+                params![default_id],
+            )?;
+        }
+
+        // Ensure at least one playlist exists
+        let count: i64 = self
+            .conn
+            .query_row("SELECT COUNT(*) FROM playlists", [], |r| r.get(0))?;
+        if count == 0 {
+            let default_id = Uuid::new_v4().to_string();
+            self.conn.execute(
+                "INSERT INTO playlists (id, name) VALUES (?1, ?2)",
+                params![default_id, "Default"],
+            )?;
+        }
+
+        Ok(())
+    }
+
+    pub fn create_playlist(&self, id: &str, name: &str) -> Result<(), rusqlite::Error> {
         self.conn.execute(
-            "INSERT INTO tracks (id, path, position) VALUES (?1, ?2, ?3)",
-            params![id, path, position as i64],
+            "INSERT INTO playlists (id, name) VALUES (?1, ?2)",
+            params![id, name],
+        )?;
+        Ok(())
+    }
+
+    pub fn get_all_playlists(&self) -> Result<Vec<PlaylistInfo>, rusqlite::Error> {
+        let mut stmt = self.conn.prepare("SELECT id, name FROM playlists")?;
+        let playlist_iter = stmt.query_map([], |row| {
+            Ok(PlaylistInfo {
+                id: row.get(0)?,
+                name: row.get(1)?,
+            })
+        })?;
+
+        let mut playlists = Vec::new();
+        for playlist in playlist_iter {
+            playlists.push(playlist?);
+        }
+        Ok(playlists)
+    }
+
+    pub fn save_track(
+        &self,
+        id: &str,
+        playlist_id: &str,
+        path: &str,
+        position: usize,
+    ) -> Result<(), rusqlite::Error> {
+        self.conn.execute(
+            "INSERT INTO tracks (id, playlist_id, path, position) VALUES (?1, ?2, ?3, ?4)",
+            params![id, playlist_id, path, position as i64],
         )?;
         Ok(())
     }
@@ -74,11 +162,14 @@ impl DbManager {
         Ok(())
     }
 
-    pub fn get_all_tracks(&self) -> Result<Vec<RestoredTrack>, rusqlite::Error> {
+    pub fn get_tracks_for_playlist(
+        &self,
+        playlist_id: &str,
+    ) -> Result<Vec<RestoredTrack>, rusqlite::Error> {
         let mut stmt = self.conn.prepare(
-            "SELECT id, path, title, artist, album, date, genre FROM tracks ORDER BY position ASC",
+            "SELECT id, path, title, artist, album, date, genre FROM tracks WHERE playlist_id = ?1 ORDER BY position ASC",
         )?;
-        let track_iter = stmt.query_map([], |row| {
+        let track_iter = stmt.query_map(params![playlist_id], |row| {
             Ok(RestoredTrack {
                 id: row.get(0)?,
                 path: PathBuf::from(row.get::<_, String>(1)?),
