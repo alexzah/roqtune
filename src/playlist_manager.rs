@@ -49,7 +49,7 @@ impl PlaylistManager {
             cached_track_ids: HashMap::new(),
             fully_cached_track_ids: HashSet::new(),
             pending_order_change: None,
-            max_num_cached_tracks: 6,
+            max_num_cached_tracks: 2,
             current_track_duration_ms: 0,
             last_seek_ms: u64::MAX,
         }
