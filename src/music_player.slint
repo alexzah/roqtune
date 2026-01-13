@@ -332,12 +332,24 @@ export component AppWindow inherits Window {
                         vertical-alignment: center;
                     }
 
-                    PlayerButton {
-                        icon-text: "⟳";
-                        font-size: 20px;
-                        is-primary: root.repeat_on;
-                        clicked => {
-                            root.toggle_repeat();
+                    Rectangle {
+                        width: 32px;
+                        height: 32px;
+                        PlayerButton {
+                            icon-text: "⟳";
+                            font-size: 20px;
+                            is-primary: root.repeat_mode != 0;
+                            clicked => {
+                                root.toggle_repeat();
+                            }
+                        }
+                        if root.repeat_mode == 2 : Text {
+                            text: "1";
+                            color: #2a6def;
+                            font-size: 10px;
+                            font-weight: 700;
+                            x: 18px;
+                            y: 12px;
                         }
                     }
                 }
@@ -711,7 +723,7 @@ export component AppWindow inherits Window {
     in-out property <[[StandardListViewItem]]> track_model: []; // holds rows of strings
     in-out property <[bool]> selection_model: []; 
     in-out property <int> playback_order_index: 0;
-    in-out property <bool> repeat_on: false;
+    in-out property <int> repeat_mode: 0; // 0: Off, 1: Playlist, 2: Track
     in-out property <int> selected_track_index: -1;
     in-out property <[int]> selected_indices: [];
     in-out property <int> playing_track_index: -1;

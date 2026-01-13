@@ -24,6 +24,13 @@ fn default_true() -> bool {
     true
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, serde::Deserialize, serde::Serialize)]
+pub enum RepeatMode {
+    Off,      // Stop after reaching the end of playlist
+    Playlist, // Repeat playlist from the beginning
+    Track,    // Repeat current track
+}
+
 #[derive(Debug, Clone)]
 pub enum Message {
     Playlist(PlaylistMessage),
@@ -95,11 +102,12 @@ pub enum PlaylistMessage {
         playing_track_metadata: Option<DetailedMetadata>,
         selected_indices: Vec<usize>,
         is_playing: bool,
-        repeat_on: bool,
+        playback_order: PlaybackOrder,
+        repeat_mode: RepeatMode,
     },
     ChangePlaybackOrder(PlaybackOrder),
     ToggleRepeat,
-    RepeatModeChanged(bool),
+    RepeatModeChanged(RepeatMode),
 }
 
 #[derive(Debug, Clone, serde::Deserialize, serde::Serialize)]

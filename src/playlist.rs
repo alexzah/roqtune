@@ -1,13 +1,7 @@
-use crate::protocol::PlaybackOrder;
+use crate::protocol::{PlaybackOrder, RepeatMode};
 use log::debug;
 use rand::{rngs::StdRng, Rng, SeedableRng};
 use std::path::PathBuf;
-
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub enum RepeatMode {
-    Off, // Stop after reaching the end of playlist
-    On,  // Repeat playlist from the beginning
-}
 
 #[derive(Clone)]
 pub struct Track {
@@ -277,12 +271,16 @@ impl Playlist {
             return None;
         }
 
+        if self.repeat_mode == RepeatMode::Track {
+            return Some(current_index);
+        }
+
         match self.playback_order {
             PlaybackOrder::Default => {
                 let next_index = current_index + 1;
                 if next_index < self.tracks.len() {
                     Some(next_index)
-                } else if self.repeat_mode == RepeatMode::On {
+                } else if self.repeat_mode == RepeatMode::Playlist {
                     Some(0)
                 } else {
                     None
@@ -300,7 +298,7 @@ impl Playlist {
                 {
                     if position + 1 < self.shuffled_indices.len() {
                         Some(self.shuffled_indices[position + 1])
-                    } else if self.repeat_mode == RepeatMode::On {
+                    } else if self.repeat_mode == RepeatMode::Playlist {
                         self.shuffled_indices.first().copied()
                     } else {
                         None
@@ -326,14 +324,10 @@ impl Playlist {
                     }
                     self.rng_seed = new_seed;
                     Some(next_index)
-                } else if self.tracks.len() == 1 {
-                    if self.repeat_mode == RepeatMode::On {
-                        Some(0)
-                    } else {
-                        None
-                    }
                 } else {
-                    None
+                    // Random is infinite even if repeat is off, but if there's only one track
+                    // we return 0 if repeat is not Off. Wait, user said Random can be infinite in both.
+                    Some(0)
                 }
             }
         }
@@ -344,11 +338,15 @@ impl Playlist {
             return None;
         }
 
+        if self.repeat_mode == RepeatMode::Track {
+            return Some(current_index);
+        }
+
         match self.playback_order {
             PlaybackOrder::Default => {
                 if current_index > 0 {
                     Some(current_index - 1)
-                } else if self.repeat_mode == RepeatMode::On {
+                } else if self.repeat_mode == RepeatMode::Playlist {
                     Some(self.tracks.len() - 1)
                 } else {
                     None
@@ -366,7 +364,7 @@ impl Playlist {
                 {
                     if position > 0 {
                         Some(self.shuffled_indices[position - 1])
-                    } else if self.repeat_mode == RepeatMode::On {
+                    } else if self.repeat_mode == RepeatMode::Playlist {
                         self.shuffled_indices.last().copied()
                     } else {
                         None
@@ -441,15 +439,16 @@ impl Playlist {
         }
     }
 
-    pub fn toggle_repeat(&mut self) -> bool {
+    pub fn toggle_repeat(&mut self) -> RepeatMode {
         self.repeat_mode = match self.repeat_mode {
-            RepeatMode::Off => RepeatMode::On,
-            RepeatMode::On => RepeatMode::Off,
+            RepeatMode::Off => RepeatMode::Playlist,
+            RepeatMode::Playlist => RepeatMode::Track,
+            RepeatMode::Track => RepeatMode::Off,
         };
-        self.repeat_mode == RepeatMode::On
+        self.repeat_mode
     }
 
-    pub fn get_repeat_mode(&self) -> RepeatMode {
-        self.repeat_mode
+    pub fn set_repeat_mode(&mut self, mode: RepeatMode) {
+        self.repeat_mode = mode;
     }
 }

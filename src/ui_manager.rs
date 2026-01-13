@@ -624,7 +624,8 @@ impl UiManager {
                             playing_track_metadata,
                             selected_indices,
                             is_playing,
-                            repeat_on,
+                            playback_order,
+                            repeat_mode,
                         },
                     ) => {
                         let selected_indices_clone = selected_indices.clone();
@@ -672,7 +673,20 @@ impl UiManager {
                             } else {
                                 ui.set_playing_track_index(-1);
                             }
-                            ui.set_repeat_on(repeat_on);
+
+                            let repeat_int = match repeat_mode {
+                                protocol::RepeatMode::Off => 0,
+                                protocol::RepeatMode::Playlist => 1,
+                                protocol::RepeatMode::Track => 2,
+                            };
+                            ui.set_repeat_mode(repeat_int);
+
+                            let order_int = match playback_order {
+                                protocol::PlaybackOrder::Default => 0,
+                                protocol::PlaybackOrder::Shuffle => 1,
+                                protocol::PlaybackOrder::Random => 2,
+                            };
+                            ui.set_playback_order_index(order_int);
 
                             // Set generic selected index
                             ui.set_selected_track_index(
@@ -844,11 +858,16 @@ impl UiManager {
                         });
                     }
                     protocol::Message::Playlist(protocol::PlaylistMessage::RepeatModeChanged(
-                        repeat_on,
+                        repeat_mode,
                     )) => {
-                        debug!("UiManager: Repeat mode changed: {}", repeat_on);
+                        debug!("UiManager: Repeat mode changed: {:?}", repeat_mode);
+                        let repeat_int = match repeat_mode {
+                            protocol::RepeatMode::Off => 0,
+                            protocol::RepeatMode::Playlist => 1,
+                            protocol::RepeatMode::Track => 2,
+                        };
                         let _ = self.ui.upgrade_in_event_loop(move |ui| {
-                            ui.set_repeat_on(repeat_on);
+                            ui.set_repeat_mode(repeat_int);
                         });
                     }
                     _ => {}
