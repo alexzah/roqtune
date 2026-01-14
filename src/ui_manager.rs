@@ -876,13 +876,7 @@ impl UiManager {
                         moved_paths.reverse();
                         moved_ids.reverse();
                         moved_metadata.reverse();
-                        let mut actual_to = to;
-                        for &idx in indices.iter() {
-                            if idx < to {
-                                actual_to -= 1;
-                            }
-                        }
-                        actual_to = actual_to.min(self.track_paths.len());
+                        let actual_to = to.min(self.track_paths.len());
                         for (i, path) in moved_paths.into_iter().enumerate() {
                             self.track_paths.insert(actual_to + i, path);
                         }
@@ -913,13 +907,7 @@ impl UiManager {
                             }
                             moved_rows.reverse();
 
-                            let mut actual_to = to;
-                            for &idx in indices_clone.iter() {
-                                if idx < to {
-                                    actual_to -= 1;
-                                }
-                            }
-                            actual_to = actual_to.min(track_model.row_count());
+                            let actual_to = to.min(track_model.row_count());
 
                             for (i, row) in moved_rows.into_iter().enumerate() {
                                 track_model.insert(actual_to + i, row);

@@ -205,13 +205,8 @@ impl Playlist {
         moved_tracks.reverse();
 
         // 2. Calculate the target insertion point in the remaining list
-        let mut actual_to = to;
-        for &idx in indices.iter() {
-            if idx < to {
-                actual_to -= 1;
-            }
-        }
-        actual_to = actual_to.min(self.tracks.len());
+        // The 'to' value from UI is already the correct final position
+        let actual_to = to.min(self.tracks.len());
 
         // 3. Re-insert them
         for (i, track) in moved_tracks.into_iter().enumerate() {
@@ -219,12 +214,12 @@ impl Playlist {
         }
 
         // 4. Update indices (playing, selected, shuffle)
-        let total_count = self.tracks.len();
-        let mut old_to_new = vec![0; total_count + indices.len()];
+        let old_track_count = self.tracks.len();
+        let mut old_to_new = vec![0; old_track_count];
         let moved_indices_set: std::collections::HashSet<usize> = indices.iter().cloned().collect();
 
         let mut remaining_old_indices = Vec::new();
-        for i in 0..(total_count + indices.len()) {
+        for i in 0..old_track_count {
             if !moved_indices_set.contains(&i) {
                 remaining_old_indices.push(i);
             }
