@@ -852,18 +852,33 @@ impl UiManager {
                         indices,
                         to,
                     }) => {
-                        debug!(
-                            ">>> ReorderTracks HANDLER: indices={:?}, to={}",
-                            indices, to
-                        );
+                        debug!("ReorderTracks: indices={:?}, to={}", indices, to);
+
                         let indices_clone = indices.clone();
 
                         let mut sorted_indices = indices.clone();
-                        sorted_indices.sort_by(|a, b| b.cmp(a));
+                        sorted_indices.sort_unstable();
+                        sorted_indices.dedup();
+                        sorted_indices.retain(|&i| i < self.track_paths.len());
+
+                        if sorted_indices.is_empty() {
+                            continue;
+                        }
+
+                        let to = to.min(self.track_paths.len());
+
+                        let first = sorted_indices[0];
+                        let last = *sorted_indices.last().unwrap();
+
+                        if to >= first && to <= last {
+                            continue;
+                        }
+
                         let mut moved_paths = Vec::new();
                         let mut moved_ids = Vec::new();
                         let mut moved_metadata = Vec::new();
-                        for &idx in sorted_indices.iter() {
+
+                        for &idx in sorted_indices.iter().rev() {
                             if idx < self.track_paths.len() {
                                 moved_paths.push(self.track_paths.remove(idx));
                             }
@@ -877,16 +892,28 @@ impl UiManager {
                         moved_paths.reverse();
                         moved_ids.reverse();
                         moved_metadata.reverse();
-                        let actual_to = to.min(self.track_paths.len());
+
+                        let removed_before = sorted_indices.iter().filter(|&&i| i < to).count();
+                        let mut insert_at = to.saturating_sub(removed_before);
+
+                        if to > first {
+                            insert_at = insert_at.saturating_add(1);
+                        }
+
+                        insert_at = insert_at.min(self.track_paths.len());
+
                         for (i, path) in moved_paths.into_iter().enumerate() {
-                            self.track_paths.insert(actual_to + i, path);
+                            self.track_paths.insert(insert_at + i, path);
                         }
                         for (i, id) in moved_ids.into_iter().enumerate() {
-                            self.track_ids.insert(actual_to + i, id);
+                            self.track_ids.insert(insert_at + i, id);
                         }
                         for (i, metadata) in moved_metadata.into_iter().enumerate() {
-                            self.track_metadata.insert(actual_to + i, metadata);
+                            self.track_metadata.insert(insert_at + i, metadata);
                         }
+
+                        self.selected_indices =
+                            (insert_at..insert_at + sorted_indices.len()).collect();
 
                         let _ = self.ui.upgrade_in_event_loop(move |ui| {
                             let track_model_strong = ui.get_track_model();
@@ -896,11 +923,24 @@ impl UiManager {
                                 .expect("VecModel<TrackRowData> expected");
 
                             let mut sorted_indices = indices_clone.clone();
-                            sorted_indices.sort_by(|a, b| b.cmp(a));
+                            sorted_indices.sort_unstable();
+                            sorted_indices.dedup();
+                            sorted_indices.retain(|&i| i < track_model.row_count());
+
+                            if sorted_indices.is_empty() {
+                                return;
+                            }
+
+                            let to = to.min(track_model.row_count());
+                            let first = sorted_indices[0];
+                            let last = *sorted_indices.last().unwrap();
+
+                            if to >= first && to <= last {
+                                return;
+                            }
 
                             let mut moved_rows = Vec::new();
-
-                            for &idx in sorted_indices.iter() {
+                            for &idx in sorted_indices.iter().rev() {
                                 if idx < track_model.row_count() {
                                     moved_rows.push(track_model.row_data(idx).unwrap());
                                     track_model.remove(idx);
@@ -908,10 +948,17 @@ impl UiManager {
                             }
                             moved_rows.reverse();
 
-                            let actual_to = to.min(track_model.row_count());
+                            let removed_before = sorted_indices.iter().filter(|&&i| i < to).count();
+                            let mut insert_at = to.saturating_sub(removed_before);
+
+                            if to > first {
+                                insert_at = insert_at.saturating_add(1);
+                            }
+
+                            insert_at = insert_at.min(track_model.row_count());
 
                             for (i, row) in moved_rows.into_iter().enumerate() {
-                                track_model.insert(actual_to + i, row);
+                                track_model.insert(insert_at + i, row);
                             }
                         });
                     }
