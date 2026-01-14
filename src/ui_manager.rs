@@ -871,7 +871,12 @@ impl UiManager {
                         let last = *sorted_indices.last().unwrap();
                         let block_len = sorted_indices.len();
 
-                        if to >= first && to <= last + 1 {
+                        let is_contiguous = sorted_indices
+                            .iter()
+                            .enumerate()
+                            .all(|(k, &i)| i == first + k);
+
+                        if is_contiguous && to >= first && to <= last + 1 {
                             continue;
                         }
 
@@ -929,7 +934,7 @@ impl UiManager {
                             let first = sorted_indices[0];
                             let last = *sorted_indices.last().unwrap();
 
-                            if to >= first && to <= last + 1 {
+                            if is_contiguous && to >= first && to <= last + 1 {
                                 return;
                             }
 
@@ -1029,7 +1034,9 @@ mod tests {
         let last = *indices.last().unwrap();
         let block_len = indices.len();
 
-        if gap >= first && gap <= last + 1 {
+        let is_contiguous = indices.iter().enumerate().all(|(k, &i)| i == first + k);
+
+        if is_contiguous && gap >= first && gap <= last + 1 {
             return indices;
         }
 
@@ -1312,5 +1319,25 @@ mod tests {
         let new_selection = apply_reorder(&mut paths, &[1, 2, 3], 0);
         assert_eq!(paths, vec!["B", "C", "D", "A"]);
         assert_eq!(new_selection, vec![0, 1, 2]);
+    }
+
+    #[test]
+    fn test_gap_reorder_non_contiguous_not_noop() {
+        // Select A, B, D (non-contiguous) and drop at gap 2 (after B)
+        // Should bring D up before C, even though A and B don't move
+        let mut paths = make_test_paths();
+        let new_selection = apply_reorder(&mut paths, &[0, 1, 3], 2);
+        assert_eq!(paths, vec!["A", "B", "D", "C"]);
+        assert_eq!(new_selection, vec![0, 1, 2]);
+    }
+
+    #[test]
+    fn test_gap_reorder_non_contiguous_middle_gap() {
+        // Select A, C (non-contiguous) and drop at gap 1 (after A)
+        // Should move C to after A, resulting in [A, C, B, D]
+        let mut paths = make_test_paths();
+        let new_selection = apply_reorder(&mut paths, &[0, 2], 1);
+        assert_eq!(paths, vec!["A", "C", "B", "D"]);
+        assert_eq!(new_selection, vec![0, 1]);
     }
 }

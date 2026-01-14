@@ -208,7 +208,9 @@ impl Playlist {
         let last = *indices.last().unwrap();
         let block_len = indices.len();
 
-        if to_gap >= first && to_gap <= last + 1 {
+        let is_contiguous = indices.iter().enumerate().all(|(k, &i)| i == first + k);
+
+        if is_contiguous && to_gap >= first && to_gap <= last + 1 {
             self.selected_indices = indices;
             return;
         }
@@ -220,9 +222,7 @@ impl Playlist {
         moved.reverse();
 
         let removed_before = indices.iter().filter(|&&i| i < to_gap).count();
-        let mut insert_at = to_gap.saturating_sub(removed_before);
-
-        insert_at = insert_at.min(self.tracks.len());
+        let insert_at = to_gap.saturating_sub(removed_before);
 
         for (offset, t) in moved.into_iter().enumerate() {
             self.tracks.insert(insert_at + offset, t);
@@ -1134,5 +1134,37 @@ mod tests {
         playlist.move_tracks(vec![0], 10);
 
         assert_order(&playlist, vec!["B", "C", "A"]);
+    }
+
+    #[test]
+    fn test_gap_non_contiguous_selection_not_noop() {
+        // Select A, B, D (non-contiguous) and drop at gap 2 (after B)
+        // Should bring D up before C, even though A and B don't move
+        let mut playlist = Playlist::new();
+        playlist.add_track(make_track("A"));
+        playlist.add_track(make_track("B"));
+        playlist.add_track(make_track("C"));
+        playlist.add_track(make_track("D"));
+
+        playlist.move_tracks(vec![0, 1, 3], 2);
+
+        assert_order(&playlist, vec!["A", "B", "D", "C"]);
+        assert_selected(&playlist, vec![0, 1, 2]);
+    }
+
+    #[test]
+    fn test_gap_non_contiguous_selection_middle_gap() {
+        // Select A, C (non-contiguous) and drop at gap 1 (after A)
+        // Should move C to after A, resulting in [A, C, B, D]
+        let mut playlist = Playlist::new();
+        playlist.add_track(make_track("A"));
+        playlist.add_track(make_track("B"));
+        playlist.add_track(make_track("C"));
+        playlist.add_track(make_track("D"));
+
+        playlist.move_tracks(vec![0, 2], 1);
+
+        assert_order(&playlist, vec!["A", "C", "B", "D"]);
+        assert_selected(&playlist, vec![0, 1]);
     }
 }
