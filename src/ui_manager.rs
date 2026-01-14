@@ -685,6 +685,7 @@ impl UiManager {
                         },
                     ) => {
                         let selected_indices_clone = selected_indices.clone();
+                        self.selected_indices = selected_indices_clone.clone();
                         let is_playing_active_playlist =
                             playing_playlist_id.as_ref() == Some(&self.active_playlist_id);
 
