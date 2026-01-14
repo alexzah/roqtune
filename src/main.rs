@@ -214,9 +214,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Wire up drag end handler
     let bus_sender_clone = bus_sender.clone();
-    ui.on_on_drag_end(move || {
-        debug!("Drag end");
-        let _ = bus_sender_clone.send(Message::Playlist(PlaylistMessage::OnDragEnd));
+    ui.on_on_drag_end(move |drop_gap| {
+        debug!("Drag end at gap {:?}", drop_gap);
+        let _ = bus_sender_clone.send(Message::Playlist(PlaylistMessage::OnDragEnd {
+            drop_gap: drop_gap as usize,
+        }));
     });
 
     // Wire up sequence selector

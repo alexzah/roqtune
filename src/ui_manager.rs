@@ -27,7 +27,6 @@ pub struct UiManager {
     drag_indices: Vec<usize>,
     is_dragging: bool,
     pressed_index: Option<usize>,
-    drop_gap: usize,
 }
 
 #[derive(Clone)]
@@ -58,7 +57,6 @@ impl UiManager {
             drag_indices: Vec::new(),
             is_dragging: false,
             pressed_index: None,
-            drop_gap: 0,
         }
     }
 
@@ -298,7 +296,6 @@ impl UiManager {
     }
 
     pub fn on_drag_move(&mut self, drop_gap: usize) {
-        self.drop_gap = drop_gap;
         if self.is_dragging {
             let _ = self.ui.upgrade_in_event_loop(move |ui| {
                 ui.set_drop_index(drop_gap as i32);
@@ -306,14 +303,14 @@ impl UiManager {
         }
     }
 
-    pub fn on_drag_end(&mut self) {
+    pub fn on_drag_end(&mut self, drop_gap: usize) {
         debug!(
             ">>> on_drag_end START: is_dragging={}, drop_gap={}, drag_indices={:?}",
-            self.is_dragging, self.drop_gap, self.drag_indices
+            self.is_dragging, drop_gap, self.drag_indices
         );
-        if self.is_dragging && !self.selected_indices.is_empty() {
-            let indices = self.selected_indices.clone();
-            let to = self.drop_gap;
+        if self.is_dragging && !self.drag_indices.is_empty() {
+            let indices = self.drag_indices.clone();
+            let to = drop_gap;
             debug!(
                 ">>> on_drag_end SENDING ReorderTracks: indices={:?}, to={}",
                 indices, to
@@ -327,7 +324,6 @@ impl UiManager {
         self.drag_indices.clear();
         self.is_dragging = false;
         self.pressed_index = None;
-        self.drop_gap = 0;
 
         let _ = self.ui.upgrade_in_event_loop(move |ui| {
             ui.set_is_dragging(false);
@@ -837,8 +833,10 @@ impl UiManager {
                     }) => {
                         self.on_drag_move(drop_gap);
                     }
-                    protocol::Message::Playlist(protocol::PlaylistMessage::OnDragEnd) => {
-                        self.on_drag_end();
+                    protocol::Message::Playlist(protocol::PlaylistMessage::OnDragEnd {
+                        drop_gap,
+                    }) => {
+                        self.on_drag_end(drop_gap);
                     }
                     protocol::Message::Playlist(protocol::PlaylistMessage::ReorderTracks {
                         indices,

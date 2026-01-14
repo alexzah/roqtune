@@ -74,7 +74,9 @@ pub enum PlaylistMessage {
     OnDragMove {
         drop_gap: usize,
     },
-    OnDragEnd,
+    OnDragEnd {
+        drop_gap: usize,
+    },
     DeselectAll,
     ReorderTracks {
         indices: Vec<usize>,

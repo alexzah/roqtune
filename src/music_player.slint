@@ -772,8 +772,7 @@ export component AppWindow inherits Window {
                                         key-handler.focus();
                                         root.on_pointer_down(self.hovered-row, event.modifiers.control, event.modifiers.shift);
                                     } else if (event.kind == PointerEventKind.up) {
-                                        root.drop-index = self.drop-gap;
-                                        root.on_drag_end();
+                                        root.on_drag_end(self.drop-gap);
                                         root.hover-index = -1;
                                     }
                                 }
@@ -920,7 +919,7 @@ export component AppWindow inherits Window {
     callback on_pointer_down(int, bool, bool);
     callback on_drag_start(int);
     callback on_drag_move(int);
-    callback on_drag_end();
+    callback on_drag_end(int);
     callback playlist_item_double_click(int);
     callback playback_order_changed(int);
     callback toggle_repeat();
