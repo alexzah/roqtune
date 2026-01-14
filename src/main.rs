@@ -27,7 +27,7 @@ fn setup_app_state_associations(ui: &AppWindow, ui_state: &UiState) {
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut clog = colog::default_builder();
-    clog.filter(None, log::LevelFilter::Debug);
+    clog.filter(None, log::LevelFilter::Info);
     clog.init();
 
     // Setup ui state

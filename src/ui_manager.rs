@@ -1,13 +1,16 @@
 use std::hash::{Hash, Hasher};
 use std::io::Write;
+use std::time::Duration;
 use std::{collections::hash_map::DefaultHasher, path::PathBuf, rc::Rc};
 
+use governor::state::NotKeyed;
 use id3::{Tag, TagLike};
 use log::debug;
 use slint::{Model, ModelRc, StandardListViewItem, VecModel};
 use tokio::sync::broadcast::{Receiver, Sender};
 
 use crate::{protocol, AppWindow, TrackRowData};
+use governor::{Quota, RateLimiter};
 
 pub struct UiState {
     pub track_model: Rc<VecModel<TrackRowData>>,
@@ -27,6 +30,7 @@ pub struct UiManager {
     drag_indices: Vec<usize>,
     is_dragging: bool,
     pressed_index: Option<usize>,
+    progress_rl: RateLimiter<NotKeyed, governor::state::InMemoryState, governor::clock::DefaultClock>
 }
 
 #[derive(Clone)]
@@ -57,6 +61,7 @@ impl UiManager {
             drag_indices: Vec::new(),
             is_dragging: false,
             pressed_index: None,
+            progress_rl: RateLimiter::direct(Quota::with_period(Duration::from_millis(30)).unwrap()),
         }
     }
 
@@ -570,31 +575,34 @@ impl UiManager {
                         elapsed_ms,
                         total_ms,
                     }) => {
-                        let _ = self.ui.upgrade_in_event_loop(move |ui| {
-                            let elapsed_secs = elapsed_ms / 1000;
-                            let elapsed_mins = elapsed_secs / 60;
-                            let elapsed_rem_secs = elapsed_secs % 60;
-                            let total_secs = total_ms / 1000;
-                            let total_mins = total_secs / 60;
-                            let total_rem_secs = total_secs % 60;
+                        if self.progress_rl.check().is_ok() {
+                            let _ = self.ui.upgrade_in_event_loop(move |ui| {
+                                let elapsed_secs = elapsed_ms / 1000;
+                                let elapsed_mins = elapsed_secs / 60;
+                                let elapsed_rem_secs = elapsed_secs % 60;
+                                let total_secs = total_ms / 1000;
+                                let total_mins = total_secs / 60;
+                                let total_rem_secs = total_secs % 60;
 
-                            ui.set_time_info(
-                                format!(
-                                    "{:02}:{:02} / {:02}:{:02}",
-                                    elapsed_mins, elapsed_rem_secs, total_mins, total_rem_secs
-                                )
-                                .into(),
-                            );
-                            if total_ms > 0 {
-                                ui.set_position_percentage(elapsed_ms as f32 / total_ms as f32);
+                                ui.set_time_info(
+                                    format!(
+                                        "{:02}:{:02} / {:02}:{:02}",
+                                        elapsed_mins, elapsed_rem_secs, total_mins, total_rem_secs
+                                    )
+                                    .into(),
+                                );
+                                if total_ms > 0 {
+                                    ui.set_position_percentage(elapsed_ms as f32 / total_ms as f32);
+                                }
+                                ui.set_current_position_text(
+                                    format!("{:02}:{:02}", elapsed_mins, elapsed_rem_secs).into(),
+                                );
+                                ui.set_total_duration_text(
+                                    format!("{:02}:{:02}", total_mins, total_rem_secs).into(),
+                                );
                             }
-                            ui.set_current_position_text(
-                                format!("{:02}:{:02}", elapsed_mins, elapsed_rem_secs).into(),
-                            );
-                            ui.set_total_duration_text(
-                                format!("{:02}:{:02}", total_mins, total_rem_secs).into(),
-                            );
-                        });
+                        );
+                        }
                     }
                     protocol::Message::Playback(
                         protocol::PlaybackMessage::TechnicalMetadataChanged(meta),
