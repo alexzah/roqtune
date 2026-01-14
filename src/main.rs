@@ -164,12 +164,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Wire up delete track handler
     let bus_sender_clone = bus_sender.clone();
-    ui.on_delete_track(move |indices| {
-        let indices_vec: Vec<usize> = indices.iter().map(|i| i as usize).collect();
-        debug!("Delete tracks requested: {:?}", indices_vec);
-        let _ = bus_sender_clone.send(Message::Playlist(PlaylistMessage::DeleteTracks(
-            indices_vec,
-        )));
+    ui.on_delete_selected_tracks(move || {
+        debug!("Delete selected tracks requested");
+        let _ = bus_sender_clone.send(Message::Playlist(PlaylistMessage::DeleteSelected));
     });
 
     // Wire up reorder track handler
@@ -185,16 +182,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Wire up pointer down handler
     let bus_sender_clone = bus_sender.clone();
-    ui.on_on_pointer_down(move |index, ctrl, shift, is_already_selected| {
+    ui.on_on_pointer_down(move |index, ctrl, shift| {
         debug!(
-            "Pointer down at index {:?} (ctrl={}, shift={}, is_already_selected={})",
-            index, ctrl, shift, is_already_selected
+            "Pointer down at index {:?} (ctrl={}, shift={})",
+            index, ctrl, shift
         );
         let _ = bus_sender_clone.send(Message::Playlist(PlaylistMessage::OnPointerDown {
             index: index as usize,
             ctrl,
             shift,
-            is_already_selected,
         }));
     });
 
@@ -218,11 +214,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Wire up drag end handler
     let bus_sender_clone = bus_sender.clone();
-    ui.on_on_drag_end(move |drop_gap| {
-        debug!("Drag end at gap {:?}", drop_gap);
-        let _ = bus_sender_clone.send(Message::Playlist(PlaylistMessage::OnDragEnd {
-            drop_gap: drop_gap as usize,
-        }));
+    ui.on_on_drag_end(move || {
+        debug!("Drag end");
+        let _ = bus_sender_clone.send(Message::Playlist(PlaylistMessage::OnDragEnd));
     });
 
     // Wire up sequence selector

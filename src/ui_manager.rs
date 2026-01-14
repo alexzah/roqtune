@@ -27,6 +27,7 @@ pub struct UiManager {
     drag_indices: Vec<usize>,
     is_dragging: bool,
     pressed_index: Option<usize>,
+    drop_gap: usize,
 }
 
 #[derive(Clone)]
@@ -57,6 +58,7 @@ impl UiManager {
             drag_indices: Vec::new(),
             is_dragging: false,
             pressed_index: None,
+            drop_gap: 0,
         }
     }
 
@@ -253,19 +255,14 @@ impl UiManager {
         }
     }
 
-    pub fn on_pointer_down(
-        &mut self,
-        pressed_index: usize,
-        ctrl: bool,
-        shift: bool,
-        is_already_selected: bool,
-    ) {
+    pub fn on_pointer_down(&mut self, pressed_index: usize, ctrl: bool, shift: bool) {
         debug!(
-            "on_pointer_down: index={}, ctrl={}, shift={}, is_already_selected={}",
-            pressed_index, ctrl, shift, is_already_selected
+            "on_pointer_down: index={}, ctrl={}, shift={}",
+            pressed_index, ctrl, shift
         );
         self.pressed_index = Some(pressed_index);
 
+        let is_already_selected = self.selected_indices.contains(&pressed_index);
         if !is_already_selected || ctrl || shift {
             let _ = self.bus_sender.send(protocol::Message::Playlist(
                 protocol::PlaylistMessage::SelectTrackMulti {
@@ -301,6 +298,7 @@ impl UiManager {
     }
 
     pub fn on_drag_move(&mut self, drop_gap: usize) {
+        self.drop_gap = drop_gap;
         if self.is_dragging {
             let _ = self.ui.upgrade_in_event_loop(move |ui| {
                 ui.set_drop_index(drop_gap as i32);
@@ -308,14 +306,14 @@ impl UiManager {
         }
     }
 
-    pub fn on_drag_end(&mut self, drop_gap: usize) {
+    pub fn on_drag_end(&mut self) {
         debug!(
-            ">>> on_drag_end START: drop_gap={}, is_dragging={}, drag_indices={:?}",
-            drop_gap, self.is_dragging, self.drag_indices
+            ">>> on_drag_end START: is_dragging={}, drop_gap={}, drag_indices={:?}",
+            self.is_dragging, self.drop_gap, self.drag_indices
         );
-        if self.is_dragging && !self.drag_indices.is_empty() {
-            let indices = self.drag_indices.clone();
-            let to = drop_gap;
+        if self.is_dragging && !self.selected_indices.is_empty() {
+            let indices = self.selected_indices.clone();
+            let to = self.drop_gap;
             debug!(
                 ">>> on_drag_end SENDING ReorderTracks: indices={:?}, to={}",
                 indices, to
@@ -329,12 +327,12 @@ impl UiManager {
         self.drag_indices.clear();
         self.is_dragging = false;
         self.pressed_index = None;
+        self.drop_gap = 0;
 
         let _ = self.ui.upgrade_in_event_loop(move |ui| {
             ui.set_is_dragging(false);
             ui.set_drop_index(-1);
             ui.set_pressed_index(-1);
-            ui.set_drag_indices(slint::ModelRc::from(Rc::new(slint::VecModel::from(vec![]))));
         });
     }
 
@@ -484,6 +482,15 @@ impl UiManager {
                                 }
                             }
                         });
+                    }
+                    protocol::Message::Playlist(protocol::PlaylistMessage::DeleteSelected) => {
+                        if self.selected_indices.is_empty() {
+                            continue;
+                        }
+                        let indices = self.selected_indices.clone();
+                        let _ = self.bus_sender.send(protocol::Message::Playlist(
+                            protocol::PlaylistMessage::DeleteTracks(indices),
+                        ));
                     }
                     protocol::Message::Playback(protocol::PlaybackMessage::PlayTrackByIndex(
                         index,
@@ -752,12 +759,6 @@ impl UiManager {
                                     .unwrap_or(-1),
                             );
 
-                            let slint_indices: Vec<i32> =
-                                selected_indices_clone.iter().map(|&i| i as i32).collect();
-                            ui.set_selected_indices(slint::ModelRc::from(Rc::new(
-                                slint::VecModel::from(slint_indices),
-                            )));
-
                             let track_model_strong = ui.get_track_model();
                             let track_model = track_model_strong
                                 .as_any()
@@ -817,21 +818,14 @@ impl UiManager {
                                     track_model.set_row_data(i, row);
                                 }
                             }
-
-                            let slint_indices: Vec<i32> =
-                                indices_clone.iter().map(|&i| i as i32).collect();
-                            ui.set_selected_indices(slint::ModelRc::from(Rc::new(
-                                slint::VecModel::from(slint_indices),
-                            )));
                         });
                     }
                     protocol::Message::Playlist(protocol::PlaylistMessage::OnPointerDown {
                         index,
                         ctrl,
                         shift,
-                        is_already_selected,
                     }) => {
-                        self.on_pointer_down(index, ctrl, shift, is_already_selected);
+                        self.on_pointer_down(index, ctrl, shift);
                     }
                     protocol::Message::Playlist(protocol::PlaylistMessage::OnDragStart {
                         pressed_index,
@@ -843,10 +837,8 @@ impl UiManager {
                     }) => {
                         self.on_drag_move(drop_gap);
                     }
-                    protocol::Message::Playlist(protocol::PlaylistMessage::OnDragEnd {
-                        drop_gap,
-                    }) => {
-                        self.on_drag_end(drop_gap);
+                    protocol::Message::Playlist(protocol::PlaylistMessage::OnDragEnd) => {
+                        self.on_drag_end();
                     }
                     protocol::Message::Playlist(protocol::PlaylistMessage::ReorderTracks {
                         indices,

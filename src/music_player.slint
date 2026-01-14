@@ -297,7 +297,7 @@ export component AppWindow inherits Window {
                 if (root.sidebar_has_focus) {
                     root.confirm_delete_playlist(root.active_playlist_index);
                 } else {
-                    root.delete_track(root.selected_indices);
+                    root.delete_selected_tracks();
                 }
                 return accept;
             }
@@ -762,14 +762,18 @@ export component AppWindow inherits Window {
 
                             pointer-event(event) => {
                                 if (event.button == PointerEventButton.left) {
+                                    if (self.hovered-row < 0) {
+                                        return;
+                                    }
                                     if (event.kind == PointerEventKind.down) {
                                         root.pressed-index = self.hovered-row;
                                         root.press-y = self.mouse-y;
                                         root.sidebar-has-focus = false;
                                         key-handler.focus();
-                                        root.on_pointer_down(self.hovered-row, event.modifiers.control, event.modifiers.shift, root.track-model[root.pressed-index].selected);
+                                        root.on_pointer_down(self.hovered-row, event.modifiers.control, event.modifiers.shift);
                                     } else if (event.kind == PointerEventKind.up) {
-                                        root.on_drag_end(self.drop-gap);
+                                        root.drop-index = self.drop-gap;
+                                        root.on_drag_end();
                                         root.hover-index = -1;
                                     }
                                 }
@@ -876,7 +880,6 @@ export component AppWindow inherits Window {
     in-out property <int> playback_order_index: 0;
     in-out property <int> repeat_mode: 0; // 0: Off, 1: Playlist, 2: Track
     in-out property <int> selected_track_index: -1;
-    in-out property <[int]> selected_indices: [];
     in-out property <int> playing_track_index: -1;
 
     // Album art properties
@@ -894,7 +897,6 @@ export component AppWindow inherits Window {
     in-out property <int> pressed-index: -1;
     property <length> press-y: 0;
     in-out property <bool> is-dragging: false;
-    in-out property <[int]> drag_indices: [];
     in-out property <int> drop-index: -1;
     property <int> hover-index: -1;
 
@@ -915,15 +917,15 @@ export component AppWindow inherits Window {
     callback next();
     callback previous();
     callback handle_track_click(int, bool, bool);
-    callback on_pointer_down(int, bool, bool, bool);
+    callback on_pointer_down(int, bool, bool);
     callback on_drag_start(int);
     callback on_drag_move(int);
-    callback on_drag_end(int);
+    callback on_drag_end();
     callback playlist_item_double_click(int);
     callback playback_order_changed(int);
     callback toggle_repeat();
     callback seek-to(float); // Position between 0.0 and 1.0
-    callback delete_track([int]);
+    callback delete_selected_tracks();
     callback reorder_tracks([int], int); // indices, to
     callback deselect_all();
     callback create_playlist();

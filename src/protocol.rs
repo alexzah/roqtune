@@ -56,6 +56,7 @@ pub struct TrackStarted {
 pub enum PlaylistMessage {
     LoadTrack(PathBuf),
     DeleteTracks(Vec<usize>),
+    DeleteSelected,
     SelectTrackMulti {
         index: usize,
         ctrl: bool,
@@ -66,7 +67,6 @@ pub enum PlaylistMessage {
         index: usize,
         ctrl: bool,
         shift: bool,
-        is_already_selected: bool,
     },
     OnDragStart {
         pressed_index: usize,
@@ -74,9 +74,7 @@ pub enum PlaylistMessage {
     OnDragMove {
         drop_gap: usize,
     },
-    OnDragEnd {
-        drop_gap: usize,
-    },
+    OnDragEnd,
     DeselectAll,
     ReorderTracks {
         indices: Vec<usize>,
