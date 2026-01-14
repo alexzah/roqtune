@@ -1120,6 +1120,74 @@ mod tests {
     }
 
     #[test]
+    fn test_reorder_multi_select_up() {
+        let mut paths = vec![
+            "A".to_string(),
+            "B".to_string(),
+            "C".to_string(),
+            "D".to_string(),
+        ];
+        let indices = vec![0, 1];
+        let to = 2;
+
+        let new_selection = apply_reorder(&mut paths, &indices, to);
+
+        assert_eq!(paths, vec!["C", "A", "B", "D"]);
+        assert_eq!(new_selection, vec![1, 2]);
+    }
+
+    #[test]
+    fn test_reorder_multi_select_to_end() {
+        let mut paths = vec![
+            "A".to_string(),
+            "B".to_string(),
+            "C".to_string(),
+            "D".to_string(),
+        ];
+        let indices = vec![0, 1];
+        let to = 3;
+
+        let new_selection = apply_reorder(&mut paths, &indices, to);
+
+        assert_eq!(paths, vec!["C", "D", "A", "B"]);
+        assert_eq!(new_selection, vec![2, 3]);
+    }
+
+    #[test]
+    fn test_reorder_from_middle_to_start() {
+        let mut paths = vec![
+            "A".to_string(),
+            "B".to_string(),
+            "C".to_string(),
+            "D".to_string(),
+        ];
+        let indices = vec![1, 2];
+        let to = 0;
+
+        let new_selection = apply_reorder(&mut paths, &indices, to);
+
+        assert_eq!(paths, vec!["B", "C", "A", "D"]);
+        assert_eq!(new_selection, vec![0, 1]);
+    }
+
+    #[test]
+    fn test_reorder_across_whole_list() {
+        let mut paths = vec![
+            "A".to_string(),
+            "B".to_string(),
+            "C".to_string(),
+            "D".to_string(),
+        ];
+        let indices = vec![0, 1, 2];
+        let to = 4;
+
+        let new_selection = apply_reorder(&mut paths, &indices, to);
+
+        assert_eq!(paths, vec!["D", "A", "B", "C"]);
+        assert_eq!(new_selection, vec![1, 2, 3]);
+    }
+
+    #[test]
     fn test_single() {
         assert_eq!(1, 1);
     }
