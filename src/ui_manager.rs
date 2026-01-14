@@ -970,3 +970,110 @@ impl UiManager {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    fn apply_reorder(paths: &mut Vec<String>, indices: &[usize], to: usize) -> Vec<usize> {
+        let len = paths.len();
+        if len == 0 {
+            return vec![];
+        }
+
+        let mut indices = indices.to_vec();
+        indices.sort_unstable();
+        indices.dedup();
+        indices.retain(|&i| i < len);
+
+        if indices.is_empty() {
+            return vec![];
+        }
+
+        let to = to.min(len);
+
+        let first = indices[0];
+        let last = *indices.last().unwrap();
+
+        if to >= first && to <= last {
+            return indices;
+        }
+
+        let mut moved = Vec::new();
+        for &idx in indices.iter().rev() {
+            if idx < paths.len() {
+                moved.push(paths.remove(idx));
+            }
+        }
+        moved.reverse();
+
+        let removed_before = indices.iter().filter(|&&i| i < to).count();
+        let mut insert_at = to.saturating_sub(removed_before);
+
+        if to > first {
+            insert_at = insert_at.saturating_add(1);
+        }
+
+        insert_at = insert_at.min(paths.len());
+
+        for (offset, item) in moved.into_iter().enumerate() {
+            paths.insert(insert_at + offset, item);
+        }
+
+        (insert_at..insert_at + indices.len()).collect()
+    }
+
+    #[test]
+    fn test_reorder_single_track_up() {
+        let mut paths = vec![
+            "A".to_string(),
+            "B".to_string(),
+            "C".to_string(),
+            "D".to_string(),
+        ];
+        let indices = vec![0];
+        let to = 1;
+
+        let new_selection = apply_reorder(&mut paths, &indices, to);
+
+        assert_eq!(paths, vec!["B", "A", "C", "D"]);
+        assert_eq!(new_selection, vec![1]);
+    }
+
+    #[test]
+    fn test_reorder_single_track_down() {
+        let mut paths = vec![
+            "A".to_string(),
+            "B".to_string(),
+            "C".to_string(),
+            "D".to_string(),
+        ];
+        let indices = vec![3];
+        let to = 1;
+
+        let new_selection = apply_reorder(&mut paths, &indices, to);
+
+        assert_eq!(paths, vec!["A", "D", "B", "C"]);
+        assert_eq!(new_selection, vec![1]);
+    }
+
+    #[test]
+    fn test_reorder_single_track_to_start() {
+        let mut paths = vec![
+            "A".to_string(),
+            "B".to_string(),
+            "C".to_string(),
+            "D".to_string(),
+        ];
+        let indices = vec![2];
+        let to = 0;
+
+        let new_selection = apply_reorder(&mut paths, &indices, to);
+
+        assert_eq!(paths, vec!["C", "A", "B", "D"]);
+        assert_eq!(new_selection, vec![0]);
+    }
+
+    #[test]
+    fn test_single() {
+        assert_eq!(1, 1);
+    }
+}

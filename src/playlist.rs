@@ -188,72 +188,50 @@ impl Playlist {
     }
 
     pub fn move_tracks(&mut self, mut indices: Vec<usize>, to: usize) {
+        let len = self.tracks.len();
+        if len == 0 {
+            self.selected_indices.clear();
+            return;
+        }
+
+        indices.sort_unstable();
+        indices.dedup();
+        indices.retain(|&i| i < len);
+
         if indices.is_empty() {
             return;
         }
-        indices.sort();
-        indices.dedup();
 
-        // 1. Identify which tracks are being moved
-        let mut moved_tracks = Vec::new();
-        // Remove from the end to keep indices stable while removing
-        for &idx in indices.iter().rev() {
-            if idx < self.tracks.len() {
-                moved_tracks.push(self.tracks.remove(idx));
-            }
-        }
-        moved_tracks.reverse();
+        let to = to.min(len);
 
-        // 2. Calculate the target insertion point in the remaining list
-        // The 'to' value from UI is already the correct final position
-        let actual_to = to.min(self.tracks.len());
+        let first = indices[0];
+        let last = *indices.last().unwrap();
 
-        // 3. Re-insert them
-        for (i, track) in moved_tracks.into_iter().enumerate() {
-            self.tracks.insert(actual_to + i, track);
+        if to >= first && to <= last {
+            self.selected_indices = indices.clone();
+            return;
         }
 
-        // 4. Update indices (playing, selected, shuffle)
-        let old_track_count = self.tracks.len();
-        let mut old_to_new = vec![0; old_track_count];
-        let moved_indices_set: std::collections::HashSet<usize> = indices.iter().cloned().collect();
-
-        let mut remaining_old_indices = Vec::new();
-        for i in 0..old_track_count {
-            if !moved_indices_set.contains(&i) {
-                remaining_old_indices.push(i);
-            }
+        let mut moved = Vec::with_capacity(indices.len());
+        for &i in indices.iter().rev() {
+            moved.push(self.tracks.remove(i));
         }
+        moved.reverse();
 
-        let mut new_order = Vec::new();
-        for _ in 0..actual_to {
-            new_order.push(remaining_old_indices.remove(0));
-        }
-        for &idx in indices.iter() {
-            new_order.push(idx);
-        }
-        new_order.extend(remaining_old_indices);
+        let removed_before = indices.iter().filter(|&&i| i < to).count();
+        let mut insert_at = to.saturating_sub(removed_before);
 
-        for (new_pos, &old_pos) in new_order.iter().enumerate() {
-            old_to_new[old_pos] = new_pos;
+        if to > first {
+            insert_at = insert_at.saturating_add(1);
         }
 
-        if let Some(playing_idx) = self.playing_track_index {
-            self.playing_track_index = Some(old_to_new[playing_idx]);
+        insert_at = insert_at.min(self.tracks.len());
+
+        for (offset, t) in moved.into_iter().enumerate() {
+            self.tracks.insert(insert_at + offset, t);
         }
 
-        for i in 0..self.selected_indices.len() {
-            self.selected_indices[i] = old_to_new[self.selected_indices[i]];
-        }
-        self.selected_indices.sort();
-
-        if let Some(anchor) = self.anchor_index {
-            self.anchor_index = Some(old_to_new[anchor]);
-        }
-
-        for i in 0..self.shuffled_indices.len() {
-            self.shuffled_indices[i] = old_to_new[self.shuffled_indices[i]];
-        }
+        self.selected_indices = (insert_at..insert_at + indices.len()).collect();
 
         debug!(
             "Playlist: Moved tracks {:?} to {}. New playing_idx={:?}, selected_indices={:?}",
@@ -445,5 +423,224 @@ impl Playlist {
 
     pub fn set_repeat_mode(&mut self, mode: RepeatMode) {
         self.repeat_mode = mode;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn make_track(id: &str) -> Track {
+        Track {
+            path: PathBuf::from(format!("/music/{}", id)),
+            id: id.to_string(),
+        }
+    }
+
+    fn assert_order(playlist: &Playlist, expected: Vec<&str>) {
+        let actual: Vec<String> = playlist.tracks.iter().map(|t| t.id.clone()).collect();
+        let expected: Vec<String> = expected.iter().map(|s| s.to_string()).collect();
+        assert_eq!(actual, expected, "Track order mismatch");
+    }
+
+    fn assert_selected(playlist: &Playlist, expected: Vec<usize>) {
+        assert_eq!(
+            playlist.selected_indices, expected,
+            "Selected indices mismatch"
+        );
+    }
+
+    #[test]
+    fn test_move_single_track_up() {
+        // Move track A (pos 0) to position 1 -> [B, A, C, D]
+        let mut playlist = Playlist::new();
+        playlist.add_track(make_track("A"));
+        playlist.add_track(make_track("B"));
+        playlist.add_track(make_track("C"));
+        playlist.add_track(make_track("D"));
+
+        playlist.move_tracks(vec![0], 1);
+
+        assert_order(&playlist, vec!["B", "A", "C", "D"]);
+        assert_selected(&playlist, vec![1]);
+    }
+
+    #[test]
+    fn test_move_single_track_down() {
+        // Move track D (pos 3) to position 1 -> [A, D, B, C]
+        let mut playlist = Playlist::new();
+        playlist.add_track(make_track("A"));
+        playlist.add_track(make_track("B"));
+        playlist.add_track(make_track("C"));
+        playlist.add_track(make_track("D"));
+
+        playlist.move_tracks(vec![3], 1);
+
+        assert_order(&playlist, vec!["A", "D", "B", "C"]);
+        assert_selected(&playlist, vec![1]);
+    }
+
+    #[test]
+    fn test_move_single_track_to_start() {
+        // Move track C (pos 2) to position 0 -> [C, A, B, D]
+        let mut playlist = Playlist::new();
+        playlist.add_track(make_track("A"));
+        playlist.add_track(make_track("B"));
+        playlist.add_track(make_track("C"));
+        playlist.add_track(make_track("D"));
+
+        playlist.move_tracks(vec![2], 0);
+
+        assert_order(&playlist, vec!["C", "A", "B", "D"]);
+        assert_selected(&playlist, vec![0]);
+    }
+
+    #[test]
+    fn test_move_single_track_to_end() {
+        // Move track A (pos 0) to position 3 -> [B, C, D, A]
+        let mut playlist = Playlist::new();
+        playlist.add_track(make_track("A"));
+        playlist.add_track(make_track("B"));
+        playlist.add_track(make_track("C"));
+        playlist.add_track(make_track("D"));
+
+        playlist.move_tracks(vec![0], 3);
+
+        assert_order(&playlist, vec!["B", "C", "D", "A"]);
+        assert_selected(&playlist, vec![3]);
+    }
+
+    #[test]
+    fn test_move_multi_select_up() {
+        // Move tracks A,B (pos 0,1) to position 2 -> [C, A, B, D]
+        let mut playlist = Playlist::new();
+        playlist.add_track(make_track("A"));
+        playlist.add_track(make_track("B"));
+        playlist.add_track(make_track("C"));
+        playlist.add_track(make_track("D"));
+
+        playlist.move_tracks(vec![0, 1], 2);
+
+        assert_order(&playlist, vec!["C", "A", "B", "D"]);
+        assert_selected(&playlist, vec![1, 2]);
+    }
+
+    #[test]
+    fn test_move_multi_select_down() {
+        // Move tracks C,D (pos 2,3) to position 1 -> [A, C, D, B]
+        let mut playlist = Playlist::new();
+        playlist.add_track(make_track("A"));
+        playlist.add_track(make_track("B"));
+        playlist.add_track(make_track("C"));
+        playlist.add_track(make_track("D"));
+
+        playlist.move_tracks(vec![2, 3], 1);
+
+        assert_order(&playlist, vec!["A", "C", "D", "B"]);
+        assert_selected(&playlist, vec![1, 2]);
+    }
+
+    #[test]
+    fn test_move_multi_select_to_start() {
+        // Move tracks B,C (pos 1,2) to position 0 -> [B, C, A, D]
+        let mut playlist = Playlist::new();
+        playlist.add_track(make_track("A"));
+        playlist.add_track(make_track("B"));
+        playlist.add_track(make_track("C"));
+        playlist.add_track(make_track("D"));
+
+        playlist.move_tracks(vec![1, 2], 0);
+
+        assert_order(&playlist, vec!["B", "C", "A", "D"]);
+        assert_selected(&playlist, vec![0, 1]);
+    }
+
+    #[test]
+    fn test_move_multi_select_to_end() {
+        // Move tracks A,B (pos 0,1) to position 3 -> [C, D, A, B]
+        let mut playlist = Playlist::new();
+        playlist.add_track(make_track("A"));
+        playlist.add_track(make_track("B"));
+        playlist.add_track(make_track("C"));
+        playlist.add_track(make_track("D"));
+
+        playlist.move_tracks(vec![0, 1], 3);
+
+        assert_order(&playlist, vec!["C", "D", "A", "B"]);
+        assert_selected(&playlist, vec![2, 3]);
+    }
+
+    #[test]
+    fn test_move_tracks_across_whole_list() {
+        // Move tracks A,B,C (pos 0,1,2) to position 4 (end) -> [D, A, B, C]
+        let mut playlist = Playlist::new();
+        playlist.add_track(make_track("A"));
+        playlist.add_track(make_track("B"));
+        playlist.add_track(make_track("C"));
+        playlist.add_track(make_track("D"));
+
+        playlist.move_tracks(vec![0, 1, 2], 4);
+
+        assert_order(&playlist, vec!["D", "A", "B", "C"]);
+        assert_selected(&playlist, vec![1, 2, 3]);
+    }
+
+    #[test]
+    fn test_move_tracks_from_middle_to_start() {
+        // Move tracks B,C,D (pos 1,2,3) to position 0 -> [B, C, D, A]
+        let mut playlist = Playlist::new();
+        playlist.add_track(make_track("A"));
+        playlist.add_track(make_track("B"));
+        playlist.add_track(make_track("C"));
+        playlist.add_track(make_track("D"));
+
+        playlist.move_tracks(vec![1, 2, 3], 0);
+
+        assert_order(&playlist, vec!["B", "C", "D", "A"]);
+        assert_selected(&playlist, vec![0, 1, 2]);
+    }
+
+    #[test]
+    fn test_move_selected_tracks_updates_positions() {
+        // Verify selected_indices are updated to new positions after move
+        let mut playlist = Playlist::new();
+        playlist.add_track(make_track("A"));
+        playlist.add_track(make_track("B"));
+        playlist.add_track(make_track("C"));
+        playlist.add_track(make_track("D"));
+
+        // Select A, B
+        playlist.selected_indices = vec![0, 1];
+
+        // Move A, B to end
+        playlist.move_tracks(vec![0, 1], 3);
+
+        // Selected should now be at positions 2, 3
+        assert_selected(&playlist, vec![2, 3]);
+    }
+
+    #[test]
+    fn test_move_empty() {
+        let mut playlist = Playlist::new();
+        playlist.add_track(make_track("A"));
+        playlist.add_track(make_track("B"));
+
+        playlist.move_tracks(vec![], 1);
+
+        assert_order(&playlist, vec!["A", "B"]);
+    }
+
+    #[test]
+    fn test_move_to_same_position() {
+        let mut playlist = Playlist::new();
+        playlist.add_track(make_track("A"));
+        playlist.add_track(make_track("B"));
+        playlist.add_track(make_track("C"));
+
+        // Move B to position 1 (where it already is)
+        playlist.move_tracks(vec![1], 1);
+
+        assert_order(&playlist, vec!["A", "B", "C"]);
+        assert_selected(&playlist, vec![1]);
     }
 }
