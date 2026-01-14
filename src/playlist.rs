@@ -187,7 +187,7 @@ impl Playlist {
         self.tracks[index].id.clone()
     }
 
-    pub fn move_tracks(&mut self, mut indices: Vec<usize>, to: usize) {
+    pub fn move_tracks(&mut self, mut indices: Vec<usize>, to_gap: usize) {
         let len = self.tracks.len();
         if len == 0 {
             self.selected_indices.clear();
@@ -202,28 +202,25 @@ impl Playlist {
             return;
         }
 
-        let to = to.min(len);
+        let to_gap = to_gap.min(len);
 
         let first = indices[0];
         let last = *indices.last().unwrap();
+        let block_len = indices.len();
 
-        if to >= first && to <= last {
-            self.selected_indices = indices.clone();
+        if to_gap >= first && to_gap <= last + 1 {
+            self.selected_indices = indices;
             return;
         }
 
-        let mut moved = Vec::with_capacity(indices.len());
+        let mut moved = Vec::with_capacity(block_len);
         for &i in indices.iter().rev() {
             moved.push(self.tracks.remove(i));
         }
         moved.reverse();
 
-        let removed_before = indices.iter().filter(|&&i| i < to).count();
-        let mut insert_at = to.saturating_sub(removed_before);
-
-        if to > first {
-            insert_at = insert_at.saturating_add(1);
-        }
+        let removed_before = indices.iter().filter(|&&i| i < to_gap).count();
+        let mut insert_at = to_gap.saturating_sub(removed_before);
 
         insert_at = insert_at.min(self.tracks.len());
 
@@ -231,11 +228,11 @@ impl Playlist {
             self.tracks.insert(insert_at + offset, t);
         }
 
-        self.selected_indices = (insert_at..insert_at + indices.len()).collect();
+        self.selected_indices = (insert_at..insert_at + block_len).collect();
 
         debug!(
-            "Playlist: Moved tracks {:?} to {}. New playing_idx={:?}, selected_indices={:?}",
-            indices, to, self.playing_track_index, self.selected_indices
+            "Playlist: Moved tracks {:?} to gap {}. New playing_idx={:?}, selected_indices={:?}",
+            indices, to_gap, self.playing_track_index, self.selected_indices
         );
     }
 
@@ -452,14 +449,14 @@ mod tests {
 
     #[test]
     fn test_move_single_track_up() {
-        // Move track A (pos 0) to position 1 -> [B, A, C, D]
+        // Move track A (pos 0) to gap 2 -> [B, A, C, D]
         let mut playlist = Playlist::new();
         playlist.add_track(make_track("A"));
         playlist.add_track(make_track("B"));
         playlist.add_track(make_track("C"));
         playlist.add_track(make_track("D"));
 
-        playlist.move_tracks(vec![0], 1);
+        playlist.move_tracks(vec![0], 2);
 
         assert_order(&playlist, vec!["B", "A", "C", "D"]);
         assert_selected(&playlist, vec![1]);
@@ -467,7 +464,7 @@ mod tests {
 
     #[test]
     fn test_move_single_track_down() {
-        // Move track D (pos 3) to position 1 -> [A, D, B, C]
+        // Move track D (pos 3) to gap 1 -> [A, D, B, C]
         let mut playlist = Playlist::new();
         playlist.add_track(make_track("A"));
         playlist.add_track(make_track("B"));
@@ -482,7 +479,7 @@ mod tests {
 
     #[test]
     fn test_move_single_track_to_start() {
-        // Move track C (pos 2) to position 0 -> [C, A, B, D]
+        // Move track C (pos 2) to gap 0 -> [C, A, B, D]
         let mut playlist = Playlist::new();
         playlist.add_track(make_track("A"));
         playlist.add_track(make_track("B"));
@@ -497,14 +494,14 @@ mod tests {
 
     #[test]
     fn test_move_single_track_to_end() {
-        // Move track A (pos 0) to position 3 -> [B, C, D, A]
+        // Move track A (pos 0) to gap 4 -> [B, C, D, A]
         let mut playlist = Playlist::new();
         playlist.add_track(make_track("A"));
         playlist.add_track(make_track("B"));
         playlist.add_track(make_track("C"));
         playlist.add_track(make_track("D"));
 
-        playlist.move_tracks(vec![0], 3);
+        playlist.move_tracks(vec![0], 4);
 
         assert_order(&playlist, vec!["B", "C", "D", "A"]);
         assert_selected(&playlist, vec![3]);
@@ -512,14 +509,14 @@ mod tests {
 
     #[test]
     fn test_move_multi_select_up() {
-        // Move tracks A,B (pos 0,1) to position 2 -> [C, A, B, D]
+        // Move tracks A,B (pos 0,1) to gap 3 -> [C, A, B, D]
         let mut playlist = Playlist::new();
         playlist.add_track(make_track("A"));
         playlist.add_track(make_track("B"));
         playlist.add_track(make_track("C"));
         playlist.add_track(make_track("D"));
 
-        playlist.move_tracks(vec![0, 1], 2);
+        playlist.move_tracks(vec![0, 1], 3);
 
         assert_order(&playlist, vec!["C", "A", "B", "D"]);
         assert_selected(&playlist, vec![1, 2]);
@@ -527,7 +524,7 @@ mod tests {
 
     #[test]
     fn test_move_multi_select_down() {
-        // Move tracks C,D (pos 2,3) to position 1 -> [A, C, D, B]
+        // Move tracks C,D (pos 2,3) to gap 1 -> [A, C, D, B]
         let mut playlist = Playlist::new();
         playlist.add_track(make_track("A"));
         playlist.add_track(make_track("B"));
@@ -542,7 +539,7 @@ mod tests {
 
     #[test]
     fn test_move_multi_select_to_start() {
-        // Move tracks B,C (pos 1,2) to position 0 -> [B, C, A, D]
+        // Move tracks B,C (pos 1,2) to gap 0 -> [B, C, A, D]
         let mut playlist = Playlist::new();
         playlist.add_track(make_track("A"));
         playlist.add_track(make_track("B"));
@@ -557,16 +554,35 @@ mod tests {
 
     #[test]
     fn test_move_multi_select_to_end() {
-        // Move tracks A,B (pos 0,1) to position 3 -> [C, D, A, B]
+        // Move tracks A,B (pos 0,1) to gap 4 -> [C, D, A, B]
         let mut playlist = Playlist::new();
         playlist.add_track(make_track("A"));
         playlist.add_track(make_track("B"));
         playlist.add_track(make_track("C"));
         playlist.add_track(make_track("D"));
 
-        playlist.move_tracks(vec![0, 1], 3);
+        playlist.move_tracks(vec![0, 1], 4);
 
         assert_order(&playlist, vec!["C", "D", "A", "B"]);
+        assert_selected(&playlist, vec![2, 3]);
+    }
+
+    #[test]
+    fn test_move_selected_tracks_updates_positions() {
+        // Verify selected_indices are updated to new positions after move
+        let mut playlist = Playlist::new();
+        playlist.add_track(make_track("A"));
+        playlist.add_track(make_track("B"));
+        playlist.add_track(make_track("C"));
+        playlist.add_track(make_track("D"));
+
+        // Select A, B
+        playlist.selected_indices = vec![0, 1];
+
+        // Move A, B to gap 4 (end)
+        playlist.move_tracks(vec![0, 1], 4);
+
+        // Selected should now be at positions 2, 3
         assert_selected(&playlist, vec![2, 3]);
     }
 
@@ -601,25 +617,6 @@ mod tests {
     }
 
     #[test]
-    fn test_move_selected_tracks_updates_positions() {
-        // Verify selected_indices are updated to new positions after move
-        let mut playlist = Playlist::new();
-        playlist.add_track(make_track("A"));
-        playlist.add_track(make_track("B"));
-        playlist.add_track(make_track("C"));
-        playlist.add_track(make_track("D"));
-
-        // Select A, B
-        playlist.selected_indices = vec![0, 1];
-
-        // Move A, B to end
-        playlist.move_tracks(vec![0, 1], 3);
-
-        // Selected should now be at positions 2, 3
-        assert_selected(&playlist, vec![2, 3]);
-    }
-
-    #[test]
     fn test_move_empty() {
         let mut playlist = Playlist::new();
         playlist.add_track(make_track("A"));
@@ -642,5 +639,500 @@ mod tests {
 
         assert_order(&playlist, vec!["A", "B", "C"]);
         assert_selected(&playlist, vec![1]);
+    }
+
+    // Gap-index semantic tests
+    // Gap 0 = before element 0
+    // Gap 1 = between element 0 and 1
+    // Gap 2 = between element 1 and 2
+    // Gap N = after element N-1
+
+    #[test]
+    fn test_gap_move_single_first_to_gap_0_noop() {
+        // Moving A (first element) to gap 0 is a no-op
+        let mut playlist = Playlist::new();
+        playlist.add_track(make_track("A"));
+        playlist.add_track(make_track("B"));
+        playlist.add_track(make_track("C"));
+        playlist.add_track(make_track("D"));
+
+        playlist.move_tracks(vec![0], 0);
+
+        assert_order(&playlist, vec!["A", "B", "C", "D"]);
+        assert_selected(&playlist, vec![0]);
+    }
+
+    #[test]
+    fn test_gap_move_single_first_to_gap_1_noop() {
+        // Moving A to gap 1 (after A) is a no-op
+        let mut playlist = Playlist::new();
+        playlist.add_track(make_track("A"));
+        playlist.add_track(make_track("B"));
+        playlist.add_track(make_track("C"));
+        playlist.add_track(make_track("D"));
+
+        playlist.move_tracks(vec![0], 1);
+
+        assert_order(&playlist, vec!["A", "B", "C", "D"]);
+        assert_selected(&playlist, vec![0]);
+    }
+
+    #[test]
+    fn test_gap_move_single_first_to_gap_2() {
+        // Moving A to gap 2 (between B and C) -> [B, A, C, D]
+        let mut playlist = Playlist::new();
+        playlist.add_track(make_track("A"));
+        playlist.add_track(make_track("B"));
+        playlist.add_track(make_track("C"));
+        playlist.add_track(make_track("D"));
+
+        playlist.move_tracks(vec![0], 2);
+
+        assert_order(&playlist, vec!["B", "A", "C", "D"]);
+        assert_selected(&playlist, vec![1]);
+    }
+
+    #[test]
+    fn test_gap_move_single_first_to_gap_3() {
+        // Moving A to gap 3 (between C and D) -> [B, C, A, D]
+        let mut playlist = Playlist::new();
+        playlist.add_track(make_track("A"));
+        playlist.add_track(make_track("B"));
+        playlist.add_track(make_track("C"));
+        playlist.add_track(make_track("D"));
+
+        playlist.move_tracks(vec![0], 3);
+
+        assert_order(&playlist, vec!["B", "C", "A", "D"]);
+        assert_selected(&playlist, vec![2]);
+    }
+
+    #[test]
+    fn test_gap_move_single_first_to_gap_4() {
+        // Moving A to gap 4 (after D, end) -> [B, C, D, A]
+        let mut playlist = Playlist::new();
+        playlist.add_track(make_track("A"));
+        playlist.add_track(make_track("B"));
+        playlist.add_track(make_track("C"));
+        playlist.add_track(make_track("D"));
+
+        playlist.move_tracks(vec![0], 4);
+
+        assert_order(&playlist, vec!["B", "C", "D", "A"]);
+        assert_selected(&playlist, vec![3]);
+    }
+
+    #[test]
+    fn test_gap_move_single_middle_to_gap_0() {
+        // Moving C to gap 0 (before A) -> [C, A, B, D]
+        let mut playlist = Playlist::new();
+        playlist.add_track(make_track("A"));
+        playlist.add_track(make_track("B"));
+        playlist.add_track(make_track("C"));
+        playlist.add_track(make_track("D"));
+
+        playlist.move_tracks(vec![2], 0);
+
+        assert_order(&playlist, vec!["C", "A", "B", "D"]);
+        assert_selected(&playlist, vec![0]);
+    }
+
+    #[test]
+    fn test_gap_move_single_middle_to_gap_1_noop() {
+        // Moving C to gap 1 (after A) -> [A, C, B, D]
+        let mut playlist = Playlist::new();
+        playlist.add_track(make_track("A"));
+        playlist.add_track(make_track("B"));
+        playlist.add_track(make_track("C"));
+        playlist.add_track(make_track("D"));
+
+        playlist.move_tracks(vec![2], 1);
+
+        assert_order(&playlist, vec!["A", "C", "B", "D"]);
+        assert_selected(&playlist, vec![1]);
+    }
+
+    #[test]
+    fn test_gap_move_single_middle_to_gap_2_noop() {
+        // Moving C to gap 2 (after C) is a no-op
+        let mut playlist = Playlist::new();
+        playlist.add_track(make_track("A"));
+        playlist.add_track(make_track("B"));
+        playlist.add_track(make_track("C"));
+        playlist.add_track(make_track("D"));
+
+        playlist.move_tracks(vec![2], 2);
+
+        assert_order(&playlist, vec!["A", "B", "C", "D"]);
+        assert_selected(&playlist, vec![2]);
+    }
+
+    #[test]
+    fn test_gap_move_single_middle_to_gap_3() {
+        // Moving C to gap 3 (after C) is a no-op
+        let mut playlist = Playlist::new();
+        playlist.add_track(make_track("A"));
+        playlist.add_track(make_track("B"));
+        playlist.add_track(make_track("C"));
+        playlist.add_track(make_track("D"));
+
+        playlist.move_tracks(vec![2], 3);
+
+        assert_order(&playlist, vec!["A", "B", "C", "D"]);
+        assert_selected(&playlist, vec![2]);
+    }
+
+    #[test]
+    fn test_gap_move_single_last_to_gap_0() {
+        // Moving D to gap 0 (before A) -> [D, A, B, C]
+        let mut playlist = Playlist::new();
+        playlist.add_track(make_track("A"));
+        playlist.add_track(make_track("B"));
+        playlist.add_track(make_track("C"));
+        playlist.add_track(make_track("D"));
+
+        playlist.move_tracks(vec![3], 0);
+
+        assert_order(&playlist, vec!["D", "A", "B", "C"]);
+        assert_selected(&playlist, vec![0]);
+    }
+
+    #[test]
+    fn test_gap_move_single_last_to_gap_1() {
+        // Moving D to gap 1 (after A) -> [A, D, B, C]
+        let mut playlist = Playlist::new();
+        playlist.add_track(make_track("A"));
+        playlist.add_track(make_track("B"));
+        playlist.add_track(make_track("C"));
+        playlist.add_track(make_track("D"));
+
+        playlist.move_tracks(vec![3], 1);
+
+        assert_order(&playlist, vec!["A", "D", "B", "C"]);
+        assert_selected(&playlist, vec![1]);
+    }
+
+    #[test]
+    fn test_gap_move_single_last_to_gap_2() {
+        // Moving D to gap 2 (after B) -> [A, B, D, C]
+        let mut playlist = Playlist::new();
+        playlist.add_track(make_track("A"));
+        playlist.add_track(make_track("B"));
+        playlist.add_track(make_track("C"));
+        playlist.add_track(make_track("D"));
+
+        playlist.move_tracks(vec![3], 2);
+
+        assert_order(&playlist, vec!["A", "B", "D", "C"]);
+        assert_selected(&playlist, vec![2]);
+    }
+
+    #[test]
+    fn test_gap_move_single_last_to_gap_3_noop() {
+        // Moving D to gap 3 (after D) is a no-op
+        let mut playlist = Playlist::new();
+        playlist.add_track(make_track("A"));
+        playlist.add_track(make_track("B"));
+        playlist.add_track(make_track("C"));
+        playlist.add_track(make_track("D"));
+
+        playlist.move_tracks(vec![3], 3);
+
+        assert_order(&playlist, vec!["A", "B", "C", "D"]);
+        assert_selected(&playlist, vec![3]);
+    }
+
+    #[test]
+    fn test_gap_move_single_last_to_gap_4_noop() {
+        // Moving D to gap 4 (after D) is a no-op
+        let mut playlist = Playlist::new();
+        playlist.add_track(make_track("A"));
+        playlist.add_track(make_track("B"));
+        playlist.add_track(make_track("C"));
+        playlist.add_track(make_track("D"));
+
+        playlist.move_tracks(vec![3], 4);
+
+        assert_order(&playlist, vec!["A", "B", "C", "D"]);
+        assert_selected(&playlist, vec![3]);
+    }
+
+    #[test]
+    fn test_gap_move_multi_first_two_to_gap_0_noop() {
+        // Moving A,B to gap 0 is a no-op
+        let mut playlist = Playlist::new();
+        playlist.add_track(make_track("A"));
+        playlist.add_track(make_track("B"));
+        playlist.add_track(make_track("C"));
+        playlist.add_track(make_track("D"));
+
+        playlist.move_tracks(vec![0, 1], 0);
+
+        assert_order(&playlist, vec!["A", "B", "C", "D"]);
+        assert_selected(&playlist, vec![0, 1]);
+    }
+
+    #[test]
+    fn test_gap_move_multi_first_two_to_gap_1_noop() {
+        // Moving A,B to gap 1 (after A) is a no-op
+        let mut playlist = Playlist::new();
+        playlist.add_track(make_track("A"));
+        playlist.add_track(make_track("B"));
+        playlist.add_track(make_track("C"));
+        playlist.add_track(make_track("D"));
+
+        playlist.move_tracks(vec![0, 1], 1);
+
+        assert_order(&playlist, vec!["A", "B", "C", "D"]);
+        assert_selected(&playlist, vec![0, 1]);
+    }
+
+    #[test]
+    fn test_gap_move_multi_first_two_to_gap_2_noop() {
+        // Moving A,B to gap 2 (after B) is a no-op
+        let mut playlist = Playlist::new();
+        playlist.add_track(make_track("A"));
+        playlist.add_track(make_track("B"));
+        playlist.add_track(make_track("C"));
+        playlist.add_track(make_track("D"));
+
+        playlist.move_tracks(vec![0, 1], 2);
+
+        assert_order(&playlist, vec!["A", "B", "C", "D"]);
+        assert_selected(&playlist, vec![0, 1]);
+    }
+
+    #[test]
+    fn test_gap_move_multi_first_two_to_gap_3() {
+        // Moving A,B to gap 3 (between C and D) -> [C, A, B, D]
+        let mut playlist = Playlist::new();
+        playlist.add_track(make_track("A"));
+        playlist.add_track(make_track("B"));
+        playlist.add_track(make_track("C"));
+        playlist.add_track(make_track("D"));
+
+        playlist.move_tracks(vec![0, 1], 3);
+
+        assert_order(&playlist, vec!["C", "A", "B", "D"]);
+        assert_selected(&playlist, vec![1, 2]);
+    }
+
+    #[test]
+    fn test_gap_move_multi_first_two_to_gap_4() {
+        // Moving A,B to gap 4 (after D) -> [C, D, A, B]
+        let mut playlist = Playlist::new();
+        playlist.add_track(make_track("A"));
+        playlist.add_track(make_track("B"));
+        playlist.add_track(make_track("C"));
+        playlist.add_track(make_track("D"));
+
+        playlist.move_tracks(vec![0, 1], 4);
+
+        assert_order(&playlist, vec!["C", "D", "A", "B"]);
+        assert_selected(&playlist, vec![2, 3]);
+    }
+
+    #[test]
+    fn test_gap_move_multi_middle_two_to_gap_0() {
+        // Moving B,C to gap 0 (before A) -> [B, C, A, D]
+        let mut playlist = Playlist::new();
+        playlist.add_track(make_track("A"));
+        playlist.add_track(make_track("B"));
+        playlist.add_track(make_track("C"));
+        playlist.add_track(make_track("D"));
+
+        playlist.move_tracks(vec![1, 2], 0);
+
+        assert_order(&playlist, vec!["B", "C", "A", "D"]);
+        assert_selected(&playlist, vec![0, 1]);
+    }
+
+    #[test]
+    fn test_gap_move_multi_middle_two_to_gap_1_noop() {
+        // Moving B,C to gap 1 (after A) -> [A, B, C, D]
+        let mut playlist = Playlist::new();
+        playlist.add_track(make_track("A"));
+        playlist.add_track(make_track("B"));
+        playlist.add_track(make_track("C"));
+        playlist.add_track(make_track("D"));
+
+        playlist.move_tracks(vec![1, 2], 1);
+
+        assert_order(&playlist, vec!["A", "B", "C", "D"]);
+        assert_selected(&playlist, vec![1, 2]);
+    }
+
+    #[test]
+    fn test_gap_move_multi_middle_two_to_gap_2_noop() {
+        // Moving B,C to gap 2 (after C) is a no-op
+        let mut playlist = Playlist::new();
+        playlist.add_track(make_track("A"));
+        playlist.add_track(make_track("B"));
+        playlist.add_track(make_track("C"));
+        playlist.add_track(make_track("D"));
+
+        playlist.move_tracks(vec![1, 2], 2);
+
+        assert_order(&playlist, vec!["A", "B", "C", "D"]);
+        assert_selected(&playlist, vec![1, 2]);
+    }
+
+    #[test]
+    fn test_gap_move_multi_middle_two_to_gap_3_noop() {
+        // Moving B,C to gap 3 (after C) is a no-op
+        let mut playlist = Playlist::new();
+        playlist.add_track(make_track("A"));
+        playlist.add_track(make_track("B"));
+        playlist.add_track(make_track("C"));
+        playlist.add_track(make_track("D"));
+
+        playlist.move_tracks(vec![1, 2], 3);
+
+        assert_order(&playlist, vec!["A", "B", "C", "D"]);
+        assert_selected(&playlist, vec![1, 2]);
+    }
+
+    #[test]
+    fn test_gap_move_multi_middle_two_to_gap_4() {
+        // Moving B,C to gap 4 (after D) -> [A, D, B, C]
+        let mut playlist = Playlist::new();
+        playlist.add_track(make_track("A"));
+        playlist.add_track(make_track("B"));
+        playlist.add_track(make_track("C"));
+        playlist.add_track(make_track("D"));
+
+        playlist.move_tracks(vec![1, 2], 4);
+
+        assert_order(&playlist, vec!["A", "D", "B", "C"]);
+        assert_selected(&playlist, vec![2, 3]);
+    }
+
+    #[test]
+    fn test_gap_move_multi_last_two_to_gap_0() {
+        // Moving C,D to gap 0 (before A) -> [C, D, A, B]
+        let mut playlist = Playlist::new();
+        playlist.add_track(make_track("A"));
+        playlist.add_track(make_track("B"));
+        playlist.add_track(make_track("C"));
+        playlist.add_track(make_track("D"));
+
+        playlist.move_tracks(vec![2, 3], 0);
+
+        assert_order(&playlist, vec!["C", "D", "A", "B"]);
+        assert_selected(&playlist, vec![0, 1]);
+    }
+
+    #[test]
+    fn test_gap_move_multi_last_two_to_gap_1() {
+        // Moving C,D to gap 1 (after A) -> [A, C, D, B]
+        let mut playlist = Playlist::new();
+        playlist.add_track(make_track("A"));
+        playlist.add_track(make_track("B"));
+        playlist.add_track(make_track("C"));
+        playlist.add_track(make_track("D"));
+
+        playlist.move_tracks(vec![2, 3], 1);
+
+        assert_order(&playlist, vec!["A", "C", "D", "B"]);
+        assert_selected(&playlist, vec![1, 2]);
+    }
+
+    #[test]
+    fn test_gap_move_multi_last_two_to_gap_2_noop() {
+        // Moving C,D to gap 2 (after C) is a no-op
+        let mut playlist = Playlist::new();
+        playlist.add_track(make_track("A"));
+        playlist.add_track(make_track("B"));
+        playlist.add_track(make_track("C"));
+        playlist.add_track(make_track("D"));
+
+        playlist.move_tracks(vec![2, 3], 2);
+
+        assert_order(&playlist, vec!["A", "B", "C", "D"]);
+        assert_selected(&playlist, vec![2, 3]);
+    }
+
+    #[test]
+    fn test_gap_move_multi_last_two_to_gap_3_noop() {
+        // Moving C,D to gap 3 (after D) is a no-op
+        let mut playlist = Playlist::new();
+        playlist.add_track(make_track("A"));
+        playlist.add_track(make_track("B"));
+        playlist.add_track(make_track("C"));
+        playlist.add_track(make_track("D"));
+
+        playlist.move_tracks(vec![2, 3], 3);
+
+        assert_order(&playlist, vec!["A", "B", "C", "D"]);
+        assert_selected(&playlist, vec![2, 3]);
+    }
+
+    #[test]
+    fn test_gap_move_multi_last_two_to_gap_4_noop() {
+        // Moving C,D to gap 4 (after D) is a no-op
+        let mut playlist = Playlist::new();
+        playlist.add_track(make_track("A"));
+        playlist.add_track(make_track("B"));
+        playlist.add_track(make_track("C"));
+        playlist.add_track(make_track("D"));
+
+        playlist.move_tracks(vec![2, 3], 4);
+
+        assert_order(&playlist, vec!["A", "B", "C", "D"]);
+        assert_selected(&playlist, vec![2, 3]);
+    }
+
+    #[test]
+    fn test_gap_move_all_three_to_gap_4() {
+        // Moving A,B,C to gap 4 (end) -> [D, A, B, C]
+        let mut playlist = Playlist::new();
+        playlist.add_track(make_track("A"));
+        playlist.add_track(make_track("B"));
+        playlist.add_track(make_track("C"));
+        playlist.add_track(make_track("D"));
+
+        playlist.move_tracks(vec![0, 1, 2], 4);
+
+        assert_order(&playlist, vec!["D", "A", "B", "C"]);
+        assert_selected(&playlist, vec![1, 2, 3]);
+    }
+
+    #[test]
+    fn test_gap_move_all_three_from_middle_to_gap_0() {
+        // Moving B,C,D to gap 0 -> [B, C, D, A]
+        let mut playlist = Playlist::new();
+        playlist.add_track(make_track("A"));
+        playlist.add_track(make_track("B"));
+        playlist.add_track(make_track("C"));
+        playlist.add_track(make_track("D"));
+
+        playlist.move_tracks(vec![1, 2, 3], 0);
+
+        assert_order(&playlist, vec!["B", "C", "D", "A"]);
+        assert_selected(&playlist, vec![0, 1, 2]);
+    }
+
+    #[test]
+    fn test_gap_empty_list() {
+        let mut playlist = Playlist::new();
+        playlist.add_track(make_track("A"));
+        playlist.add_track(make_track("B"));
+
+        playlist.move_tracks(vec![], 1);
+
+        assert_order(&playlist, vec!["A", "B"]);
+    }
+
+    #[test]
+    fn test_gap_out_of_bounds() {
+        let mut playlist = Playlist::new();
+        playlist.add_track(make_track("A"));
+        playlist.add_track(make_track("B"));
+        playlist.add_track(make_track("C"));
+
+        // Moving A to gap 10 (clamped to 3, which is after C) -> [B, C, A]
+        playlist.move_tracks(vec![0], 10);
+
+        assert_order(&playlist, vec!["B", "C", "A"]);
     }
 }

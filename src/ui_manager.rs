@@ -869,8 +869,9 @@ impl UiManager {
 
                         let first = sorted_indices[0];
                         let last = *sorted_indices.last().unwrap();
+                        let block_len = sorted_indices.len();
 
-                        if to >= first && to <= last {
+                        if to >= first && to <= last + 1 {
                             continue;
                         }
 
@@ -894,13 +895,7 @@ impl UiManager {
                         moved_metadata.reverse();
 
                         let removed_before = sorted_indices.iter().filter(|&&i| i < to).count();
-                        let mut insert_at = to.saturating_sub(removed_before);
-
-                        if to > first {
-                            insert_at = insert_at.saturating_add(1);
-                        }
-
-                        insert_at = insert_at.min(self.track_paths.len());
+                        let insert_at = to.saturating_sub(removed_before);
 
                         for (i, path) in moved_paths.into_iter().enumerate() {
                             self.track_paths.insert(insert_at + i, path);
@@ -912,8 +907,7 @@ impl UiManager {
                             self.track_metadata.insert(insert_at + i, metadata);
                         }
 
-                        self.selected_indices =
-                            (insert_at..insert_at + sorted_indices.len()).collect();
+                        self.selected_indices = (insert_at..insert_at + block_len).collect();
 
                         let _ = self.ui.upgrade_in_event_loop(move |ui| {
                             let track_model_strong = ui.get_track_model();
@@ -935,7 +929,7 @@ impl UiManager {
                             let first = sorted_indices[0];
                             let last = *sorted_indices.last().unwrap();
 
-                            if to >= first && to <= last {
+                            if to >= first && to <= last + 1 {
                                 return;
                             }
 
@@ -949,13 +943,7 @@ impl UiManager {
                             moved_rows.reverse();
 
                             let removed_before = sorted_indices.iter().filter(|&&i| i < to).count();
-                            let mut insert_at = to.saturating_sub(removed_before);
-
-                            if to > first {
-                                insert_at = insert_at.saturating_add(1);
-                            }
-
-                            insert_at = insert_at.min(track_model.row_count());
+                            let insert_at = to.saturating_sub(removed_before);
 
                             for (i, row) in moved_rows.into_iter().enumerate() {
                                 track_model.insert(insert_at + i, row);
@@ -1020,7 +1008,7 @@ impl UiManager {
 
 #[cfg(test)]
 mod tests {
-    fn apply_reorder(paths: &mut Vec<String>, indices: &[usize], to: usize) -> Vec<usize> {
+    fn apply_reorder(paths: &mut Vec<String>, indices: &[usize], gap: usize) -> Vec<usize> {
         let len = paths.len();
         if len == 0 {
             return vec![];
@@ -1035,12 +1023,13 @@ mod tests {
             return vec![];
         }
 
-        let to = to.min(len);
+        let gap = gap.min(len);
 
         let first = indices[0];
         let last = *indices.last().unwrap();
+        let block_len = indices.len();
 
-        if to >= first && to <= last {
+        if gap >= first && gap <= last + 1 {
             return indices;
         }
 
@@ -1052,143 +1041,276 @@ mod tests {
         }
         moved.reverse();
 
-        let removed_before = indices.iter().filter(|&&i| i < to).count();
-        let mut insert_at = to.saturating_sub(removed_before);
-
-        if to > first {
-            insert_at = insert_at.saturating_add(1);
-        }
-
-        insert_at = insert_at.min(paths.len());
+        let removed_before = indices.iter().filter(|&&i| i < gap).count();
+        let insert_at = gap.saturating_sub(removed_before);
 
         for (offset, item) in moved.into_iter().enumerate() {
             paths.insert(insert_at + offset, item);
         }
 
-        (insert_at..insert_at + indices.len()).collect()
+        (insert_at..insert_at + block_len).collect()
     }
 
-    #[test]
-    fn test_reorder_single_track_up() {
-        let mut paths = vec![
+    // Gap-index semantic tests
+    // Gap 0 = before element 0
+    // Gap 1 = between element 0 and 1
+    // Gap 2 = between element 1 and 2
+    // Gap N = after element N-1
+
+    fn make_test_paths() -> Vec<String> {
+        vec![
             "A".to_string(),
             "B".to_string(),
             "C".to_string(),
             "D".to_string(),
-        ];
-        let indices = vec![0];
-        let to = 1;
+        ]
+    }
 
-        let new_selection = apply_reorder(&mut paths, &indices, to);
+    #[test]
+    fn test_gap_reorder_single_first_to_gap_0_noop() {
+        let mut paths = make_test_paths();
+        let new_selection = apply_reorder(&mut paths, &[0], 0);
+        assert_eq!(paths, vec!["A", "B", "C", "D"]);
+        assert_eq!(new_selection, vec![0]);
+    }
 
+    #[test]
+    fn test_gap_reorder_single_first_to_gap_1_noop() {
+        let mut paths = make_test_paths();
+        let new_selection = apply_reorder(&mut paths, &[0], 1);
+        assert_eq!(paths, vec!["A", "B", "C", "D"]);
+        assert_eq!(new_selection, vec![0]);
+    }
+
+    #[test]
+    fn test_gap_reorder_single_first_to_gap_2() {
+        let mut paths = make_test_paths();
+        let new_selection = apply_reorder(&mut paths, &[0], 2);
         assert_eq!(paths, vec!["B", "A", "C", "D"]);
         assert_eq!(new_selection, vec![1]);
     }
 
     #[test]
-    fn test_reorder_single_track_down() {
-        let mut paths = vec![
-            "A".to_string(),
-            "B".to_string(),
-            "C".to_string(),
-            "D".to_string(),
-        ];
-        let indices = vec![3];
-        let to = 1;
-
-        let new_selection = apply_reorder(&mut paths, &indices, to);
-
-        assert_eq!(paths, vec!["A", "D", "B", "C"]);
-        assert_eq!(new_selection, vec![1]);
+    fn test_gap_reorder_single_first_to_gap_3() {
+        let mut paths = make_test_paths();
+        let new_selection = apply_reorder(&mut paths, &[0], 3);
+        assert_eq!(paths, vec!["B", "C", "A", "D"]);
+        assert_eq!(new_selection, vec![2]);
     }
 
     #[test]
-    fn test_reorder_single_track_to_start() {
-        let mut paths = vec![
-            "A".to_string(),
-            "B".to_string(),
-            "C".to_string(),
-            "D".to_string(),
-        ];
-        let indices = vec![2];
-        let to = 0;
+    fn test_gap_reorder_single_first_to_gap_4() {
+        let mut paths = make_test_paths();
+        let new_selection = apply_reorder(&mut paths, &[0], 4);
+        assert_eq!(paths, vec!["B", "C", "D", "A"]);
+        assert_eq!(new_selection, vec![3]);
+    }
 
-        let new_selection = apply_reorder(&mut paths, &indices, to);
-
+    #[test]
+    fn test_gap_reorder_single_middle_to_gap_0() {
+        let mut paths = make_test_paths();
+        let new_selection = apply_reorder(&mut paths, &[2], 0);
         assert_eq!(paths, vec!["C", "A", "B", "D"]);
         assert_eq!(new_selection, vec![0]);
     }
 
     #[test]
-    fn test_reorder_multi_select_up() {
-        let mut paths = vec![
-            "A".to_string(),
-            "B".to_string(),
-            "C".to_string(),
-            "D".to_string(),
-        ];
-        let indices = vec![0, 1];
-        let to = 2;
+    fn test_gap_reorder_single_middle_to_gap_1_noop() {
+        let mut paths = make_test_paths();
+        let new_selection = apply_reorder(&mut paths, &[2], 1);
+        assert_eq!(paths, vec!["A", "C", "B", "D"]);
+        assert_eq!(new_selection, vec![1]);
+    }
 
-        let new_selection = apply_reorder(&mut paths, &indices, to);
+    #[test]
+    fn test_gap_reorder_single_middle_to_gap_2_noop() {
+        let mut paths = make_test_paths();
+        let new_selection = apply_reorder(&mut paths, &[2], 2);
+        assert_eq!(paths, vec!["A", "B", "C", "D"]);
+        assert_eq!(new_selection, vec![2]);
+    }
 
+    #[test]
+    fn test_gap_reorder_single_middle_to_gap_3_noop() {
+        let mut paths = make_test_paths();
+        let new_selection = apply_reorder(&mut paths, &[2], 3);
+        assert_eq!(paths, vec!["A", "B", "C", "D"]);
+        assert_eq!(new_selection, vec![2]);
+    }
+
+    #[test]
+    fn test_gap_reorder_single_last_to_gap_0() {
+        let mut paths = make_test_paths();
+        let new_selection = apply_reorder(&mut paths, &[3], 0);
+        assert_eq!(paths, vec!["D", "A", "B", "C"]);
+        assert_eq!(new_selection, vec![0]);
+    }
+
+    #[test]
+    fn test_gap_reorder_single_last_to_gap_1() {
+        let mut paths = make_test_paths();
+        let new_selection = apply_reorder(&mut paths, &[3], 1);
+        assert_eq!(paths, vec!["A", "D", "B", "C"]);
+        assert_eq!(new_selection, vec![1]);
+    }
+
+    #[test]
+    fn test_gap_reorder_single_last_to_gap_2() {
+        let mut paths = make_test_paths();
+        let new_selection = apply_reorder(&mut paths, &[3], 2);
+        assert_eq!(paths, vec!["A", "B", "D", "C"]);
+        assert_eq!(new_selection, vec![2]);
+    }
+
+    #[test]
+    fn test_gap_reorder_single_last_to_gap_3_noop() {
+        let mut paths = make_test_paths();
+        let new_selection = apply_reorder(&mut paths, &[3], 3);
+        assert_eq!(paths, vec!["A", "B", "C", "D"]);
+        assert_eq!(new_selection, vec![3]);
+    }
+
+    #[test]
+    fn test_gap_reorder_single_last_to_gap_4_noop() {
+        let mut paths = make_test_paths();
+        let new_selection = apply_reorder(&mut paths, &[3], 4);
+        assert_eq!(paths, vec!["A", "B", "C", "D"]);
+        assert_eq!(new_selection, vec![3]);
+    }
+
+    #[test]
+    fn test_gap_reorder_multi_first_two_to_gap_0_noop() {
+        let mut paths = make_test_paths();
+        let new_selection = apply_reorder(&mut paths, &[0, 1], 0);
+        assert_eq!(paths, vec!["A", "B", "C", "D"]);
+        assert_eq!(new_selection, vec![0, 1]);
+    }
+
+    #[test]
+    fn test_gap_reorder_multi_first_two_to_gap_1_noop() {
+        let mut paths = make_test_paths();
+        let new_selection = apply_reorder(&mut paths, &[0, 1], 1);
+        assert_eq!(paths, vec!["A", "B", "C", "D"]);
+        assert_eq!(new_selection, vec![0, 1]);
+    }
+
+    #[test]
+    fn test_gap_reorder_multi_first_two_to_gap_2_noop() {
+        let mut paths = make_test_paths();
+        let new_selection = apply_reorder(&mut paths, &[0, 1], 2);
+        assert_eq!(paths, vec!["A", "B", "C", "D"]);
+        assert_eq!(new_selection, vec![0, 1]);
+    }
+
+    #[test]
+    fn test_gap_reorder_multi_first_two_to_gap_3() {
+        let mut paths = make_test_paths();
+        let new_selection = apply_reorder(&mut paths, &[0, 1], 3);
         assert_eq!(paths, vec!["C", "A", "B", "D"]);
         assert_eq!(new_selection, vec![1, 2]);
     }
 
     #[test]
-    fn test_reorder_multi_select_to_end() {
-        let mut paths = vec![
-            "A".to_string(),
-            "B".to_string(),
-            "C".to_string(),
-            "D".to_string(),
-        ];
-        let indices = vec![0, 1];
-        let to = 3;
-
-        let new_selection = apply_reorder(&mut paths, &indices, to);
-
+    fn test_gap_reorder_multi_first_two_to_gap_4() {
+        let mut paths = make_test_paths();
+        let new_selection = apply_reorder(&mut paths, &[0, 1], 4);
         assert_eq!(paths, vec!["C", "D", "A", "B"]);
         assert_eq!(new_selection, vec![2, 3]);
     }
 
     #[test]
-    fn test_reorder_from_middle_to_start() {
-        let mut paths = vec![
-            "A".to_string(),
-            "B".to_string(),
-            "C".to_string(),
-            "D".to_string(),
-        ];
-        let indices = vec![1, 2];
-        let to = 0;
-
-        let new_selection = apply_reorder(&mut paths, &indices, to);
-
+    fn test_gap_reorder_multi_middle_two_to_gap_0() {
+        let mut paths = make_test_paths();
+        let new_selection = apply_reorder(&mut paths, &[1, 2], 0);
         assert_eq!(paths, vec!["B", "C", "A", "D"]);
         assert_eq!(new_selection, vec![0, 1]);
     }
 
     #[test]
-    fn test_reorder_across_whole_list() {
-        let mut paths = vec![
-            "A".to_string(),
-            "B".to_string(),
-            "C".to_string(),
-            "D".to_string(),
-        ];
-        let indices = vec![0, 1, 2];
-        let to = 4;
+    fn test_gap_reorder_multi_middle_two_to_gap_1_noop() {
+        let mut paths = make_test_paths();
+        let new_selection = apply_reorder(&mut paths, &[1, 2], 1);
+        assert_eq!(paths, vec!["A", "B", "C", "D"]);
+        assert_eq!(new_selection, vec![1, 2]);
+    }
 
-        let new_selection = apply_reorder(&mut paths, &indices, to);
+    #[test]
+    fn test_gap_reorder_multi_middle_two_to_gap_2_noop() {
+        let mut paths = make_test_paths();
+        let new_selection = apply_reorder(&mut paths, &[1, 2], 2);
+        assert_eq!(paths, vec!["A", "B", "C", "D"]);
+        assert_eq!(new_selection, vec![1, 2]);
+    }
 
+    #[test]
+    fn test_gap_reorder_multi_middle_two_to_gap_3_noop() {
+        let mut paths = make_test_paths();
+        let new_selection = apply_reorder(&mut paths, &[1, 2], 3);
+        assert_eq!(paths, vec!["A", "B", "C", "D"]);
+        assert_eq!(new_selection, vec![1, 2]);
+    }
+
+    #[test]
+    fn test_gap_reorder_multi_middle_two_to_gap_4() {
+        let mut paths = make_test_paths();
+        let new_selection = apply_reorder(&mut paths, &[1, 2], 4);
+        assert_eq!(paths, vec!["A", "D", "B", "C"]);
+        assert_eq!(new_selection, vec![2, 3]);
+    }
+
+    #[test]
+    fn test_gap_reorder_multi_last_two_to_gap_0() {
+        let mut paths = make_test_paths();
+        let new_selection = apply_reorder(&mut paths, &[2, 3], 0);
+        assert_eq!(paths, vec!["C", "D", "A", "B"]);
+        assert_eq!(new_selection, vec![0, 1]);
+    }
+
+    #[test]
+    fn test_gap_reorder_multi_last_two_to_gap_1() {
+        let mut paths = make_test_paths();
+        let new_selection = apply_reorder(&mut paths, &[2, 3], 1);
+        assert_eq!(paths, vec!["A", "C", "D", "B"]);
+        assert_eq!(new_selection, vec![1, 2]);
+    }
+
+    #[test]
+    fn test_gap_reorder_multi_last_two_to_gap_2_noop() {
+        let mut paths = make_test_paths();
+        let new_selection = apply_reorder(&mut paths, &[2, 3], 2);
+        assert_eq!(paths, vec!["A", "B", "C", "D"]);
+        assert_eq!(new_selection, vec![2, 3]);
+    }
+
+    #[test]
+    fn test_gap_reorder_multi_last_two_to_gap_3_noop() {
+        let mut paths = make_test_paths();
+        let new_selection = apply_reorder(&mut paths, &[2, 3], 3);
+        assert_eq!(paths, vec!["A", "B", "C", "D"]);
+        assert_eq!(new_selection, vec![2, 3]);
+    }
+
+    #[test]
+    fn test_gap_reorder_multi_last_two_to_gap_4_noop() {
+        let mut paths = make_test_paths();
+        let new_selection = apply_reorder(&mut paths, &[2, 3], 4);
+        assert_eq!(paths, vec!["A", "B", "C", "D"]);
+        assert_eq!(new_selection, vec![2, 3]);
+    }
+
+    #[test]
+    fn test_gap_reorder_all_three_to_gap_4() {
+        let mut paths = make_test_paths();
+        let new_selection = apply_reorder(&mut paths, &[0, 1, 2], 4);
         assert_eq!(paths, vec!["D", "A", "B", "C"]);
         assert_eq!(new_selection, vec![1, 2, 3]);
     }
 
     #[test]
-    fn test_single() {
-        assert_eq!(1, 1);
+    fn test_gap_reorder_all_three_from_middle_to_gap_0() {
+        let mut paths = make_test_paths();
+        let new_selection = apply_reorder(&mut paths, &[1, 2, 3], 0);
+        assert_eq!(paths, vec!["B", "C", "D", "A"]);
+        assert_eq!(new_selection, vec![0, 1, 2]);
     }
 }
