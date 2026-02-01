@@ -30,7 +30,8 @@ pub struct UiManager {
     drag_indices: Vec<usize>,
     is_dragging: bool,
     pressed_index: Option<usize>,
-    progress_rl: RateLimiter<NotKeyed, governor::state::InMemoryState, governor::clock::DefaultClock>
+    progress_rl:
+        RateLimiter<NotKeyed, governor::state::InMemoryState, governor::clock::DefaultClock>,
 }
 
 #[derive(Clone)]
@@ -61,7 +62,9 @@ impl UiManager {
             drag_indices: Vec::new(),
             is_dragging: false,
             pressed_index: None,
-            progress_rl: RateLimiter::direct(Quota::with_period(Duration::from_millis(30)).unwrap()),
+            progress_rl: RateLimiter::direct(
+                Quota::with_period(Duration::from_millis(30)).unwrap(),
+            ),
         }
     }
 
@@ -600,8 +603,7 @@ impl UiManager {
                                 ui.set_total_duration_text(
                                     format!("{:02}:{:02}", total_mins, total_rem_secs).into(),
                                 );
-                            }
-                        );
+                            });
                         }
                     }
                     protocol::Message::Playback(

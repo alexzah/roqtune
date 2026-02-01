@@ -230,10 +230,56 @@ impl Playlist {
 
         self.selected_indices = (insert_at..insert_at + block_len).collect();
 
+        // Update playing_track_index
+        if let Some(playing_idx) = self.playing_track_index {
+            self.playing_track_index =
+                Some(Self::compute_new_index(playing_idx, &indices, insert_at));
+        }
+
+        // Update anchor_index
+        if let Some(anchor_idx) = self.anchor_index {
+            self.anchor_index = Some(Self::compute_new_index(anchor_idx, &indices, insert_at));
+        }
+
+        // Update shuffled_indices
+        if !self.shuffled_indices.is_empty() {
+            for shuffle_idx in &mut self.shuffled_indices {
+                *shuffle_idx = Self::compute_new_index(*shuffle_idx, &indices, insert_at);
+            }
+        }
+
         debug!(
             "Playlist: Moved tracks {:?} to gap {}. New playing_idx={:?}, selected_indices={:?}",
             indices, to_gap, self.playing_track_index, self.selected_indices
         );
+    }
+
+    /// Computes the new index of an item after a move operation.
+    /// - `old_idx`: The original index of the item
+    /// - `moved_indices`: The sorted, deduped list of indices that were moved
+    /// - `insert_at`: The position where moved items were inserted
+    fn compute_new_index(old_idx: usize, moved_indices: &[usize], insert_at: usize) -> usize {
+        // Check if this index was one of the moved items
+        if let Some(pos) = moved_indices.iter().position(|&i| i == old_idx) {
+            // It was moved, so its new position is insert_at + its position in the moved set
+            return insert_at + pos;
+        }
+
+        // It wasn't moved, so we need to figure out how it shifted
+        // Count how many moved items were before this index (they were removed)
+        let moved_before = moved_indices.iter().filter(|&&i| i < old_idx).count();
+        // After removal, this item's index decreased by moved_before
+        let after_removal = old_idx - moved_before;
+
+        // Count how many items were inserted before this position
+        let block_len = moved_indices.len();
+        let inserted_before = if insert_at <= after_removal {
+            block_len
+        } else {
+            0
+        };
+
+        after_removal + inserted_before
     }
 
     pub fn get_next_track_index(&mut self, current_index: usize) -> Option<usize> {
@@ -1166,5 +1212,176 @@ mod tests {
 
         assert_order(&playlist, vec!["A", "C", "B", "D"]);
         assert_selected(&playlist, vec![0, 1]);
+    }
+
+    // Tests for playing_track_index updates during move operations
+
+    #[test]
+    fn test_move_playing_track_down() {
+        // Playing track is A (pos 0), move it to gap 3
+        // [A*, B, C, D] -> [B, C, A*, D]
+        let mut playlist = Playlist::new();
+        playlist.add_track(make_track("A"));
+        playlist.add_track(make_track("B"));
+        playlist.add_track(make_track("C"));
+        playlist.add_track(make_track("D"));
+        playlist.set_playing_track_index(Some(0));
+
+        playlist.move_tracks(vec![0], 3);
+
+        assert_order(&playlist, vec!["B", "C", "A", "D"]);
+        assert_eq!(playlist.get_playing_track_index(), Some(2));
+    }
+
+    #[test]
+    fn test_move_playing_track_up() {
+        // Playing track is D (pos 3), move it to gap 1
+        // [A, B, C, D*] -> [A, D*, B, C]
+        let mut playlist = Playlist::new();
+        playlist.add_track(make_track("A"));
+        playlist.add_track(make_track("B"));
+        playlist.add_track(make_track("C"));
+        playlist.add_track(make_track("D"));
+        playlist.set_playing_track_index(Some(3));
+
+        playlist.move_tracks(vec![3], 1);
+
+        assert_order(&playlist, vec!["A", "D", "B", "C"]);
+        assert_eq!(playlist.get_playing_track_index(), Some(1));
+    }
+
+    #[test]
+    fn test_move_non_playing_track_before_playing() {
+        // Playing track is C (pos 2), move D to gap 1
+        // [A, B, C*, D] -> [A, D, B, C*]
+        let mut playlist = Playlist::new();
+        playlist.add_track(make_track("A"));
+        playlist.add_track(make_track("B"));
+        playlist.add_track(make_track("C"));
+        playlist.add_track(make_track("D"));
+        playlist.set_playing_track_index(Some(2));
+
+        playlist.move_tracks(vec![3], 1);
+
+        assert_order(&playlist, vec!["A", "D", "B", "C"]);
+        assert_eq!(playlist.get_playing_track_index(), Some(3));
+    }
+
+    #[test]
+    fn test_move_non_playing_track_after_playing() {
+        // Playing track is B (pos 1), move A to gap 3
+        // [A, B*, C, D] -> [B*, C, A, D]
+        let mut playlist = Playlist::new();
+        playlist.add_track(make_track("A"));
+        playlist.add_track(make_track("B"));
+        playlist.add_track(make_track("C"));
+        playlist.add_track(make_track("D"));
+        playlist.set_playing_track_index(Some(1));
+
+        playlist.move_tracks(vec![0], 3);
+
+        assert_order(&playlist, vec!["B", "C", "A", "D"]);
+        assert_eq!(playlist.get_playing_track_index(), Some(0));
+    }
+
+    #[test]
+    fn test_move_multiple_tracks_including_playing() {
+        // Playing track is B (pos 1), move A and B to gap 4
+        // [A, B*, C, D] -> [C, D, A, B*]
+        let mut playlist = Playlist::new();
+        playlist.add_track(make_track("A"));
+        playlist.add_track(make_track("B"));
+        playlist.add_track(make_track("C"));
+        playlist.add_track(make_track("D"));
+        playlist.set_playing_track_index(Some(1));
+
+        playlist.move_tracks(vec![0, 1], 4);
+
+        assert_order(&playlist, vec!["C", "D", "A", "B"]);
+        assert_eq!(playlist.get_playing_track_index(), Some(3));
+    }
+
+    #[test]
+    fn test_move_multiple_tracks_not_including_playing() {
+        // Playing track is C (pos 2), move A and D to gap 2
+        // [A, B, C*, D] -> [B, A, D, C*]
+        let mut playlist = Playlist::new();
+        playlist.add_track(make_track("A"));
+        playlist.add_track(make_track("B"));
+        playlist.add_track(make_track("C"));
+        playlist.add_track(make_track("D"));
+        playlist.set_playing_track_index(Some(2));
+
+        playlist.move_tracks(vec![0, 3], 2);
+
+        assert_order(&playlist, vec!["B", "A", "D", "C"]);
+        assert_eq!(playlist.get_playing_track_index(), Some(3));
+    }
+
+    #[test]
+    fn test_move_tracks_playing_unaffected() {
+        // Playing track is D (pos 3), move B to gap 0
+        // [A, B, C, D*] -> [B, A, C, D*]
+        let mut playlist = Playlist::new();
+        playlist.add_track(make_track("A"));
+        playlist.add_track(make_track("B"));
+        playlist.add_track(make_track("C"));
+        playlist.add_track(make_track("D"));
+        playlist.set_playing_track_index(Some(3));
+
+        playlist.move_tracks(vec![1], 0);
+
+        assert_order(&playlist, vec!["B", "A", "C", "D"]);
+        assert_eq!(playlist.get_playing_track_index(), Some(3));
+    }
+
+    #[test]
+    fn test_move_tracks_no_playing_track() {
+        // No playing track, move A to gap 2
+        // [A, B, C, D] -> [B, A, C, D]
+        let mut playlist = Playlist::new();
+        playlist.add_track(make_track("A"));
+        playlist.add_track(make_track("B"));
+        playlist.add_track(make_track("C"));
+        playlist.add_track(make_track("D"));
+
+        playlist.move_tracks(vec![0], 2);
+
+        assert_order(&playlist, vec!["B", "A", "C", "D"]);
+        assert_eq!(playlist.get_playing_track_index(), None);
+    }
+
+    #[test]
+    fn test_move_playing_track_to_start() {
+        // Playing track is C (pos 2), move it to gap 0
+        // [A, B, C*, D] -> [C*, A, B, D]
+        let mut playlist = Playlist::new();
+        playlist.add_track(make_track("A"));
+        playlist.add_track(make_track("B"));
+        playlist.add_track(make_track("C"));
+        playlist.add_track(make_track("D"));
+        playlist.set_playing_track_index(Some(2));
+
+        playlist.move_tracks(vec![2], 0);
+
+        assert_order(&playlist, vec!["C", "A", "B", "D"]);
+        assert_eq!(playlist.get_playing_track_index(), Some(0));
+    }
+
+    #[test]
+    fn test_move_playing_track_to_end() {
+        // Playing track is B (pos 1), move it to gap 4
+        // [A, B*, C, D] -> [A, C, D, B*]
+        let mut playlist = Playlist::new();
+        playlist.add_track(make_track("A"));
+        playlist.add_track(make_track("B"));
+        playlist.add_track(make_track("C"));
+        playlist.add_track(make_track("D"));
+        playlist.set_playing_track_index(Some(1));
+
+        playlist.move_tracks(vec![1], 4);
+
+        assert_order(&playlist, vec!["A", "C", "D", "B"]);
+        assert_eq!(playlist.get_playing_track_index(), Some(3));
     }
 }
