@@ -480,7 +480,7 @@ export component AppWindow inherits Window {
                 
                 // Current time display
                 Text {
-                    text: root.current-position-text;
+                    text: root.format-time(root.elapsed-ms);
                     color: #888;
                     font-size: 12px;
                     vertical-alignment: center;
@@ -555,7 +555,7 @@ export component AppWindow inherits Window {
                 
                 // Total duration display
                 Text {
-                    text: root.total-duration-text;
+                    text: root.format-time(root.total-ms);
                     color: #888;
                     font-size: 12px;
                     vertical-alignment: center;
@@ -845,7 +845,7 @@ export component AppWindow inherits Window {
                 }
                 
                 Text {
-                    text: root.time-info;
+                    text: root.format-time-range(root.elapsed-ms, root.total-ms);
                     color: #999;
                     font-size: 12px;
                     vertical-alignment: center;
@@ -899,14 +899,31 @@ export component AppWindow inherits Window {
     in-out property <int> drop-index: -1;
     property <int> hover-index: -1;
 
-    // Seek bar properties
-    in-out property <float> current-position: 0.0; // in seconds
-    in-out property <float> total-duration: 0.0; // in seconds
+    // Seek bar properties - raw integer values from Rust (no string allocations)
+    in-out property <int> elapsed-ms: 0;
+    in-out property <int> total-ms: 0;
     in-out property <float> position-percentage: 0.0; // between 0.0 and 1.0
-    in-out property <string> current-position-text: "0:00";
-    in-out property <string> total-duration-text: "0:00";
     in-out property <string> technical-info: "";
-    in-out property <string> time-info: "";
+    
+    // Computed time display strings (derived from integer ms values)
+    // These are computed in Slint to avoid Rust string allocations
+    pure function format-time-component(value: int) -> string {
+        if value < 10 {
+            return "0" + value;
+        }
+        return value;
+    }
+    
+    pure function format-time(ms: int) -> string {
+        if ms <= 0 {
+            return "0:00";
+        }
+        return floor(ms / 60000) + ":" + root.format-time-component(mod(floor(ms / 1000), 60));
+    }
+    
+    pure function format-time-range(elapsed: int, total: int) -> string {
+        return root.format-time(elapsed) + " / " + root.format-time(total);
+    }
 
     // Callback declarations
     callback open_file();

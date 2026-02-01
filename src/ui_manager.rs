@@ -32,6 +32,9 @@ pub struct UiManager {
     pressed_index: Option<usize>,
     progress_rl:
         RateLimiter<NotKeyed, governor::state::InMemoryState, governor::clock::DefaultClock>,
+    // Cached progress values to avoid unnecessary UI updates
+    last_elapsed_ms: u64,
+    last_total_ms: u64,
 }
 
 #[derive(Clone)]
@@ -65,6 +68,8 @@ impl UiManager {
             progress_rl: RateLimiter::direct(
                 Quota::with_period(Duration::from_millis(30)).unwrap(),
             ),
+            last_elapsed_ms: 0,
+            last_total_ms: 0,
         }
     }
 
@@ -579,31 +584,39 @@ impl UiManager {
                         total_ms,
                     }) => {
                         if self.progress_rl.check().is_ok() {
-                            let _ = self.ui.upgrade_in_event_loop(move |ui| {
-                                let elapsed_secs = elapsed_ms / 1000;
-                                let elapsed_mins = elapsed_secs / 60;
-                                let elapsed_rem_secs = elapsed_secs % 60;
-                                let total_secs = total_ms / 1000;
-                                let total_mins = total_secs / 60;
-                                let total_rem_secs = total_secs % 60;
+                            // Check if the displayed second has changed (for text updates)
+                            let elapsed_secs = elapsed_ms / 1000;
+                            let last_elapsed_secs = self.last_elapsed_ms / 1000;
+                            let time_text_changed =
+                                elapsed_secs != last_elapsed_secs || total_ms != self.last_total_ms;
 
-                                ui.set_time_info(
-                                    format!(
-                                        "{:02}:{:02} / {:02}:{:02}",
-                                        elapsed_mins, elapsed_rem_secs, total_mins, total_rem_secs
-                                    )
-                                    .into(),
-                                );
-                                if total_ms > 0 {
-                                    ui.set_position_percentage(elapsed_ms as f32 / total_ms as f32);
-                                }
-                                ui.set_current_position_text(
-                                    format!("{:02}:{:02}", elapsed_mins, elapsed_rem_secs).into(),
-                                );
-                                ui.set_total_duration_text(
-                                    format!("{:02}:{:02}", total_mins, total_rem_secs).into(),
-                                );
-                            });
+                            // Always compute percentage for smooth progress bar
+                            let percentage = if total_ms > 0 {
+                                elapsed_ms as f32 / total_ms as f32
+                            } else {
+                                0.0
+                            };
+
+                            if time_text_changed {
+                                // Update cached values and set integer ms properties
+                                // This triggers Slint's pure functions to recompute text
+                                self.last_elapsed_ms = elapsed_ms;
+                                self.last_total_ms = total_ms;
+
+                                let elapsed_ms_i32 = elapsed_ms as i32;
+                                let total_ms_i32 = total_ms as i32;
+
+                                let _ = self.ui.upgrade_in_event_loop(move |ui| {
+                                    ui.set_elapsed_ms(elapsed_ms_i32);
+                                    ui.set_total_ms(total_ms_i32);
+                                    ui.set_position_percentage(percentage);
+                                });
+                            } else {
+                                // Just update the progress bar percentage for smooth animation
+                                let _ = self.ui.upgrade_in_event_loop(move |ui| {
+                                    ui.set_position_percentage(percentage);
+                                });
+                            }
                         }
                     }
                     protocol::Message::Playback(
@@ -621,13 +634,16 @@ impl UiManager {
                         });
                     }
                     protocol::Message::Playback(protocol::PlaybackMessage::Stop) => {
+                        // Reset cached progress values
+                        self.last_elapsed_ms = 0;
+                        self.last_total_ms = 0;
+
                         let _ = self.ui.upgrade_in_event_loop(move |ui| {
                             ui.set_technical_info("".into());
-                            ui.set_time_info("".into());
                             ui.set_status_text("No track selected".into());
                             ui.set_position_percentage(0.0);
-                            ui.set_current_position_text("0:00".into());
-                            ui.set_total_duration_text("0:00".into());
+                            ui.set_elapsed_ms(0);
+                            ui.set_total_ms(0);
 
                             let track_model_strong = ui.get_track_model();
                             let track_model = track_model_strong
@@ -808,6 +824,27 @@ impl UiManager {
                             "After SelectionChanged: self.selected_indices = {:?}",
                             self.selected_indices
                         );
+
+                        // Update cover art and metadata display based on selection
+                        if !indices.is_empty() {
+                            let idx = indices[0];
+                            if let Some(path) = self.track_paths.get(idx) {
+                                self.update_cover_art(Some(path));
+                            }
+                            if let Some(meta) = self.track_metadata.get(idx) {
+                                let _ = self.bus_sender.send(protocol::Message::Playback(
+                                    protocol::PlaybackMessage::MetadataDisplayChanged(Some(
+                                        protocol::DetailedMetadata {
+                                            title: meta.title.clone(),
+                                            artist: meta.artist.clone(),
+                                            album: meta.album.clone(),
+                                            date: meta.date.clone(),
+                                            genre: meta.genre.clone(),
+                                        },
+                                    )),
+                                ));
+                            }
+                        }
 
                         let _ = self.ui.upgrade_in_event_loop(move |ui| {
                             let track_model_strong = ui.get_track_model();
