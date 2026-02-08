@@ -24,6 +24,7 @@ pub struct PlaylistManager {
     cached_track_ids: HashMap<String, u64>, // id -> start_offset_ms
     fully_cached_track_ids: HashSet<String>,
     requested_track_offsets: HashMap<String, u64>, // id -> requested start_offset_ms
+    pending_start_track_id: Option<String>,
     pending_order_change: Option<protocol::PlaybackOrder>,
     max_num_cached_tracks: usize,
     current_track_duration_ms: u64,
@@ -51,6 +52,7 @@ impl PlaylistManager {
             cached_track_ids: HashMap::new(),
             fully_cached_track_ids: HashSet::new(),
             requested_track_offsets: HashMap::new(),
+            pending_start_track_id: None,
             pending_order_change: None,
             max_num_cached_tracks: 2,
             current_track_duration_ms: 0,
@@ -65,6 +67,7 @@ impl PlaylistManager {
             return;
         }
 
+        self.pending_start_track_id = None;
         self.started_track_id = None;
         self.playback_playlist.set_playing(true);
         self.playback_playlist.set_playing_track_index(Some(index));
@@ -76,6 +79,7 @@ impl PlaylistManager {
             let _ = self.bus_producer.send(protocol::Message::Playback(
                 protocol::PlaybackMessage::PlayTrackById(track_id),
             ));
+            self.pending_start_track_id = Some(self.playback_playlist.get_track_id(index));
         } else {
             // Not cached or cached at wrong offset, start decoding process
             self.stop_decoding();
@@ -215,6 +219,7 @@ impl PlaylistManager {
                     }
                     protocol::Message::Playback(protocol::PlaybackMessage::Stop) => {
                         debug!("PlaylistManager: Received stop command");
+                        self.pending_start_track_id = None;
                         self.started_track_id = None;
                         self.playback_playlist.set_playing(false);
                         self.playback_playlist.set_playing_track_index(None);
@@ -272,6 +277,24 @@ impl PlaylistManager {
                     }
                     protocol::Message::Playback(protocol::PlaybackMessage::TrackFinished(id)) => {
                         debug!("PlaylistManager: Received track finished command: {}", id);
+                        let current_track_id = self
+                            .playback_playlist
+                            .get_playing_track_index()
+                            .and_then(|idx| {
+                                if idx < self.playback_playlist.num_tracks() {
+                                    Some(self.playback_playlist.get_track_id(idx))
+                                } else {
+                                    None
+                                }
+                            });
+                        if current_track_id.as_deref() != Some(id.as_str()) {
+                            debug!(
+                                "PlaylistManager: Ignoring stale TrackFinished for {} (current={:?})",
+                                id, current_track_id
+                            );
+                            continue;
+                        }
+                        self.pending_start_track_id = None;
                         self.started_track_id = None;
                         if let Some(playing_idx) = self.playback_playlist.get_playing_track_index()
                         {
@@ -310,7 +333,25 @@ impl PlaylistManager {
                             "PlaylistManager: Received track started command: {}",
                             track_started.id
                         );
+                        let current_track_id = self
+                            .playback_playlist
+                            .get_playing_track_index()
+                            .and_then(|idx| {
+                                if idx < self.playback_playlist.num_tracks() {
+                                    Some(self.playback_playlist.get_track_id(idx))
+                                } else {
+                                    None
+                                }
+                            });
+                        if current_track_id.as_deref() != Some(track_started.id.as_str()) {
+                            debug!(
+                                "PlaylistManager: Ignoring stale TrackStarted for {} (current={:?})",
+                                track_started.id, current_track_id
+                            );
+                            continue;
+                        }
                         self.last_seek_ms = u64::MAX;
+                        self.pending_start_track_id = None;
                         self.started_track_id = Some(track_started.id.clone());
                         if let Some(playing_idx) = self.playback_playlist.get_playing_track_index()
                         {
@@ -359,10 +400,18 @@ impl PlaylistManager {
                                     if playing_track_id == id {
                                         let already_started_current_track =
                                             self.started_track_id.as_deref() == Some(id.as_str());
+                                        let already_requested_start =
+                                            self.pending_start_track_id.as_deref()
+                                                == Some(id.as_str());
 
                                         if already_started_current_track {
                                             debug!(
                                                 "PlaylistManager: Ignoring stale ReadyForPlayback for already started track: {}",
+                                                id
+                                            );
+                                        } else if already_requested_start {
+                                            debug!(
+                                                "PlaylistManager: Ignoring duplicate ReadyForPlayback start request for {}",
                                                 id
                                             );
                                         } else {
@@ -371,6 +420,7 @@ impl PlaylistManager {
                                                     protocol::PlaybackMessage::PlayTrackById(id),
                                                 ),
                                             );
+                                            self.pending_start_track_id = Some(playing_track_id);
                                         }
                                     }
                                 }
@@ -716,6 +766,7 @@ impl PlaylistManager {
                                 // Remove from cached list since it's no longer cached at offset 0
                                 self.cached_track_ids.remove(&track_id);
                                 self.fully_cached_track_ids.remove(&track_id);
+                                self.pending_start_track_id = None;
                                 self.started_track_id = None;
                                 self.requested_track_offsets.clear();
 
@@ -843,6 +894,8 @@ impl PlaylistManager {
     }
 
     fn clear_cached_tracks(&mut self) {
+        self.pending_start_track_id = None;
+        self.started_track_id = None;
         self.cached_track_ids.clear();
         self.fully_cached_track_ids.clear();
         self.requested_track_offsets.clear();
@@ -855,6 +908,7 @@ impl PlaylistManager {
     }
 
     fn stop_decoding(&mut self) {
+        self.pending_start_track_id = None;
         self.requested_track_offsets.clear();
         let _ = self.bus_producer.send(protocol::Message::Audio(
             protocol::AudioMessage::StopDecoding,
@@ -1519,6 +1573,200 @@ mod tests {
                     .iter()
                     .any(|track| track.id == id1 && track.start_offset_ms == 0),
                 _ => false,
+            },
+        );
+    }
+
+    #[test]
+    fn test_ready_for_playback_for_non_current_track_is_ignored() {
+        let mut harness = PlaylistManagerHarness::new();
+        let (_id0, _) = harness.add_track("pm_ready_non_current_0");
+        let (id1, _) = harness.add_track("pm_ready_non_current_1");
+        harness.drain_messages();
+
+        harness.send(protocol::Message::Playback(
+            protocol::PlaybackMessage::PlayTrackByIndex(0),
+        ));
+        let _ = wait_for_message(&mut harness.receiver, Duration::from_secs(1), |message| {
+            matches!(
+                message,
+                protocol::Message::Playlist(protocol::PlaylistMessage::PlaylistIndicesChanged {
+                    is_playing: true,
+                    playing_index: Some(0),
+                    ..
+                })
+            )
+        });
+
+        harness.drain_messages();
+        harness.send(protocol::Message::Playback(
+            protocol::PlaybackMessage::ReadyForPlayback(id1.clone()),
+        ));
+
+        assert_no_message(
+            &mut harness.receiver,
+            Duration::from_millis(250),
+            |message| {
+                matches!(
+                    message,
+                    protocol::Message::Playback(protocol::PlaybackMessage::PlayTrackById(id))
+                        if id == &id1
+                )
+            },
+        );
+    }
+
+    #[test]
+    fn test_duplicate_ready_for_playback_before_start_emits_single_play_request() {
+        let mut harness = PlaylistManagerHarness::new();
+        let (id0, _) = harness.add_track("pm_dup_ready_0");
+        harness.drain_messages();
+
+        harness.send(protocol::Message::Playback(
+            protocol::PlaybackMessage::PlayTrackByIndex(0),
+        ));
+        let _ = wait_for_message(&mut harness.receiver, Duration::from_secs(1), |message| {
+            matches!(
+                message,
+                protocol::Message::Playlist(protocol::PlaylistMessage::PlaylistIndicesChanged {
+                    is_playing: true,
+                    playing_index: Some(0),
+                    ..
+                })
+            )
+        });
+
+        harness.drain_messages();
+        harness.send(protocol::Message::Playback(
+            protocol::PlaybackMessage::ReadyForPlayback(id0.clone()),
+        ));
+        let _ = wait_for_message(&mut harness.receiver, Duration::from_secs(1), |message| {
+            matches!(
+                message,
+                protocol::Message::Playback(protocol::PlaybackMessage::PlayTrackById(id))
+                    if id == &id0
+            )
+        });
+
+        harness.send(protocol::Message::Playback(
+            protocol::PlaybackMessage::ReadyForPlayback(id0.clone()),
+        ));
+        assert_no_message(
+            &mut harness.receiver,
+            Duration::from_millis(250),
+            |message| {
+                matches!(
+                    message,
+                    protocol::Message::Playback(protocol::PlaybackMessage::PlayTrackById(id))
+                        if id == &id0
+                )
+            },
+        );
+    }
+
+    #[test]
+    fn test_stale_track_finished_is_ignored() {
+        let mut harness = PlaylistManagerHarness::new();
+        let (id0, _) = harness.add_track("pm_stale_finish_0");
+        let (_id1, _) = harness.add_track("pm_stale_finish_1");
+        harness.drain_messages();
+
+        harness.send(protocol::Message::Playback(
+            protocol::PlaybackMessage::PlayTrackByIndex(0),
+        ));
+        let _ = wait_for_message(&mut harness.receiver, Duration::from_secs(1), |message| {
+            matches!(
+                message,
+                protocol::Message::Playlist(protocol::PlaylistMessage::PlaylistIndicesChanged {
+                    is_playing: true,
+                    playing_index: Some(0),
+                    ..
+                })
+            )
+        });
+
+        harness.send(protocol::Message::Playback(
+            protocol::PlaybackMessage::TrackFinished(id0.clone()),
+        ));
+        let _ = wait_for_message(&mut harness.receiver, Duration::from_secs(1), |message| {
+            matches!(
+                message,
+                protocol::Message::Playlist(protocol::PlaylistMessage::PlaylistIndicesChanged {
+                    is_playing: true,
+                    playing_index: Some(1),
+                    ..
+                })
+            )
+        });
+
+        harness.drain_messages();
+        harness.send(protocol::Message::Playback(
+            protocol::PlaybackMessage::TrackFinished(id0),
+        ));
+
+        assert_no_message(
+            &mut harness.receiver,
+            Duration::from_millis(250),
+            |message| {
+                matches!(
+                    message,
+                    protocol::Message::Playback(protocol::PlaybackMessage::Stop)
+                        | protocol::Message::Playlist(protocol::PlaylistMessage::TrackFinished)
+                )
+            },
+        );
+    }
+
+    #[test]
+    fn test_stale_track_started_is_ignored() {
+        let mut harness = PlaylistManagerHarness::new();
+        let (id0, _) = harness.add_track("pm_stale_started_0");
+        let (_id1, _) = harness.add_track("pm_stale_started_1");
+        harness.drain_messages();
+
+        harness.send(protocol::Message::Playback(
+            protocol::PlaybackMessage::PlayTrackByIndex(0),
+        ));
+        let _ = wait_for_message(&mut harness.receiver, Duration::from_secs(1), |message| {
+            matches!(
+                message,
+                protocol::Message::Playlist(protocol::PlaylistMessage::PlaylistIndicesChanged {
+                    is_playing: true,
+                    playing_index: Some(0),
+                    ..
+                })
+            )
+        });
+
+        harness.send(protocol::Message::Playback(
+            protocol::PlaybackMessage::TrackFinished(id0.clone()),
+        ));
+        let _ = wait_for_message(&mut harness.receiver, Duration::from_secs(1), |message| {
+            matches!(
+                message,
+                protocol::Message::Playlist(protocol::PlaylistMessage::PlaylistIndicesChanged {
+                    is_playing: true,
+                    playing_index: Some(1),
+                    ..
+                })
+            )
+        });
+
+        harness.drain_messages();
+        harness.send(protocol::Message::Playback(
+            protocol::PlaybackMessage::TrackStarted(protocol::TrackStarted {
+                id: id0,
+                start_offset_ms: 0,
+            }),
+        ));
+        assert_no_message(
+            &mut harness.receiver,
+            Duration::from_millis(250),
+            |message| {
+                matches!(
+                    message,
+                    protocol::Message::Playlist(protocol::PlaylistMessage::TrackStarted { .. })
+                )
             },
         );
     }
