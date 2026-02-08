@@ -1,6 +1,6 @@
 use std::hash::{Hash, Hasher};
 use std::io::Write;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use std::{
     collections::hash_map::DefaultHasher,
     path::PathBuf,
@@ -11,7 +11,7 @@ use std::{
 
 use governor::state::NotKeyed;
 use id3::{Tag, TagLike};
-use log::debug;
+use log::{debug, info, warn};
 use slint::{Model, ModelRc, StandardListViewItem, VecModel};
 use tokio::sync::broadcast::{Receiver, Sender};
 
@@ -45,6 +45,12 @@ pub struct UiManager {
     last_total_ms: u64,
     current_playing_track_path: Option<PathBuf>,
     current_playing_track_metadata: Option<protocol::DetailedMetadata>,
+    playback_active: bool,
+    processed_message_count: u64,
+    lagged_message_count: u64,
+    last_message_at: Instant,
+    last_progress_at: Option<Instant>,
+    last_health_log_at: Instant,
 }
 
 #[derive(Clone)]
@@ -115,7 +121,66 @@ impl UiManager {
             last_total_ms: 0,
             current_playing_track_path: None,
             current_playing_track_metadata: None,
+            playback_active: false,
+            processed_message_count: 0,
+            lagged_message_count: 0,
+            last_message_at: Instant::now(),
+            last_progress_at: None,
+            last_health_log_at: Instant::now(),
         }
+    }
+
+    fn on_message_received(&mut self) {
+        let now = Instant::now();
+        self.processed_message_count = self.processed_message_count.saturating_add(1);
+        self.log_health_if_due(now);
+        self.last_message_at = now;
+    }
+
+    fn on_message_lagged(&mut self) {
+        self.lagged_message_count = self.lagged_message_count.saturating_add(1);
+        let now = Instant::now();
+        if now.duration_since(self.last_health_log_at) >= Duration::from_secs(5) {
+            warn!(
+                "UiManager: bus lagged. total_lagged={}, processed={}",
+                self.lagged_message_count, self.processed_message_count
+            );
+            self.last_health_log_at = now;
+        }
+    }
+
+    fn log_health_if_due(&mut self, now: Instant) {
+        if now.duration_since(self.last_health_log_at) < Duration::from_secs(5) {
+            return;
+        }
+
+        let since_last_message_ms = now.duration_since(self.last_message_at).as_millis();
+        let since_last_progress_ms = self
+            .last_progress_at
+            .map(|last| now.duration_since(last).as_millis() as u64);
+        info!(
+            "UiManager health: processed={}, lagged={}, playback_active={}, since_last_message_ms={}, since_last_progress_ms={:?}",
+            self.processed_message_count,
+            self.lagged_message_count,
+            self.playback_active,
+            since_last_message_ms,
+            since_last_progress_ms
+        );
+
+        if self.playback_active {
+            if let Some(last_progress_at) = self.last_progress_at {
+                if now.duration_since(last_progress_at) > Duration::from_secs(2) {
+                    warn!(
+                        "UiManager: playback is active but no progress message for {}ms",
+                        now.duration_since(last_progress_at).as_millis()
+                    );
+                }
+            } else {
+                warn!("UiManager: playback is active but no progress message received yet");
+            }
+        }
+
+        self.last_health_log_at = now;
     }
 
     fn find_cover_art(track_path: &PathBuf) -> Option<PathBuf> {
@@ -444,335 +509,318 @@ impl UiManager {
     pub fn run(&mut self) {
         loop {
             match self.bus_receiver.blocking_recv() {
-                Ok(message) => match message {
-                    protocol::Message::Playlist(protocol::PlaylistMessage::PlaylistsRestored(
-                        playlists,
-                    )) => {
-                        let old_len = self.playlist_ids.len();
-                        self.playlist_ids = playlists.iter().map(|p| p.id.clone()).collect();
-                        let new_len = self.playlist_ids.len();
-                        let mut slint_playlists = Vec::new();
-                        for p in playlists {
-                            slint_playlists.push(StandardListViewItem::from(p.name.as_str()));
-                        }
-
-                        let _ = self.ui.upgrade_in_event_loop(move |ui| {
-                            ui.set_playlists(ModelRc::from(Rc::new(VecModel::from(
-                                slint_playlists,
-                            ))));
-                            if new_len > old_len && old_len > 0 {
-                                ui.set_editing_playlist_index((new_len - 1) as i32);
+                Ok(message) => {
+                    self.on_message_received();
+                    match message {
+                        protocol::Message::Playlist(
+                            protocol::PlaylistMessage::PlaylistsRestored(playlists),
+                        ) => {
+                            let old_len = self.playlist_ids.len();
+                            self.playlist_ids = playlists.iter().map(|p| p.id.clone()).collect();
+                            let new_len = self.playlist_ids.len();
+                            let mut slint_playlists = Vec::new();
+                            for p in playlists {
+                                slint_playlists.push(StandardListViewItem::from(p.name.as_str()));
                             }
-                        });
-                    }
-                    protocol::Message::Playlist(
-                        protocol::PlaylistMessage::ActivePlaylistChanged(id),
-                    ) => {
-                        self.active_playlist_id = id.clone();
-                        if let Some(index) = self.playlist_ids.iter().position(|p_id| p_id == &id) {
+
                             let _ = self.ui.upgrade_in_event_loop(move |ui| {
-                                ui.set_active_playlist_index(index as i32);
-                            });
-                        }
-                    }
-                    protocol::Message::Playlist(protocol::PlaylistMessage::PlaylistRestored(
-                        tracks,
-                    )) => {
-                        self.track_ids.clear();
-                        self.track_paths.clear();
-                        self.track_metadata.clear();
-
-                        let mut track_data = Vec::new();
-                        for track in tracks {
-                            self.track_ids.push(track.id.clone());
-                            self.track_paths.push(track.path.clone());
-                            self.track_metadata.push(TrackMetadata {
-                                title: track.metadata.title.clone(),
-                                artist: track.metadata.artist.clone(),
-                                album: track.metadata.album.clone(),
-                                date: track.metadata.date.clone(),
-                                genre: track.metadata.genre.clone(),
-                            });
-
-                            track_data.push(TrackRowData {
-                                status: "".into(),
-                                title: track.metadata.title.clone().into(),
-                                artist: track.metadata.artist.clone().into(),
-                                album: track.metadata.album.clone().into(),
-                                selected: false,
-                            });
-                        }
-
-                        let _ = self.ui.upgrade_in_event_loop(move |ui| {
-                            let track_model_strong = ui.get_track_model();
-                            let track_model = track_model_strong
-                                .as_any()
-                                .downcast_ref::<VecModel<TrackRowData>>()
-                                .expect("VecModel<TrackRowData> expected");
-
-                            while track_model.row_count() > 0 {
-                                track_model.remove(0);
-                            }
-
-                            for track in track_data {
-                                track_model.push(track);
-                            }
-                        });
-                    }
-                    protocol::Message::Playlist(protocol::PlaylistMessage::TrackAdded {
-                        id,
-                        path,
-                    }) => {
-                        self.track_ids.push(id.clone());
-                        self.track_paths.push(path.clone());
-                        let tags = self.read_track_metadata(&path);
-                        self.track_metadata.push(tags.clone());
-
-                        let _ = self.bus_sender.send(protocol::Message::Playlist(
-                            protocol::PlaylistMessage::UpdateMetadata {
-                                id,
-                                metadata: protocol::DetailedMetadata {
-                                    title: tags.title.clone(),
-                                    artist: tags.artist.clone(),
-                                    album: tags.album.clone(),
-                                    date: tags.date.clone(),
-                                    genre: tags.genre.clone(),
-                                },
-                            },
-                        ));
-
-                        let _ = self.ui.upgrade_in_event_loop(move |ui| {
-                            let track_model_strong = ui.get_track_model();
-                            let track_model = track_model_strong
-                                .as_any()
-                                .downcast_ref::<VecModel<TrackRowData>>()
-                                .expect("VecModel<TrackRowData> expected");
-                            track_model.push(TrackRowData {
-                                status: "".into(),
-                                title: tags.title.clone().into(),
-                                artist: tags.artist.clone().into(),
-                                album: tags.album.clone().into(),
-                                selected: false,
-                            });
-                        });
-                    }
-                    protocol::Message::Playlist(protocol::PlaylistMessage::DeleteTracks(
-                        mut indices,
-                    )) => {
-                        indices.sort_by(|a, b| b.cmp(a));
-                        let indices_to_remove = indices.clone();
-
-                        for index in indices {
-                            if index < self.track_ids.len() {
-                                self.track_ids.remove(index);
-                            }
-                            if index < self.track_paths.len() {
-                                self.track_paths.remove(index);
-                            }
-                            if index < self.track_metadata.len() {
-                                self.track_metadata.remove(index);
-                            }
-                        }
-
-                        let _ = self.ui.upgrade_in_event_loop(move |ui| {
-                            let track_model_strong = ui.get_track_model();
-                            let track_model = track_model_strong
-                                .as_any()
-                                .downcast_ref::<VecModel<TrackRowData>>()
-                                .expect("VecModel<TrackRowData> expected");
-
-                            for index in indices_to_remove {
-                                if index < track_model.row_count() {
-                                    track_model.remove(index);
+                                ui.set_playlists(ModelRc::from(Rc::new(VecModel::from(
+                                    slint_playlists,
+                                ))));
+                                if new_len > old_len && old_len > 0 {
+                                    ui.set_editing_playlist_index((new_len - 1) as i32);
                                 }
-                            }
-                        });
-                    }
-                    protocol::Message::Playlist(protocol::PlaylistMessage::DeleteSelected) => {
-                        if self.selected_indices.is_empty() {
-                            continue;
+                            });
                         }
-                        let indices = self.selected_indices.clone();
-                        let _ = self.bus_sender.send(protocol::Message::Playlist(
-                            protocol::PlaylistMessage::DeleteTracks(indices),
-                        ));
-                    }
-                    protocol::Message::Playback(protocol::PlaybackMessage::PlayTrackByIndex(
-                        index,
-                    )) => {
-                        let _ = self.ui.upgrade_in_event_loop(move |ui| {
-                            let track_model_strong = ui.get_track_model();
-                            let track_model = track_model_strong
-                                .as_any()
-                                .downcast_ref::<VecModel<TrackRowData>>()
-                                .expect("VecModel<TrackRowData> expected");
-
-                            let mut title = slint::SharedString::new();
-                            let mut artist = slint::SharedString::new();
-
-                            for i in 0..track_model.row_count() {
-                                let mut row = track_model.row_data(i).unwrap();
-                                if i == index {
-                                    row.status = "▶️".into();
-                                    title = row.title.clone();
-                                    artist = row.artist.clone();
-                                    track_model.set_row_data(i, row);
-                                } else if !row.status.is_empty() {
-                                    row.status = "".into();
-                                    track_model.set_row_data(i, row);
-                                }
+                        protocol::Message::Playlist(
+                            protocol::PlaylistMessage::ActivePlaylistChanged(id),
+                        ) => {
+                            self.active_playlist_id = id.clone();
+                            if let Some(index) =
+                                self.playlist_ids.iter().position(|p_id| p_id == &id)
+                            {
+                                let _ = self.ui.upgrade_in_event_loop(move |ui| {
+                                    ui.set_active_playlist_index(index as i32);
+                                });
                             }
-                            ui.set_playing_track_index(index as i32);
-                            if !artist.is_empty() {
-                                ui.set_status_text(format!("{} - {}", artist, title).into());
-                            } else {
-                                ui.set_status_text(title);
+                        }
+                        protocol::Message::Playlist(
+                            protocol::PlaylistMessage::PlaylistRestored(tracks),
+                        ) => {
+                            self.track_ids.clear();
+                            self.track_paths.clear();
+                            self.track_metadata.clear();
+
+                            let mut track_data = Vec::new();
+                            for track in tracks {
+                                self.track_ids.push(track.id.clone());
+                                self.track_paths.push(track.path.clone());
+                                self.track_metadata.push(TrackMetadata {
+                                    title: track.metadata.title.clone(),
+                                    artist: track.metadata.artist.clone(),
+                                    album: track.metadata.album.clone(),
+                                    date: track.metadata.date.clone(),
+                                    genre: track.metadata.genre.clone(),
+                                });
+
+                                track_data.push(TrackRowData {
+                                    status: "".into(),
+                                    title: track.metadata.title.clone().into(),
+                                    artist: track.metadata.artist.clone().into(),
+                                    album: track.metadata.album.clone().into(),
+                                    selected: false,
+                                });
                             }
-                        });
-                    }
-                    protocol::Message::Playback(protocol::PlaybackMessage::Play) => {
-                        let _ = self.ui.upgrade_in_event_loop(move |ui| {
-                            let playing_index = ui.get_playing_track_index();
-                            if playing_index >= 0 {
+
+                            let _ = self.ui.upgrade_in_event_loop(move |ui| {
                                 let track_model_strong = ui.get_track_model();
                                 let track_model = track_model_strong
                                     .as_any()
                                     .downcast_ref::<VecModel<TrackRowData>>()
                                     .expect("VecModel<TrackRowData> expected");
-                                if (playing_index as usize) < track_model.row_count() {
-                                    let mut row =
-                                        track_model.row_data(playing_index as usize).unwrap();
-                                    let title = row.title.clone();
-                                    let artist = row.artist.clone();
-                                    row.status = "▶️".into();
-                                    track_model.set_row_data(playing_index as usize, row);
-                                    if !artist.is_empty() {
-                                        ui.set_status_text(
-                                            format!("{} - {}", artist, title).into(),
-                                        );
-                                    } else {
-                                        ui.set_status_text(title);
+
+                                while track_model.row_count() > 0 {
+                                    track_model.remove(0);
+                                }
+
+                                for track in track_data {
+                                    track_model.push(track);
+                                }
+                            });
+                        }
+                        protocol::Message::Playlist(protocol::PlaylistMessage::TrackAdded {
+                            id,
+                            path,
+                        }) => {
+                            self.track_ids.push(id.clone());
+                            self.track_paths.push(path.clone());
+                            let tags = self.read_track_metadata(&path);
+                            self.track_metadata.push(tags.clone());
+
+                            let _ = self.bus_sender.send(protocol::Message::Playlist(
+                                protocol::PlaylistMessage::UpdateMetadata {
+                                    id,
+                                    metadata: protocol::DetailedMetadata {
+                                        title: tags.title.clone(),
+                                        artist: tags.artist.clone(),
+                                        album: tags.album.clone(),
+                                        date: tags.date.clone(),
+                                        genre: tags.genre.clone(),
+                                    },
+                                },
+                            ));
+
+                            let _ = self.ui.upgrade_in_event_loop(move |ui| {
+                                let track_model_strong = ui.get_track_model();
+                                let track_model = track_model_strong
+                                    .as_any()
+                                    .downcast_ref::<VecModel<TrackRowData>>()
+                                    .expect("VecModel<TrackRowData> expected");
+                                track_model.push(TrackRowData {
+                                    status: "".into(),
+                                    title: tags.title.clone().into(),
+                                    artist: tags.artist.clone().into(),
+                                    album: tags.album.clone().into(),
+                                    selected: false,
+                                });
+                            });
+                        }
+                        protocol::Message::Playlist(protocol::PlaylistMessage::DeleteTracks(
+                            mut indices,
+                        )) => {
+                            indices.sort_by(|a, b| b.cmp(a));
+                            let indices_to_remove = indices.clone();
+
+                            for index in indices {
+                                if index < self.track_ids.len() {
+                                    self.track_ids.remove(index);
+                                }
+                                if index < self.track_paths.len() {
+                                    self.track_paths.remove(index);
+                                }
+                                if index < self.track_metadata.len() {
+                                    self.track_metadata.remove(index);
+                                }
+                            }
+
+                            let _ = self.ui.upgrade_in_event_loop(move |ui| {
+                                let track_model_strong = ui.get_track_model();
+                                let track_model = track_model_strong
+                                    .as_any()
+                                    .downcast_ref::<VecModel<TrackRowData>>()
+                                    .expect("VecModel<TrackRowData> expected");
+
+                                for index in indices_to_remove {
+                                    if index < track_model.row_count() {
+                                        track_model.remove(index);
                                     }
                                 }
-                            }
-                        });
-                    }
-                    protocol::Message::Playback(protocol::PlaybackMessage::Pause) => {
-                        let _ = self.ui.upgrade_in_event_loop(move |ui| {
-                            let playing_index = ui.get_playing_track_index();
-                            let track_model_strong = ui.get_track_model();
-                            let track_model = track_model_strong
-                                .as_any()
-                                .downcast_ref::<VecModel<TrackRowData>>()
-                                .expect("VecModel<TrackRowData> expected");
-
-                            if playing_index >= 0
-                                && (playing_index as usize) < track_model.row_count()
-                            {
-                                let mut row = track_model.row_data(playing_index as usize).unwrap();
-                                row.status = "⏸️".into();
-                                track_model.set_row_data(playing_index as usize, row);
-                            }
-                        });
-                    }
-                    protocol::Message::Playback(protocol::PlaybackMessage::PlaybackProgress {
-                        elapsed_ms,
-                        total_ms,
-                    }) => {
-                        if self.progress_rl.check().is_ok() {
-                            // Check if the displayed second has changed (for text updates)
-                            let elapsed_secs = elapsed_ms / 1000;
-                            let last_elapsed_secs = self.last_elapsed_ms / 1000;
-                            let time_text_changed =
-                                elapsed_secs != last_elapsed_secs || total_ms != self.last_total_ms;
-
-                            // Always compute percentage for smooth progress bar
-                            let percentage = if total_ms > 0 {
-                                elapsed_ms as f32 / total_ms as f32
-                            } else {
-                                0.0
-                            };
-
-                            if time_text_changed {
-                                // Update cached values and set integer ms properties
-                                // This triggers Slint's pure functions to recompute text
-                                self.last_elapsed_ms = elapsed_ms;
-                                self.last_total_ms = total_ms;
-
-                                let elapsed_ms_i32 = elapsed_ms as i32;
-                                let total_ms_i32 = total_ms as i32;
-
-                                let _ = self.ui.upgrade_in_event_loop(move |ui| {
-                                    ui.set_elapsed_ms(elapsed_ms_i32);
-                                    ui.set_total_ms(total_ms_i32);
-                                    ui.set_position_percentage(percentage);
-                                });
-                            } else {
-                                // Just update the progress bar percentage for smooth animation
-                                let _ = self.ui.upgrade_in_event_loop(move |ui| {
-                                    ui.set_position_percentage(percentage);
-                                });
-                            }
+                            });
                         }
-                    }
-                    protocol::Message::Playback(
-                        protocol::PlaybackMessage::TechnicalMetadataChanged(meta),
-                    ) => {
-                        debug!("UiManager: Technical metadata changed: {:?}", meta);
-                        let _ = self.ui.upgrade_in_event_loop(move |ui| {
-                            ui.set_technical_info(
-                                format!(
-                                    "{} | {} kbps | {} Hz",
-                                    meta.format, meta.bitrate_kbps, meta.sample_rate_hz
-                                )
-                                .into(),
-                            );
-                        });
-                    }
-                    protocol::Message::Playback(protocol::PlaybackMessage::Stop) => {
-                        self.current_playing_track_path = None;
-                        self.current_playing_track_metadata = None;
-                        let selected_indices = self.selected_indices.clone();
-                        self.update_display_for_selection(&selected_indices, None, None);
+                        protocol::Message::Playlist(protocol::PlaylistMessage::DeleteSelected) => {
+                            if self.selected_indices.is_empty() {
+                                continue;
+                            }
+                            let indices = self.selected_indices.clone();
+                            let _ = self.bus_sender.send(protocol::Message::Playlist(
+                                protocol::PlaylistMessage::DeleteTracks(indices),
+                            ));
+                        }
+                        protocol::Message::Playback(
+                            protocol::PlaybackMessage::PlayTrackByIndex(index),
+                        ) => {
+                            let _ = self.ui.upgrade_in_event_loop(move |ui| {
+                                let track_model_strong = ui.get_track_model();
+                                let track_model = track_model_strong
+                                    .as_any()
+                                    .downcast_ref::<VecModel<TrackRowData>>()
+                                    .expect("VecModel<TrackRowData> expected");
 
-                        // Reset cached progress values
-                        self.last_elapsed_ms = 0;
-                        self.last_total_ms = 0;
+                                let mut title = slint::SharedString::new();
+                                let mut artist = slint::SharedString::new();
 
-                        let _ = self.ui.upgrade_in_event_loop(move |ui| {
-                            ui.set_technical_info("".into());
-                            ui.set_status_text("No track selected".into());
-                            ui.set_position_percentage(0.0);
-                            ui.set_elapsed_ms(0);
-                            ui.set_total_ms(0);
+                                for i in 0..track_model.row_count() {
+                                    let mut row = track_model.row_data(i).unwrap();
+                                    if i == index {
+                                        row.status = "▶️".into();
+                                        title = row.title.clone();
+                                        artist = row.artist.clone();
+                                        track_model.set_row_data(i, row);
+                                    } else if !row.status.is_empty() {
+                                        row.status = "".into();
+                                        track_model.set_row_data(i, row);
+                                    }
+                                }
+                                ui.set_playing_track_index(index as i32);
+                                if !artist.is_empty() {
+                                    ui.set_status_text(format!("{} - {}", artist, title).into());
+                                } else {
+                                    ui.set_status_text(title);
+                                }
+                            });
+                        }
+                        protocol::Message::Playback(protocol::PlaybackMessage::Play) => {
+                            let _ = self.ui.upgrade_in_event_loop(move |ui| {
+                                let playing_index = ui.get_playing_track_index();
+                                if playing_index >= 0 {
+                                    let track_model_strong = ui.get_track_model();
+                                    let track_model = track_model_strong
+                                        .as_any()
+                                        .downcast_ref::<VecModel<TrackRowData>>()
+                                        .expect("VecModel<TrackRowData> expected");
+                                    if (playing_index as usize) < track_model.row_count() {
+                                        let mut row =
+                                            track_model.row_data(playing_index as usize).unwrap();
+                                        let title = row.title.clone();
+                                        let artist = row.artist.clone();
+                                        row.status = "▶️".into();
+                                        track_model.set_row_data(playing_index as usize, row);
+                                        if !artist.is_empty() {
+                                            ui.set_status_text(
+                                                format!("{} - {}", artist, title).into(),
+                                            );
+                                        } else {
+                                            ui.set_status_text(title);
+                                        }
+                                    }
+                                }
+                            });
+                        }
+                        protocol::Message::Playback(protocol::PlaybackMessage::Pause) => {
+                            let _ = self.ui.upgrade_in_event_loop(move |ui| {
+                                let playing_index = ui.get_playing_track_index();
+                                let track_model_strong = ui.get_track_model();
+                                let track_model = track_model_strong
+                                    .as_any()
+                                    .downcast_ref::<VecModel<TrackRowData>>()
+                                    .expect("VecModel<TrackRowData> expected");
 
-                            let track_model_strong = ui.get_track_model();
-                            let track_model = track_model_strong
-                                .as_any()
-                                .downcast_ref::<VecModel<TrackRowData>>()
-                                .expect("VecModel<TrackRowData> expected");
+                                if playing_index >= 0
+                                    && (playing_index as usize) < track_model.row_count()
+                                {
+                                    let mut row =
+                                        track_model.row_data(playing_index as usize).unwrap();
+                                    row.status = "⏸️".into();
+                                    track_model.set_row_data(playing_index as usize, row);
+                                }
+                            });
+                        }
+                        protocol::Message::Playback(
+                            protocol::PlaybackMessage::PlaybackProgress {
+                                elapsed_ms,
+                                total_ms,
+                            },
+                        ) => {
+                            self.last_progress_at = Some(Instant::now());
+                            if self.progress_rl.check().is_ok() {
+                                // Check if the displayed second has changed (for text updates)
+                                let elapsed_secs = elapsed_ms / 1000;
+                                let last_elapsed_secs = self.last_elapsed_ms / 1000;
+                                let time_text_changed = elapsed_secs != last_elapsed_secs
+                                    || total_ms != self.last_total_ms;
 
-                            for i in 0..track_model.row_count() {
-                                let mut row = track_model.row_data(i).unwrap();
-                                if !row.status.is_empty() {
-                                    row.status = "".into();
-                                    track_model.set_row_data(i, row);
+                                // Always compute percentage for smooth progress bar
+                                let percentage = if total_ms > 0 {
+                                    elapsed_ms as f32 / total_ms as f32
+                                } else {
+                                    0.0
+                                };
+
+                                if time_text_changed {
+                                    // Update cached values and set integer ms properties
+                                    // This triggers Slint's pure functions to recompute text
+                                    self.last_elapsed_ms = elapsed_ms;
+                                    self.last_total_ms = total_ms;
+
+                                    let elapsed_ms_i32 = elapsed_ms as i32;
+                                    let total_ms_i32 = total_ms as i32;
+
+                                    let _ = self.ui.upgrade_in_event_loop(move |ui| {
+                                        ui.set_elapsed_ms(elapsed_ms_i32);
+                                        ui.set_total_ms(total_ms_i32);
+                                        ui.set_position_percentage(percentage);
+                                    });
+                                } else {
+                                    // Just update the progress bar percentage for smooth animation
+                                    let _ = self.ui.upgrade_in_event_loop(move |ui| {
+                                        ui.set_position_percentage(percentage);
+                                    });
                                 }
                             }
-                            ui.set_playing_track_index(-1);
-                        });
-                    }
-                    protocol::Message::Playlist(protocol::PlaylistMessage::TrackStarted {
-                        index,
-                        playlist_id,
-                        metadata,
-                    }) => {
-                        let is_active_playlist = playlist_id == self.active_playlist_id;
-                        let title = metadata.title.clone();
-                        let artist = metadata.artist.clone();
+                        }
+                        protocol::Message::Playback(
+                            protocol::PlaybackMessage::TechnicalMetadataChanged(meta),
+                        ) => {
+                            debug!("UiManager: Technical metadata changed: {:?}", meta);
+                            let _ = self.ui.upgrade_in_event_loop(move |ui| {
+                                ui.set_technical_info(
+                                    format!(
+                                        "{} | {} kbps | {} Hz",
+                                        meta.format, meta.bitrate_kbps, meta.sample_rate_hz
+                                    )
+                                    .into(),
+                                );
+                            });
+                        }
+                        protocol::Message::Playback(protocol::PlaybackMessage::Stop) => {
+                            self.playback_active = false;
+                            self.last_progress_at = None;
+                            self.current_playing_track_path = None;
+                            self.current_playing_track_metadata = None;
+                            let selected_indices = self.selected_indices.clone();
+                            self.update_display_for_selection(&selected_indices, None, None);
 
-                        let _ = self.ui.upgrade_in_event_loop(move |ui| {
-                            if is_active_playlist {
+                            // Reset cached progress values
+                            self.last_elapsed_ms = 0;
+                            self.last_total_ms = 0;
+
+                            let _ = self.ui.upgrade_in_event_loop(move |ui| {
+                                ui.set_technical_info("".into());
+                                ui.set_status_text("No track selected".into());
+                                ui.set_position_percentage(0.0);
+                                ui.set_elapsed_ms(0);
+                                ui.set_total_ms(0);
+
                                 let track_model_strong = ui.get_track_model();
                                 let track_model = track_model_strong
                                     .as_any()
@@ -781,333 +829,369 @@ impl UiManager {
 
                                 for i in 0..track_model.row_count() {
                                     let mut row = track_model.row_data(i).unwrap();
-                                    if i == index {
-                                        row.status = "▶️".into();
+                                    if !row.status.is_empty() {
+                                        row.status = "".into();
+                                        track_model.set_row_data(i, row);
+                                    }
+                                }
+                                ui.set_playing_track_index(-1);
+                            });
+                        }
+                        protocol::Message::Playlist(protocol::PlaylistMessage::TrackStarted {
+                            index,
+                            playlist_id,
+                            metadata,
+                        }) => {
+                            let is_active_playlist = playlist_id == self.active_playlist_id;
+                            let title = metadata.title.clone();
+                            let artist = metadata.artist.clone();
+
+                            let _ = self.ui.upgrade_in_event_loop(move |ui| {
+                                if is_active_playlist {
+                                    let track_model_strong = ui.get_track_model();
+                                    let track_model = track_model_strong
+                                        .as_any()
+                                        .downcast_ref::<VecModel<TrackRowData>>()
+                                        .expect("VecModel<TrackRowData> expected");
+
+                                    for i in 0..track_model.row_count() {
+                                        let mut row = track_model.row_data(i).unwrap();
+                                        if i == index {
+                                            row.status = "▶️".into();
+                                            track_model.set_row_data(i, row);
+                                        } else if !row.status.is_empty() {
+                                            row.status = "".into();
+                                            track_model.set_row_data(i, row);
+                                        }
+                                    }
+                                    ui.set_selected_track_index(index as i32);
+                                    ui.set_playing_track_index(index as i32);
+                                } else {
+                                    ui.set_playing_track_index(-1);
+                                }
+
+                                if !artist.is_empty() {
+                                    ui.set_status_text(format!("{} - {}", artist, title).into());
+                                } else {
+                                    ui.set_status_text(title.into());
+                                }
+                            });
+                        }
+                        protocol::Message::Playlist(
+                            protocol::PlaylistMessage::PlaylistIndicesChanged {
+                                playing_playlist_id,
+                                playing_index,
+                                playing_track_path,
+                                playing_track_metadata,
+                                selected_indices,
+                                is_playing,
+                                playback_order,
+                                repeat_mode,
+                            },
+                        ) => {
+                            self.playback_active = is_playing;
+                            if !is_playing {
+                                self.last_progress_at = None;
+                            }
+                            let selected_indices_clone = selected_indices.clone();
+                            self.selected_indices = selected_indices_clone.clone();
+                            let is_playing_active_playlist =
+                                playing_playlist_id.as_ref() == Some(&self.active_playlist_id);
+
+                            self.current_playing_track_path = playing_track_path.clone();
+                            self.current_playing_track_metadata = playing_track_metadata.clone();
+                            self.update_display_for_selection(
+                                &selected_indices,
+                                playing_track_path.as_ref(),
+                                playing_track_metadata.as_ref(),
+                            );
+
+                            let _ = self.ui.upgrade_in_event_loop(move |ui| {
+                                if is_playing_active_playlist {
+                                    ui.set_playing_track_index(
+                                        playing_index.map(|i| i as i32).unwrap_or(-1),
+                                    );
+                                } else {
+                                    ui.set_playing_track_index(-1);
+                                }
+
+                                let repeat_int = match repeat_mode {
+                                    protocol::RepeatMode::Off => 0,
+                                    protocol::RepeatMode::Playlist => 1,
+                                    protocol::RepeatMode::Track => 2,
+                                };
+                                ui.set_repeat_mode(repeat_int);
+
+                                let order_int = match playback_order {
+                                    protocol::PlaybackOrder::Default => 0,
+                                    protocol::PlaybackOrder::Shuffle => 1,
+                                    protocol::PlaybackOrder::Random => 2,
+                                };
+                                ui.set_playback_order_index(order_int);
+
+                                ui.set_selected_track_index(
+                                    selected_indices_clone
+                                        .first()
+                                        .copied()
+                                        .map(|i| i as i32)
+                                        .unwrap_or(-1),
+                                );
+
+                                let track_model_strong = ui.get_track_model();
+                                let track_model = track_model_strong
+                                    .as_any()
+                                    .downcast_ref::<VecModel<TrackRowData>>()
+                                    .expect("VecModel<TrackRowData> expected");
+
+                                for i in 0..track_model.row_count() {
+                                    let mut row = track_model.row_data(i).unwrap();
+                                    let was_selected = row.selected;
+                                    let should_be_selected = selected_indices_clone.contains(&i);
+
+                                    if was_selected != should_be_selected {
+                                        row.selected = should_be_selected;
+                                        track_model.set_row_data(i, row);
+                                    }
+                                }
+
+                                for i in 0..track_model.row_count() {
+                                    let mut row = track_model.row_data(i).unwrap();
+                                    if is_playing_active_playlist && playing_index == Some(i) {
+                                        let emoji = if is_playing { "▶️" } else { "⏸️" };
+                                        row.status = emoji.into();
                                         track_model.set_row_data(i, row);
                                     } else if !row.status.is_empty() {
                                         row.status = "".into();
                                         track_model.set_row_data(i, row);
                                     }
                                 }
-                                ui.set_selected_track_index(index as i32);
-                                ui.set_playing_track_index(index as i32);
-                            } else {
-                                ui.set_playing_track_index(-1);
+                            });
+                        }
+                        protocol::Message::Playlist(
+                            protocol::PlaylistMessage::SelectionChanged(indices),
+                        ) => {
+                            debug!(
+                                "SelectionChanged: setting selected_indices to {:?}",
+                                indices
+                            );
+                            let indices_clone = indices.clone();
+                            self.selected_indices = indices_clone.clone();
+                            debug!(
+                                "After SelectionChanged: self.selected_indices = {:?}",
+                                self.selected_indices
+                            );
+
+                            // Update cover art and metadata display based on selection.
+                            // If nothing is selected, fall back to the currently playing track.
+                            let playing_track_path = self.current_playing_track_path.clone();
+                            let playing_track_metadata =
+                                self.current_playing_track_metadata.clone();
+                            self.update_display_for_selection(
+                                &indices,
+                                playing_track_path.as_ref(),
+                                playing_track_metadata.as_ref(),
+                            );
+
+                            let _ = self.ui.upgrade_in_event_loop(move |ui| {
+                                let track_model_strong = ui.get_track_model();
+                                let track_model = track_model_strong
+                                    .as_any()
+                                    .downcast_ref::<VecModel<TrackRowData>>()
+                                    .expect("VecModel<TrackRowData> expected");
+
+                                for i in 0..track_model.row_count() {
+                                    let mut row = track_model.row_data(i).unwrap();
+                                    let should_be_selected = indices_clone.contains(&i);
+                                    if row.selected != should_be_selected {
+                                        row.selected = should_be_selected;
+                                        track_model.set_row_data(i, row);
+                                    }
+                                }
+                            });
+                        }
+                        protocol::Message::Playlist(protocol::PlaylistMessage::OnPointerDown {
+                            index,
+                            ctrl,
+                            shift,
+                        }) => {
+                            self.on_pointer_down(index, ctrl, shift);
+                        }
+                        protocol::Message::Playlist(protocol::PlaylistMessage::OnDragStart {
+                            pressed_index,
+                        }) => {
+                            self.on_drag_start(pressed_index);
+                        }
+                        protocol::Message::Playlist(protocol::PlaylistMessage::OnDragMove {
+                            drop_gap,
+                        }) => {
+                            self.on_drag_move(drop_gap);
+                        }
+                        protocol::Message::Playlist(protocol::PlaylistMessage::OnDragEnd {
+                            drop_gap,
+                        }) => {
+                            self.on_drag_end(drop_gap);
+                        }
+                        protocol::Message::Playlist(protocol::PlaylistMessage::ReorderTracks {
+                            indices,
+                            to,
+                        }) => {
+                            debug!("ReorderTracks: indices={:?}, to={}", indices, to);
+
+                            let indices_clone = indices.clone();
+
+                            let mut sorted_indices = indices.clone();
+                            sorted_indices.sort_unstable();
+                            sorted_indices.dedup();
+                            sorted_indices.retain(|&i| i < self.track_paths.len());
+
+                            if sorted_indices.is_empty() {
+                                continue;
                             }
 
-                            if !artist.is_empty() {
-                                ui.set_status_text(format!("{} - {}", artist, title).into());
-                            } else {
-                                ui.set_status_text(title.into());
-                            }
-                        });
-                    }
-                    protocol::Message::Playlist(
-                        protocol::PlaylistMessage::PlaylistIndicesChanged {
-                            playing_playlist_id,
-                            playing_index,
-                            playing_track_path,
-                            playing_track_metadata,
-                            selected_indices,
-                            is_playing,
-                            playback_order,
-                            repeat_mode,
-                        },
-                    ) => {
-                        let selected_indices_clone = selected_indices.clone();
-                        self.selected_indices = selected_indices_clone.clone();
-                        let is_playing_active_playlist =
-                            playing_playlist_id.as_ref() == Some(&self.active_playlist_id);
+                            let to = to.min(self.track_paths.len());
 
-                        self.current_playing_track_path = playing_track_path.clone();
-                        self.current_playing_track_metadata = playing_track_metadata.clone();
-                        self.update_display_for_selection(
-                            &selected_indices,
-                            playing_track_path.as_ref(),
-                            playing_track_metadata.as_ref(),
-                        );
+                            let first = sorted_indices[0];
+                            let last = *sorted_indices.last().unwrap();
+                            let block_len = sorted_indices.len();
 
-                        let _ = self.ui.upgrade_in_event_loop(move |ui| {
-                            if is_playing_active_playlist {
-                                ui.set_playing_track_index(
-                                    playing_index.map(|i| i as i32).unwrap_or(-1),
-                                );
-                            } else {
-                                ui.set_playing_track_index(-1);
+                            let is_contiguous = sorted_indices
+                                .iter()
+                                .enumerate()
+                                .all(|(k, &i)| i == first + k);
+
+                            if is_contiguous && to >= first && to <= last + 1 {
+                                continue;
                             }
 
+                            let mut moved_paths = Vec::new();
+                            let mut moved_ids = Vec::new();
+                            let mut moved_metadata = Vec::new();
+
+                            for &idx in sorted_indices.iter().rev() {
+                                if idx < self.track_paths.len() {
+                                    moved_paths.push(self.track_paths.remove(idx));
+                                }
+                                if idx < self.track_ids.len() {
+                                    moved_ids.push(self.track_ids.remove(idx));
+                                }
+                                if idx < self.track_metadata.len() {
+                                    moved_metadata.push(self.track_metadata.remove(idx));
+                                }
+                            }
+                            moved_paths.reverse();
+                            moved_ids.reverse();
+                            moved_metadata.reverse();
+
+                            let removed_before = sorted_indices.iter().filter(|&&i| i < to).count();
+                            let insert_at = to.saturating_sub(removed_before);
+
+                            for (i, path) in moved_paths.into_iter().enumerate() {
+                                self.track_paths.insert(insert_at + i, path);
+                            }
+                            for (i, id) in moved_ids.into_iter().enumerate() {
+                                self.track_ids.insert(insert_at + i, id);
+                            }
+                            for (i, metadata) in moved_metadata.into_iter().enumerate() {
+                                self.track_metadata.insert(insert_at + i, metadata);
+                            }
+
+                            self.selected_indices = (insert_at..insert_at + block_len).collect();
+
+                            let _ = self.ui.upgrade_in_event_loop(move |ui| {
+                                let track_model_strong = ui.get_track_model();
+                                let track_model = track_model_strong
+                                    .as_any()
+                                    .downcast_ref::<VecModel<TrackRowData>>()
+                                    .expect("VecModel<TrackRowData> expected");
+
+                                let mut sorted_indices = indices_clone.clone();
+                                sorted_indices.sort_unstable();
+                                sorted_indices.dedup();
+                                sorted_indices.retain(|&i| i < track_model.row_count());
+
+                                if sorted_indices.is_empty() {
+                                    return;
+                                }
+
+                                let to = to.min(track_model.row_count());
+                                let first = sorted_indices[0];
+                                let last = *sorted_indices.last().unwrap();
+
+                                if is_contiguous && to >= first && to <= last + 1 {
+                                    return;
+                                }
+
+                                let mut moved_rows = Vec::new();
+                                for &idx in sorted_indices.iter().rev() {
+                                    if idx < track_model.row_count() {
+                                        moved_rows.push(track_model.row_data(idx).unwrap());
+                                        track_model.remove(idx);
+                                    }
+                                }
+                                moved_rows.reverse();
+
+                                let removed_before =
+                                    sorted_indices.iter().filter(|&&i| i < to).count();
+                                let insert_at = to.saturating_sub(removed_before);
+
+                                for (i, row) in moved_rows.into_iter().enumerate() {
+                                    track_model.insert(insert_at + i, row);
+                                }
+                            });
+                        }
+                        protocol::Message::Playback(
+                            protocol::PlaybackMessage::CoverArtChanged(path),
+                        ) => {
+                            let _ = self.ui.upgrade_in_event_loop(move |ui| {
+                                if let Some(path) = path {
+                                    if let Ok(img) = slint::Image::load_from_path(&path) {
+                                        ui.set_current_cover_art(img);
+                                    } else {
+                                        ui.set_current_cover_art(slint::Image::default());
+                                    }
+                                } else {
+                                    ui.set_current_cover_art(slint::Image::default());
+                                }
+                            });
+                        }
+                        protocol::Message::Playback(
+                            protocol::PlaybackMessage::MetadataDisplayChanged(meta),
+                        ) => {
+                            let _ = self.ui.upgrade_in_event_loop(move |ui| {
+                                if let Some(meta) = meta {
+                                    ui.set_display_title(meta.title.into());
+                                    ui.set_display_artist(meta.artist.into());
+                                    ui.set_display_album(meta.album.into());
+                                    ui.set_display_date(meta.date.into());
+                                    ui.set_display_genre(meta.genre.into());
+                                } else {
+                                    ui.set_display_title("".into());
+                                    ui.set_display_artist("".into());
+                                    ui.set_display_album("".into());
+                                    ui.set_display_date("".into());
+                                    ui.set_display_genre("".into());
+                                }
+                            });
+                        }
+                        protocol::Message::Playlist(
+                            protocol::PlaylistMessage::RepeatModeChanged(repeat_mode),
+                        ) => {
+                            debug!("UiManager: Repeat mode changed: {:?}", repeat_mode);
                             let repeat_int = match repeat_mode {
                                 protocol::RepeatMode::Off => 0,
                                 protocol::RepeatMode::Playlist => 1,
                                 protocol::RepeatMode::Track => 2,
                             };
-                            ui.set_repeat_mode(repeat_int);
-
-                            let order_int = match playback_order {
-                                protocol::PlaybackOrder::Default => 0,
-                                protocol::PlaybackOrder::Shuffle => 1,
-                                protocol::PlaybackOrder::Random => 2,
-                            };
-                            ui.set_playback_order_index(order_int);
-
-                            ui.set_selected_track_index(
-                                selected_indices_clone
-                                    .first()
-                                    .copied()
-                                    .map(|i| i as i32)
-                                    .unwrap_or(-1),
-                            );
-
-                            let track_model_strong = ui.get_track_model();
-                            let track_model = track_model_strong
-                                .as_any()
-                                .downcast_ref::<VecModel<TrackRowData>>()
-                                .expect("VecModel<TrackRowData> expected");
-
-                            for i in 0..track_model.row_count() {
-                                let mut row = track_model.row_data(i).unwrap();
-                                let was_selected = row.selected;
-                                let should_be_selected = selected_indices_clone.contains(&i);
-
-                                if was_selected != should_be_selected {
-                                    row.selected = should_be_selected;
-                                    track_model.set_row_data(i, row);
-                                }
-                            }
-
-                            for i in 0..track_model.row_count() {
-                                let mut row = track_model.row_data(i).unwrap();
-                                if is_playing_active_playlist && playing_index == Some(i) {
-                                    let emoji = if is_playing { "▶️" } else { "⏸️" };
-                                    row.status = emoji.into();
-                                    track_model.set_row_data(i, row);
-                                } else if !row.status.is_empty() {
-                                    row.status = "".into();
-                                    track_model.set_row_data(i, row);
-                                }
-                            }
-                        });
-                    }
-                    protocol::Message::Playlist(protocol::PlaylistMessage::SelectionChanged(
-                        indices,
-                    )) => {
-                        debug!(
-                            "SelectionChanged: setting selected_indices to {:?}",
-                            indices
-                        );
-                        let indices_clone = indices.clone();
-                        self.selected_indices = indices_clone.clone();
-                        debug!(
-                            "After SelectionChanged: self.selected_indices = {:?}",
-                            self.selected_indices
-                        );
-
-                        // Update cover art and metadata display based on selection.
-                        // If nothing is selected, fall back to the currently playing track.
-                        let playing_track_path = self.current_playing_track_path.clone();
-                        let playing_track_metadata = self.current_playing_track_metadata.clone();
-                        self.update_display_for_selection(
-                            &indices,
-                            playing_track_path.as_ref(),
-                            playing_track_metadata.as_ref(),
-                        );
-
-                        let _ = self.ui.upgrade_in_event_loop(move |ui| {
-                            let track_model_strong = ui.get_track_model();
-                            let track_model = track_model_strong
-                                .as_any()
-                                .downcast_ref::<VecModel<TrackRowData>>()
-                                .expect("VecModel<TrackRowData> expected");
-
-                            for i in 0..track_model.row_count() {
-                                let mut row = track_model.row_data(i).unwrap();
-                                let should_be_selected = indices_clone.contains(&i);
-                                if row.selected != should_be_selected {
-                                    row.selected = should_be_selected;
-                                    track_model.set_row_data(i, row);
-                                }
-                            }
-                        });
-                    }
-                    protocol::Message::Playlist(protocol::PlaylistMessage::OnPointerDown {
-                        index,
-                        ctrl,
-                        shift,
-                    }) => {
-                        self.on_pointer_down(index, ctrl, shift);
-                    }
-                    protocol::Message::Playlist(protocol::PlaylistMessage::OnDragStart {
-                        pressed_index,
-                    }) => {
-                        self.on_drag_start(pressed_index);
-                    }
-                    protocol::Message::Playlist(protocol::PlaylistMessage::OnDragMove {
-                        drop_gap,
-                    }) => {
-                        self.on_drag_move(drop_gap);
-                    }
-                    protocol::Message::Playlist(protocol::PlaylistMessage::OnDragEnd {
-                        drop_gap,
-                    }) => {
-                        self.on_drag_end(drop_gap);
-                    }
-                    protocol::Message::Playlist(protocol::PlaylistMessage::ReorderTracks {
-                        indices,
-                        to,
-                    }) => {
-                        debug!("ReorderTracks: indices={:?}, to={}", indices, to);
-
-                        let indices_clone = indices.clone();
-
-                        let mut sorted_indices = indices.clone();
-                        sorted_indices.sort_unstable();
-                        sorted_indices.dedup();
-                        sorted_indices.retain(|&i| i < self.track_paths.len());
-
-                        if sorted_indices.is_empty() {
-                            continue;
+                            let _ = self.ui.upgrade_in_event_loop(move |ui| {
+                                ui.set_repeat_mode(repeat_int);
+                            });
                         }
-
-                        let to = to.min(self.track_paths.len());
-
-                        let first = sorted_indices[0];
-                        let last = *sorted_indices.last().unwrap();
-                        let block_len = sorted_indices.len();
-
-                        let is_contiguous = sorted_indices
-                            .iter()
-                            .enumerate()
-                            .all(|(k, &i)| i == first + k);
-
-                        if is_contiguous && to >= first && to <= last + 1 {
-                            continue;
-                        }
-
-                        let mut moved_paths = Vec::new();
-                        let mut moved_ids = Vec::new();
-                        let mut moved_metadata = Vec::new();
-
-                        for &idx in sorted_indices.iter().rev() {
-                            if idx < self.track_paths.len() {
-                                moved_paths.push(self.track_paths.remove(idx));
-                            }
-                            if idx < self.track_ids.len() {
-                                moved_ids.push(self.track_ids.remove(idx));
-                            }
-                            if idx < self.track_metadata.len() {
-                                moved_metadata.push(self.track_metadata.remove(idx));
-                            }
-                        }
-                        moved_paths.reverse();
-                        moved_ids.reverse();
-                        moved_metadata.reverse();
-
-                        let removed_before = sorted_indices.iter().filter(|&&i| i < to).count();
-                        let insert_at = to.saturating_sub(removed_before);
-
-                        for (i, path) in moved_paths.into_iter().enumerate() {
-                            self.track_paths.insert(insert_at + i, path);
-                        }
-                        for (i, id) in moved_ids.into_iter().enumerate() {
-                            self.track_ids.insert(insert_at + i, id);
-                        }
-                        for (i, metadata) in moved_metadata.into_iter().enumerate() {
-                            self.track_metadata.insert(insert_at + i, metadata);
-                        }
-
-                        self.selected_indices = (insert_at..insert_at + block_len).collect();
-
-                        let _ = self.ui.upgrade_in_event_loop(move |ui| {
-                            let track_model_strong = ui.get_track_model();
-                            let track_model = track_model_strong
-                                .as_any()
-                                .downcast_ref::<VecModel<TrackRowData>>()
-                                .expect("VecModel<TrackRowData> expected");
-
-                            let mut sorted_indices = indices_clone.clone();
-                            sorted_indices.sort_unstable();
-                            sorted_indices.dedup();
-                            sorted_indices.retain(|&i| i < track_model.row_count());
-
-                            if sorted_indices.is_empty() {
-                                return;
-                            }
-
-                            let to = to.min(track_model.row_count());
-                            let first = sorted_indices[0];
-                            let last = *sorted_indices.last().unwrap();
-
-                            if is_contiguous && to >= first && to <= last + 1 {
-                                return;
-                            }
-
-                            let mut moved_rows = Vec::new();
-                            for &idx in sorted_indices.iter().rev() {
-                                if idx < track_model.row_count() {
-                                    moved_rows.push(track_model.row_data(idx).unwrap());
-                                    track_model.remove(idx);
-                                }
-                            }
-                            moved_rows.reverse();
-
-                            let removed_before = sorted_indices.iter().filter(|&&i| i < to).count();
-                            let insert_at = to.saturating_sub(removed_before);
-
-                            for (i, row) in moved_rows.into_iter().enumerate() {
-                                track_model.insert(insert_at + i, row);
-                            }
-                        });
+                        _ => {}
                     }
-                    protocol::Message::Playback(protocol::PlaybackMessage::CoverArtChanged(
-                        path,
-                    )) => {
-                        let _ = self.ui.upgrade_in_event_loop(move |ui| {
-                            if let Some(path) = path {
-                                if let Ok(img) = slint::Image::load_from_path(&path) {
-                                    ui.set_current_cover_art(img);
-                                } else {
-                                    ui.set_current_cover_art(slint::Image::default());
-                                }
-                            } else {
-                                ui.set_current_cover_art(slint::Image::default());
-                            }
-                        });
-                    }
-                    protocol::Message::Playback(
-                        protocol::PlaybackMessage::MetadataDisplayChanged(meta),
-                    ) => {
-                        let _ = self.ui.upgrade_in_event_loop(move |ui| {
-                            if let Some(meta) = meta {
-                                ui.set_display_title(meta.title.into());
-                                ui.set_display_artist(meta.artist.into());
-                                ui.set_display_album(meta.album.into());
-                                ui.set_display_date(meta.date.into());
-                                ui.set_display_genre(meta.genre.into());
-                            } else {
-                                ui.set_display_title("".into());
-                                ui.set_display_artist("".into());
-                                ui.set_display_album("".into());
-                                ui.set_display_date("".into());
-                                ui.set_display_genre("".into());
-                            }
-                        });
-                    }
-                    protocol::Message::Playlist(protocol::PlaylistMessage::RepeatModeChanged(
-                        repeat_mode,
-                    )) => {
-                        debug!("UiManager: Repeat mode changed: {:?}", repeat_mode);
-                        let repeat_int = match repeat_mode {
-                            protocol::RepeatMode::Off => 0,
-                            protocol::RepeatMode::Playlist => 1,
-                            protocol::RepeatMode::Track => 2,
-                        };
-                        let _ = self.ui.upgrade_in_event_loop(move |ui| {
-                            ui.set_repeat_mode(repeat_int);
-                        });
-                    }
-                    _ => {}
-                },
-                Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {}
+                }
+                Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
+                    self.on_message_lagged();
+                }
                 Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
             }
         }

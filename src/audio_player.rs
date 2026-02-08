@@ -50,6 +50,7 @@ pub struct AudioPlayer {
     current_track_position: Arc<AtomicUsize>,
     current_track_offset_ms: Arc<AtomicUsize>,
     current_metadata: Arc<Mutex<Option<crate::protocol::TechnicalMetadata>>>,
+    decode_bootstrap_pending: Arc<AtomicBool>,
     volume: Arc<AtomicU32>,
     buffer_low_watermark_ms: Arc<AtomicUsize>,
     buffer_target_ms: Arc<AtomicUsize>,
@@ -148,6 +149,7 @@ impl AudioPlayer {
         let cached_track_indices = Arc::new(Mutex::new(HashMap::new()));
         let current_track_id = Arc::new(Mutex::new(String::new()));
         let current_metadata = Arc::new(Mutex::new(None));
+        let decode_bootstrap_pending = Arc::new(AtomicBool::new(false));
         let current_track_offset_ms = Arc::new(AtomicUsize::new(0));
         let queue_start_position = Arc::new(AtomicUsize::new(0));
         let queue_end_position = Arc::new(AtomicUsize::new(0));
@@ -176,6 +178,7 @@ impl AudioPlayer {
             current_track_position: current_track_position.clone(),
             current_track_offset_ms: current_track_offset_ms.clone(),
             current_metadata: current_metadata.clone(),
+            decode_bootstrap_pending: decode_bootstrap_pending.clone(),
             volume: volume.clone(),
             buffer_low_watermark_ms: buffer_low_watermark_ms.clone(),
             buffer_target_ms: buffer_target_ms.clone(),
@@ -240,6 +243,8 @@ impl AudioPlayer {
         let queue_end_position_clone = queue_end_position.clone();
         let target_sample_rate_clone = target_sample_rate.clone();
         let target_channels_clone = target_channels.clone();
+        let current_metadata_clone = current_metadata.clone();
+        let decode_bootstrap_pending_clone = decode_bootstrap_pending.clone();
         let buffer_low_watermark_ms_clone = buffer_low_watermark_ms.clone();
         let buffer_target_ms_clone = buffer_target_ms.clone();
         let buffer_request_interval_ms_clone = buffer_request_interval_ms.clone();
@@ -261,11 +266,19 @@ impl AudioPlayer {
             let target_buffer_samples =
                 Self::milliseconds_to_samples(target_buffer_ms, sample_rate, channels);
 
+            let has_active_track = current_metadata_clone
+                .lock()
+                .map(|metadata| metadata.is_some())
+                .unwrap_or(false);
+            let has_bootstrap_pending = decode_bootstrap_pending_clone.load(Ordering::Relaxed);
+
             let current_position = current_track_position_clone.load(Ordering::Relaxed);
             let queue_end_position = queue_end_position_clone.load(Ordering::Relaxed);
             let buffered_samples = queue_end_position.saturating_sub(current_position);
 
-            let requested_samples = Self::compute_decode_request_samples(
+            let requested_samples = Self::compute_decode_request_samples_for_state(
+                has_active_track,
+                has_bootstrap_pending,
                 buffered_samples,
                 low_watermark_samples,
                 target_buffer_samples,
@@ -296,6 +309,23 @@ impl AudioPlayer {
             return 0;
         }
         target_buffer_samples.saturating_sub(buffered_samples)
+    }
+
+    fn compute_decode_request_samples_for_state(
+        has_active_track: bool,
+        has_bootstrap_pending: bool,
+        buffered_samples: usize,
+        low_watermark_samples: usize,
+        target_buffer_samples: usize,
+    ) -> usize {
+        if !has_active_track && !has_bootstrap_pending {
+            return 0;
+        }
+        Self::compute_decode_request_samples(
+            buffered_samples,
+            low_watermark_samples,
+            target_buffer_samples,
+        )
     }
 
     fn setup_audio_device(&mut self) {
@@ -523,6 +553,8 @@ impl AudioPlayer {
                 if samples.is_empty() {
                     return;
                 }
+                self.decode_bootstrap_pending
+                    .store(false, Ordering::Relaxed);
                 let sample_count = samples.len();
                 let mut queue = self.sample_queue.lock().unwrap();
                 queue.push_back(AudioQueueEntry::Samples(samples));
@@ -536,6 +568,8 @@ impl AudioPlayer {
                 technical_metadata,
                 start_offset_ms,
             } => {
+                self.decode_bootstrap_pending
+                    .store(false, Ordering::Relaxed);
                 let start_index = self.queue_end_position.load(Ordering::Relaxed);
                 let mut queue = self.sample_queue.lock().unwrap();
                 queue.push_back(AudioQueueEntry::TrackHeader(TrackHeader {
@@ -571,6 +605,8 @@ impl AudioPlayer {
                 }
             }
             AudioPacket::TrackFooter { id } => {
+                self.decode_bootstrap_pending
+                    .store(false, Ordering::Relaxed);
                 let footer_index = self.queue_end_position.load(Ordering::Relaxed);
                 let mut queue = self.sample_queue.lock().unwrap();
                 queue.push_back(AudioQueueEntry::TrackFooter(id.clone()));
@@ -606,6 +642,11 @@ impl AudioPlayer {
         loop {
             match self.bus_receiver.blocking_recv() {
                 Ok(message) => match message {
+                    Message::Audio(AudioMessage::DecodeTracks(tracks)) => {
+                        let needs_bootstrap = tracks.iter().any(|track| track.play_immediately);
+                        self.decode_bootstrap_pending
+                            .store(needs_bootstrap, Ordering::Relaxed);
+                    }
                     Message::Audio(AudioMessage::AudioPacket(buffer)) => {
                         self.load_samples(buffer);
                     }
@@ -619,6 +660,8 @@ impl AudioPlayer {
                     }
                     Message::Playback(PlaybackMessage::Stop) => {
                         self.is_playing.store(false, Ordering::Relaxed);
+                        self.decode_bootstrap_pending
+                            .store(false, Ordering::Relaxed);
                         debug!("AudioPlayer: Playback stopped");
                     }
                     Message::Playback(PlaybackMessage::PlayTrackById(id)) => {
@@ -677,6 +720,8 @@ impl AudioPlayer {
                     }
                     Message::Playback(PlaybackMessage::ClearPlayerCache) => {
                         self.is_playing.store(false, Ordering::Relaxed);
+                        self.decode_bootstrap_pending
+                            .store(false, Ordering::Relaxed);
                         self.sample_queue.lock().unwrap().clear();
                         self.cached_track_indices.lock().unwrap().clear();
                         self.queue_start_position.store(0, Ordering::Relaxed);
@@ -707,6 +752,10 @@ impl AudioPlayer {
                             self.stream = None;
                             self.create_stream();
                         }
+                    }
+                    Message::Audio(AudioMessage::StopDecoding) => {
+                        self.decode_bootstrap_pending
+                            .store(false, Ordering::Relaxed);
                     }
                     Message::Playback(PlaybackMessage::TrackStarted(track_started)) => {
                         debug!("AudioPlayer: Track started: {}", track_started.id);
@@ -771,6 +820,29 @@ mod tests {
     #[test]
     fn test_compute_decode_request_samples_when_below_watermark() {
         let request = AudioPlayer::compute_decode_request_samples(10_000, 20_000, 40_000);
+        assert_eq!(request, 30_000);
+    }
+
+    #[test]
+    fn test_compute_decode_request_samples_for_state_without_active_track() {
+        let request =
+            AudioPlayer::compute_decode_request_samples_for_state(false, false, 0, 20_000, 40_000);
+        assert_eq!(request, 0);
+    }
+
+    #[test]
+    fn test_compute_decode_request_samples_for_state_with_active_track() {
+        let request = AudioPlayer::compute_decode_request_samples_for_state(
+            true, false, 10_000, 20_000, 40_000,
+        );
+        assert_eq!(request, 30_000);
+    }
+
+    #[test]
+    fn test_compute_decode_request_samples_for_state_with_bootstrap_pending() {
+        let request = AudioPlayer::compute_decode_request_samples_for_state(
+            false, true, 10_000, 20_000, 40_000,
+        );
         assert_eq!(request, 30_000);
     }
 }

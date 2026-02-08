@@ -25,10 +25,26 @@ fn setup_app_state_associations(ui: &AppWindow, ui_state: &UiState) {
     ui.set_track_model(ModelRc::from(ui_state.track_model.clone()));
 }
 
+fn panic_payload_to_string(payload: &(dyn std::any::Any + Send)) -> String {
+    if let Some(s) = payload.downcast_ref::<&str>() {
+        return (*s).to_string();
+    }
+    if let Some(s) = payload.downcast_ref::<String>() {
+        return s.clone();
+    }
+    "non-string panic payload".to_string()
+}
+
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut clog = colog::default_builder();
-    clog.filter(None, log::LevelFilter::Info);
+    clog.filter(None, log::LevelFilter::Debug);
     clog.init();
+
+    std::panic::set_hook(Box::new(|panic_info| {
+        let current_thread = std::thread::current();
+        let thread_name = current_thread.name().unwrap_or("unnamed");
+        log::error!("panic in thread '{}': {}", thread_name, panic_info);
+    }));
 
     if std::env::var_os("SLINT_BACKEND").is_none() {
         std::env::set_var("SLINT_BACKEND", "winit-software");
@@ -329,12 +345,20 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let ui_manager_bus_sender = bus_sender.clone();
     let ui_handle_clone = ui.as_weak().clone();
     thread::spawn(move || {
-        let mut ui_manager = UiManager::new(
-            ui_handle_clone,
-            ui_manager_bus_sender.subscribe(),
-            ui_manager_bus_sender.clone(),
-        );
-        ui_manager.run();
+        let run_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let mut ui_manager = UiManager::new(
+                ui_handle_clone,
+                ui_manager_bus_sender.subscribe(),
+                ui_manager_bus_sender.clone(),
+            );
+            ui_manager.run();
+        }));
+        if let Err(payload) = run_result {
+            log::error!(
+                "UiManager thread terminated due to panic: {}",
+                panic_payload_to_string(payload.as_ref())
+            );
+        }
     });
 
     // Setup AudioDecoder

@@ -17,6 +17,7 @@ use symphonia::core::io::MediaSourceStream;
 use symphonia::core::meta::MetadataOptions;
 use symphonia::core::probe::Hint;
 use tokio::sync::broadcast::{Receiver, Sender};
+use tokio::sync::mpsc::error::TrySendError;
 use tokio::sync::mpsc::{self, Receiver as MpscReceiver, Sender as MpscSender};
 
 #[derive(Debug, Clone)]
@@ -607,9 +608,7 @@ impl AudioDecoder {
                             .unwrap();
                     }
                     Message::Audio(AudioMessage::RequestDecodeChunk { requested_samples }) => {
-                        self.worker_sender
-                            .blocking_send(DecodeWorkItem::RequestDecodeChunk { requested_samples })
-                            .unwrap();
+                        self.enqueue_decode_chunk_request(requested_samples);
                     }
                     Message::Audio(AudioMessage::StopDecoding) => {
                         debug!("AudioDecoder: Clearing decode state");
@@ -656,11 +655,61 @@ impl AudioDecoder {
         }
     }
 
+    fn enqueue_decode_chunk_request(&self, requested_samples: usize) {
+        if requested_samples == 0 {
+            return;
+        }
+        match self
+            .worker_sender
+            .try_send(DecodeWorkItem::RequestDecodeChunk { requested_samples })
+        {
+            Ok(()) => {}
+            Err(TrySendError::Full(_)) => {
+                // Decode chunk requests are advisory; if a request is already queued, let it drain.
+                debug!("AudioDecoder: dropping decode request because worker queue is full");
+            }
+            Err(TrySendError::Closed(_)) => {
+                error!("AudioDecoder: decode worker channel is closed");
+            }
+        }
+    }
+
     fn spawn_decode_worker(&mut self, worker_receiver: MpscReceiver<DecodeWorkItem>) {
         let bus_sender = self.bus_sender.clone();
         thread::spawn(move || {
             let mut worker = DecodeWorker::new(bus_sender.clone(), worker_receiver);
             worker.run();
         });
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{AudioDecoder, DecodeWorkItem};
+    use tokio::sync::broadcast;
+    use tokio::sync::mpsc;
+
+    #[test]
+    fn test_enqueue_decode_chunk_request_drops_when_worker_queue_full() {
+        let (bus_sender, _) = broadcast::channel(8);
+        let (_worker_tx, mut worker_rx) = mpsc::channel(1);
+        let decoder = AudioDecoder {
+            bus_receiver: bus_sender.subscribe(),
+            bus_sender: bus_sender.clone(),
+            worker_sender: _worker_tx,
+        };
+
+        decoder
+            .worker_sender
+            .try_send(DecodeWorkItem::Stop)
+            .expect("seed worker queue");
+        decoder.enqueue_decode_chunk_request(10_000);
+
+        let queued = worker_rx.try_recv().expect("expected first queued item");
+        assert!(matches!(queued, DecodeWorkItem::Stop));
+        assert!(
+            worker_rx.try_recv().is_err(),
+            "decode request should have been dropped while queue was full"
+        );
     }
 }
