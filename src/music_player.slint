@@ -191,6 +191,7 @@ component TrackRow inherits Rectangle {
     in property <TrackRowData> data;
     in property <bool> is-playing;
     in property <bool> is-hover;
+    in property <length> null-column-width: 120px;
 
     height: 30px;
     background: data.selected ? #3d3d3d : is-hover ? #333 : transparent;
@@ -246,7 +247,7 @@ component TrackRow inherits Rectangle {
         }
 
         Rectangle {
-            horizontal-stretch: 3;
+            width: root.null-column-width;
         }
     }
 }
@@ -326,6 +327,7 @@ export component AppWindow inherits Window {
     property <string> delete_confirm_message: "";
     in-out property <bool> show_confirm_dialog: false;
     in-out property <bool> sidebar_has_focus: false;
+    property <length> null-column-width: 120px;
 
     // Status display at the bottom showing the currently playing track
     in-out property <string> status-text: "";
@@ -854,7 +856,7 @@ export component AppWindow inherits Window {
                             Text { text: "Title"; color: #888; font-size: 12px; horizontal-stretch: 2; min-width: 150px; vertical-alignment: center; horizontal-alignment: left; }
                             Text { text: "Artist"; color: #888; font-size: 12px; horizontal-stretch: 1; min-width: 100px; vertical-alignment: center; horizontal-alignment: left; }
                             Text { text: "Album"; color: #888; font-size: 12px; horizontal-stretch: 1; min-width: 100px; vertical-alignment: center; horizontal-alignment: left; }
-                            Rectangle { horizontal-stretch: 3; }
+                            Rectangle { width: root.null-column-width; }
                         }
                     }
 
@@ -869,6 +871,7 @@ export component AppWindow inherits Window {
                                 data: track;
                                 is-playing: root.playing_track_index == i;
                                 is-hover: root.hover-index == i && !root.is-dragging;
+                                null-column-width: root.null-column-width;
                             }
                         }
 
@@ -881,22 +884,32 @@ export component AppWindow inherits Window {
                             property <length> row-height: 30px;
                             property <length> header-height: 28px;
                             property <length> content-y: self.mouse-y - track-list.viewport-y;
-                            property <int> hovered-row: max(-1, min(root.track_model.length - 1, floor(content-y / row-height)));
+                            property <int> raw-row: floor(content-y / row-height);
+                            property <bool> is-in-rows: raw-row >= 0 && raw-row < root.track_model.length;
+                            property <bool> in-null-column: self.mouse-x >= (self.width - root.null-column-width);
+                            property <int> hovered-row: is-in-rows ? raw-row : -1;
                             property <int> drop-gap: max(0, min(root.track_model.length, floor((content-y + row-height / 2) / row-height)));
 
                             pointer-event(event) => {
                                 if (event.button == PointerEventButton.left) {
-                                    if (self.hovered-row < 0) {
-                                        return;
-                                    }
                                     if (event.kind == PointerEventKind.down) {
+                                        if (!self.is-in-rows || self.in-null-column) {
+                                            root.sidebar_has_focus = false;
+                                            key-handler.focus();
+                                            root.pressed-index = -1;
+                                            root.hover-index = -1;
+                                            root.deselect_all();
+                                            return;
+                                        }
                                         root.pressed-index = self.hovered-row;
                                         root.press-y = self.mouse-y;
                                         root.sidebar_has_focus = false;
                                         key-handler.focus();
                                         root.on_pointer_down(self.hovered-row, event.modifiers.control, event.modifiers.shift);
                                     } else if (event.kind == PointerEventKind.up) {
-                                        root.on_drag_end(self.drop-gap);
+                                        if (root.pressed-index != -1) {
+                                            root.on_drag_end(self.drop-gap);
+                                        }
                                         root.hover-index = -1;
                                     }
                                 }
@@ -904,20 +917,22 @@ export component AppWindow inherits Window {
 
                             moved => {
                                 if (!self.pressed) {
-                                    root.hover-index = self.hovered-row;
+                                    root.hover-index = (self.is-in-rows && !self.in-null-column) ? self.hovered-row : -1;
                                 } else {
-                                    if (!root.is-dragging && abs(self.mouse-y - root.press-y) > 5px) {
+                                    if (root.pressed-index != -1 && !root.is-dragging && abs(self.mouse-y - root.press-y) > 5px) {
                                         root.is-dragging = true;
                                         root.on_drag_start(root.pressed-index);
                                     }
-                                    if (root.is-dragging) {
+                                    if (root.is-dragging && root.pressed-index != -1) {
                                         root.on_drag_move(self.drop-gap);
                                     }
                                 }
                             }
 
                             double-clicked => {
-                                root.playlist_item_double_click(self.hovered-row);
+                                if (self.is-in-rows && !self.in-null-column) {
+                                    root.playlist_item_double_click(self.hovered-row);
+                                }
                             }
                         }
 

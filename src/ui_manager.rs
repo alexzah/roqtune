@@ -35,6 +35,8 @@ pub struct UiManager {
     // Cached progress values to avoid unnecessary UI updates
     last_elapsed_ms: u64,
     last_total_ms: u64,
+    current_playing_track_path: Option<PathBuf>,
+    current_playing_track_metadata: Option<protocol::DetailedMetadata>,
 }
 
 #[derive(Clone)]
@@ -70,6 +72,8 @@ impl UiManager {
             ),
             last_elapsed_ms: 0,
             last_total_ms: 0,
+            current_playing_track_path: None,
+            current_playing_track_metadata: None,
         }
     }
 
@@ -153,6 +157,53 @@ impl UiManager {
         let cover_art_path = track_path.and_then(|p| self.find_cover_art(p));
         let _ = self.bus_sender.send(protocol::Message::Playback(
             protocol::PlaybackMessage::CoverArtChanged(cover_art_path),
+        ));
+    }
+
+    fn to_detailed_metadata(track_metadata: &TrackMetadata) -> protocol::DetailedMetadata {
+        protocol::DetailedMetadata {
+            title: track_metadata.title.clone(),
+            artist: track_metadata.artist.clone(),
+            album: track_metadata.album.clone(),
+            date: track_metadata.date.clone(),
+            genre: track_metadata.genre.clone(),
+        }
+    }
+
+    fn resolve_display_target(
+        selected_indices: &[usize],
+        track_paths: &[PathBuf],
+        track_metadata: &[TrackMetadata],
+        playing_track_path: Option<&PathBuf>,
+        playing_track_metadata: Option<&protocol::DetailedMetadata>,
+    ) -> (Option<PathBuf>, Option<protocol::DetailedMetadata>) {
+        if let Some(&selected_index) = selected_indices.first() {
+            let selected_path = track_paths.get(selected_index).cloned();
+            let selected_metadata = track_metadata
+                .get(selected_index)
+                .map(Self::to_detailed_metadata);
+            return (selected_path, selected_metadata);
+        }
+
+        (playing_track_path.cloned(), playing_track_metadata.cloned())
+    }
+
+    fn update_display_for_selection(
+        &self,
+        selected_indices: &[usize],
+        playing_track_path: Option<&PathBuf>,
+        playing_track_metadata: Option<&protocol::DetailedMetadata>,
+    ) {
+        let (display_path, display_metadata) = Self::resolve_display_target(
+            selected_indices,
+            &self.track_paths,
+            &self.track_metadata,
+            playing_track_path,
+            playing_track_metadata,
+        );
+        self.update_cover_art(display_path.as_ref());
+        let _ = self.bus_sender.send(protocol::Message::Playback(
+            protocol::PlaybackMessage::MetadataDisplayChanged(display_metadata),
         ));
     }
 
@@ -634,6 +685,10 @@ impl UiManager {
                         });
                     }
                     protocol::Message::Playback(protocol::PlaybackMessage::Stop) => {
+                        self.current_playing_track_path = None;
+                        self.current_playing_track_metadata = None;
+                        self.update_display_for_selection(&self.selected_indices, None, None);
+
                         // Reset cached progress values
                         self.last_elapsed_ms = 0;
                         self.last_total_ms = 0;
@@ -718,37 +773,13 @@ impl UiManager {
                         let is_playing_active_playlist =
                             playing_playlist_id.as_ref() == Some(&self.active_playlist_id);
 
-                        if !selected_indices.is_empty() {
-                            let idx = selected_indices[0];
-                            if let Some(path) = self.track_paths.get(idx) {
-                                self.update_cover_art(Some(path));
-                            }
-                            if let Some(meta) = self.track_metadata.get(idx) {
-                                let _ = self.bus_sender.send(protocol::Message::Playback(
-                                    protocol::PlaybackMessage::MetadataDisplayChanged(Some(
-                                        protocol::DetailedMetadata {
-                                            title: meta.title.clone(),
-                                            artist: meta.artist.clone(),
-                                            album: meta.album.clone(),
-                                            date: meta.date.clone(),
-                                            genre: meta.genre.clone(),
-                                        },
-                                    )),
-                                ));
-                            }
-                        } else if let (Some(path), Some(meta)) =
-                            (playing_track_path, playing_track_metadata)
-                        {
-                            self.update_cover_art(Some(&path));
-                            let _ = self.bus_sender.send(protocol::Message::Playback(
-                                protocol::PlaybackMessage::MetadataDisplayChanged(Some(meta)),
-                            ));
-                        } else {
-                            self.update_cover_art(None);
-                            let _ = self.bus_sender.send(protocol::Message::Playback(
-                                protocol::PlaybackMessage::MetadataDisplayChanged(None),
-                            ));
-                        }
+                        self.current_playing_track_path = playing_track_path.clone();
+                        self.current_playing_track_metadata = playing_track_metadata.clone();
+                        self.update_display_for_selection(
+                            &selected_indices,
+                            playing_track_path.as_ref(),
+                            playing_track_metadata.as_ref(),
+                        );
 
                         let _ = self.ui.upgrade_in_event_loop(move |ui| {
                             if is_playing_active_playlist {
@@ -825,26 +856,13 @@ impl UiManager {
                             self.selected_indices
                         );
 
-                        // Update cover art and metadata display based on selection
-                        if !indices.is_empty() {
-                            let idx = indices[0];
-                            if let Some(path) = self.track_paths.get(idx) {
-                                self.update_cover_art(Some(path));
-                            }
-                            if let Some(meta) = self.track_metadata.get(idx) {
-                                let _ = self.bus_sender.send(protocol::Message::Playback(
-                                    protocol::PlaybackMessage::MetadataDisplayChanged(Some(
-                                        protocol::DetailedMetadata {
-                                            title: meta.title.clone(),
-                                            artist: meta.artist.clone(),
-                                            album: meta.album.clone(),
-                                            date: meta.date.clone(),
-                                            genre: meta.genre.clone(),
-                                        },
-                                    )),
-                                ));
-                            }
-                        }
+                        // Update cover art and metadata display based on selection.
+                        // If nothing is selected, fall back to the currently playing track.
+                        self.update_display_for_selection(
+                            &indices,
+                            self.current_playing_track_path.as_ref(),
+                            self.current_playing_track_metadata.as_ref(),
+                        );
 
                         let _ = self.ui.upgrade_in_event_loop(move |ui| {
                             let track_model_strong = ui.get_track_model();
@@ -1050,6 +1068,86 @@ impl UiManager {
 
 #[cfg(test)]
 mod tests {
+    use super::{TrackMetadata, UiManager};
+    use std::path::PathBuf;
+
+    fn make_meta(title: &str) -> TrackMetadata {
+        TrackMetadata {
+            title: title.to_string(),
+            artist: format!("{title}-artist"),
+            album: format!("{title}-album"),
+            date: "2026".to_string(),
+            genre: "test".to_string(),
+        }
+    }
+
+    #[test]
+    fn test_resolve_display_target_prefers_selection() {
+        let selected = vec![1usize];
+        let paths = vec![PathBuf::from("a.mp3"), PathBuf::from("b.mp3")];
+        let metadata = vec![make_meta("A"), make_meta("B")];
+        let playing_path = Some(PathBuf::from("playing.mp3"));
+        let playing_meta = crate::protocol::DetailedMetadata {
+            title: "Playing".to_string(),
+            artist: "P".to_string(),
+            album: "P".to_string(),
+            date: "".to_string(),
+            genre: "".to_string(),
+        };
+
+        let (path, meta) = UiManager::resolve_display_target(
+            &selected,
+            &paths,
+            &metadata,
+            playing_path.as_ref(),
+            Some(&playing_meta),
+        );
+
+        assert_eq!(path, Some(PathBuf::from("b.mp3")));
+        let meta = meta.expect("selected metadata should exist");
+        assert_eq!(meta.title, "B");
+    }
+
+    #[test]
+    fn test_resolve_display_target_falls_back_to_playing_when_no_selection() {
+        let selected = vec![];
+        let paths = vec![PathBuf::from("a.mp3")];
+        let metadata = vec![make_meta("A")];
+        let playing_path = Some(PathBuf::from("playing.mp3"));
+        let playing_meta = crate::protocol::DetailedMetadata {
+            title: "Playing".to_string(),
+            artist: "P".to_string(),
+            album: "P".to_string(),
+            date: "".to_string(),
+            genre: "".to_string(),
+        };
+
+        let (path, meta) = UiManager::resolve_display_target(
+            &selected,
+            &paths,
+            &metadata,
+            playing_path.as_ref(),
+            Some(&playing_meta),
+        );
+
+        assert_eq!(path, Some(PathBuf::from("playing.mp3")));
+        let meta = meta.expect("playing metadata should exist");
+        assert_eq!(meta.title, "Playing");
+    }
+
+    #[test]
+    fn test_resolve_display_target_returns_none_without_selection_or_playing() {
+        let selected = vec![];
+        let paths = vec![PathBuf::from("a.mp3")];
+        let metadata = vec![make_meta("A")];
+
+        let (path, meta) =
+            UiManager::resolve_display_target(&selected, &paths, &metadata, None, None);
+
+        assert!(path.is_none());
+        assert!(meta.is_none());
+    }
+
     fn apply_reorder(paths: &mut Vec<String>, indices: &[usize], gap: usize) -> Vec<usize> {
         let len = paths.len();
         if len == 0 {

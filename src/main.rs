@@ -381,4 +381,28 @@ mod tests {
             "Track list interactions should clear sidebar focus"
         );
     }
+
+    #[test]
+    fn test_playlist_null_column_and_empty_space_trigger_deselect() {
+        let slint_ui = include_str!("music_player.slint");
+
+        assert!(
+            slint_ui.contains("property <length> null-column-width: 120px;"),
+            "App window should define a null column width"
+        );
+        assert!(
+            slint_ui.contains("property <bool> in-null-column: self.mouse-x >= (self.width - root.null-column-width);"),
+            "Track overlay should detect clicks in null column"
+        );
+        assert!(
+            slint_ui.contains(
+                "property <bool> is-in-rows: raw-row >= 0 && raw-row < root.track_model.length;"
+            ),
+            "Track overlay should detect when click is outside rows"
+        );
+        assert!(
+            slint_ui.contains("root.deselect_all();"),
+            "Track overlay should deselect on null-column or empty-space clicks"
+        );
+    }
 }
