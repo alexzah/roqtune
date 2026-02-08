@@ -2,7 +2,7 @@ use crate::protocol::{
     AudioMessage, AudioPacket, ConfigMessage, Message, PlaybackMessage, TrackStarted,
 };
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
-use log::{debug, error};
+use log::{debug, error, warn};
 use std::{
     collections::{HashMap, VecDeque},
     sync::{
@@ -788,7 +788,9 @@ impl AudioPlayer {
                     }
                     _ => {}
                 },
-                Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {}
+                Err(tokio::sync::broadcast::error::RecvError::Lagged(skipped)) => {
+                    warn!("AudioPlayer: bus lagged by {} messages", skipped);
+                }
                 Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
             }
         }

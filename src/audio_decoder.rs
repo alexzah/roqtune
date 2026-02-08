@@ -8,6 +8,8 @@ use rubato::{
 use std::cmp::min;
 use std::collections::VecDeque;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 use std::thread;
 use symphonia::core::audio::SampleBuffer;
 use symphonia::core::codecs::{CodecParameters, Decoder, DecoderOptions};
@@ -22,9 +24,17 @@ use tokio::sync::mpsc::{self, Receiver as MpscReceiver, Sender as MpscSender};
 
 #[derive(Debug, Clone)]
 enum DecodeWorkItem {
-    DecodeTracks(Vec<TrackIdentifier>),
-    RequestDecodeChunk { requested_samples: usize },
-    Stop,
+    DecodeTracks {
+        tracks: Vec<TrackIdentifier>,
+        generation: u64,
+    },
+    RequestDecodeChunk {
+        requested_samples: usize,
+        generation: u64,
+    },
+    Stop {
+        generation: u64,
+    },
     ConfigChanged(Config),
 }
 
@@ -43,6 +53,7 @@ struct ActiveDecodeTrack {
 struct DecodeWorker {
     bus_sender: Sender<Message>,
     work_receiver: MpscReceiver<DecodeWorkItem>,
+    decode_request_inflight: Arc<AtomicBool>,
     work_queue: VecDeque<DecodeWorkItem>,
     pending_tracks: VecDeque<TrackIdentifier>,
     active_track: Option<ActiveDecodeTrack>,
@@ -52,13 +63,19 @@ struct DecodeWorker {
     target_channels: u16,
     target_bits_per_sample: u16,
     decoder_request_chunk_ms: u32,
+    decode_generation: u64,
 }
 
 impl DecodeWorker {
-    pub fn new(bus_sender: Sender<Message>, work_receiver: MpscReceiver<DecodeWorkItem>) -> Self {
+    pub fn new(
+        bus_sender: Sender<Message>,
+        work_receiver: MpscReceiver<DecodeWorkItem>,
+        decode_request_inflight: Arc<AtomicBool>,
+    ) -> Self {
         Self {
             bus_sender,
             work_receiver,
+            decode_request_inflight,
             work_queue: VecDeque::new(),
             pending_tracks: VecDeque::new(),
             active_track: None,
@@ -68,7 +85,12 @@ impl DecodeWorker {
             target_channels: 2,
             target_bits_per_sample: 16,
             decoder_request_chunk_ms: protocol::BufferingConfig::default().decoder_request_chunk_ms,
+            decode_generation: 0,
         }
+    }
+
+    fn should_bootstrap_decode(tracks: &[TrackIdentifier]) -> bool {
+        tracks.iter().any(|track| track.play_immediately)
     }
 
     pub fn run(&mut self) {
@@ -85,16 +107,55 @@ impl DecodeWorker {
 
     fn handle_work_item(&mut self, item: DecodeWorkItem) {
         match item {
-            DecodeWorkItem::Stop => {
-                debug!("DecodeWorker: Received stop signal");
+            DecodeWorkItem::Stop { generation } => {
+                if generation < self.decode_generation {
+                    debug!(
+                        "DecodeWorker: Ignoring stale stop. stale_generation={} current_generation={}",
+                        generation, self.decode_generation
+                    );
+                    return;
+                }
+                debug!(
+                    "DecodeWorker: Received stop signal for generation={}",
+                    generation
+                );
                 self.clear_state();
+                self.decode_generation = generation;
             }
-            DecodeWorkItem::DecodeTracks(tracks) => {
+            DecodeWorkItem::DecodeTracks { tracks, generation } => {
+                if generation < self.decode_generation {
+                    debug!(
+                        "DecodeWorker: Ignoring stale decode tracks. stale_generation={} current_generation={}",
+                        generation, self.decode_generation
+                    );
+                    return;
+                }
+                if generation > self.decode_generation {
+                    self.clear_state();
+                    self.decode_generation = generation;
+                }
+                let should_bootstrap = Self::should_bootstrap_decode(&tracks);
                 for track in tracks {
                     self.pending_tracks.push_back(track);
                 }
+                if should_bootstrap {
+                    let bootstrap_samples =
+                        self.ms_to_samples(self.decoder_request_chunk_ms.max(1));
+                    self.decode_requested_samples(bootstrap_samples.max(1));
+                }
             }
-            DecodeWorkItem::RequestDecodeChunk { requested_samples } => {
+            DecodeWorkItem::RequestDecodeChunk {
+                requested_samples,
+                generation,
+            } => {
+                self.decode_request_inflight.store(false, Ordering::Relaxed);
+                if generation != self.decode_generation {
+                    debug!(
+                        "DecodeWorker: Ignoring decode chunk request for non-active generation. requested_generation={} current_generation={}",
+                        generation, self.decode_generation
+                    );
+                    return;
+                }
                 self.decode_requested_samples(requested_samples);
             }
             DecodeWorkItem::ConfigChanged(config) => {
@@ -583,6 +644,8 @@ pub struct AudioDecoder {
     bus_receiver: Receiver<Message>,
     bus_sender: Sender<Message>,
     worker_sender: MpscSender<DecodeWorkItem>,
+    decode_request_inflight: Arc<AtomicBool>,
+    decode_generation: u64,
 }
 
 impl AudioDecoder {
@@ -592,6 +655,8 @@ impl AudioDecoder {
             bus_receiver,
             bus_sender,
             worker_sender,
+            decode_request_inflight: Arc::new(AtomicBool::new(false)),
+            decode_generation: 0,
         };
         audio_decoder.spawn_decode_worker(worker_receiver);
         audio_decoder
@@ -603,16 +668,29 @@ impl AudioDecoder {
                 Ok(message) => match message {
                     Message::Audio(AudioMessage::DecodeTracks(paths)) => {
                         debug!("AudioDecoder: Queueing tracks for decode {:?}", paths);
+                        if paths.iter().any(|track| track.play_immediately) {
+                            self.decode_generation = self.decode_generation.saturating_add(1);
+                        }
+                        let generation = self.decode_generation;
                         self.worker_sender
-                            .blocking_send(DecodeWorkItem::DecodeTracks(paths))
+                            .blocking_send(DecodeWorkItem::DecodeTracks {
+                                tracks: paths,
+                                generation,
+                            })
                             .unwrap();
                     }
                     Message::Audio(AudioMessage::RequestDecodeChunk { requested_samples }) => {
-                        self.enqueue_decode_chunk_request(requested_samples);
+                        self.enqueue_decode_chunk_request(
+                            self.decode_generation,
+                            requested_samples,
+                        );
                     }
                     Message::Audio(AudioMessage::StopDecoding) => {
                         debug!("AudioDecoder: Clearing decode state");
-                        let _ = self.worker_sender.blocking_send(DecodeWorkItem::Stop);
+                        let generation = self.decode_generation;
+                        let _ = self
+                            .worker_sender
+                            .blocking_send(DecodeWorkItem::Stop { generation });
                     }
                     Message::Config(ConfigMessage::ConfigChanged(config)) => {
                         debug!(
@@ -655,20 +733,31 @@ impl AudioDecoder {
         }
     }
 
-    fn enqueue_decode_chunk_request(&self, requested_samples: usize) {
+    fn enqueue_decode_chunk_request(&self, generation: u64, requested_samples: usize) {
         if requested_samples == 0 {
+            return;
+        }
+        if self
+            .decode_request_inflight
+            .compare_exchange(false, true, Ordering::Relaxed, Ordering::Relaxed)
+            .is_err()
+        {
             return;
         }
         match self
             .worker_sender
-            .try_send(DecodeWorkItem::RequestDecodeChunk { requested_samples })
-        {
+            .try_send(DecodeWorkItem::RequestDecodeChunk {
+                requested_samples,
+                generation,
+            }) {
             Ok(()) => {}
             Err(TrySendError::Full(_)) => {
+                self.decode_request_inflight.store(false, Ordering::Relaxed);
                 // Decode chunk requests are advisory; if a request is already queued, let it drain.
                 debug!("AudioDecoder: dropping decode request because worker queue is full");
             }
             Err(TrySendError::Closed(_)) => {
+                self.decode_request_inflight.store(false, Ordering::Relaxed);
                 error!("AudioDecoder: decode worker channel is closed");
             }
         }
@@ -676,8 +765,10 @@ impl AudioDecoder {
 
     fn spawn_decode_worker(&mut self, worker_receiver: MpscReceiver<DecodeWorkItem>) {
         let bus_sender = self.bus_sender.clone();
+        let decode_request_inflight = self.decode_request_inflight.clone();
         thread::spawn(move || {
-            let mut worker = DecodeWorker::new(bus_sender.clone(), worker_receiver);
+            let mut worker =
+                DecodeWorker::new(bus_sender.clone(), worker_receiver, decode_request_inflight);
             worker.run();
         });
     }
@@ -685,7 +776,11 @@ impl AudioDecoder {
 
 #[cfg(test)]
 mod tests {
-    use super::{AudioDecoder, DecodeWorkItem};
+    use super::{AudioDecoder, DecodeWorkItem, DecodeWorker};
+    use crate::protocol::TrackIdentifier;
+    use std::path::PathBuf;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::Arc;
     use tokio::sync::broadcast;
     use tokio::sync::mpsc;
 
@@ -697,19 +792,192 @@ mod tests {
             bus_receiver: bus_sender.subscribe(),
             bus_sender: bus_sender.clone(),
             worker_sender: _worker_tx,
+            decode_request_inflight: Arc::new(AtomicBool::new(false)),
+            decode_generation: 0,
         };
 
         decoder
             .worker_sender
-            .try_send(DecodeWorkItem::Stop)
+            .try_send(DecodeWorkItem::Stop { generation: 0 })
             .expect("seed worker queue");
-        decoder.enqueue_decode_chunk_request(10_000);
+        decoder.enqueue_decode_chunk_request(0, 10_000);
 
         let queued = worker_rx.try_recv().expect("expected first queued item");
-        assert!(matches!(queued, DecodeWorkItem::Stop));
+        assert!(matches!(queued, DecodeWorkItem::Stop { generation: 0 }));
         assert!(
             worker_rx.try_recv().is_err(),
             "decode request should have been dropped while queue was full"
+        );
+    }
+
+    fn make_track(id: &str, play_immediately: bool) -> TrackIdentifier {
+        TrackIdentifier {
+            id: id.to_string(),
+            path: PathBuf::from(format!("/tmp/{}.flac", id)),
+            play_immediately,
+            start_offset_ms: 0,
+        }
+    }
+
+    #[test]
+    fn test_should_bootstrap_decode_detects_immediate_track() {
+        let tracks = vec![
+            TrackIdentifier {
+                id: "a".to_string(),
+                path: PathBuf::from("/tmp/a.flac"),
+                play_immediately: false,
+                start_offset_ms: 0,
+            },
+            TrackIdentifier {
+                id: "b".to_string(),
+                path: PathBuf::from("/tmp/b.flac"),
+                play_immediately: true,
+                start_offset_ms: 0,
+            },
+        ];
+        assert!(DecodeWorker::should_bootstrap_decode(&tracks));
+    }
+
+    #[test]
+    fn test_should_bootstrap_decode_false_when_no_immediate_track() {
+        let tracks = vec![TrackIdentifier {
+            id: "a".to_string(),
+            path: PathBuf::from("/tmp/a.flac"),
+            play_immediately: false,
+            start_offset_ms: 0,
+        }];
+        assert!(!DecodeWorker::should_bootstrap_decode(&tracks));
+    }
+
+    #[test]
+    fn test_stale_stop_does_not_clear_active_generation_queue() {
+        let (bus_sender, _) = broadcast::channel(8);
+        let (_worker_tx, worker_rx) = mpsc::channel(8);
+        let mut worker = DecodeWorker::new(bus_sender, worker_rx, Arc::new(AtomicBool::new(false)));
+
+        worker.handle_work_item(DecodeWorkItem::DecodeTracks {
+            tracks: vec![make_track("g2", false)],
+            generation: 2,
+        });
+        assert_eq!(worker.decode_generation, 2);
+        assert_eq!(worker.pending_tracks.len(), 1);
+
+        worker.handle_work_item(DecodeWorkItem::Stop { generation: 1 });
+        assert_eq!(worker.decode_generation, 2);
+        assert_eq!(worker.pending_tracks.len(), 1);
+    }
+
+    #[test]
+    fn test_stale_decode_request_is_ignored() {
+        let (bus_sender, _) = broadcast::channel(8);
+        let (_worker_tx, worker_rx) = mpsc::channel(8);
+        let mut worker = DecodeWorker::new(bus_sender, worker_rx, Arc::new(AtomicBool::new(false)));
+
+        worker.handle_work_item(DecodeWorkItem::DecodeTracks {
+            tracks: vec![make_track("g3", false)],
+            generation: 3,
+        });
+        assert_eq!(worker.decode_generation, 3);
+        assert_eq!(worker.pending_tracks.len(), 1);
+
+        worker.handle_work_item(DecodeWorkItem::RequestDecodeChunk {
+            requested_samples: 10_000,
+            generation: 2,
+        });
+        assert_eq!(worker.pending_tracks.len(), 1);
+    }
+
+    #[test]
+    fn test_new_generation_replaces_previous_pending_tracks() {
+        let (bus_sender, _) = broadcast::channel(8);
+        let (_worker_tx, worker_rx) = mpsc::channel(8);
+        let mut worker = DecodeWorker::new(bus_sender, worker_rx, Arc::new(AtomicBool::new(false)));
+
+        worker.handle_work_item(DecodeWorkItem::DecodeTracks {
+            tracks: vec![make_track("old", false)],
+            generation: 1,
+        });
+        assert_eq!(worker.pending_tracks.len(), 1);
+
+        worker.handle_work_item(DecodeWorkItem::DecodeTracks {
+            tracks: vec![make_track("new", false)],
+            generation: 2,
+        });
+        assert_eq!(worker.decode_generation, 2);
+        assert_eq!(worker.pending_tracks.len(), 1);
+        assert_eq!(
+            worker.pending_tracks.front().map(|track| track.id.as_str()),
+            Some("new")
+        );
+    }
+
+    #[test]
+    fn test_stop_clears_current_generation_state() {
+        let (bus_sender, _) = broadcast::channel(8);
+        let (_worker_tx, worker_rx) = mpsc::channel(8);
+        let mut worker = DecodeWorker::new(bus_sender, worker_rx, Arc::new(AtomicBool::new(false)));
+
+        worker.handle_work_item(DecodeWorkItem::DecodeTracks {
+            tracks: vec![make_track("active", false)],
+            generation: 4,
+        });
+        assert_eq!(worker.pending_tracks.len(), 1);
+
+        worker.handle_work_item(DecodeWorkItem::Stop { generation: 4 });
+        assert_eq!(worker.decode_generation, 4);
+        assert!(worker.pending_tracks.is_empty());
+        assert!(worker.active_track.is_none());
+    }
+
+    #[test]
+    fn test_enqueue_decode_chunk_request_coalesces_while_inflight() {
+        let (bus_sender, _) = broadcast::channel(8);
+        let (worker_tx, mut worker_rx) = mpsc::channel(8);
+        let inflight = Arc::new(AtomicBool::new(false));
+        let decoder = AudioDecoder {
+            bus_receiver: bus_sender.subscribe(),
+            bus_sender: bus_sender.clone(),
+            worker_sender: worker_tx,
+            decode_request_inflight: inflight.clone(),
+            decode_generation: 0,
+        };
+
+        decoder.enqueue_decode_chunk_request(0, 10_000);
+        decoder.enqueue_decode_chunk_request(0, 20_000);
+
+        let queued = worker_rx
+            .try_recv()
+            .expect("expected queued decode request");
+        assert!(matches!(
+            queued,
+            DecodeWorkItem::RequestDecodeChunk {
+                requested_samples: 10_000,
+                generation: 0
+            }
+        ));
+        assert!(
+            worker_rx.try_recv().is_err(),
+            "second request should be coalesced while inflight"
+        );
+        assert!(inflight.load(Ordering::Relaxed));
+    }
+
+    #[test]
+    fn test_worker_clears_inflight_flag_when_handling_decode_request() {
+        let (bus_sender, _) = broadcast::channel(8);
+        let (_worker_tx, worker_rx) = mpsc::channel(8);
+        let inflight = Arc::new(AtomicBool::new(true));
+        let mut worker = DecodeWorker::new(bus_sender, worker_rx, inflight.clone());
+        worker.decode_generation = 2;
+
+        worker.handle_work_item(DecodeWorkItem::RequestDecodeChunk {
+            requested_samples: 5_000,
+            generation: 1,
+        });
+
+        assert!(
+            !inflight.load(Ordering::Relaxed),
+            "worker should clear inflight even for stale requests"
         );
     }
 }
