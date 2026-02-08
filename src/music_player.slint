@@ -713,13 +713,6 @@ export component AppWindow inherits Window {
                 max-width: 250px;
                 background: #202020;
                 
-                sidebar-ta := TouchArea {
-                    clicked => {
-                        root.sidebar_has_focus = true;
-                        root.refocus_main();
-                    }
-                }
-
                 VerticalLayout {
                     // Top Half: Playlist Picker
                     VerticalLayout {
@@ -848,13 +841,6 @@ export component AppWindow inherits Window {
                 horizontal-stretch: 4;
                 background: #282828;
                 
-                TouchArea {
-                    clicked => {
-                        root.sidebar_has_focus = false;
-                        root.refocus_main();
-                    }
-                }
-
                 VerticalLayout {
                     // Header
                     Rectangle {
@@ -906,7 +892,7 @@ export component AppWindow inherits Window {
                                     if (event.kind == PointerEventKind.down) {
                                         root.pressed-index = self.hovered-row;
                                         root.press-y = self.mouse-y;
-                                        root.sidebar-has-focus = false;
+                                        root.sidebar_has_focus = false;
                                         key-handler.focus();
                                         root.on_pointer_down(self.hovered-row, event.modifiers.control, event.modifiers.shift);
                                     } else if (event.kind == PointerEventKind.up) {

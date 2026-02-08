@@ -361,3 +361,24 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     info!("Application exiting");
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn test_focus_touch_areas_are_not_full_pane_overlays() {
+        let slint_ui = include_str!("music_player.slint");
+
+        assert!(
+            !slint_ui.contains("sidebar-ta := TouchArea"),
+            "Sidebar-wide focus TouchArea should not exist"
+        );
+        assert!(
+            !slint_ui.contains("Rectangle {\n                horizontal-stretch: 4;\n                background: #282828;\n                \n                TouchArea {"),
+            "Main-pane-wide focus TouchArea should not exist"
+        );
+        assert!(
+            slint_ui.contains("root.sidebar_has_focus = false;"),
+            "Track list interactions should clear sidebar focus"
+        );
+    }
+}
