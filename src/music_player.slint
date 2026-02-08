@@ -481,12 +481,12 @@ export component AppWindow inherits Window {
 
                     Rectangle {
                         width: 20px;
-                        height: 32px;
+                        height: 26px;
                         background: transparent;
 
                         Rectangle {
                             x: 0px;
-                            y: 13px;
+                            y: 10px;
                             width: 4px;
                             height: 6px;
                             border-radius: 1px;
@@ -495,7 +495,7 @@ export component AppWindow inherits Window {
 
                         Rectangle {
                             x: 4px;
-                            y: 12px;
+                            y: 9px;
                             width: 2px;
                             height: 8px;
                             border-radius: 1px;
@@ -504,7 +504,7 @@ export component AppWindow inherits Window {
 
                         Rectangle {
                             x: 6px;
-                            y: 11px;
+                            y: 8px;
                             width: 1px;
                             height: 10px;
                             background: #888;
@@ -512,7 +512,7 @@ export component AppWindow inherits Window {
 
                         Text {
                             x: 8px;
-                            y: 8px;
+                            y: 5px;
                             text: "))";
                             color: #888;
                             font-size: 11px;
@@ -522,12 +522,12 @@ export component AppWindow inherits Window {
 
                     volume-slider := Rectangle {
                         width: 110px;
-                        height: 32px;
+                        height: 26px;
                         background: transparent;
 
                         volume-track := Rectangle {
                             x: 0;
-                            y: 13px;
+                            y: 10px;
                             width: parent.width;
                             height: 6px;
                             border-radius: 3px;
@@ -566,7 +566,7 @@ export component AppWindow inherits Window {
                         ta-volume := TouchArea {
                             width: parent.width;
                             height: 20px;
-                            y: 6px;
+                            y: 3px;
                             mouse-cursor: pointer;
                             clicked => {
                                 root.volume-level = max(0, min(1, self.mouse-x / volume-track.width));
@@ -581,10 +581,10 @@ export component AppWindow inherits Window {
                         }
                         
                         if ta-volume.pressed : Rectangle {
-                            width: 36px;
-                            height: 18px;
+                            width: 34px;
+                            height: 12px;
                             x: min(volume-track.width - self.width, max(0px, (volume-track.width * root.volume-level) - self.width / 2));
-                            y: -18px;
+                            y: 0px;
                             border-radius: 3px;
                             background: #1f1f1f;
                             border-width: 1px;
@@ -593,7 +593,7 @@ export component AppWindow inherits Window {
                             Text {
                                 text: floor(root.volume-level * 100) + "%";
                                 color: #ddd;
-                                font-size: 11px;
+                                font-size: 8px;
                                 horizontal-alignment: center;
                                 vertical-alignment: center;
                             }
