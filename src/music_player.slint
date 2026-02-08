@@ -463,6 +463,74 @@ export component AppWindow inherits Window {
                             y: 12px;
                         }
                     }
+
+                    Text {
+                        text: "Volume:";
+                        color: #888;
+                        font-size: 13px;
+                        vertical-alignment: center;
+                    }
+
+                    volume-slider := Rectangle {
+                        width: 110px;
+                        height: 6px;
+                        border-radius: 3px;
+                        background: #333;
+
+                        Rectangle {
+                            x: 0;
+                            y: 0;
+                            width: volume-slider.width * root.volume-level;
+                            height: parent.height;
+                            background: #2a6def;
+                            border-radius: 3px;
+                        }
+
+                        volume-handle := Rectangle {
+                            width: 10px;
+                            height: 10px;
+                            x: (volume-slider.width * root.volume-level) - self.width / 2;
+                            y: (parent.height - self.height) / 2;
+                            background: white;
+                            border-radius: 5px;
+                            animate x {
+                                duration: 100ms;
+                                easing: ease-out;
+                            }
+                        }
+
+                        states [
+                            hover when ta-volume.has-hover || ta-volume.pressed: {
+                                volume-handle.width: 12px;
+                                volume-handle.height: 12px;
+                            }
+                        ]
+
+                        ta-volume := TouchArea {
+                            width: parent.width;
+                            height: 20px;
+                            mouse-cursor: pointer;
+                            clicked => {
+                                root.volume-level = max(0, min(1, self.mouse-x / volume-slider.width));
+                                root.volume-changed(root.volume-level);
+                            }
+                            moved => {
+                                if (self.pressed) {
+                                    root.volume-level = max(0, min(1, self.mouse-x / volume-slider.width));
+                                    root.volume-changed(root.volume-level);
+                                }
+                            }
+                        }
+                    }
+
+                    Text {
+                        width: 34px;
+                        text: floor(root.volume-level * 100) + "%";
+                        color: #888;
+                        font-size: 12px;
+                        vertical-alignment: center;
+                        horizontal-alignment: right;
+                    }
                 }
             }
         }
@@ -903,6 +971,7 @@ export component AppWindow inherits Window {
     in-out property <int> elapsed-ms: 0;
     in-out property <int> total-ms: 0;
     in-out property <float> position-percentage: 0.0; // between 0.0 and 1.0
+    in-out property <float> volume-level: 1.0; // between 0.0 and 1.0
     in-out property <string> technical-info: "";
     
     // Computed time display strings (derived from integer ms values)
@@ -941,6 +1010,7 @@ export component AppWindow inherits Window {
     callback playback_order_changed(int);
     callback toggle_repeat();
     callback seek-to(float); // Position between 0.0 and 1.0
+    callback volume-changed(float); // Volume between 0.0 and 1.0
     callback delete_selected_tracks();
     callback reorder_tracks([int], int); // indices, to
     callback deselect_all();

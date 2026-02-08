@@ -6,7 +6,7 @@ use log::{debug, error};
 use std::{
     collections::{HashMap, VecDeque},
     sync::{
-        atomic::{AtomicBool, AtomicUsize, Ordering},
+        atomic::{AtomicBool, AtomicU32, AtomicUsize, Ordering},
         Arc, Mutex,
     },
     thread,
@@ -48,6 +48,7 @@ pub struct AudioPlayer {
     current_track_position: Arc<AtomicUsize>,
     current_track_offset_ms: Arc<AtomicUsize>,
     current_metadata: Arc<Mutex<Option<crate::protocol::TechnicalMetadata>>>,
+    volume: Arc<AtomicU32>,
 
     // Setup cache
     cached_track_indices: Arc<Mutex<HashMap<String, TrackIndex>>>,
@@ -68,6 +69,7 @@ impl AudioPlayer {
         let current_track_offset_ms = Arc::new(AtomicUsize::new(0));
         let target_sample_rate = Arc::new(AtomicUsize::new(44100));
         let target_channels = Arc::new(AtomicUsize::new(2));
+        let volume = Arc::new(AtomicU32::new(1.0f32.to_bits()));
 
         let mut player = Self {
             bus_receiver,
@@ -85,6 +87,7 @@ impl AudioPlayer {
             current_track_position: current_track_position.clone(),
             current_track_offset_ms: current_track_offset_ms.clone(),
             current_metadata: current_metadata.clone(),
+            volume: volume.clone(),
         };
 
         player.setup_audio_device();
@@ -216,6 +219,7 @@ impl AudioPlayer {
         let bus_sender_clone = self.bus_sender.clone();
         let is_playing = self.is_playing.clone();
         let current_track_position = self.current_track_position.clone();
+        let volume = self.volume.clone();
 
         match device.build_output_stream(
             config,
@@ -228,6 +232,7 @@ impl AudioPlayer {
                 let mut sample_queue_unlocked = sample_queue.lock().unwrap();
                 let mut input_current_position = current_track_position.load(Ordering::Relaxed);
                 let mut output_current_position = 0;
+                let gain = f32::from_bits(volume.load(Ordering::Relaxed)).clamp(0.0, 1.0);
 
                 while output_current_position < output_buffer.len() {
                     let sample = &mut output_buffer[output_current_position];
@@ -236,7 +241,7 @@ impl AudioPlayer {
                         match next_sample {
                             AudioSample::Sample(s) => {
                                 input_current_position += 1;
-                                *s
+                                *s * gain
                             }
                             AudioSample::TrackHeader(TrackHeader {
                                 id,
@@ -455,6 +460,11 @@ impl AudioPlayer {
                             ));
                             *self.current_metadata.lock().unwrap() = Some(info.technical_metadata);
                         }
+                    }
+                    Message::Playback(PlaybackMessage::SetVolume(volume)) => {
+                        let clamped = volume.clamp(0.0, 1.0);
+                        self.volume.store(clamped.to_bits(), Ordering::Relaxed);
+                        debug!("AudioPlayer: Volume set to {:.2}", clamped);
                     }
                     _ => {}
                 },

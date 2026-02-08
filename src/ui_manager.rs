@@ -530,7 +530,7 @@ impl UiManager {
                             if !artist.is_empty() {
                                 ui.set_status_text(format!("{} - {}", artist, title).into());
                             } else {
-                                ui.set_status_text(title.into());
+                                ui.set_status_text(title);
                             }
                         });
                     }
@@ -555,7 +555,7 @@ impl UiManager {
                                             format!("{} - {}", artist, title).into(),
                                         );
                                     } else {
-                                        ui.set_status_text(title.into());
+                                        ui.set_status_text(title);
                                     }
                                 }
                             }

@@ -198,6 +198,7 @@ pub enum PlaybackMessage {
     ClearPlayerCache,
     ClearNextTracks,
     Seek(f32),
+    SetVolume(f32),
     TechnicalMetadataChanged(TechnicalMetadata),
     PlaybackProgress { elapsed_ms: u64, total_ms: u64 },
     CoverArtChanged(Option<PathBuf>),

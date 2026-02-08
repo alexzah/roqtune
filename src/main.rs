@@ -261,6 +261,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let _ = bus_sender_clone.send(Message::Playback(PlaybackMessage::Seek(percentage)));
     });
 
+    // Wire up volume handler
+    let bus_sender_clone = bus_sender.clone();
+    ui.on_volume_changed(move |volume| {
+        let clamped = volume.clamp(0.0, 1.0);
+        debug!("Volume changed to {}%", clamped * 100.0);
+        let _ = bus_sender_clone.send(Message::Playback(PlaybackMessage::SetVolume(clamped)));
+    });
+
     // Wire up playlist management
     let bus_sender_clone = bus_sender.clone();
     ui.on_create_playlist(move || {
