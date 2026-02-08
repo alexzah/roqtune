@@ -30,6 +30,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     clog.filter(None, log::LevelFilter::Info);
     clog.init();
 
+    if std::env::var_os("SLINT_BACKEND").is_none() {
+        std::env::set_var("SLINT_BACKEND", "winit-software");
+        info!("SLINT_BACKEND not set. Defaulting to winit-software");
+    }
+
     // Setup ui state
     let ui = AppWindow::new()?;
 
