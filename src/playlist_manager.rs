@@ -615,6 +615,11 @@ impl PlaylistManager {
                             }
                         }
                     }
+                    protocol::Message::Audio(protocol::AudioMessage::TrackEvicted(id)) => {
+                        debug!("PlaylistManager: Received TrackEvicted: {}", id);
+                        self.cached_track_ids.remove(&id);
+                        self.fully_cached_track_ids.remove(&id);
+                    }
                     protocol::Message::Playlist(
                         protocol::PlaylistMessage::ChangePlaybackOrder(order),
                     ) => {
@@ -1388,6 +1393,66 @@ mod tests {
                                 && track.play_immediately
                                 && track.start_offset_ms == 50_000
                         })
+                    }
+                    _ => false,
+                },
+            );
+    }
+
+    #[test]
+    fn test_track_evicted_invalidates_cached_entry() {
+        let mut harness = PlaylistManagerHarness::new();
+        let (id0, _) = harness.add_track("pm_track_evicted_0");
+        harness.drain_messages();
+
+        harness.send(protocol::Message::Playback(
+            protocol::PlaybackMessage::PlayTrackByIndex(0),
+        ));
+
+        let _ = wait_for_message(&mut harness.receiver, Duration::from_secs(1), |message| {
+            matches!(
+                message,
+                protocol::Message::Playback(protocol::PlaybackMessage::ClearPlayerCache)
+            )
+        });
+        let _ =
+            wait_for_message(
+                &mut harness.receiver,
+                Duration::from_secs(1),
+                |message| match message {
+                    protocol::Message::Audio(protocol::AudioMessage::DecodeTracks(tracks)) => {
+                        tracks
+                            .first()
+                            .map(|track| track.id == id0 && track.play_immediately)
+                            .unwrap_or(false)
+                    }
+                    _ => false,
+                },
+            );
+
+        harness.drain_messages();
+        harness.send(protocol::Message::Audio(
+            protocol::AudioMessage::TrackCached(id0.clone(), 0),
+        ));
+        harness.send(protocol::Message::Audio(
+            protocol::AudioMessage::TrackEvicted(id0.clone()),
+        ));
+        harness.drain_messages();
+
+        harness.send(protocol::Message::Playback(
+            protocol::PlaybackMessage::PlayTrackByIndex(0),
+        ));
+
+        let _ =
+            wait_for_message(
+                &mut harness.receiver,
+                Duration::from_secs(1),
+                |message| match message {
+                    protocol::Message::Audio(protocol::AudioMessage::DecodeTracks(tracks)) => {
+                        tracks
+                            .first()
+                            .map(|track| track.id == id0 && track.play_immediately)
+                            .unwrap_or(false)
                     }
                     _ => false,
                 },

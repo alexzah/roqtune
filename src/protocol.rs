@@ -222,6 +222,7 @@ pub enum AudioMessage {
     RequestDecodeChunk { requested_samples: usize },
     StopDecoding,
     TrackCached(String, u64), // id, start_offset_ms
+    TrackEvicted(String),
     AudioPacket(AudioPacket),
 }
 
