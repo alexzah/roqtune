@@ -582,9 +582,9 @@ export component AppWindow inherits Window {
                         
                         if ta-volume.pressed : Rectangle {
                             width: 34px;
-                            height: 12px;
-                            x: min(volume-track.width - self.width, max(0px, (volume-track.width * root.volume-level) - self.width / 2));
-                            y: 0px;
+                            height: 13px;
+                            x: min(volume-track.width - self.width - 2px, max(2px, (volume-track.width * root.volume-level) - self.width / 2));
+                            y: -4px;
                             border-radius: 3px;
                             background: #1f1f1f;
                             border-width: 1px;
