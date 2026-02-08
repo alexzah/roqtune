@@ -1,7 +1,13 @@
 use std::hash::{Hash, Hasher};
 use std::io::Write;
 use std::time::Duration;
-use std::{collections::hash_map::DefaultHasher, path::PathBuf, rc::Rc};
+use std::{
+    collections::hash_map::DefaultHasher,
+    path::PathBuf,
+    rc::Rc,
+    sync::mpsc::{self, Receiver as StdReceiver, Sender as StdSender},
+    thread,
+};
 
 use governor::state::NotKeyed;
 use id3::{Tag, TagLike};
@@ -21,6 +27,8 @@ pub struct UiManager {
     ui: slint::Weak<AppWindow>,
     bus_receiver: Receiver<protocol::Message>,
     bus_sender: Sender<protocol::Message>,
+    cover_art_lookup_tx: StdSender<CoverArtLookupRequest>,
+    last_cover_art_lookup_path: Option<PathBuf>,
     active_playlist_id: String,
     playlist_ids: Vec<String>,
     track_ids: Vec<String>,
@@ -48,16 +56,49 @@ struct TrackMetadata {
     genre: String,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct CoverArtLookupRequest {
+    track_path: Option<PathBuf>,
+}
+
 impl UiManager {
+    fn coalesce_cover_art_requests(
+        mut latest: CoverArtLookupRequest,
+        request_rx: &StdReceiver<CoverArtLookupRequest>,
+    ) -> CoverArtLookupRequest {
+        while let Ok(next) = request_rx.try_recv() {
+            latest = next;
+        }
+        latest
+    }
+
     pub fn new(
         ui: slint::Weak<AppWindow>,
         bus_receiver: Receiver<protocol::Message>,
         bus_sender: Sender<protocol::Message>,
     ) -> Self {
+        let (cover_art_lookup_tx, cover_art_lookup_rx) = mpsc::channel::<CoverArtLookupRequest>();
+        let cover_art_bus_sender = bus_sender.clone();
+        thread::spawn(move || {
+            while let Ok(request) = cover_art_lookup_rx.recv() {
+                let latest_request =
+                    UiManager::coalesce_cover_art_requests(request, &cover_art_lookup_rx);
+                let cover_art_path = latest_request
+                    .track_path
+                    .as_ref()
+                    .and_then(UiManager::find_cover_art);
+                let _ = cover_art_bus_sender.send(protocol::Message::Playback(
+                    protocol::PlaybackMessage::CoverArtChanged(cover_art_path),
+                ));
+            }
+        });
+
         Self {
             ui: ui.clone(),
             bus_receiver,
             bus_sender,
+            cover_art_lookup_tx,
+            last_cover_art_lookup_path: None,
             active_playlist_id: String::new(),
             playlist_ids: Vec::new(),
             track_ids: Vec::new(),
@@ -77,7 +118,7 @@ impl UiManager {
         }
     }
 
-    fn find_cover_art(&self, track_path: &PathBuf) -> Option<PathBuf> {
+    fn find_cover_art(track_path: &PathBuf) -> Option<PathBuf> {
         let parent = track_path.parent()?;
         let names = ["cover", "front", "folder", "album", "art"];
         let extensions = ["jpg", "jpeg", "png", "webp"];
@@ -109,10 +150,10 @@ impl UiManager {
         }
 
         // Priority 2: Embedded art
-        self.extract_embedded_art(track_path)
+        Self::extract_embedded_art(track_path)
     }
 
-    fn extract_embedded_art(&self, track_path: &PathBuf) -> Option<PathBuf> {
+    fn extract_embedded_art(track_path: &PathBuf) -> Option<PathBuf> {
         let mut hasher = DefaultHasher::new();
         track_path.hash(&mut hasher);
         let hash = hasher.finish();
@@ -153,11 +194,15 @@ impl UiManager {
         None
     }
 
-    fn update_cover_art(&self, track_path: Option<&PathBuf>) {
-        let cover_art_path = track_path.and_then(|p| self.find_cover_art(p));
-        let _ = self.bus_sender.send(protocol::Message::Playback(
-            protocol::PlaybackMessage::CoverArtChanged(cover_art_path),
-        ));
+    fn update_cover_art(&mut self, track_path: Option<&PathBuf>) {
+        let requested_track_path = track_path.cloned();
+        if self.last_cover_art_lookup_path == requested_track_path {
+            return;
+        }
+        self.last_cover_art_lookup_path = requested_track_path.clone();
+        let _ = self.cover_art_lookup_tx.send(CoverArtLookupRequest {
+            track_path: requested_track_path,
+        });
     }
 
     fn to_detailed_metadata(track_metadata: &TrackMetadata) -> protocol::DetailedMetadata {
@@ -189,7 +234,7 @@ impl UiManager {
     }
 
     fn update_display_for_selection(
-        &self,
+        &mut self,
         selected_indices: &[usize],
         playing_track_path: Option<&PathBuf>,
         playing_track_metadata: Option<&protocol::DetailedMetadata>,
@@ -687,7 +732,8 @@ impl UiManager {
                     protocol::Message::Playback(protocol::PlaybackMessage::Stop) => {
                         self.current_playing_track_path = None;
                         self.current_playing_track_metadata = None;
-                        self.update_display_for_selection(&self.selected_indices, None, None);
+                        let selected_indices = self.selected_indices.clone();
+                        self.update_display_for_selection(&selected_indices, None, None);
 
                         // Reset cached progress values
                         self.last_elapsed_ms = 0;
@@ -858,10 +904,12 @@ impl UiManager {
 
                         // Update cover art and metadata display based on selection.
                         // If nothing is selected, fall back to the currently playing track.
+                        let playing_track_path = self.current_playing_track_path.clone();
+                        let playing_track_metadata = self.current_playing_track_metadata.clone();
                         self.update_display_for_selection(
                             &indices,
-                            self.current_playing_track_path.as_ref(),
-                            self.current_playing_track_metadata.as_ref(),
+                            playing_track_path.as_ref(),
+                            playing_track_metadata.as_ref(),
                         );
 
                         let _ = self.ui.upgrade_in_event_loop(move |ui| {
@@ -1068,8 +1116,9 @@ impl UiManager {
 
 #[cfg(test)]
 mod tests {
-    use super::{TrackMetadata, UiManager};
+    use super::{CoverArtLookupRequest, TrackMetadata, UiManager};
     use std::path::PathBuf;
+    use std::sync::mpsc;
 
     fn make_meta(title: &str) -> TrackMetadata {
         TrackMetadata {
@@ -1079,6 +1128,25 @@ mod tests {
             date: "2026".to_string(),
             genre: "test".to_string(),
         }
+    }
+
+    #[test]
+    fn test_coalesce_cover_art_requests_keeps_latest() {
+        let (tx, rx) = mpsc::channel::<CoverArtLookupRequest>();
+        tx.send(CoverArtLookupRequest {
+            track_path: Some(PathBuf::from("first.mp3")),
+        })
+        .expect("failed to queue request");
+        tx.send(CoverArtLookupRequest {
+            track_path: Some(PathBuf::from("second.mp3")),
+        })
+        .expect("failed to queue request");
+        tx.send(CoverArtLookupRequest { track_path: None })
+            .expect("failed to queue request");
+
+        let first = rx.recv().expect("expected first request");
+        let latest = UiManager::coalesce_cover_art_requests(first, &rx);
+        assert_eq!(latest.track_path, None);
     }
 
     #[test]
