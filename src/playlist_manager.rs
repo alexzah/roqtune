@@ -23,6 +23,7 @@ pub struct PlaylistManager {
     db_manager: DbManager,
     cached_track_ids: HashMap<String, u64>, // id -> start_offset_ms
     fully_cached_track_ids: HashSet<String>,
+    requested_track_offsets: HashMap<String, u64>, // id -> requested start_offset_ms
     pending_order_change: Option<protocol::PlaybackOrder>,
     max_num_cached_tracks: usize,
     current_track_duration_ms: u64,
@@ -49,6 +50,7 @@ impl PlaylistManager {
             db_manager,
             cached_track_ids: HashMap::new(),
             fully_cached_track_ids: HashSet::new(),
+            requested_track_offsets: HashMap::new(),
             pending_order_change: None,
             max_num_cached_tracks: 2,
             current_track_duration_ms: 0,
@@ -79,6 +81,7 @@ impl PlaylistManager {
             self.stop_decoding();
             self.cached_track_ids.clear();
             self.fully_cached_track_ids.clear();
+            self.requested_track_offsets.clear();
             let _ = self.bus_producer.send(protocol::Message::Playback(
                 protocol::PlaybackMessage::ClearPlayerCache,
             ));
@@ -617,6 +620,7 @@ impl PlaylistManager {
                             "PlaylistManager: Received TrackCached: {} at offset {}",
                             id, offset
                         );
+                        self.requested_track_offsets.remove(&id);
                         self.cached_track_ids.insert(id.clone(), offset);
                         self.fully_cached_track_ids.insert(id.clone());
 
@@ -634,6 +638,7 @@ impl PlaylistManager {
                     }
                     protocol::Message::Audio(protocol::AudioMessage::TrackEvicted(id)) => {
                         debug!("PlaylistManager: Received TrackEvicted: {}", id);
+                        self.requested_track_offsets.remove(&id);
                         self.cached_track_ids.remove(&id);
                         self.fully_cached_track_ids.remove(&id);
                     }
@@ -712,6 +717,7 @@ impl PlaylistManager {
                                 self.cached_track_ids.remove(&track_id);
                                 self.fully_cached_track_ids.remove(&track_id);
                                 self.started_track_id = None;
+                                self.requested_track_offsets.clear();
 
                                 // 1. Stop current decoding
                                 self.stop_decoding();
@@ -724,12 +730,13 @@ impl PlaylistManager {
                                 // 3. Restart decoding at offset
                                 let _ = self.bus_producer.send(protocol::Message::Audio(
                                     protocol::AudioMessage::DecodeTracks(vec![TrackIdentifier {
-                                        id: track_id,
+                                        id: track_id.clone(),
                                         path: track_path,
                                         play_immediately: true,
                                         start_offset_ms: target_ms,
                                     }]),
                                 ));
+                                self.requested_track_offsets.insert(track_id, target_ms);
                             }
                         }
                     }
@@ -788,7 +795,9 @@ impl PlaylistManager {
                 let track_id = self.playback_playlist.get_track_id(current_index);
                 let is_cached_at_track_start =
                     self.cached_track_ids.get(&track_id).copied() == Some(0);
-                if is_cached_at_track_start {
+                let is_requested_at_track_start =
+                    self.requested_track_offsets.get(&track_id).copied() == Some(0);
+                if is_cached_at_track_start || is_requested_at_track_start {
                     if let Some(next_index) =
                         self.playback_playlist.get_next_track_index(current_index)
                     {
@@ -822,14 +831,21 @@ impl PlaylistManager {
             "PlaylistManager: Updated cached tracks: {:?}",
             self.cached_track_ids
         );
-        let _ = self.bus_producer.send(protocol::Message::Audio(
-            protocol::AudioMessage::DecodeTracks(track_paths),
-        ));
+        if !track_paths.is_empty() {
+            for track in &track_paths {
+                self.requested_track_offsets
+                    .insert(track.id.clone(), track.start_offset_ms);
+            }
+            let _ = self.bus_producer.send(protocol::Message::Audio(
+                protocol::AudioMessage::DecodeTracks(track_paths),
+            ));
+        }
     }
 
     fn clear_cached_tracks(&mut self) {
         self.cached_track_ids.clear();
         self.fully_cached_track_ids.clear();
+        self.requested_track_offsets.clear();
         let _ = self.bus_producer.send(protocol::Message::Audio(
             protocol::AudioMessage::StopDecoding,
         ));
@@ -839,6 +855,7 @@ impl PlaylistManager {
     }
 
     fn stop_decoding(&mut self) {
+        self.requested_track_offsets.clear();
         let _ = self.bus_producer.send(protocol::Message::Audio(
             protocol::AudioMessage::StopDecoding,
         ));
@@ -1443,6 +1460,65 @@ mod tests {
                     protocol::Message::Playback(protocol::PlaybackMessage::PlayTrackById(id))
                         if id == &id1
                 )
+            },
+        );
+    }
+
+    #[test]
+    fn test_natural_transition_does_not_requeue_already_requested_next_track() {
+        let mut harness = PlaylistManagerHarness::new();
+        let (id0, _) = harness.add_track("pm_transition_dedup_0");
+        let (id1, _) = harness.add_track("pm_transition_dedup_1");
+        harness.drain_messages();
+
+        harness.send(protocol::Message::Playback(
+            protocol::PlaybackMessage::PlayTrackByIndex(0),
+        ));
+
+        // Initial decode request should include current + next track.
+        let _ =
+            wait_for_message(
+                &mut harness.receiver,
+                Duration::from_secs(1),
+                |message| match message {
+                    protocol::Message::Audio(protocol::AudioMessage::DecodeTracks(tracks)) => {
+                        tracks
+                            .iter()
+                            .any(|track| track.id == id0 && track.play_immediately)
+                            && tracks
+                                .iter()
+                                .any(|track| track.id == id1 && !track.play_immediately)
+                    }
+                    _ => false,
+                },
+            );
+
+        harness.drain_messages();
+        harness.send(protocol::Message::Playback(
+            protocol::PlaybackMessage::TrackFinished(id0),
+        ));
+
+        let _ = wait_for_message(&mut harness.receiver, Duration::from_secs(1), |message| {
+            matches!(
+                message,
+                protocol::Message::Playlist(protocol::PlaylistMessage::PlaylistIndicesChanged {
+                    is_playing: true,
+                    playing_index: Some(1),
+                    ..
+                })
+            )
+        });
+
+        // Regression check: the next track was already requested in the initial prefetch
+        // and must not be requested again on natural transition.
+        assert_no_message(
+            &mut harness.receiver,
+            Duration::from_millis(250),
+            |message| match message {
+                protocol::Message::Audio(protocol::AudioMessage::DecodeTracks(tracks)) => tracks
+                    .iter()
+                    .any(|track| track.id == id1 && track.start_offset_ms == 0),
+                _ => false,
             },
         );
     }
