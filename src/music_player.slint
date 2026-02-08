@@ -266,6 +266,7 @@ component PlayerButton inherits Rectangle {
         font-size: root.font-size;
         color: root.is-primary ? #2a6def : #eee;
         horizontal-alignment: center;
+        vertical-alignment: center;
         opacity: root.enabled ? 1.0 : 0.5;
     }
 
@@ -343,16 +344,17 @@ export component AppWindow inherits Window {
                 
                 // Left Group: Open
                 Rectangle {
-                    width: 70px;
+                    width: 32px;
                     height: 26px;
                     border-radius: 2px;
                     background: touch-area-open.pressed ? #444 : touch-area-open.has-hover ? #555 : #373737;
                     animate background { duration: 150ms; }
                     
                     Text {
-                        text: "Open";
+                        text: "+";
                         color: #eee;
-                        font-size: 13px;
+                        font-size: 20px;
+                        font-weight: 700;
                         vertical-alignment: center;
                         horizontal-alignment: center;
                     }
@@ -455,7 +457,7 @@ export component AppWindow inherits Window {
                         height: 32px;
                         PlayerButton {
                             icon-text: "⟳";
-                            font-size: 20px;
+                            font-size: 19px;
                             is-primary: root.repeat_mode != 0;
                             clicked => {
                                 root.toggle_repeat();
