@@ -1384,4 +1384,72 @@ mod tests {
         assert_order(&playlist, vec!["A", "C", "D", "B"]);
         assert_eq!(playlist.get_playing_track_index(), Some(3));
     }
+
+    #[test]
+    fn test_next_default_without_repeat_returns_none_at_end() {
+        let mut playlist = Playlist::new();
+        playlist.add_track(make_track("A"));
+        playlist.add_track(make_track("B"));
+
+        assert_eq!(playlist.get_next_track_index(1), None);
+    }
+
+    #[test]
+    fn test_next_default_with_playlist_repeat_wraps() {
+        let mut playlist = Playlist::new();
+        playlist.add_track(make_track("A"));
+        playlist.add_track(make_track("B"));
+        playlist.set_repeat_mode(RepeatMode::Playlist);
+
+        assert_eq!(playlist.get_next_track_index(1), Some(0));
+    }
+
+    #[test]
+    fn test_next_with_track_repeat_stays_on_same_track() {
+        let mut playlist = Playlist::new();
+        playlist.add_track(make_track("A"));
+        playlist.add_track(make_track("B"));
+        playlist.set_repeat_mode(RepeatMode::Track);
+
+        assert_eq!(playlist.get_next_track_index(1), Some(1));
+    }
+
+    #[test]
+    fn test_previous_default_with_playlist_repeat_wraps_to_end() {
+        let mut playlist = Playlist::new();
+        playlist.add_track(make_track("A"));
+        playlist.add_track(make_track("B"));
+        playlist.set_repeat_mode(RepeatMode::Playlist);
+
+        assert_eq!(playlist.get_previous_track_index(0), Some(1));
+    }
+
+    #[test]
+    fn test_shuffle_order_covers_all_tracks_then_ends_without_repeat() {
+        let mut playlist = Playlist::new();
+        playlist.add_track(make_track("A"));
+        playlist.add_track(make_track("B"));
+        playlist.add_track(make_track("C"));
+        playlist.set_selected_indices(vec![0]);
+        playlist.set_playback_order(PlaybackOrder::Shuffle);
+
+        let next_1 = playlist.get_next_track_index(0).unwrap();
+        let next_2 = playlist.get_next_track_index(next_1).unwrap();
+        let next_3 = playlist.get_next_track_index(next_2);
+
+        assert_ne!(next_1, 0);
+        assert_ne!(next_2, 0);
+        assert_ne!(next_1, next_2);
+        assert_eq!(next_3, None);
+    }
+
+    #[test]
+    fn test_random_order_picks_different_track_when_multiple_tracks_exist() {
+        let mut playlist = Playlist::new();
+        playlist.add_track(make_track("A"));
+        playlist.add_track(make_track("B"));
+        playlist.set_playback_order(PlaybackOrder::Random);
+
+        assert_eq!(playlist.get_next_track_index(0), Some(1));
+    }
 }

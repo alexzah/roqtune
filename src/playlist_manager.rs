@@ -841,3 +841,473 @@ impl PlaylistManager {
         ));
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::path::PathBuf;
+    use std::thread;
+    use std::time::{Duration, Instant};
+    use tokio::sync::broadcast::{self, error::TryRecvError, Receiver, Sender};
+
+    struct PlaylistManagerHarness {
+        bus_sender: Sender<protocol::Message>,
+        receiver: Receiver<protocol::Message>,
+    }
+
+    impl PlaylistManagerHarness {
+        fn new() -> Self {
+            let (bus_sender, _) = broadcast::channel(4096);
+            let manager_bus_sender = bus_sender.clone();
+            let manager_receiver = bus_sender.subscribe();
+            let db_manager = DbManager::new_in_memory().expect("failed to create in-memory db");
+
+            thread::spawn(move || {
+                let mut manager = PlaylistManager::new(
+                    Playlist::new(),
+                    manager_receiver,
+                    manager_bus_sender,
+                    db_manager,
+                );
+                manager.run();
+            });
+
+            let mut receiver = bus_sender.subscribe();
+            let _ = wait_for_message(&mut receiver, Duration::from_secs(1), |message| {
+                matches!(
+                    message,
+                    protocol::Message::Playlist(protocol::PlaylistMessage::ActivePlaylistChanged(
+                        _
+                    ))
+                )
+            });
+
+            let mut harness = Self {
+                bus_sender,
+                receiver,
+            };
+            harness.drain_messages();
+            harness
+        }
+
+        fn send(&self, message: protocol::Message) {
+            self.bus_sender
+                .send(message)
+                .expect("failed to send message to bus");
+        }
+
+        fn add_track(&mut self, name: &str) -> (String, PathBuf) {
+            let path = PathBuf::from(format!("/tmp/{}.mp3", name));
+            self.send(protocol::Message::Playlist(
+                protocol::PlaylistMessage::LoadTrack(path.clone()),
+            ));
+
+            let message =
+                wait_for_message(
+                    &mut self.receiver,
+                    Duration::from_secs(1),
+                    |message| match message {
+                        protocol::Message::Playlist(protocol::PlaylistMessage::TrackAdded {
+                            path: added_path,
+                            ..
+                        }) => added_path == &path,
+                        _ => false,
+                    },
+                );
+
+            if let protocol::Message::Playlist(protocol::PlaylistMessage::TrackAdded { id, path }) =
+                message
+            {
+                (id, path)
+            } else {
+                panic!("expected TrackAdded message");
+            }
+        }
+
+        fn drain_messages(&mut self) {
+            loop {
+                match self.receiver.try_recv() {
+                    Ok(_) => {}
+                    Err(TryRecvError::Empty) => break,
+                    Err(TryRecvError::Lagged(_)) => continue,
+                    Err(TryRecvError::Closed) => break,
+                }
+            }
+        }
+    }
+
+    fn wait_for_message<F>(
+        receiver: &mut Receiver<protocol::Message>,
+        timeout: Duration,
+        mut predicate: F,
+    ) -> protocol::Message
+    where
+        F: FnMut(&protocol::Message) -> bool,
+    {
+        let start = Instant::now();
+        loop {
+            if start.elapsed() > timeout {
+                panic!("timed out waiting for expected message");
+            }
+            match receiver.try_recv() {
+                Ok(message) => {
+                    if predicate(&message) {
+                        return message;
+                    }
+                }
+                Err(TryRecvError::Empty) => thread::sleep(Duration::from_millis(5)),
+                Err(TryRecvError::Lagged(_)) => continue,
+                Err(TryRecvError::Closed) => panic!("bus closed while waiting for message"),
+            }
+        }
+    }
+
+    #[test]
+    fn test_play_pause_next_previous_event_sequence() {
+        let mut harness = PlaylistManagerHarness::new();
+        let (id0, _) = harness.add_track("pm_play_0");
+        let (id1, _) = harness.add_track("pm_play_1");
+        harness.drain_messages();
+
+        harness.send(protocol::Message::Playback(
+            protocol::PlaybackMessage::PlayTrackByIndex(0),
+        ));
+
+        let _ = wait_for_message(&mut harness.receiver, Duration::from_secs(1), |message| {
+            matches!(
+                message,
+                protocol::Message::Playback(protocol::PlaybackMessage::ClearPlayerCache)
+            )
+        });
+
+        let _ =
+            wait_for_message(
+                &mut harness.receiver,
+                Duration::from_secs(1),
+                |message| match message {
+                    protocol::Message::Audio(protocol::AudioMessage::DecodeTracks(tracks)) => {
+                        tracks
+                            .first()
+                            .map(|track| track.id == id0 && track.play_immediately)
+                            .unwrap_or(false)
+                    }
+                    _ => false,
+                },
+            );
+
+        harness.send(protocol::Message::Playback(
+            protocol::PlaybackMessage::ReadyForPlayback(id0.clone()),
+        ));
+
+        let _ = wait_for_message(&mut harness.receiver, Duration::from_secs(1), |message| {
+            matches!(
+                message,
+                protocol::Message::Playback(protocol::PlaybackMessage::PlayTrackById(id))
+                    if id == &id0
+            )
+        });
+
+        harness.send(protocol::Message::Playback(
+            protocol::PlaybackMessage::Pause,
+        ));
+        let _ = wait_for_message(&mut harness.receiver, Duration::from_secs(1), |message| {
+            matches!(
+                message,
+                protocol::Message::Playlist(protocol::PlaylistMessage::PlaylistIndicesChanged {
+                    is_playing: false,
+                    playing_index: Some(0),
+                    ..
+                })
+            )
+        });
+
+        harness.send(protocol::Message::Playback(protocol::PlaybackMessage::Play));
+        let _ = wait_for_message(&mut harness.receiver, Duration::from_secs(1), |message| {
+            matches!(
+                message,
+                protocol::Message::Playlist(protocol::PlaylistMessage::PlaylistIndicesChanged {
+                    is_playing: true,
+                    playing_index: Some(0),
+                    ..
+                })
+            )
+        });
+
+        harness.send(protocol::Message::Playback(protocol::PlaybackMessage::Next));
+        let _ =
+            wait_for_message(
+                &mut harness.receiver,
+                Duration::from_secs(1),
+                |message| match message {
+                    protocol::Message::Audio(protocol::AudioMessage::DecodeTracks(tracks)) => {
+                        tracks
+                            .first()
+                            .map(|track| track.id == id1 && track.play_immediately)
+                            .unwrap_or(false)
+                    }
+                    _ => false,
+                },
+            );
+
+        harness.send(protocol::Message::Playback(
+            protocol::PlaybackMessage::ReadyForPlayback(id1.clone()),
+        ));
+        let _ = wait_for_message(&mut harness.receiver, Duration::from_secs(1), |message| {
+            matches!(
+                message,
+                protocol::Message::Playback(protocol::PlaybackMessage::PlayTrackById(id))
+                    if id == &id1
+            )
+        });
+
+        harness.send(protocol::Message::Playback(
+            protocol::PlaybackMessage::Previous,
+        ));
+        let _ =
+            wait_for_message(
+                &mut harness.receiver,
+                Duration::from_secs(1),
+                |message| match message {
+                    protocol::Message::Audio(protocol::AudioMessage::DecodeTracks(tracks)) => {
+                        tracks
+                            .first()
+                            .map(|track| track.id == id0 && track.play_immediately)
+                            .unwrap_or(false)
+                    }
+                    _ => false,
+                },
+            );
+    }
+
+    #[test]
+    fn test_natural_transition_stops_after_last_track_when_repeat_off() {
+        let mut harness = PlaylistManagerHarness::new();
+        let (id0, _) = harness.add_track("pm_transition_0");
+        let (id1, _) = harness.add_track("pm_transition_1");
+        harness.drain_messages();
+
+        harness.send(protocol::Message::Playback(
+            protocol::PlaybackMessage::PlayTrackByIndex(0),
+        ));
+        let _ = wait_for_message(&mut harness.receiver, Duration::from_secs(1), |message| {
+            matches!(
+                message,
+                protocol::Message::Playlist(protocol::PlaylistMessage::PlaylistIndicesChanged {
+                    is_playing: true,
+                    playing_index: Some(0),
+                    ..
+                })
+            )
+        });
+
+        harness.send(protocol::Message::Playback(
+            protocol::PlaybackMessage::TrackFinished(id0.clone()),
+        ));
+        let _ = wait_for_message(&mut harness.receiver, Duration::from_secs(1), |message| {
+            matches!(
+                message,
+                protocol::Message::Playlist(protocol::PlaylistMessage::PlaylistIndicesChanged {
+                    is_playing: true,
+                    playing_index: Some(1),
+                    ..
+                })
+            )
+        });
+
+        harness.send(protocol::Message::Playback(
+            protocol::PlaybackMessage::TrackFinished(id1.clone()),
+        ));
+        let _ = wait_for_message(&mut harness.receiver, Duration::from_secs(1), |message| {
+            matches!(
+                message,
+                protocol::Message::Playback(protocol::PlaybackMessage::Stop)
+            )
+        });
+        let _ = wait_for_message(&mut harness.receiver, Duration::from_secs(1), |message| {
+            matches!(
+                message,
+                protocol::Message::Playlist(protocol::PlaylistMessage::PlaylistIndicesChanged {
+                    is_playing: false,
+                    playing_index: None,
+                    ..
+                })
+            )
+        });
+    }
+
+    #[test]
+    fn test_repeat_playlist_wraps_after_last_track() {
+        let mut harness = PlaylistManagerHarness::new();
+        let (id0, _) = harness.add_track("pm_repeat_playlist_0");
+        let (id1, _) = harness.add_track("pm_repeat_playlist_1");
+        harness.drain_messages();
+
+        harness.send(protocol::Message::Playback(
+            protocol::PlaybackMessage::PlayTrackByIndex(0),
+        ));
+        let _ = wait_for_message(&mut harness.receiver, Duration::from_secs(1), |message| {
+            matches!(
+                message,
+                protocol::Message::Playlist(protocol::PlaylistMessage::PlaylistIndicesChanged {
+                    is_playing: true,
+                    playing_index: Some(0),
+                    ..
+                })
+            )
+        });
+
+        harness.send(protocol::Message::Playlist(
+            protocol::PlaylistMessage::ToggleRepeat,
+        ));
+        let _ = wait_for_message(&mut harness.receiver, Duration::from_secs(1), |message| {
+            matches!(
+                message,
+                protocol::Message::Playlist(protocol::PlaylistMessage::RepeatModeChanged(
+                    protocol::RepeatMode::Playlist
+                ))
+            )
+        });
+
+        harness.send(protocol::Message::Playback(
+            protocol::PlaybackMessage::TrackFinished(id0.clone()),
+        ));
+        let _ = wait_for_message(&mut harness.receiver, Duration::from_secs(1), |message| {
+            matches!(
+                message,
+                protocol::Message::Playlist(protocol::PlaylistMessage::PlaylistIndicesChanged {
+                    is_playing: true,
+                    playing_index: Some(1),
+                    ..
+                })
+            )
+        });
+
+        harness.send(protocol::Message::Playback(
+            protocol::PlaybackMessage::TrackFinished(id1.clone()),
+        ));
+        let _ = wait_for_message(&mut harness.receiver, Duration::from_secs(1), |message| {
+            matches!(
+                message,
+                protocol::Message::Playlist(protocol::PlaylistMessage::PlaylistIndicesChanged {
+                    is_playing: true,
+                    playing_index: Some(0),
+                    ..
+                })
+            )
+        });
+    }
+
+    #[test]
+    fn test_repeat_track_replays_same_track_on_finish() {
+        let mut harness = PlaylistManagerHarness::new();
+        let (id0, _) = harness.add_track("pm_repeat_track_0");
+        harness.drain_messages();
+
+        harness.send(protocol::Message::Playback(
+            protocol::PlaybackMessage::PlayTrackByIndex(0),
+        ));
+        let _ = wait_for_message(&mut harness.receiver, Duration::from_secs(1), |message| {
+            matches!(
+                message,
+                protocol::Message::Playlist(protocol::PlaylistMessage::PlaylistIndicesChanged {
+                    is_playing: true,
+                    playing_index: Some(0),
+                    ..
+                })
+            )
+        });
+
+        harness.send(protocol::Message::Playlist(
+            protocol::PlaylistMessage::ToggleRepeat,
+        ));
+        harness.send(protocol::Message::Playlist(
+            protocol::PlaylistMessage::ToggleRepeat,
+        ));
+        let _ = wait_for_message(&mut harness.receiver, Duration::from_secs(1), |message| {
+            matches!(
+                message,
+                protocol::Message::Playlist(protocol::PlaylistMessage::RepeatModeChanged(
+                    protocol::RepeatMode::Track
+                ))
+            )
+        });
+
+        harness.send(protocol::Message::Playback(
+            protocol::PlaybackMessage::TrackFinished(id0.clone()),
+        ));
+        let _ = wait_for_message(&mut harness.receiver, Duration::from_secs(1), |message| {
+            matches!(
+                message,
+                protocol::Message::Playlist(protocol::PlaylistMessage::PlaylistIndicesChanged {
+                    is_playing: true,
+                    playing_index: Some(0),
+                    ..
+                })
+            )
+        });
+    }
+
+    #[test]
+    fn test_seek_restarts_decode_from_requested_offset() {
+        let mut harness = PlaylistManagerHarness::new();
+        let (id0, _) = harness.add_track("pm_seek_0");
+        harness.drain_messages();
+
+        harness.send(protocol::Message::Playback(
+            protocol::PlaybackMessage::PlayTrackByIndex(0),
+        ));
+        let _ = wait_for_message(&mut harness.receiver, Duration::from_secs(1), |message| {
+            matches!(
+                message,
+                protocol::Message::Playlist(protocol::PlaylistMessage::PlaylistIndicesChanged {
+                    is_playing: true,
+                    playing_index: Some(0),
+                    ..
+                })
+            )
+        });
+        harness.drain_messages();
+
+        harness.send(protocol::Message::Playback(
+            protocol::PlaybackMessage::TechnicalMetadataChanged(protocol::TechnicalMetadata {
+                format: "MP3".to_string(),
+                bitrate_kbps: 320,
+                sample_rate_hz: 44_100,
+                duration_ms: 100_000,
+            }),
+        ));
+        harness.send(protocol::Message::Playback(
+            protocol::PlaybackMessage::Seek(0.5),
+        ));
+
+        let _ = wait_for_message(&mut harness.receiver, Duration::from_secs(1), |message| {
+            matches!(
+                message,
+                protocol::Message::Audio(protocol::AudioMessage::StopDecoding)
+            )
+        });
+
+        let _ = wait_for_message(&mut harness.receiver, Duration::from_secs(1), |message| {
+            matches!(
+                message,
+                protocol::Message::Playback(protocol::PlaybackMessage::ClearPlayerCache)
+            )
+        });
+
+        let _ =
+            wait_for_message(
+                &mut harness.receiver,
+                Duration::from_secs(1),
+                |message| match message {
+                    protocol::Message::Audio(protocol::AudioMessage::DecodeTracks(tracks)) => {
+                        tracks.iter().any(|track| {
+                            track.id == id0
+                                && track.play_immediately
+                                && track.start_offset_ms == 50_000
+                        })
+                    }
+                    _ => false,
+                },
+            );
+    }
+}

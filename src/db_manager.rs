@@ -26,6 +26,15 @@ impl DbManager {
         Ok(db_manager)
     }
 
+    #[cfg(test)]
+    pub fn new_in_memory() -> Result<Self, rusqlite::Error> {
+        let conn = Connection::open_in_memory()?;
+        let db_manager = Self { conn };
+        db_manager.initialize_schema()?;
+        db_manager.migrate()?;
+        Ok(db_manager)
+    }
+
     fn initialize_schema(&self) -> Result<(), rusqlite::Error> {
         self.conn.execute(
             "CREATE TABLE IF NOT EXISTS playlists (

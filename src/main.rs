@@ -55,6 +55,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             ui: protocol::UiConfig {
                 show_album_art: true,
             },
+            buffering: protocol::BufferingConfig::default(),
         };
 
         info!(

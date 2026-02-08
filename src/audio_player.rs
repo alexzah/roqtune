@@ -49,6 +49,9 @@ pub struct AudioPlayer {
     current_track_offset_ms: Arc<AtomicUsize>,
     current_metadata: Arc<Mutex<Option<crate::protocol::TechnicalMetadata>>>,
     volume: Arc<AtomicU32>,
+    buffer_low_watermark_ms: Arc<AtomicUsize>,
+    buffer_target_ms: Arc<AtomicUsize>,
+    buffer_request_interval_ms: Arc<AtomicUsize>,
 
     // Setup cache
     cached_track_indices: Arc<Mutex<HashMap<String, TrackIndex>>>,
@@ -70,6 +73,9 @@ impl AudioPlayer {
         let target_sample_rate = Arc::new(AtomicUsize::new(44100));
         let target_channels = Arc::new(AtomicUsize::new(2));
         let volume = Arc::new(AtomicU32::new(1.0f32.to_bits()));
+        let buffer_low_watermark_ms = Arc::new(AtomicUsize::new(12_000));
+        let buffer_target_ms = Arc::new(AtomicUsize::new(24_000));
+        let buffer_request_interval_ms = Arc::new(AtomicUsize::new(120));
 
         let mut player = Self {
             bus_receiver,
@@ -88,6 +94,9 @@ impl AudioPlayer {
             current_track_offset_ms: current_track_offset_ms.clone(),
             current_metadata: current_metadata.clone(),
             volume: volume.clone(),
+            buffer_low_watermark_ms: buffer_low_watermark_ms.clone(),
+            buffer_target_ms: buffer_target_ms.clone(),
+            buffer_request_interval_ms: buffer_request_interval_ms.clone(),
         };
 
         player.setup_audio_device();
@@ -141,7 +150,71 @@ impl AudioPlayer {
             }
         });
 
+        // Spawn decode prefetch thread. It requests more decoded audio when
+        // buffered samples ahead of playback fall below a configurable threshold.
+        let bus_sender_clone = bus_sender.clone();
+        let sample_queue_clone = player.sample_queue.clone();
+        let current_track_position_clone = current_track_position.clone();
+        let target_sample_rate_clone = target_sample_rate.clone();
+        let target_channels_clone = target_channels.clone();
+        let buffer_low_watermark_ms_clone = buffer_low_watermark_ms.clone();
+        let buffer_target_ms_clone = buffer_target_ms.clone();
+        let buffer_request_interval_ms_clone = buffer_request_interval_ms.clone();
+        thread::spawn(move || loop {
+            let interval_ms = buffer_request_interval_ms_clone
+                .load(Ordering::Relaxed)
+                .max(20) as u64;
+            thread::sleep(Duration::from_millis(interval_ms));
+
+            let sample_rate = target_sample_rate_clone.load(Ordering::Relaxed);
+            let channels = target_channels_clone.load(Ordering::Relaxed);
+            let low_watermark_ms = buffer_low_watermark_ms_clone.load(Ordering::Relaxed);
+            let target_buffer_ms = buffer_target_ms_clone
+                .load(Ordering::Relaxed)
+                .max(low_watermark_ms.saturating_add(500));
+
+            let low_watermark_samples =
+                Self::milliseconds_to_samples(low_watermark_ms, sample_rate, channels);
+            let target_buffer_samples =
+                Self::milliseconds_to_samples(target_buffer_ms, sample_rate, channels);
+
+            let buffered_samples = {
+                let queue = sample_queue_clone.lock().unwrap();
+                let current_position = current_track_position_clone.load(Ordering::Relaxed);
+                queue.len().saturating_sub(current_position)
+            };
+
+            let requested_samples = Self::compute_decode_request_samples(
+                buffered_samples,
+                low_watermark_samples,
+                target_buffer_samples,
+            );
+            if requested_samples > 0 {
+                let _ = bus_sender_clone.send(Message::Audio(AudioMessage::RequestDecodeChunk {
+                    requested_samples,
+                }));
+            }
+        });
+
         player
+    }
+
+    fn milliseconds_to_samples(milliseconds: usize, sample_rate: usize, channels: usize) -> usize {
+        let sr = sample_rate.max(1) as u128;
+        let ch = channels.max(1) as u128;
+        let samples = milliseconds as u128 * sr * ch / 1000;
+        samples.min(usize::MAX as u128) as usize
+    }
+
+    fn compute_decode_request_samples(
+        buffered_samples: usize,
+        low_watermark_samples: usize,
+        target_buffer_samples: usize,
+    ) -> usize {
+        if buffered_samples >= low_watermark_samples {
+            return 0;
+        }
+        target_buffer_samples.saturating_sub(buffered_samples)
     }
 
     fn setup_audio_device(&mut self) {
@@ -431,6 +504,17 @@ impl AudioPlayer {
                         self.target_channels
                             .store(config.output.channel_count as usize, Ordering::Relaxed);
                         self.target_bits_per_sample = config.output.bits_per_sample;
+                        let low_watermark_ms = config.buffering.player_low_watermark_ms as usize;
+                        let target_buffer_ms = (config.buffering.player_target_buffer_ms as usize)
+                            .max(low_watermark_ms.saturating_add(500));
+                        self.buffer_low_watermark_ms
+                            .store(low_watermark_ms, Ordering::Relaxed);
+                        self.buffer_target_ms
+                            .store(target_buffer_ms, Ordering::Relaxed);
+                        self.buffer_request_interval_ms.store(
+                            config.buffering.player_request_interval_ms.max(20) as usize,
+                            Ordering::Relaxed,
+                        );
                         self.setup_audio_device();
                         if self.stream.is_some() {
                             self.stream = None;
@@ -472,5 +556,34 @@ impl AudioPlayer {
                 Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::AudioPlayer;
+
+    #[test]
+    fn test_milliseconds_to_samples_stereo() {
+        let samples = AudioPlayer::milliseconds_to_samples(1000, 44_100, 2);
+        assert_eq!(samples, 88_200);
+    }
+
+    #[test]
+    fn test_milliseconds_to_samples_clamps_zero_inputs() {
+        let samples = AudioPlayer::milliseconds_to_samples(1000, 0, 0);
+        assert_eq!(samples, 1);
+    }
+
+    #[test]
+    fn test_compute_decode_request_samples_when_above_watermark() {
+        let request = AudioPlayer::compute_decode_request_samples(50_000, 20_000, 40_000);
+        assert_eq!(request, 0);
+    }
+
+    #[test]
+    fn test_compute_decode_request_samples_when_below_watermark() {
+        let request = AudioPlayer::compute_decode_request_samples(10_000, 20_000, 40_000);
+        assert_eq!(request, 30_000);
     }
 }

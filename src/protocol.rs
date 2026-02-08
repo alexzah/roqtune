@@ -5,6 +5,8 @@ pub struct Config {
     pub output: OutputConfig,
     #[serde(default)]
     pub ui: UiConfig,
+    #[serde(default)]
+    pub buffering: BufferingConfig,
 }
 
 #[derive(Debug, Clone, serde::Deserialize, serde::Serialize)]
@@ -20,8 +22,47 @@ pub struct UiConfig {
     pub show_album_art: bool,
 }
 
+#[derive(Debug, Clone, serde::Deserialize, serde::Serialize)]
+pub struct BufferingConfig {
+    #[serde(default = "default_player_low_watermark_ms")]
+    pub player_low_watermark_ms: u32,
+    #[serde(default = "default_player_target_buffer_ms")]
+    pub player_target_buffer_ms: u32,
+    #[serde(default = "default_player_request_interval_ms")]
+    pub player_request_interval_ms: u32,
+    #[serde(default = "default_decoder_request_chunk_ms")]
+    pub decoder_request_chunk_ms: u32,
+}
+
+impl Default for BufferingConfig {
+    fn default() -> Self {
+        Self {
+            player_low_watermark_ms: default_player_low_watermark_ms(),
+            player_target_buffer_ms: default_player_target_buffer_ms(),
+            player_request_interval_ms: default_player_request_interval_ms(),
+            decoder_request_chunk_ms: default_decoder_request_chunk_ms(),
+        }
+    }
+}
+
 fn default_true() -> bool {
     true
+}
+
+fn default_player_low_watermark_ms() -> u32 {
+    12_000
+}
+
+fn default_player_target_buffer_ms() -> u32 {
+    24_000
+}
+
+fn default_player_request_interval_ms() -> u32 {
+    120
+}
+
+fn default_decoder_request_chunk_ms() -> u32 {
+    1_500
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, serde::Deserialize, serde::Serialize)]
@@ -178,6 +219,7 @@ pub struct TrackIdentifier {
 #[derive(Debug, Clone)]
 pub enum AudioMessage {
     DecodeTracks(Vec<TrackIdentifier>),
+    RequestDecodeChunk { requested_samples: usize },
     StopDecoding,
     TrackCached(String, u64), // id, start_offset_ms
     AudioPacket(AudioPacket),
