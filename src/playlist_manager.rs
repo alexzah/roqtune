@@ -761,13 +761,26 @@ impl PlaylistManager {
         let mut track_paths = Vec::new();
 
         for _ in 0..self.max_num_cached_tracks {
-            if current_index < self.playback_playlist.num_tracks()
-                && !self
-                    .cached_track_ids
-                    .contains_key(&self.playback_playlist.get_track_id(current_index))
-            {
+            if current_index < self.playback_playlist.num_tracks() {
+                let track_id = self.playback_playlist.get_track_id(current_index);
+                let is_cached_at_track_start =
+                    self.cached_track_ids.get(&track_id).copied() == Some(0);
+                if is_cached_at_track_start {
+                    if let Some(next_index) =
+                        self.playback_playlist.get_next_track_index(current_index)
+                    {
+                        current_index = next_index;
+                        if next_index >= self.playback_playlist.num_tracks() {
+                            break;
+                        }
+                    } else {
+                        break;
+                    }
+                    continue;
+                }
+
                 track_paths.push(TrackIdentifier {
-                    id: self.playback_playlist.get_track(current_index).id.clone(),
+                    id: track_id,
                     path: self.playback_playlist.get_track(current_index).path.clone(),
                     play_immediately: play_immediately && current_index == first_index,
                     start_offset_ms: 0,
@@ -1245,6 +1258,76 @@ mod tests {
                 })
             )
         });
+    }
+
+    #[test]
+    fn test_repeat_track_recaches_from_start_after_nonzero_offset_cache() {
+        let mut harness = PlaylistManagerHarness::new();
+        let (id0, _) = harness.add_track("pm_repeat_seek_end_0");
+        harness.drain_messages();
+
+        harness.send(protocol::Message::Playback(
+            protocol::PlaybackMessage::PlayTrackByIndex(0),
+        ));
+        let _ = wait_for_message(&mut harness.receiver, Duration::from_secs(1), |message| {
+            matches!(
+                message,
+                protocol::Message::Playlist(protocol::PlaylistMessage::PlaylistIndicesChanged {
+                    is_playing: true,
+                    playing_index: Some(0),
+                    ..
+                })
+            )
+        });
+
+        // Set Repeat=Track
+        harness.send(protocol::Message::Playlist(
+            protocol::PlaylistMessage::ToggleRepeat,
+        ));
+        harness.send(protocol::Message::Playlist(
+            protocol::PlaylistMessage::ToggleRepeat,
+        ));
+        let _ = wait_for_message(&mut harness.receiver, Duration::from_secs(1), |message| {
+            matches!(
+                message,
+                protocol::Message::Playlist(protocol::PlaylistMessage::RepeatModeChanged(
+                    protocol::RepeatMode::Track
+                ))
+            )
+        });
+
+        // Simulate a seek-near-end cache state where current track is cached at non-zero offset.
+        harness.send(protocol::Message::Audio(
+            protocol::AudioMessage::TrackCached(id0.clone(), 98_000),
+        ));
+        let _ = wait_for_message(&mut harness.receiver, Duration::from_secs(1), |message| {
+            matches!(
+                message,
+                protocol::Message::Audio(protocol::AudioMessage::TrackCached(id, offset))
+                    if id == &id0 && *offset == 98_000
+            )
+        });
+
+        harness.drain_messages();
+        harness.send(protocol::Message::Playback(
+            protocol::PlaybackMessage::TrackFinished(id0.clone()),
+        ));
+
+        // Regression check: repeat-track must decode from start (offset 0), not assume
+        // non-zero cached offset is reusable.
+        let _ =
+            wait_for_message(
+                &mut harness.receiver,
+                Duration::from_secs(1),
+                |message| match message {
+                    protocol::Message::Audio(protocol::AudioMessage::DecodeTracks(tracks)) => {
+                        tracks
+                            .iter()
+                            .any(|track| track.id == id0 && track.start_offset_ms == 0)
+                    }
+                    _ => false,
+                },
+            );
     }
 
     #[test]
