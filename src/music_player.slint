@@ -1,4 +1,4 @@
-import { Button, VerticalBox, StandardTableView, ComboBox, ScrollView, LineEdit, ListView } from "std-widgets.slint";
+import { Button, VerticalBox, StandardTableView, ScrollView, LineEdit, ListView } from "std-widgets.slint";
 
 struct TrackRowData {
     status: string,
@@ -418,29 +418,36 @@ export component AppWindow inherits Window {
                 // Right Group: Playback mode selection
                 HorizontalLayout {
                     spacing: 12px;
-                    
-                    Text {
-                        text: "Order:";
-                        color: #888;
-                        font-size: 13px;
-                        vertical-alignment: center;
-                    }
 
-                    ComboBox {
-                        width: 180px;
-                        height: 26px;
-                        model: ["Default", "Shuffle", "Random"];
-                        current-index: root.playback_order_index;
-                        selected => {
-                            root.playback_order_changed(self.current-index);
+                    Rectangle {
+                        width: 32px;
+                        height: 32px;
+                        PlayerButton {
+                            icon-text: "⇄";
+                            font-size: 20px;
+                            is-primary: root.playback_order_index != 0;
+                            clicked => {
+                                let next-order = root.playback_order_index == 0 ? 1 : root.playback_order_index == 1 ? 2 : 0;
+                                root.playback_order_index = next-order;
+                                root.playback_order_changed(next-order);
+                            }
                         }
-                    }
-
-                    Text {
-                        text: "Repeat:";
-                        color: #888;
-                        font-size: 13px;
-                        vertical-alignment: center;
+                        if root.playback_order_index == 2 : Rectangle {
+                            width: 10px;
+                            height: 10px;
+                            x: 15px;
+                            y: 11px;
+                            border-radius: 5px;
+                            background: #2a6def;
+                            Text {
+                                text: "?";
+                                color: white;
+                                font-size: 7px;
+                                font-weight: 700;
+                                horizontal-alignment: center;
+                                vertical-alignment: center;
+                            }
+                        }
                     }
 
                     Rectangle {
@@ -454,34 +461,84 @@ export component AppWindow inherits Window {
                                 root.toggle_repeat();
                             }
                         }
-                        if root.repeat_mode == 2 : Text {
-                            text: "1";
-                            color: #2a6def;
-                            font-size: 6px;
-                            font-weight: 700;
-                            x: 13px;
-                            y: 12px;
+                        if root.repeat_mode == 2 : Rectangle {
+                            width: 10px;
+                            height: 10px;
+                            x: 15px;
+                            y: 11px;
+                            border-radius: 5px;
+                            background: #2a6def;
+                            Text {
+                                text: "1";
+                                color: white;
+                                font-size: 7px;
+                                font-weight: 700;
+                                horizontal-alignment: center;
+                                vertical-alignment: center;
+                            }
                         }
                     }
 
-                    Text {
-                        text: "Volume:";
-                        color: #888;
-                        font-size: 13px;
-                        vertical-alignment: center;
+                    Rectangle {
+                        width: 20px;
+                        height: 32px;
+                        background: transparent;
+
+                        Rectangle {
+                            x: 0px;
+                            y: 13px;
+                            width: 4px;
+                            height: 6px;
+                            border-radius: 1px;
+                            background: #888;
+                        }
+
+                        Rectangle {
+                            x: 4px;
+                            y: 12px;
+                            width: 2px;
+                            height: 8px;
+                            border-radius: 1px;
+                            background: #888;
+                        }
+
+                        Rectangle {
+                            x: 6px;
+                            y: 11px;
+                            width: 1px;
+                            height: 10px;
+                            background: #888;
+                        }
+
+                        Text {
+                            x: 8px;
+                            y: 8px;
+                            text: "))";
+                            color: #888;
+                            font-size: 11px;
+                            vertical-alignment: center;
+                        }
                     }
 
                     volume-slider := Rectangle {
                         width: 110px;
-                        height: 6px;
-                        border-radius: 3px;
-                        background: #333;
+                        height: 32px;
+                        background: transparent;
+
+                        volume-track := Rectangle {
+                            x: 0;
+                            y: 13px;
+                            width: parent.width;
+                            height: 6px;
+                            border-radius: 3px;
+                            background: #333;
+                        }
 
                         Rectangle {
                             x: 0;
-                            y: 0;
-                            width: volume-slider.width * root.volume-level;
-                            height: parent.height;
+                            y: volume-track.y;
+                            width: volume-track.width * root.volume-level;
+                            height: volume-track.height;
                             background: #2a6def;
                             border-radius: 3px;
                         }
@@ -489,8 +546,8 @@ export component AppWindow inherits Window {
                         volume-handle := Rectangle {
                             width: 10px;
                             height: 10px;
-                            x: (volume-slider.width * root.volume-level) - self.width / 2;
-                            y: (parent.height - self.height) / 2;
+                            x: (volume-track.width * root.volume-level) - self.width / 2;
+                            y: volume-track.y + (volume-track.height - self.height) / 2;
                             background: white;
                             border-radius: 5px;
                             animate x {
@@ -509,27 +566,38 @@ export component AppWindow inherits Window {
                         ta-volume := TouchArea {
                             width: parent.width;
                             height: 20px;
+                            y: 6px;
                             mouse-cursor: pointer;
                             clicked => {
-                                root.volume-level = max(0, min(1, self.mouse-x / volume-slider.width));
+                                root.volume-level = max(0, min(1, self.mouse-x / volume-track.width));
                                 root.volume-changed(root.volume-level);
                             }
                             moved => {
                                 if (self.pressed) {
-                                    root.volume-level = max(0, min(1, self.mouse-x / volume-slider.width));
+                                    root.volume-level = max(0, min(1, self.mouse-x / volume-track.width));
                                     root.volume-changed(root.volume-level);
                                 }
                             }
                         }
-                    }
+                        
+                        if ta-volume.pressed : Rectangle {
+                            width: 36px;
+                            height: 18px;
+                            x: min(volume-track.width - self.width, max(0px, (volume-track.width * root.volume-level) - self.width / 2));
+                            y: -18px;
+                            border-radius: 3px;
+                            background: #1f1f1f;
+                            border-width: 1px;
+                            border-color: #3a3a3a;
 
-                    Text {
-                        width: 34px;
-                        text: floor(root.volume-level * 100) + "%";
-                        color: #888;
-                        font-size: 12px;
-                        vertical-alignment: center;
-                        horizontal-alignment: right;
+                            Text {
+                                text: floor(root.volume-level * 100) + "%";
+                                color: #ddd;
+                                font-size: 11px;
+                                horizontal-alignment: center;
+                                vertical-alignment: center;
+                            }
+                        }
                     }
                 }
             }
