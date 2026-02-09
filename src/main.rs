@@ -459,6 +459,129 @@ fn playlist_column_order_keys(columns: &[PlaylistColumnConfig]) -> Vec<String> {
     columns.iter().map(playlist_column_key).collect()
 }
 
+#[derive(Clone, Copy)]
+struct ColumnWidthBounds {
+    min_px: i32,
+    max_px: i32,
+}
+
+fn playlist_column_width_bounds(column: &PlaylistColumnConfig) -> ColumnWidthBounds {
+    let normalized_format = column.format.trim().to_ascii_lowercase();
+    let normalized_name = column.name.trim().to_ascii_lowercase();
+
+    if normalized_format == "{track}"
+        || normalized_format == "{track_number}"
+        || normalized_format == "{tracknumber}"
+        || normalized_name == "track #"
+        || normalized_name == "track"
+    {
+        return ColumnWidthBounds {
+            min_px: 52,
+            max_px: 90,
+        };
+    }
+
+    if normalized_format == "{disc}" || normalized_format == "{disc_number}" {
+        return ColumnWidthBounds {
+            min_px: 50,
+            max_px: 84,
+        };
+    }
+
+    if normalized_format == "{year}" || normalized_format == "{date}" || normalized_name == "year" {
+        return ColumnWidthBounds {
+            min_px: 64,
+            max_px: 104,
+        };
+    }
+
+    if normalized_format == "{title}" || normalized_name == "title" {
+        return ColumnWidthBounds {
+            min_px: 140,
+            max_px: 440,
+        };
+    }
+
+    if normalized_format == "{artist}"
+        || normalized_format == "{album_artist}"
+        || normalized_format == "{albumartist}"
+        || normalized_name == "artist"
+        || normalized_name == "album artist"
+    {
+        return ColumnWidthBounds {
+            min_px: 120,
+            max_px: 320,
+        };
+    }
+
+    if normalized_format == "{album}" || normalized_name == "album" {
+        return ColumnWidthBounds {
+            min_px: 140,
+            max_px: 360,
+        };
+    }
+
+    if normalized_format == "{genre}" || normalized_name == "genre" {
+        return ColumnWidthBounds {
+            min_px: 100,
+            max_px: 210,
+        };
+    }
+
+    if normalized_name == "duration"
+        || normalized_name == "time"
+        || normalized_format == "{duration}"
+    {
+        return ColumnWidthBounds {
+            min_px: 78,
+            max_px: 120,
+        };
+    }
+
+    if column.custom {
+        return ColumnWidthBounds {
+            min_px: 110,
+            max_px: 340,
+        };
+    }
+
+    ColumnWidthBounds {
+        min_px: 100,
+        max_px: 300,
+    }
+}
+
+fn playlist_column_bounds_at_visible_index(
+    columns: &[PlaylistColumnConfig],
+    visible_index: usize,
+) -> Option<ColumnWidthBounds> {
+    columns
+        .iter()
+        .filter(|column| column.enabled)
+        .nth(visible_index)
+        .map(playlist_column_width_bounds)
+}
+
+fn playlist_column_key_at_visible_index(
+    columns: &[PlaylistColumnConfig],
+    visible_index: usize,
+) -> Option<String> {
+    columns
+        .iter()
+        .filter(|column| column.enabled)
+        .nth(visible_index)
+        .map(playlist_column_key)
+}
+
+fn clamp_width_for_visible_column(
+    columns: &[PlaylistColumnConfig],
+    visible_index: usize,
+    width_px: i32,
+) -> Option<i32> {
+    let bounds = playlist_column_bounds_at_visible_index(columns, visible_index)?;
+    Some(width_px.clamp(bounds.min_px.max(48), bounds.max_px.max(bounds.min_px)))
+}
+
 fn reorder_visible_playlist_columns(
     columns: &[PlaylistColumnConfig],
     from_visible_index: usize,
@@ -577,6 +700,27 @@ fn resolve_playlist_header_gap_from_x(mouse_x_px: i32, widths_px: &[i32]) -> i32
         start_px = next_start;
     }
     widths_px.len() as i32
+}
+
+fn resolve_playlist_header_divider_from_x(
+    mouse_x_px: i32,
+    widths_px: &[i32],
+    hit_tolerance_px: i32,
+) -> i32 {
+    if mouse_x_px < 0 || widths_px.is_empty() {
+        return -1;
+    }
+    let tolerance = hit_tolerance_px.max(1);
+    let mut start_px: i32 = 0;
+    for (index, width_px) in widths_px.iter().enumerate() {
+        let column_width = (*width_px).max(0);
+        let end_px = start_px.saturating_add(column_width);
+        if (mouse_x_px - end_px).abs() <= tolerance {
+            return index as i32;
+        }
+        start_px = end_px.saturating_add(10);
+    }
+    -1
 }
 
 fn sidebar_width_from_window(window_width_px: u32) -> i32 {
@@ -985,6 +1129,118 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 )
             })
             .unwrap_or(-1)
+    });
+
+    let ui_handle_clone = ui.as_weak().clone();
+    ui.on_playlist_header_divider_at(move |mouse_x_px| {
+        ui_handle_clone
+            .upgrade()
+            .map(|ui| {
+                resolve_playlist_header_divider_from_x(
+                    mouse_x_px,
+                    &playlist_column_widths_from_model(ui.get_playlist_column_widths_px()),
+                    4,
+                )
+            })
+            .unwrap_or(-1)
+    });
+
+    let config_state_clone = Arc::clone(&config_state);
+    ui.on_playlist_header_column_min_width(move |visible_index| {
+        let state = config_state_clone
+            .lock()
+            .expect("config state lock poisoned");
+        playlist_column_bounds_at_visible_index(
+            &state.ui.playlist_columns,
+            visible_index.max(0) as usize,
+        )
+        .map(|bounds| bounds.min_px.max(48))
+        .unwrap_or(48)
+    });
+
+    let config_state_clone = Arc::clone(&config_state);
+    ui.on_playlist_header_column_max_width(move |visible_index| {
+        let state = config_state_clone
+            .lock()
+            .expect("config state lock poisoned");
+        playlist_column_bounds_at_visible_index(
+            &state.ui.playlist_columns,
+            visible_index.max(0) as usize,
+        )
+        .map(|bounds| bounds.max_px.max(bounds.min_px))
+        .unwrap_or(1024)
+    });
+
+    let bus_sender_clone = bus_sender.clone();
+    let config_state_clone = Arc::clone(&config_state);
+    ui.on_preview_playlist_column_width(move |visible_index, width_px| {
+        let (column_key, clamped_width_px) = {
+            let state = config_state_clone
+                .lock()
+                .expect("config state lock poisoned");
+            let visible_index = visible_index.max(0) as usize;
+            let column_key =
+                playlist_column_key_at_visible_index(&state.ui.playlist_columns, visible_index);
+            let clamped =
+                clamp_width_for_visible_column(&state.ui.playlist_columns, visible_index, width_px);
+            (column_key, clamped)
+        };
+        if let (Some(column_key), Some(clamped_width_px)) = (column_key, clamped_width_px) {
+            let _ = bus_sender_clone.send(Message::Playlist(
+                PlaylistMessage::SetActivePlaylistColumnWidthOverride {
+                    column_key,
+                    width_px: clamped_width_px as u32,
+                    persist: false,
+                },
+            ));
+        }
+    });
+
+    let bus_sender_clone = bus_sender.clone();
+    let config_state_clone = Arc::clone(&config_state);
+    ui.on_commit_playlist_column_width(move |visible_index, width_px| {
+        let (column_key, clamped_width_px) = {
+            let state = config_state_clone
+                .lock()
+                .expect("config state lock poisoned");
+            let visible_index = visible_index.max(0) as usize;
+            let column_key =
+                playlist_column_key_at_visible_index(&state.ui.playlist_columns, visible_index);
+            let clamped =
+                clamp_width_for_visible_column(&state.ui.playlist_columns, visible_index, width_px);
+            (column_key, clamped)
+        };
+        if let (Some(column_key), Some(clamped_width_px)) = (column_key, clamped_width_px) {
+            let _ = bus_sender_clone.send(Message::Playlist(
+                PlaylistMessage::SetActivePlaylistColumnWidthOverride {
+                    column_key,
+                    width_px: clamped_width_px as u32,
+                    persist: true,
+                },
+            ));
+        }
+    });
+
+    let bus_sender_clone = bus_sender.clone();
+    let config_state_clone = Arc::clone(&config_state);
+    ui.on_reset_playlist_column_width(move |visible_index| {
+        let column_key = {
+            let state = config_state_clone
+                .lock()
+                .expect("config state lock poisoned");
+            playlist_column_key_at_visible_index(
+                &state.ui.playlist_columns,
+                visible_index.max(0) as usize,
+            )
+        };
+        if let Some(column_key) = column_key {
+            let _ = bus_sender_clone.send(Message::Playlist(
+                PlaylistMessage::ClearActivePlaylistColumnWidthOverride {
+                    column_key,
+                    persist: true,
+                },
+            ));
+        }
     });
 
     // Wire up sequence selector
@@ -1815,6 +2071,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     ));
 
     let bus_sender_clone = bus_sender.clone();
+    let _ = bus_sender_clone.send(Message::Playlist(
+        PlaylistMessage::RequestActivePlaylistColumnWidthOverrides,
+    ));
+
+    let bus_sender_clone = bus_sender.clone();
     let _ = bus_sender_clone.send(Message::Config(ConfigMessage::ConfigChanged(
         runtime_config,
     )));
@@ -1857,7 +2118,9 @@ mod tests {
 
     use super::{
         apply_column_order_keys, choose_preferred_u16, choose_preferred_u32,
-        reorder_visible_playlist_columns, resolve_playlist_header_column_from_x,
+        clamp_width_for_visible_column, playlist_column_key_at_visible_index,
+        playlist_column_width_bounds, reorder_visible_playlist_columns,
+        resolve_playlist_header_column_from_x, resolve_playlist_header_divider_from_x,
         resolve_playlist_header_gap_from_x, resolve_runtime_config, sanitize_playlist_columns,
         select_output_option_index_u16, select_output_option_index_u32,
         should_apply_custom_column_delete, sidebar_width_from_window, OutputSettingsOptions,
@@ -1968,6 +2231,30 @@ mod tests {
             "App window should expose gap hit test callback"
         );
         assert!(
+            slint_ui.contains("callback playlist_header_divider_at(int) -> int;"),
+            "App window should expose divider hit test callback"
+        );
+        assert!(
+            slint_ui.contains("callback preview_playlist_column_width(int, int);"),
+            "App window should expose live resize preview callback"
+        );
+        assert!(
+            slint_ui.contains("callback commit_playlist_column_width(int, int);"),
+            "App window should expose resize commit callback"
+        );
+        assert!(
+            slint_ui.contains("callback reset_playlist_column_width(int);"),
+            "App window should expose resize reset callback"
+        );
+        assert!(
+            slint_ui.contains("callback playlist_header_column_min_width(int) -> int;"),
+            "App window should expose column min-width callback"
+        );
+        assert!(
+            slint_ui.contains("callback playlist_header_column_max_width(int) -> int;"),
+            "App window should expose column max-width callback"
+        );
+        assert!(
             slint_ui.contains("in-out property <int> sidebar_width_px:"),
             "Sidebar width should be controllable by viewport-driven logic"
         );
@@ -1997,6 +2284,16 @@ mod tests {
         assert_eq!(resolve_playlist_header_gap_from_x(279, &widths), 2);
         assert_eq!(resolve_playlist_header_gap_from_x(285, &widths), 2);
         assert_eq!(resolve_playlist_header_gap_from_x(460, &widths), 3);
+    }
+
+    #[test]
+    fn test_resolve_playlist_header_divider_from_x_hits_column_boundaries() {
+        let widths = vec![70, 200, 180];
+        assert_eq!(resolve_playlist_header_divider_from_x(70, &widths, 4), 0);
+        assert_eq!(resolve_playlist_header_divider_from_x(73, &widths, 4), 0);
+        assert_eq!(resolve_playlist_header_divider_from_x(281, &widths, 4), 1);
+        assert_eq!(resolve_playlist_header_divider_from_x(470, &widths, 4), 2);
+        assert_eq!(resolve_playlist_header_divider_from_x(150, &widths, 4), -1);
     }
 
     #[test]
@@ -2074,6 +2371,93 @@ mod tests {
         let reordered = apply_column_order_keys(&columns, &saved_order);
         let names: Vec<String> = reordered.into_iter().map(|column| column.name).collect();
         assert_eq!(names, vec!["Album & Year", "Artist", "Title"]);
+    }
+
+    #[test]
+    fn test_playlist_column_key_at_visible_index_ignores_hidden_columns() {
+        let columns = vec![
+            PlaylistColumnConfig {
+                name: "Title".to_string(),
+                format: "{title}".to_string(),
+                enabled: true,
+                custom: false,
+            },
+            PlaylistColumnConfig {
+                name: "Hidden".to_string(),
+                format: "{genre}".to_string(),
+                enabled: false,
+                custom: false,
+            },
+            PlaylistColumnConfig {
+                name: "Album & Year".to_string(),
+                format: "{album} ({year})".to_string(),
+                enabled: true,
+                custom: true,
+            },
+        ];
+
+        assert_eq!(
+            playlist_column_key_at_visible_index(&columns, 0),
+            Some("{title}".to_string())
+        );
+        assert_eq!(
+            playlist_column_key_at_visible_index(&columns, 1),
+            Some("custom:Album & Year|{album} ({year})".to_string())
+        );
+        assert_eq!(playlist_column_key_at_visible_index(&columns, 2), None);
+    }
+
+    #[test]
+    fn test_playlist_column_width_bounds_for_track_and_custom_columns() {
+        let track_column = PlaylistColumnConfig {
+            name: "Track #".to_string(),
+            format: "{track_number}".to_string(),
+            enabled: true,
+            custom: false,
+        };
+        let custom_column = PlaylistColumnConfig {
+            name: "Album & Year".to_string(),
+            format: "{album} ({year})".to_string(),
+            enabled: true,
+            custom: true,
+        };
+
+        let track_bounds = playlist_column_width_bounds(&track_column);
+        assert_eq!(track_bounds.min_px, 52);
+        assert_eq!(track_bounds.max_px, 90);
+
+        let custom_bounds = playlist_column_width_bounds(&custom_column);
+        assert_eq!(custom_bounds.min_px, 110);
+        assert_eq!(custom_bounds.max_px, 340);
+    }
+
+    #[test]
+    fn test_clamp_width_for_visible_column_respects_column_profile_bounds() {
+        let columns = vec![
+            PlaylistColumnConfig {
+                name: "Track #".to_string(),
+                format: "{track_number}".to_string(),
+                enabled: true,
+                custom: false,
+            },
+            PlaylistColumnConfig {
+                name: "Hidden".to_string(),
+                format: "{genre}".to_string(),
+                enabled: false,
+                custom: false,
+            },
+            PlaylistColumnConfig {
+                name: "Title".to_string(),
+                format: "{title}".to_string(),
+                enabled: true,
+                custom: false,
+            },
+        ];
+
+        assert_eq!(clamp_width_for_visible_column(&columns, 0, 10), Some(52));
+        assert_eq!(clamp_width_for_visible_column(&columns, 0, 200), Some(90));
+        assert_eq!(clamp_width_for_visible_column(&columns, 1, 1000), Some(440));
+        assert_eq!(clamp_width_for_visible_column(&columns, 3, 120), None);
     }
 
     #[test]

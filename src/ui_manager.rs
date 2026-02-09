@@ -3,6 +3,7 @@ use std::io::Write;
 use std::time::{Duration, Instant};
 use std::{
     collections::hash_map::DefaultHasher,
+    collections::{HashMap, HashSet},
     path::PathBuf,
     rc::Rc,
     sync::mpsc::{self, Receiver as StdReceiver, Sender as StdSender},
@@ -51,6 +52,7 @@ pub struct UiManager {
     playlist_columns: Vec<PlaylistColumnConfig>,
     playlist_column_content_targets_px: Vec<u32>,
     playlist_column_widths_px: Vec<u32>,
+    playlist_column_width_overrides_px: HashMap<String, u32>,
     playlist_columns_available_width_px: u32,
     playlist_columns_content_width_px: u32,
     playback_active: bool,
@@ -189,6 +191,7 @@ impl UiManager {
             playlist_columns: config::default_playlist_columns(),
             playlist_column_content_targets_px: Vec::new(),
             playlist_column_widths_px: Vec::new(),
+            playlist_column_width_overrides_px: HashMap::new(),
             playlist_columns_available_width_px: 0,
             playlist_columns_content_width_px: 0,
             playback_active: false,
@@ -445,6 +448,18 @@ impl UiManager {
             .collect()
     }
 
+    fn normalize_column_format(format: &str) -> String {
+        format.trim().to_ascii_lowercase()
+    }
+
+    fn playlist_column_key(column: &PlaylistColumnConfig) -> String {
+        if column.custom {
+            format!("custom:{}|{}", column.name.trim(), column.format.trim())
+        } else {
+            Self::normalize_column_format(&column.format)
+        }
+    }
+
     fn column_width_profile(column: &PlaylistColumnConfig) -> ColumnWidthProfile {
         let normalized_format = column.format.trim().to_ascii_lowercase();
         let normalized_name = column.name.trim().to_ascii_lowercase();
@@ -613,12 +628,17 @@ impl UiManager {
 
         for (index, column) in visible_columns.iter().enumerate() {
             let profile = Self::column_width_profile(column);
-            let target = self
-                .playlist_column_content_targets_px
-                .get(index)
-                .copied()
-                .unwrap_or(profile.preferred_px)
-                .clamp(profile.min_px, profile.max_px);
+            let override_width = self
+                .playlist_column_width_overrides_px
+                .get(&Self::playlist_column_key(column))
+                .copied();
+            let target = override_width.unwrap_or_else(|| {
+                self.playlist_column_content_targets_px
+                    .get(index)
+                    .copied()
+                    .unwrap_or(profile.preferred_px)
+            });
+            let target = target.clamp(profile.min_px, profile.max_px);
             min_widths.push(profile.min_px);
             max_widths.push(profile.max_px);
             widths.push(target);
@@ -1031,6 +1051,8 @@ impl UiManager {
                             protocol::PlaylistMessage::ActivePlaylistChanged(id),
                         ) => {
                             self.active_playlist_id = id.clone();
+                            self.playlist_column_width_overrides_px.clear();
+                            self.apply_playlist_column_layout();
                             if let Some(index) =
                                 self.playlist_ids.iter().position(|p_id| p_id == &id)
                             {
@@ -1658,6 +1680,13 @@ impl UiManager {
                             config,
                         )) => {
                             self.playlist_columns = config.ui.playlist_columns.clone();
+                            let valid_column_keys: HashSet<String> = self
+                                .playlist_columns
+                                .iter()
+                                .map(Self::playlist_column_key)
+                                .collect();
+                            self.playlist_column_width_overrides_px
+                                .retain(|key, _| valid_column_keys.contains(key));
                             self.refresh_playlist_column_content_targets();
                             self.apply_playlist_column_layout();
                             let playlist_columns = self.playlist_columns.clone();
@@ -1725,6 +1754,48 @@ impl UiManager {
                                 self.playlist_columns_available_width_px = width_px;
                                 self.apply_playlist_column_layout();
                             }
+                        }
+                        protocol::Message::Playlist(
+                            protocol::PlaylistMessage::ActivePlaylistColumnWidthOverrides(
+                                overrides,
+                            ),
+                        ) => {
+                            self.playlist_column_width_overrides_px.clear();
+                            if let Some(overrides) = overrides {
+                                for override_item in overrides {
+                                    if override_item.column_key.trim().is_empty() {
+                                        continue;
+                                    }
+                                    self.playlist_column_width_overrides_px.insert(
+                                        override_item.column_key,
+                                        override_item.width_px.max(48),
+                                    );
+                                }
+                            }
+                            self.apply_playlist_column_layout();
+                        }
+                        protocol::Message::Playlist(
+                            protocol::PlaylistMessage::SetActivePlaylistColumnWidthOverride {
+                                column_key,
+                                width_px,
+                                ..
+                            },
+                        ) => {
+                            if column_key.trim().is_empty() {
+                                continue;
+                            }
+                            self.playlist_column_width_overrides_px
+                                .insert(column_key, width_px.max(48));
+                            self.apply_playlist_column_layout();
+                        }
+                        protocol::Message::Playlist(
+                            protocol::PlaylistMessage::ClearActivePlaylistColumnWidthOverride {
+                                column_key,
+                                ..
+                            },
+                        ) => {
+                            self.playlist_column_width_overrides_px.remove(&column_key);
+                            self.apply_playlist_column_layout();
                         }
                         protocol::Message::Playlist(
                             protocol::PlaylistMessage::RepeatModeChanged(repeat_mode),

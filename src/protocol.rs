@@ -87,6 +87,17 @@ pub enum PlaylistMessage {
     ActivePlaylistColumnOrder(Option<Vec<String>>),
     SetActivePlaylistColumnOrder(Vec<String>),
     RequestActivePlaylistColumnOrder,
+    ActivePlaylistColumnWidthOverrides(Option<Vec<PlaylistColumnWidthOverride>>),
+    SetActivePlaylistColumnWidthOverride {
+        column_key: String,
+        width_px: u32,
+        persist: bool,
+    },
+    ClearActivePlaylistColumnWidthOverride {
+        column_key: String,
+        persist: bool,
+    },
+    RequestActivePlaylistColumnWidthOverrides,
     TrackFinished,
     TrackStarted {
         index: usize,
@@ -105,6 +116,12 @@ pub enum PlaylistMessage {
     ChangePlaybackOrder(PlaybackOrder),
     ToggleRepeat,
     RepeatModeChanged(RepeatMode),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+pub struct PlaylistColumnWidthOverride {
+    pub column_key: String,
+    pub width_px: u32,
 }
 
 #[derive(Debug, Clone, serde::Deserialize, serde::Serialize)]

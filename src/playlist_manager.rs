@@ -113,6 +113,25 @@ impl PlaylistManager {
         }
     }
 
+    fn broadcast_active_playlist_column_width_overrides(&self) {
+        match self
+            .db_manager
+            .get_playlist_column_width_overrides(&self.active_playlist_id)
+        {
+            Ok(overrides) => {
+                let _ = self.bus_producer.send(protocol::Message::Playlist(
+                    protocol::PlaylistMessage::ActivePlaylistColumnWidthOverrides(overrides),
+                ));
+            }
+            Err(err) => {
+                error!(
+                    "Failed to load playlist column width overrides for {}: {}",
+                    self.active_playlist_id, err
+                );
+            }
+        }
+    }
+
     pub fn run(&mut self) {
         // Restore playlists from database
         let playlists = match self.db_manager.get_all_playlists() {
@@ -159,6 +178,7 @@ impl PlaylistManager {
                 protocol::PlaylistMessage::ActivePlaylistChanged(self.active_playlist_id.clone()),
             ));
             self.broadcast_active_playlist_column_order();
+            self.broadcast_active_playlist_column_width_overrides();
         }
 
         loop {
@@ -663,6 +683,7 @@ impl PlaylistManager {
                             protocol::PlaylistMessage::ActivePlaylistChanged(id),
                         ));
                         self.broadcast_active_playlist_column_order();
+                        self.broadcast_active_playlist_column_width_overrides();
                         self.broadcast_playlist_changed();
                     }
                     protocol::Message::Playlist(
@@ -688,6 +709,54 @@ impl PlaylistManager {
                             continue;
                         }
                         self.broadcast_active_playlist_column_order();
+                    }
+                    protocol::Message::Playlist(
+                        protocol::PlaylistMessage::SetActivePlaylistColumnWidthOverride {
+                            column_key,
+                            width_px,
+                            persist,
+                        },
+                    ) => {
+                        if !persist || self.active_playlist_id.is_empty() {
+                            continue;
+                        }
+                        if let Err(err) = self.db_manager.set_playlist_column_width_override(
+                            &self.active_playlist_id,
+                            &column_key,
+                            width_px.max(48),
+                        ) {
+                            error!(
+                                "Failed to persist playlist column width override for {} key {}: {}",
+                                self.active_playlist_id, column_key, err
+                            );
+                        }
+                    }
+                    protocol::Message::Playlist(
+                        protocol::PlaylistMessage::ClearActivePlaylistColumnWidthOverride {
+                            column_key,
+                            persist,
+                        },
+                    ) => {
+                        if !persist || self.active_playlist_id.is_empty() {
+                            continue;
+                        }
+                        if let Err(err) = self.db_manager.clear_playlist_column_width_override(
+                            &self.active_playlist_id,
+                            &column_key,
+                        ) {
+                            error!(
+                                "Failed to clear playlist column width override for {} key {}: {}",
+                                self.active_playlist_id, column_key, err
+                            );
+                        }
+                    }
+                    protocol::Message::Playlist(
+                        protocol::PlaylistMessage::RequestActivePlaylistColumnWidthOverrides,
+                    ) => {
+                        if self.active_playlist_id.is_empty() {
+                            continue;
+                        }
+                        self.broadcast_active_playlist_column_width_overrides();
                     }
                     protocol::Message::Audio(protocol::AudioMessage::TrackCached(id, offset)) => {
                         debug!(
