@@ -395,8 +395,17 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let config_dir = dirs::config_dir().unwrap();
     let config_file = config_dir.join("music_player.toml");
 
+    if let Err(err) = std::fs::create_dir_all(&config_dir) {
+        return Err(format!(
+            "Failed to create config directory {}: {}",
+            config_dir.display(),
+            err
+        )
+        .into());
+    }
+
     if !config_file.exists() {
-        let default_config = Config::default();
+        let default_config = sanitize_config(Config::default());
 
         info!(
             "Config file not found. Creating default config. path={}",
