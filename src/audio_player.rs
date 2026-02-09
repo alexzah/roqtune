@@ -42,6 +42,7 @@ pub struct AudioPlayer {
     target_sample_rate: Arc<AtomicUsize>,
     target_channels: Arc<AtomicUsize>,
     target_bits_per_sample: u16,
+    target_output_device_name: Arc<Mutex<Option<String>>>,
     sample_queue: Arc<Mutex<VecDeque<AudioQueueEntry>>>,
     queue_start_position: Arc<AtomicUsize>,
     queue_end_position: Arc<AtomicUsize>,
@@ -155,6 +156,7 @@ impl AudioPlayer {
         let queue_end_position = Arc::new(AtomicUsize::new(0));
         let target_sample_rate = Arc::new(AtomicUsize::new(44100));
         let target_channels = Arc::new(AtomicUsize::new(2));
+        let target_output_device_name = Arc::new(Mutex::new(None));
         let volume = Arc::new(AtomicU32::new(1.0f32.to_bits()));
         let buffer_low_watermark_ms = Arc::new(AtomicUsize::new(12_000));
         let buffer_target_ms = Arc::new(AtomicUsize::new(24_000));
@@ -174,6 +176,7 @@ impl AudioPlayer {
             target_sample_rate: target_sample_rate.clone(),
             target_channels: target_channels.clone(),
             target_bits_per_sample: 0,
+            target_output_device_name,
             current_track_id: current_track_id.clone(),
             current_track_position: current_track_position.clone(),
             current_track_offset_ms: current_track_offset_ms.clone(),
@@ -330,7 +333,30 @@ impl AudioPlayer {
 
     fn setup_audio_device(&mut self) {
         let host = cpal::default_host();
-        let device = match host.default_output_device() {
+        let requested_device_name = self
+            .target_output_device_name
+            .lock()
+            .unwrap()
+            .as_ref()
+            .cloned();
+        let selected_device = requested_device_name.as_ref().and_then(|device_name| {
+            host.output_devices().ok().and_then(|devices| {
+                devices
+                    .filter_map(|device| {
+                        let name = device.name().ok()?;
+                        if name == *device_name {
+                            Some(device)
+                        } else {
+                            None
+                        }
+                    })
+                    .next()
+            })
+        });
+        if requested_device_name.is_some() && selected_device.is_none() {
+            warn!("AudioPlayer: requested output device not found. Falling back to system default");
+        }
+        let device = match selected_device.or_else(|| host.default_output_device()) {
             Some(device) => device,
             None => {
                 error!("No output device available");
@@ -736,6 +762,12 @@ impl AudioPlayer {
                         self.target_channels
                             .store(config.output.channel_count as usize, Ordering::Relaxed);
                         self.target_bits_per_sample = config.output.bits_per_sample;
+                        *self.target_output_device_name.lock().unwrap() =
+                            if config.output.output_device_name.trim().is_empty() {
+                                None
+                            } else {
+                                Some(config.output.output_device_name.trim().to_string())
+                            };
                         let low_watermark_ms = config.buffering.player_low_watermark_ms as usize;
                         let target_buffer_ms = (config.buffering.player_target_buffer_ms as usize)
                             .max(low_watermark_ms.saturating_add(500));

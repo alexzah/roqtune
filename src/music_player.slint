@@ -1140,7 +1140,7 @@ export component AppWindow inherits Window {
 
         Rectangle {
             width: min(root.width - 40px, 620px);
-            height: min(root.height - 40px, 320px);
+            height: min(root.height - 40px, 370px);
             x: (parent.width - self.width) / 2;
             y: (parent.height - self.height) / 2;
             border-radius: 6px;
@@ -1172,13 +1172,21 @@ export component AppWindow inherits Window {
 
                 Rectangle { height: 1px; background: #343434; }
 
-                VerticalLayout {
-                    vertical-stretch: 1;
-                    spacing: 8px;
+                    VerticalLayout {
+                        vertical-stretch: 1;
+                        spacing: 8px;
 
-                    SettingsDropdownControl {
-                        label: "Output Channels";
-                        options: root.settings_channel_options;
+                        SettingsDropdownControl {
+                            label: "Output Device";
+                            options: root.settings_output_device_options;
+                            selected_index <=> root.settings_output_device_index;
+                            custom_value <=> root.settings_output_device_custom_value;
+                            custom_placeholder: "Enter output device name";
+                        }
+
+                        SettingsDropdownControl {
+                            label: "Output Channels";
+                            options: root.settings_channel_options;
                         selected_index <=> root.settings_channel_index;
                         custom_value <=> root.settings_channel_custom_value;
                         custom_placeholder: "Enter channel count";
@@ -1264,10 +1272,12 @@ export component AppWindow inherits Window {
                         primary: true;
                         clicked => {
                             root.apply_settings(
+                                root.settings_output_device_index,
                                 root.settings_channel_index,
                                 root.settings_sample_rate_index,
                                 root.settings_bits_per_sample_index,
                                 root.settings_show_album_art,
+                                root.settings_output_device_custom_value,
                                 root.settings_channel_custom_value,
                                 root.settings_sample_rate_custom_value,
                                 root.settings_bits_per_sample_custom_value
@@ -1317,12 +1327,15 @@ export component AppWindow inherits Window {
     in-out property <bool> show_settings_dialog: false;
     in-out property <bool> show_settings_restart_notice: false;
     in-out property <string> settings_restart_notice_message: "";
+    in-out property <[string]> settings_output_device_options: [];
     in-out property <[string]> settings_channel_options: [];
     in-out property <[string]> settings_sample_rate_options: [];
     in-out property <[string]> settings_bits_per_sample_options: [];
+    in-out property <int> settings_output_device_index: 0;
     in-out property <int> settings_channel_index: 0;
     in-out property <int> settings_sample_rate_index: 0;
     in-out property <int> settings_bits_per_sample_index: 0;
+    in-out property <string> settings_output_device_custom_value: "";
     in-out property <string> settings_channel_custom_value: "";
     in-out property <string> settings_sample_rate_custom_value: "";
     in-out property <string> settings_bits_per_sample_custom_value: "";
@@ -1373,5 +1386,5 @@ export component AppWindow inherits Window {
     callback rename_playlist(int, string);
     callback delete_playlist(int);
     callback open_settings();
-    callback apply_settings(int, int, int, bool, string, string, string);
+    callback apply_settings(int, int, int, int, bool, string, string, string, string);
 }

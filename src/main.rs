@@ -45,6 +45,8 @@ fn panic_payload_to_string(payload: &(dyn std::any::Any + Send)) -> String {
 
 #[derive(Debug, Clone)]
 struct OutputSettingsOptions {
+    device_names: Vec<String>,
+    auto_device_name: String,
     channel_values: Vec<u16>,
     sample_rate_values: Vec<u32>,
     bits_per_sample_values: Vec<u16>,
@@ -53,8 +55,9 @@ struct OutputSettingsOptions {
     auto_bits_per_sample_value: u16,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 struct OutputRuntimeSignature {
+    output_device_name: String,
     channel_count: u16,
     sample_rate_hz: u32,
     bits_per_sample: u16,
@@ -63,6 +66,7 @@ struct OutputRuntimeSignature {
 impl OutputRuntimeSignature {
     fn from_output(output: &OutputConfig) -> Self {
         Self {
+            output_device_name: output.output_device_name.clone(),
             channel_count: output.channel_count,
             sample_rate_hz: output.sample_rate_khz,
             bits_per_sample: output.bits_per_sample,
@@ -128,6 +132,9 @@ fn choose_preferred_u32(detected: &BTreeSet<u32>, preferred_values: &[u32], fall
 
 fn resolve_runtime_config(config: &Config, output_options: &OutputSettingsOptions) -> Config {
     let mut runtime = config.clone();
+    if runtime.output.output_device_auto {
+        runtime.output.output_device_name = output_options.auto_device_name.clone();
+    }
     if runtime.output.channel_count_auto {
         runtime.output.channel_count = output_options.auto_channel_value;
     }
@@ -138,6 +145,22 @@ fn resolve_runtime_config(config: &Config, output_options: &OutputSettingsOption
         runtime.output.bits_per_sample = output_options.auto_bits_per_sample_value;
     }
     runtime
+}
+
+fn select_output_option_index_string(
+    is_auto: bool,
+    value: &str,
+    values: &[String],
+    custom_index: usize,
+) -> usize {
+    if is_auto {
+        return 0;
+    }
+    values
+        .iter()
+        .position(|candidate| candidate == value)
+        .map(|idx| idx + 1)
+        .unwrap_or(custom_index)
 }
 
 fn select_output_option_index_u16(
@@ -188,9 +211,56 @@ fn detect_output_settings_options(config: &Config) -> OutputSettingsOptions {
     let mut channels = BTreeSet::new();
     let mut sample_rates = BTreeSet::new();
     let mut bits_per_sample = BTreeSet::new();
+    let mut device_names = Vec::new();
+    let mut auto_device_name = String::new();
 
     let host = cpal::default_host();
-    if let Some(device) = host.default_output_device() {
+    if let Some(default_device) = host.default_output_device() {
+        auto_device_name = default_device
+            .name()
+            .ok()
+            .filter(|name| !name.is_empty())
+            .unwrap_or_default();
+    }
+    if let Ok(devices) = host.output_devices() {
+        for device in devices {
+            if let Ok(name) = device.name() {
+                if !name.is_empty() {
+                    device_names.push(name);
+                }
+            }
+        }
+    }
+    if !config.output.output_device_name.trim().is_empty() {
+        device_names.push(config.output.output_device_name.trim().to_string());
+    }
+    device_names.sort();
+    device_names.dedup();
+
+    let selected_device = if config.output.output_device_auto {
+        host.default_output_device()
+    } else {
+        let requested_name = config.output.output_device_name.trim().to_string();
+        let matching_device = if requested_name.is_empty() {
+            None
+        } else {
+            host.output_devices().ok().and_then(|devices| {
+                devices
+                    .filter_map(|device| {
+                        let name = device.name().ok()?;
+                        if name == requested_name {
+                            Some(device)
+                        } else {
+                            None
+                        }
+                    })
+                    .next()
+            })
+        };
+        matching_device.or_else(|| host.default_output_device())
+    };
+
+    if let Some(device) = selected_device {
         if let Ok(configs) = device.supported_output_configs() {
             for output_config in configs {
                 channels.insert(output_config.channels().max(1));
@@ -251,6 +321,8 @@ fn detect_output_settings_options(config: &Config) -> OutputSettingsOptions {
     );
 
     OutputSettingsOptions {
+        device_names,
+        auto_device_name,
         channel_values,
         sample_rate_values,
         bits_per_sample_values,
@@ -261,6 +333,7 @@ fn detect_output_settings_options(config: &Config) -> OutputSettingsOptions {
 }
 
 fn sanitize_config(config: Config) -> Config {
+    let output_device_name = config.output.output_device_name.trim().to_string();
     let clamped_channels = config.output.channel_count.clamp(1, 8);
     let clamped_sample_rate_hz = config.output.sample_rate_khz.clamp(8_000, 192_000);
     let clamped_bits = config.output.bits_per_sample.clamp(8, 32);
@@ -275,6 +348,8 @@ fn sanitize_config(config: Config) -> Config {
 
     Config {
         output: OutputConfig {
+            output_device_name,
+            output_device_auto: config.output.output_device_auto,
             channel_count: clamped_channels,
             sample_rate_khz: clamped_sample_rate_hz,
             bits_per_sample: clamped_bits,
@@ -296,6 +371,21 @@ fn sanitize_config(config: Config) -> Config {
 
 fn apply_config_to_ui(ui: &AppWindow, config: &Config, output_options: &OutputSettingsOptions) {
     ui.set_show_album_art(config.ui.show_album_art);
+
+    let auto_device_label = if output_options.auto_device_name.is_empty() {
+        "Unavailable".to_string()
+    } else {
+        output_options.auto_device_name.clone()
+    };
+    let mut device_options_with_other: Vec<slint::SharedString> =
+        vec![format!("Auto (System Default: {})", auto_device_label).into()];
+    device_options_with_other.extend(
+        output_options
+            .device_names
+            .iter()
+            .map(|value| value.as_str().into()),
+    );
+    device_options_with_other.push("Other...".into());
 
     let mut channel_options_with_other: Vec<slint::SharedString> =
         vec![format!("Auto ({})", output_options.auto_channel_value).into()];
@@ -327,6 +417,9 @@ fn apply_config_to_ui(ui: &AppWindow, config: &Config, output_options: &OutputSe
     );
     bit_depth_options_with_other.push("Other...".into());
 
+    ui.set_settings_output_device_options(ModelRc::from(Rc::new(VecModel::from(
+        device_options_with_other,
+    ))));
     ui.set_settings_channel_options(ModelRc::from(Rc::new(VecModel::from(
         channel_options_with_other,
     ))));
@@ -337,10 +430,17 @@ fn apply_config_to_ui(ui: &AppWindow, config: &Config, output_options: &OutputSe
         bit_depth_options_with_other,
     ))));
 
+    let device_custom_index = output_options.device_names.len() + 1;
     let channel_custom_index = output_options.channel_values.len() + 1;
     let sample_rate_custom_index = output_options.sample_rate_values.len() + 1;
     let bits_custom_index = output_options.bits_per_sample_values.len() + 1;
 
+    let device_index = select_output_option_index_string(
+        config.output.output_device_auto,
+        &config.output.output_device_name,
+        &output_options.device_names,
+        device_custom_index,
+    );
     let channel_index = select_output_option_index_u16(
         config.output.channel_count_auto,
         config.output.channel_count,
@@ -360,9 +460,11 @@ fn apply_config_to_ui(ui: &AppWindow, config: &Config, output_options: &OutputSe
         bits_custom_index,
     );
 
+    ui.set_settings_output_device_index(device_index as i32);
     ui.set_settings_channel_index(channel_index as i32);
     ui.set_settings_sample_rate_index(sample_rate_index as i32);
     ui.set_settings_bits_per_sample_index(bits_index as i32);
+    ui.set_settings_output_device_custom_value(config.output.output_device_name.to_string().into());
     ui.set_settings_channel_custom_value(config.output.channel_count.to_string().into());
     ui.set_settings_sample_rate_custom_value(config.output.sample_rate_khz.to_string().into());
     ui.set_settings_bits_per_sample_custom_value(config.output.bits_per_sample.to_string().into());
@@ -662,10 +764,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let config_file_clone = config_file.clone();
     let ui_handle_clone = ui.as_weak().clone();
     ui.on_apply_settings(
-        move |channel_index,
+        move |output_device_index,
+              channel_index,
               sample_rate_index,
               bits_per_sample_index,
               show_album_art,
+              output_device_custom_value,
               channel_custom_value,
               sample_rate_custom_value,
               bits_custom_value| {
@@ -676,6 +780,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 state.clone()
             };
 
+            let output_device_idx = output_device_index.max(0) as usize;
             let channel_idx = channel_index.max(0) as usize;
             let sample_rate_idx = sample_rate_index.max(0) as usize;
             let bits_idx = bits_per_sample_index.max(0) as usize;
@@ -686,6 +791,19 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 options.clone()
             };
 
+            let output_device_auto = output_device_idx == 0;
+            let output_device_name = if output_device_auto {
+                options_snapshot.auto_device_name.clone()
+            } else if output_device_idx <= options_snapshot.device_names.len() {
+                options_snapshot.device_names[output_device_idx - 1].clone()
+            } else {
+                let custom_name = output_device_custom_value.trim();
+                if custom_name.is_empty() {
+                    previous_config.output.output_device_name.clone()
+                } else {
+                    custom_name.to_string()
+                }
+            };
             let channel_count_auto = channel_idx == 0;
             let channel_count = if channel_count_auto {
                 options_snapshot.auto_channel_value
@@ -728,6 +846,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
             let next_config = sanitize_config(Config {
                 output: OutputConfig {
+                    output_device_name: if output_device_auto {
+                        String::new()
+                    } else {
+                        output_device_name
+                    },
+                    output_device_auto,
                     channel_count,
                     sample_rate_khz: sample_rate_hz,
                     bits_per_sample,
@@ -1025,6 +1149,8 @@ mod tests {
     fn test_resolve_runtime_config_applies_auto_values_only_for_auto_fields() {
         let persisted = Config {
             output: OutputConfig {
+                output_device_name: String::new(),
+                output_device_auto: true,
                 channel_count: 6,
                 sample_rate_khz: 48_000,
                 bits_per_sample: 16,
@@ -1038,6 +1164,8 @@ mod tests {
             buffering: BufferingConfig::default(),
         };
         let options = OutputSettingsOptions {
+            device_names: vec!["Device A".to_string(), "Device B".to_string()],
+            auto_device_name: "Device B".to_string(),
             channel_values: vec![1, 2, 6],
             sample_rate_values: vec![44_100, 48_000],
             bits_per_sample_values: vec![16, 24],
@@ -1050,5 +1178,6 @@ mod tests {
         assert_eq!(runtime.output.channel_count, 2);
         assert_eq!(runtime.output.sample_rate_khz, 48_000);
         assert_eq!(runtime.output.bits_per_sample, 24);
+        assert_eq!(runtime.output.output_device_name, "Device B");
     }
 }

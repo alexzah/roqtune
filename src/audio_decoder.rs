@@ -710,6 +710,8 @@ impl AudioDecoder {
                         );
                         let dummy_config = Config {
                             output: OutputConfig {
+                                output_device_name: String::new(),
+                                output_device_auto: true,
                                 channel_count: channels,
                                 sample_rate_khz: sample_rate,
                                 bits_per_sample: 32,
