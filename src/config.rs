@@ -38,6 +38,8 @@ pub struct OutputConfig {
 pub struct UiConfig {
     #[serde(default = "default_true")]
     pub show_album_art: bool,
+    #[serde(default = "default_true")]
+    pub show_layout_edit_intro: bool,
     #[serde(default)]
     pub layout: LayoutConfig,
     #[serde(default = "default_playlist_columns")]
@@ -95,6 +97,7 @@ impl Default for UiConfig {
     fn default() -> Self {
         Self {
             show_album_art: true,
+            show_layout_edit_intro: true,
             layout: LayoutConfig::default(),
             playlist_columns: default_playlist_columns(),
             window_width: default_window_width(),
@@ -213,6 +216,7 @@ mod tests {
         assert!(config.output.bits_per_sample_auto);
 
         assert!(config.ui.show_album_art);
+        assert!(config.ui.show_layout_edit_intro);
         assert_eq!(config.ui.layout, LayoutConfig::default());
         assert_eq!(config.ui.playlist_columns, default_playlist_columns());
         assert_eq!(config.ui.window_width, 900);
@@ -249,6 +253,7 @@ decoder_request_chunk_ms = 1500
         assert!(parsed.output.sample_rate_auto);
         assert!(parsed.output.bits_per_sample_auto);
         assert_eq!(parsed.ui.layout, LayoutConfig::default());
+        assert!(parsed.ui.show_layout_edit_intro);
         assert_eq!(parsed.ui.playlist_columns, default_playlist_columns());
         assert_eq!(parsed.ui.window_width, 900);
         assert_eq!(parsed.ui.window_height, 650);

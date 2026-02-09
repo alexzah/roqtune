@@ -6,6 +6,20 @@ struct TrackRowData {
     selected: bool,
 }
 
+struct LayoutSplitterModel {
+    id: string,
+    axis: int,
+    x_px: int,
+    y_px: int,
+    width_px: int,
+    height_px: int,
+    ratio: float,
+    min_ratio: float,
+    max_ratio: float,
+    track_start_px: int,
+    track_length_px: int,
+}
+
 component ContextMenu inherits PopupWindow {
     callback rename();
     callback delete();
@@ -403,11 +417,411 @@ component PlayerButton inherits Rectangle {
     }
 
     touch-area := TouchArea {
+        pointer-event(event) => {
+            if (event.button == PointerEventButton.right && event.kind == PointerEventKind.down) {
+                root.right-clicked();
+            }
+        }
         clicked => {
             if (root.enabled) {
                 root.clicked();
             }
         }
+    }
+    callback right-clicked;
+}
+
+component ControlActionButton inherits Rectangle {
+    in property <int> action-id: 0;
+    in property <int> cluster-id: 0;
+    in property <int> playback-order-index: 0;
+    in property <int> repeat-mode: 0;
+    in property <bool> layout-edit-mode: false;
+    callback invoked(int);
+    callback open-add-menu(int);
+
+    pure function icon-for-action(action: int) -> string {
+        if action == 1 { return "+"; }
+        if action == 2 { return "⏮"; }
+        if action == 3 { return "▶"; }
+        if action == 4 { return "⏸"; }
+        if action == 5 { return "⏹"; }
+        if action == 6 { return "⏭"; }
+        if action == 7 { return "⇄"; }
+        if action == 8 { return "⟳"; }
+        if action == 9 { return "◫"; }
+        if action == 10 { return "⚙"; }
+        return "•";
+    }
+
+    pure function font-size-for-action(action: int) -> length {
+        if action == 1 { return 20px; }
+        if action == 3 { return 20px; }
+        if action == 10 { return 21px; }
+        if action == 7 { return 20px; }
+        if action == 8 { return 19px; }
+        return 18px;
+    }
+
+    pure function primary-for-action(action: int) -> bool {
+        if action == 3 { return true; }
+        if action == 7 { return root.playback-order-index != 0; }
+        if action == 8 { return root.repeat-mode != 0; }
+        if action == 9 { return root.layout-edit-mode; }
+        return false;
+    }
+
+    width: 32px;
+    height: 32px;
+
+    PlayerButton {
+        icon-text: root.icon-for-action(root.action-id);
+        font-size: root.font-size-for-action(root.action-id);
+        is-primary: root.primary-for-action(root.action-id);
+        clicked => { root.invoked(root.action-id); }
+        right-clicked => { root.open-add-menu(root.cluster-id); }
+    }
+
+    if root.action-id == 7 && root.playback-order-index == 2 : Rectangle {
+        width: 10px;
+        height: 10px;
+        x: 15px;
+        y: 11px;
+        border-radius: 5px;
+        background: #2a6def;
+        Text {
+            text: "?";
+            color: white;
+            font-size: 7px;
+            font-weight: 700;
+            horizontal-alignment: center;
+            vertical-alignment: center;
+        }
+    }
+
+    if root.action-id == 8 && root.repeat-mode == 2 : Rectangle {
+        width: 10px;
+        height: 10px;
+        x: 15px;
+        y: 11px;
+        border-radius: 5px;
+        background: #2a6def;
+        Text {
+            text: "1";
+            color: white;
+            font-size: 7px;
+            font-weight: 700;
+            horizontal-alignment: center;
+            vertical-alignment: center;
+        }
+    }
+}
+
+component ButtonCluster inherits Rectangle {
+    in property <int> cluster-id: 0;
+    in property <[int]> button-actions: [];
+    in property <int> playback-order-index: 0;
+    in property <int> repeat-mode: 0;
+    in property <bool> layout-edit-mode: false;
+    callback action-invoked(int);
+    callback request-add-menu(int);
+
+    width: max(32px, button-actions.length * 32px + max(0, button-actions.length - 1) * 8px);
+    height: 32px;
+
+    if root.button-actions.length == 0 : Rectangle {
+        width: 32px;
+        height: 32px;
+        border-radius: 3px;
+        border-width: 1px;
+        border-color: #3d3d3d;
+        background: empty-cluster-ta.has-hover ? #333 : #2a2a2a;
+        Text {
+            text: "…";
+            color: #999;
+            font-size: 16px;
+            horizontal-alignment: center;
+            vertical-alignment: center;
+        }
+        empty-cluster-ta := TouchArea {
+            pointer-event(event) => {
+                if (event.button == PointerEventButton.right && event.kind == PointerEventKind.down) {
+                    root.request-add-menu(root.cluster-id);
+                }
+            }
+        }
+    }
+
+    HorizontalLayout {
+        spacing: 8px;
+        for action in root.button-actions : ControlActionButton {
+            action-id: action;
+            cluster-id: root.cluster-id;
+            playback-order-index: root.playback-order-index;
+            repeat-mode: root.repeat-mode;
+            layout-edit-mode: root.layout-edit-mode;
+            invoked(action-id) => { root.action-invoked(action-id); }
+            open-add-menu(cluster-id) => { root.request-add-menu(cluster-id); }
+        }
+    }
+}
+
+component VolumeSliderControl inherits Rectangle {
+    in-out property <float> value: 1.0;
+    callback changed(float);
+
+    private property <length> icon-slot-width: 18px;
+    private property <length> track-height: 6px;
+    private property <length> handle-base-size: 10px;
+    private property <length> handle-hover-size: 12px;
+    private property <length> track-center-adjust: root.track-height / 3;
+    background: transparent;
+
+    HorizontalLayout {
+        spacing: 6px;
+
+        icon-slot := Rectangle {
+            width: root.icon-slot-width;
+            height: root.height;
+            background: transparent;
+            Text {
+                width: parent.width;
+                height: parent.height;
+                text: "🔊";
+                color: #888;
+                font-size: max(9px, min(12px, root.height * 0.45));
+                horizontal-alignment: center;
+                vertical-alignment: center;
+            }
+        }
+
+        slider-area := Rectangle {
+            horizontal-stretch: 1;
+            height: root.height;
+            background: transparent;
+
+            volume-track := Rectangle {
+                x: 0px;
+                y: (parent.height - self.height) / 2 - root.track-center-adjust;
+                width: parent.width;
+                height: root.track-height;
+                border-radius: 3px;
+                background: #333;
+            }
+
+            Rectangle {
+                x: volume-track.x;
+                y: volume-track.y;
+                width: volume-track.width * root.value;
+                height: volume-track.height;
+                background: #2a6def;
+                border-radius: 3px;
+            }
+
+            volume-handle := Rectangle {
+                width: root.handle-base-size;
+                height: root.handle-base-size;
+                x: volume-track.width > 0px ? volume-track.x + (volume-track.width * root.value) - self.width / 2 : volume-track.x;
+                y: volume-track.y + (volume-track.height - self.height) / 2;
+                background: white;
+                border-radius: 5px;
+                animate x { duration: 100ms; easing: ease-out; }
+            }
+
+            states [
+                hover when ta-volume.has-hover || ta-volume.pressed: {
+                    volume-handle.width: root.handle-hover-size;
+                    volume-handle.height: root.handle-hover-size;
+                }
+            ]
+
+            ta-volume := TouchArea {
+                x: 0px;
+                y: 0px;
+                width: parent.width;
+                height: parent.height;
+                mouse-cursor: pointer;
+                clicked => {
+                    if (volume-track.width > 0px) {
+                        root.value = max(0, min(1, self.mouse-x / volume-track.width));
+                        root.changed(root.value);
+                    }
+                }
+                moved => {
+                    if (self.pressed && volume-track.width > 0px) {
+                        root.value = max(0, min(1, self.mouse-x / volume-track.width));
+                        root.changed(root.value);
+                    }
+                }
+            }
+
+            if ta-volume.pressed : Rectangle {
+                width: 32px;
+                height: 12px;
+                x: min(
+                    volume-track.x + volume-track.width - self.width - 2px,
+                    max(volume-track.x + 2px, volume-handle.x - self.width / 2)
+                );
+                y: max(0px, volume-track.y - self.height - 2px);
+                z: 10;
+                border-radius: 3px;
+                background: #1f1f1f;
+                border-width: 1px;
+                border-color: #3a3a3a;
+                Text {
+                    text: floor(root.value * 100) + "%";
+                    color: #ddd;
+                    font-size: 8px;
+                    horizontal-alignment: center;
+                    vertical-alignment: center;
+                }
+            }
+        }
+    }
+}
+
+component SeekBarControl inherits Rectangle {
+    in property <float> position-percentage: 0.0;
+    in property <string> elapsed-text: "0:00";
+    in property <string> total-text: "0:00";
+    callback seek-requested(float);
+
+    height: 32px;
+    background: #242424;
+    HorizontalLayout {
+        padding-left: 12px;
+        padding-right: 12px;
+        padding-top: 8px;
+        padding-bottom: 8px;
+        spacing: 10px;
+
+        Text {
+            text: root.elapsed-text;
+            color: #888;
+            font-size: 12px;
+            vertical-alignment: center;
+            horizontal-alignment: right;
+            width: 45px;
+        }
+
+        seekbar := Rectangle {
+            height: 6px;
+            border-radius: 3px;
+            background: #333;
+            horizontal-stretch: 1;
+            Rectangle {
+                x: 0;
+                y: 0;
+                width: seekbar.width * root.position-percentage;
+                height: parent.height;
+                background: #2a6def;
+                border-radius: 3px;
+                animate width { duration: 150ms; easing: ease-out; }
+            }
+            handle := Rectangle {
+                width: 12px;
+                height: 12px;
+                x: (seekbar.width * root.position-percentage) - self.width / 2;
+                y: (parent.height - self.height) / 2;
+                background: white;
+                border-radius: 6px;
+                drop-shadow-offset-y: 1px;
+                drop-shadow-blur: 2px;
+                drop-shadow-color: #00000080;
+                animate x { duration: 150ms; easing: ease-out; }
+            }
+            states [
+                hover when ta-seek.has-hover || ta-seek.pressed: {
+                    handle.background: #ffffff;
+                    handle.width: 14px;
+                    handle.height: 14px;
+                }
+            ]
+            ta-seek := TouchArea {
+                width: parent.width;
+                height: 20px;
+                mouse-cursor: pointer;
+                clicked => { root.seek-requested(max(0, min(1, self.mouse-x / seekbar.width))); }
+                moved => {
+                    if (self.pressed) {
+                        root.seek-requested(max(0, min(1, self.mouse-x / seekbar.width)));
+                    }
+                }
+            }
+        }
+
+        Text {
+            text: root.total-text;
+            color: #888;
+            font-size: 12px;
+            vertical-alignment: center;
+            width: 45px;
+        }
+    }
+}
+
+component MetadataViewer inherits Rectangle {
+    in property <string> display-title: "";
+    in property <string> display-artist: "";
+    in property <string> display-album: "";
+    in property <string> display-date: "";
+    in property <string> display-genre: "";
+
+    background: transparent;
+    VerticalLayout {
+        spacing: 4px;
+        if root.display-title != "" : Text {
+            text: root.display-title;
+            color: #eee;
+            font-size: 14px;
+            font-weight: 700;
+            wrap: word-wrap;
+            overflow: elide;
+        }
+        if root.display-artist != "" : Text {
+            text: root.display-artist;
+            color: #ccc;
+            font-size: 13px;
+            wrap: word-wrap;
+            overflow: elide;
+        }
+        if root.display-album != "" : Text {
+            text: root.display-album;
+            color: #aaa;
+            font-size: 12px;
+            wrap: word-wrap;
+            overflow: elide;
+        }
+        HorizontalLayout {
+            spacing: 8px;
+            if root.display-date != "" : Text {
+                text: root.display-date;
+                color: #888;
+                font-size: 11px;
+            }
+            if root.display-genre != "" : Text {
+                text: root.display-genre;
+                color: #888;
+                font-size: 11px;
+                horizontal-stretch: 1;
+                overflow: elide;
+            }
+        }
+    }
+}
+
+component AlbumArtViewer inherits Rectangle {
+    in property <image> art-source;
+
+    vertical-stretch: 1;
+    height: 100px;
+    background: #202020;
+    border-radius: 4px;
+    Image {
+        source: root.art-source;
+        width: parent.width;
+        height: parent.height;
+        image-fit: contain;
     }
 }
 
@@ -531,7 +945,9 @@ export component AppWindow inherits Window {
             }
             if (event.text == Key.Escape && root.layout_edit_mode) {
                 root.show_layout_editor_dialog = false;
-                root.layout_edit_mode = false;
+                root.show_layout_leaf_context_menu = false;
+                root.show_layout_splitter_context_menu = false;
+                root.open_layout_editor();
                 return accept;
             }
             if (event.text == Key.Delete) {
@@ -596,53 +1012,52 @@ export component AppWindow inherits Window {
     in-out property <[int]> playlist_column_gap_positions_px: [];
     in-out property <int> playlist_columns_content_width_px: 0;
     in-out property <int> playlist_columns_available_width_px: 0;
+    in-out property <[int]> control_cluster_import_buttons: [1];
+    in-out property <[int]> control_cluster_transport_buttons: [2, 3, 4, 5, 6];
+    in-out property <[int]> control_cluster_utility_buttons: [7, 8, 9, 10];
+    in-out property <bool> show_control_cluster_menu: false;
+    in-out property <int> control_cluster_menu_target: -1;
+    property <length> control_cluster_menu_x: 0px;
+    property <length> control_cluster_menu_y: 0px;
     in-out property <int> sidebar_width_px: 220;
     in-out property <bool> layout_edit_mode: false;
     in-out property <bool> show_layout_editor_dialog: false;
+    in-out property <bool> show_layout_leaf_context_menu: false;
+    in-out property <bool> show_layout_splitter_context_menu: false;
+    in-out property <bool> layout_intro_dont_show_again: false;
+    in-out property <string> layout_context_splitter_id: "";
+    property <length> layout_leaf_context_menu_x: 0px;
+    property <length> layout_leaf_context_menu_y: 0px;
+    property <length> layout_splitter_context_menu_x: 0px;
+    property <length> layout_splitter_context_menu_y: 0px;
     in-out property <[string]> layout_panel_options: [];
-    in-out property <int> layout_editor_top_panel_kind: 1;
-    in-out property <int> layout_editor_left_panel_kind: 2;
-    in-out property <int> layout_editor_center_panel_kind: 3;
-    in-out property <int> layout_editor_right_panel_kind: 4;
-    in-out property <int> layout_editor_bottom_panel_kind: 6;
-    in-out property <[int]> layout_region_panel_kinds: [1, 2, 3, 4, 6];
-    in-out property <int> layout_control_bar_region: 0;
-    in-out property <int> layout_playlist_switcher_region: 1;
-    in-out property <int> layout_track_list_region: 2;
-    in-out property <int> layout_album_art_region: 3;
-    in-out property <int> layout_status_bar_region: 4;
-    in-out property <[int]> layout_region_x_px: [0, 0, 0, 0, 0];
-    in-out property <[int]> layout_region_y_px: [0, 0, 0, 0, 0];
-    in-out property <[int]> layout_region_width_px: [0, 0, 0, 0, 0];
-    in-out property <[int]> layout_region_height_px: [0, 0, 0, 0, 0];
-    in-out property <[bool]> layout_region_visible: [false, false, false, false, false];
-    in-out property <int> layout_top_size_px: 74;
-    in-out property <int> layout_left_size_px: 220;
-    in-out property <int> layout_right_size_px: 230;
-    in-out property <int> layout_bottom_size_px: 24;
-    in-out property <bool> layout_splitter_top_visible: false;
-    in-out property <int> layout_splitter_top_x_px: 0;
-    in-out property <int> layout_splitter_top_y_px: 0;
-    in-out property <int> layout_splitter_top_width_px: 0;
-    in-out property <int> layout_splitter_top_height_px: 0;
-    in-out property <bool> layout_splitter_left_visible: false;
-    in-out property <int> layout_splitter_left_x_px: 0;
-    in-out property <int> layout_splitter_left_y_px: 0;
-    in-out property <int> layout_splitter_left_width_px: 0;
-    in-out property <int> layout_splitter_left_height_px: 0;
-    in-out property <bool> layout_splitter_right_visible: false;
-    in-out property <int> layout_splitter_right_x_px: 0;
-    in-out property <int> layout_splitter_right_y_px: 0;
-    in-out property <int> layout_splitter_right_width_px: 0;
-    in-out property <int> layout_splitter_right_height_px: 0;
-    in-out property <bool> layout_splitter_bottom_visible: false;
-    in-out property <int> layout_splitter_bottom_x_px: 0;
-    in-out property <int> layout_splitter_bottom_y_px: 0;
-    in-out property <int> layout_splitter_bottom_width_px: 0;
-    in-out property <int> layout_splitter_bottom_height_px: 0;
+    in-out property <int> layout_editor_replace_panel_kind: 0;
+    in-out property <int> layout_editor_split_panel_kind: 10;
+    in-out property <int> layout_editor_new_root_panel_kind: 7;
+    in-out property <int> layout_editor_split_axis: 1;
+    in-out property <[string]> layout_leaf_ids: [];
+    in-out property <int> layout_selected_leaf_index: -1;
+    in-out property <[int]> layout_region_panel_kinds: [];
+    in-out property <int> layout_import_cluster_region: -1;
+    in-out property <int> layout_transport_cluster_region: -1;
+    in-out property <int> layout_utility_cluster_region: -1;
+    in-out property <int> layout_volume_slider_region: -1;
+    in-out property <int> layout_seek_bar_region: -1;
+    in-out property <int> layout_playlist_switcher_region: -1;
+    in-out property <int> layout_track_list_region: -1;
+    in-out property <int> layout_metadata_viewer_region: -1;
+    in-out property <int> layout_album_art_viewer_region: -1;
+    in-out property <int> layout_status_bar_region: -1;
+    in-out property <[int]> layout_region_x_px: [];
+    in-out property <[int]> layout_region_y_px: [];
+    in-out property <[int]> layout_region_width_px: [];
+    in-out property <[int]> layout_region_height_px: [];
+    in-out property <[bool]> layout_region_visible: [];
+    in-out property <[LayoutSplitterModel]> layout_splitters: [];
+    in-out property <int> layout_active_splitter_index: -1;
     property <length> layout_splitter_drag_start_mouse_x: 0px;
     property <length> layout_splitter_drag_start_mouse_y: 0px;
-    in-out property <int> layout_splitter_drag_start_size_px: 0;
+    in-out property <float> layout_splitter_drag_start_ratio: 0.5;
 
     pure function playlist-column-width(index: int) -> length {
         if index >= 0 && index < root.playlist_column_widths_px.length {
@@ -707,21 +1122,36 @@ export component AppWindow inherits Window {
 
     pure function layout-panel-label(panel-kind: int) -> string {
         if panel-kind == 1 {
-            return "Control Bar";
+            return "Import Cluster";
         }
         if panel-kind == 2 {
-            return "Playlist Switcher";
+            return "Transport Cluster";
         }
         if panel-kind == 3 {
-            return "Track List";
+            return "Utility Cluster";
         }
         if panel-kind == 4 {
-            return "Album Art Pane";
+            return "Volume Slider";
         }
         if panel-kind == 5 {
-            return "Spacer";
+            return "Seek Bar";
         }
         if panel-kind == 6 {
+            return "Playlist Switcher";
+        }
+        if panel-kind == 7 {
+            return "Track List";
+        }
+        if panel-kind == 8 {
+            return "Metadata Viewer";
+        }
+        if panel-kind == 9 {
+            return "Album Art Viewer";
+        }
+        if panel-kind == 10 {
+            return "Spacer";
+        }
+        if panel-kind == 11 {
             return "Status Bar";
         }
         return "None";
@@ -749,71 +1179,12 @@ export component AppWindow inherits Window {
                 root.layout_workspace_resized(max(0, floor(self.width / 1px)), max(0, floor(self.height / 1px)));
             }
 
-            if root.layout-region-panel-kind(0) == 5 && root.layout-region-is-visible(0) : Rectangle {
-                x: root.layout-region-x(0);
-                y: root.layout-region-y(0);
-                width: root.layout-region-width(0);
-                height: root.layout-region-height(0);
-                background: #252525;
-                border-width: root.layout_edit_mode ? 1px : 0px;
-                border-color: #3a3a3a;
-                Text {
-                    text: "Spacer";
-                    color: #666;
-                    horizontal-alignment: center;
-                    vertical-alignment: center;
-                }
-            }
-            if root.layout-region-panel-kind(1) == 5 && root.layout-region-is-visible(1) : Rectangle {
-                x: root.layout-region-x(1);
-                y: root.layout-region-y(1);
-                width: root.layout-region-width(1);
-                height: root.layout-region-height(1);
-                background: #252525;
-                border-width: root.layout_edit_mode ? 1px : 0px;
-                border-color: #3a3a3a;
-                Text {
-                    text: "Spacer";
-                    color: #666;
-                    horizontal-alignment: center;
-                    vertical-alignment: center;
-                }
-            }
-            if root.layout-region-panel-kind(2) == 5 && root.layout-region-is-visible(2) : Rectangle {
-                x: root.layout-region-x(2);
-                y: root.layout-region-y(2);
-                width: root.layout-region-width(2);
-                height: root.layout-region-height(2);
-                background: #252525;
-                border-width: root.layout_edit_mode ? 1px : 0px;
-                border-color: #3a3a3a;
-                Text {
-                    text: "Spacer";
-                    color: #666;
-                    horizontal-alignment: center;
-                    vertical-alignment: center;
-                }
-            }
-            if root.layout-region-panel-kind(3) == 5 && root.layout-region-is-visible(3) : Rectangle {
-                x: root.layout-region-x(3);
-                y: root.layout-region-y(3);
-                width: root.layout-region-width(3);
-                height: root.layout-region-height(3);
-                background: #252525;
-                border-width: root.layout_edit_mode ? 1px : 0px;
-                border-color: #3a3a3a;
-                Text {
-                    text: "Spacer";
-                    color: #666;
-                    horizontal-alignment: center;
-                    vertical-alignment: center;
-                }
-            }
-            if root.layout-region-panel-kind(4) == 5 && root.layout-region-is-visible(4) : Rectangle {
-                x: root.layout-region-x(4);
-                y: root.layout-region-y(4);
-                width: root.layout-region-width(4);
-                height: root.layout-region-height(4);
+            for leaf-id[i] in root.layout_leaf_ids : Rectangle {
+                x: root.layout-region-x(i);
+                y: root.layout-region-y(i);
+                width: root.layout-region-width(i);
+                height: root.layout-region-height(i);
+                visible: root.layout-region-is-visible(i) && root.layout-region-panel-kind(i) == 10;
                 background: #252525;
                 border-width: root.layout_edit_mode ? 1px : 0px;
                 border-color: #3a3a3a;
@@ -825,305 +1196,170 @@ export component AppWindow inherits Window {
                 }
             }
 
-            control-panel := Rectangle {
-                x: root.layout-region-x(root.layout_control_bar_region);
-                y: root.layout-region-y(root.layout_control_bar_region);
-                width: root.layout-region-width(root.layout_control_bar_region);
-                height: root.layout-region-height(root.layout_control_bar_region);
-                visible: root.layout-region-is-visible(root.layout_control_bar_region);
+            import-cluster-panel := Rectangle {
+                x: root.layout-region-x(root.layout_import_cluster_region);
+                y: root.layout-region-y(root.layout_import_cluster_region);
+                width: root.layout-region-width(root.layout_import_cluster_region);
+                height: root.layout-region-height(root.layout_import_cluster_region);
+                visible: root.layout-region-is-visible(root.layout_import_cluster_region);
                 clip: true;
                 background: #202020;
-
-                VerticalLayout {
-                    Rectangle {
-                        height: 42px;
-                        background: #202020;
-                        HorizontalLayout {
-                            padding-left: 12px;
-                            padding-right: 12px;
-                            padding-top: 8px;
-                            padding-bottom: 8px;
-                            spacing: 12px;
-
-                            Rectangle {
-                                width: 32px;
-                                height: 26px;
-                                border-radius: 2px;
-                                background: touch-area-open.pressed ? #444 : touch-area-open.has-hover ? #555 : #373737;
-                                animate background { duration: 150ms; }
-
-                                Text {
-                                    text: "+";
-                                    color: #eee;
-                                    font-size: 20px;
-                                    font-weight: 700;
-                                    vertical-alignment: center;
-                                    horizontal-alignment: center;
-                                }
-
-                                touch-area-open := TouchArea {
-                                    clicked => { root.open_file(); }
-                                }
+                HorizontalLayout {
+                    padding-left: 8px;
+                    padding-right: 8px;
+                    alignment: center;
+                    import-cluster := ButtonCluster {
+                        cluster-id: 0;
+                        button-actions: root.control_cluster_import_buttons;
+                        playback-order-index: root.playback_order_index;
+                        repeat-mode: root.repeat_mode;
+                        layout-edit-mode: root.layout_edit_mode;
+                        action-invoked(action-id) => {
+                            if (action-id == 1) { root.open_file(); }
+                            if (action-id == 2) { root.previous(); }
+                            if (action-id == 3) { root.play(); }
+                            if (action-id == 4) { root.pause(); }
+                            if (action-id == 5) { root.stop(); }
+                            if (action-id == 6) { root.next(); }
+                            if (action-id == 7) {
+                                let next-order = root.playback_order_index == 0 ? 1 : root.playback_order_index == 1 ? 2 : 0;
+                                root.playback_order_index = next-order;
+                                root.playback_order_changed(next-order);
                             }
-
-                            Rectangle { horizontal-stretch: 1; }
-
-                            HorizontalLayout {
-                                spacing: 12px;
-                                PlayerButton { icon-text: "⏮"; font-size: 18px; clicked => { root.previous(); } }
-                                PlayerButton { icon-text: "▶"; is-primary: true; font-size: 20px; clicked => { root.play(); } }
-                                PlayerButton { icon-text: "⏸"; font-size: 18px; clicked => { root.pause(); } }
-                                PlayerButton { icon-text: "⏹"; font-size: 18px; clicked => { root.stop(); } }
-                                PlayerButton { icon-text: "⏭"; font-size: 18px; clicked => { root.next(); } }
-                            }
-
-                            Rectangle { horizontal-stretch: 1; }
-
-                            HorizontalLayout {
-                                spacing: 12px;
-
-                                Rectangle {
-                                    width: 32px;
-                                    height: 32px;
-                                    PlayerButton {
-                                        icon-text: "⇄";
-                                        font-size: 20px;
-                                        is-primary: root.playback_order_index != 0;
-                                        clicked => {
-                                            let next-order = root.playback_order_index == 0 ? 1 : root.playback_order_index == 1 ? 2 : 0;
-                                            root.playback_order_index = next-order;
-                                            root.playback_order_changed(next-order);
-                                        }
-                                    }
-                                    if root.playback_order_index == 2 : Rectangle {
-                                        width: 10px;
-                                        height: 10px;
-                                        x: 15px;
-                                        y: 11px;
-                                        border-radius: 5px;
-                                        background: #2a6def;
-                                        Text {
-                                            text: "?";
-                                            color: white;
-                                            font-size: 7px;
-                                            font-weight: 700;
-                                            horizontal-alignment: center;
-                                            vertical-alignment: center;
-                                        }
-                                    }
-                                }
-
-                                Rectangle {
-                                    width: 32px;
-                                    height: 32px;
-                                    PlayerButton {
-                                        icon-text: "⟳";
-                                        font-size: 19px;
-                                        is-primary: root.repeat_mode != 0;
-                                        clicked => { root.toggle_repeat(); }
-                                    }
-                                    if root.repeat_mode == 2 : Rectangle {
-                                        width: 10px;
-                                        height: 10px;
-                                        x: 15px;
-                                        y: 11px;
-                                        border-radius: 5px;
-                                        background: #2a6def;
-                                        Text {
-                                            text: "1";
-                                            color: white;
-                                            font-size: 7px;
-                                            font-weight: 700;
-                                            horizontal-alignment: center;
-                                            vertical-alignment: center;
-                                        }
-                                    }
-                                }
-
-                                PlayerButton {
-                                    icon-text: "◫";
-                                    font-size: 18px;
-                                    is-primary: root.layout_edit_mode;
-                                    clicked => { root.open_layout_editor(); }
-                                }
-
-                                PlayerButton {
-                                    icon-text: "⚙";
-                                    font-size: 21px;
-                                    clicked => { root.open_settings(); }
-                                }
-
-                                Rectangle {
-                                    width: 20px;
-                                    height: 26px;
-                                    background: transparent;
-
-                                    Rectangle { x: 0px; y: 10px; width: 4px; height: 6px; border-radius: 1px; background: #888; }
-                                    Rectangle { x: 4px; y: 9px; width: 2px; height: 8px; border-radius: 1px; background: #888; }
-                                    Rectangle { x: 6px; y: 8px; width: 1px; height: 10px; background: #888; }
-                                    Text {
-                                        x: 8px;
-                                        y: 5px;
-                                        text: "))";
-                                        color: #888;
-                                        font-size: 11px;
-                                        vertical-alignment: center;
-                                    }
-                                }
-
-                                volume-slider := Rectangle {
-                                    width: 110px;
-                                    height: 26px;
-                                    background: transparent;
-
-                                    volume-track := Rectangle {
-                                        x: 0;
-                                        y: 10px;
-                                        width: parent.width;
-                                        height: 6px;
-                                        border-radius: 3px;
-                                        background: #333;
-                                    }
-
-                                    Rectangle {
-                                        x: 0;
-                                        y: volume-track.y;
-                                        width: volume-track.width * root.volume-level;
-                                        height: volume-track.height;
-                                        background: #2a6def;
-                                        border-radius: 3px;
-                                    }
-
-                                    volume-handle := Rectangle {
-                                        width: 10px;
-                                        height: 10px;
-                                        x: (volume-track.width * root.volume-level) - self.width / 2;
-                                        y: volume-track.y + (volume-track.height - self.height) / 2;
-                                        background: white;
-                                        border-radius: 5px;
-                                        animate x { duration: 100ms; easing: ease-out; }
-                                    }
-
-                                    states [
-                                        hover when ta-volume.has-hover || ta-volume.pressed: {
-                                            volume-handle.width: 12px;
-                                            volume-handle.height: 12px;
-                                        }
-                                    ]
-
-                                    ta-volume := TouchArea {
-                                        width: parent.width;
-                                        height: 20px;
-                                        y: 3px;
-                                        mouse-cursor: pointer;
-                                        clicked => {
-                                            root.volume-level = max(0, min(1, self.mouse-x / volume-track.width));
-                                            root.volume-changed(root.volume-level);
-                                        }
-                                        moved => {
-                                            if (self.pressed) {
-                                                root.volume-level = max(0, min(1, self.mouse-x / volume-track.width));
-                                                root.volume-changed(root.volume-level);
-                                            }
-                                        }
-                                    }
-
-                                    if ta-volume.pressed : Rectangle {
-                                        width: 34px;
-                                        height: 13px;
-                                        x: min(volume-track.width - self.width - 2px, max(2px, (volume-track.width * root.volume-level) - self.width / 2));
-                                        y: -4px;
-                                        border-radius: 3px;
-                                        background: #1f1f1f;
-                                        border-width: 1px;
-                                        border-color: #3a3a3a;
-                                        Text {
-                                            text: floor(root.volume-level * 100) + "%";
-                                            color: #ddd;
-                                            font-size: 8px;
-                                            horizontal-alignment: center;
-                                            vertical-alignment: center;
-                                        }
-                                    }
-                                }
-                            }
+                            if (action-id == 8) { root.toggle_repeat(); }
+                            if (action-id == 9) { root.open_layout_editor(); }
+                            if (action-id == 10) { root.open_settings(); }
+                        }
+                        request-add-menu(cluster-id) => {
+                            root.control_cluster_menu_target = cluster-id;
+                            root.control_cluster_menu_x = min(root.width - 230px, max(8px, import-cluster-panel.x + 8px));
+                            root.control_cluster_menu_y = min(root.height - 280px, max(8px, import-cluster-panel.y + import-cluster-panel.height + 4px));
+                            root.show_control_cluster_menu = true;
                         }
                     }
+                }
+            }
 
-                    Rectangle {
-                        height: 32px;
-                        background: #242424;
-                        HorizontalLayout {
-                            padding-left: 12px;
-                            padding-right: 12px;
-                            padding-top: 8px;
-                            padding-bottom: 8px;
-                            spacing: 10px;
-
-                            Text {
-                                text: root.format-time(root.elapsed-ms);
-                                color: #888;
-                                font-size: 12px;
-                                vertical-alignment: center;
-                                horizontal-alignment: right;
-                                width: 45px;
+            transport-cluster-panel := Rectangle {
+                x: root.layout-region-x(root.layout_transport_cluster_region);
+                y: root.layout-region-y(root.layout_transport_cluster_region);
+                width: root.layout-region-width(root.layout_transport_cluster_region);
+                height: root.layout-region-height(root.layout_transport_cluster_region);
+                visible: root.layout-region-is-visible(root.layout_transport_cluster_region);
+                clip: true;
+                background: #202020;
+                HorizontalLayout {
+                    padding-left: 8px;
+                    padding-right: 8px;
+                    alignment: center;
+                    transport-cluster := ButtonCluster {
+                        cluster-id: 1;
+                        button-actions: root.control_cluster_transport_buttons;
+                        playback-order-index: root.playback_order_index;
+                        repeat-mode: root.repeat_mode;
+                        layout-edit-mode: root.layout_edit_mode;
+                        action-invoked(action-id) => {
+                            if (action-id == 1) { root.open_file(); }
+                            if (action-id == 2) { root.previous(); }
+                            if (action-id == 3) { root.play(); }
+                            if (action-id == 4) { root.pause(); }
+                            if (action-id == 5) { root.stop(); }
+                            if (action-id == 6) { root.next(); }
+                            if (action-id == 7) {
+                                let next-order = root.playback_order_index == 0 ? 1 : root.playback_order_index == 1 ? 2 : 0;
+                                root.playback_order_index = next-order;
+                                root.playback_order_changed(next-order);
                             }
-
-                            seekbar := Rectangle {
-                                height: 6px;
-                                border-radius: 3px;
-                                background: #333;
-                                horizontal-stretch: 1;
-                                Rectangle {
-                                    x: 0;
-                                    y: 0;
-                                    width: seekbar.width * root.position-percentage;
-                                    height: parent.height;
-                                    background: #2a6def;
-                                    border-radius: 3px;
-                                    animate width { duration: 150ms; easing: ease-out; }
-                                }
-                                handle := Rectangle {
-                                    width: 12px;
-                                    height: 12px;
-                                    x: (seekbar.width * root.position-percentage) - self.width / 2;
-                                    y: (parent.height - self.height) / 2;
-                                    background: white;
-                                    border-radius: 6px;
-                                    drop-shadow-offset-y: 1px;
-                                    drop-shadow-blur: 2px;
-                                    drop-shadow-color: #00000080;
-                                    animate x { duration: 150ms; easing: ease-out; }
-                                }
-                                states [
-                                    hover when ta-seek.has-hover || ta-seek.pressed: {
-                                        handle.background: #ffffff;
-                                        handle.width: 14px;
-                                        handle.height: 14px;
-                                    }
-                                ]
-                                ta-seek := TouchArea {
-                                    width: parent.width;
-                                    height: 20px;
-                                    mouse-cursor: pointer;
-                                    clicked => { root.seek-to(max(0, min(1, self.mouse-x / seekbar.width))); }
-                                    moved => {
-                                        if (self.pressed) {
-                                            root.seek-to(max(0, min(1, self.mouse-x / seekbar.width)));
-                                        }
-                                    }
-                                }
-                            }
-
-                            Text {
-                                text: root.format-time(root.total-ms);
-                                color: #888;
-                                font-size: 12px;
-                                vertical-alignment: center;
-                                width: 45px;
-                            }
+                            if (action-id == 8) { root.toggle_repeat(); }
+                            if (action-id == 9) { root.open_layout_editor(); }
+                            if (action-id == 10) { root.open_settings(); }
+                        }
+                        request-add-menu(cluster-id) => {
+                            root.control_cluster_menu_target = cluster-id;
+                            root.control_cluster_menu_x = min(root.width - 230px, max(8px, transport-cluster-panel.x + 8px));
+                            root.control_cluster_menu_y = min(root.height - 280px, max(8px, transport-cluster-panel.y + transport-cluster-panel.height + 4px));
+                            root.show_control_cluster_menu = true;
                         }
                     }
+                }
+            }
+
+            utility-cluster-panel := Rectangle {
+                x: root.layout-region-x(root.layout_utility_cluster_region);
+                y: root.layout-region-y(root.layout_utility_cluster_region);
+                width: root.layout-region-width(root.layout_utility_cluster_region);
+                height: root.layout-region-height(root.layout_utility_cluster_region);
+                visible: root.layout-region-is-visible(root.layout_utility_cluster_region);
+                clip: true;
+                background: #202020;
+                HorizontalLayout {
+                    padding-left: 8px;
+                    padding-right: 8px;
+                    alignment: center;
+                    utility-cluster := ButtonCluster {
+                        cluster-id: 2;
+                        button-actions: root.control_cluster_utility_buttons;
+                        playback-order-index: root.playback_order_index;
+                        repeat-mode: root.repeat_mode;
+                        layout-edit-mode: root.layout_edit_mode;
+                        action-invoked(action-id) => {
+                            if (action-id == 1) { root.open_file(); }
+                            if (action-id == 2) { root.previous(); }
+                            if (action-id == 3) { root.play(); }
+                            if (action-id == 4) { root.pause(); }
+                            if (action-id == 5) { root.stop(); }
+                            if (action-id == 6) { root.next(); }
+                            if (action-id == 7) {
+                                let next-order = root.playback_order_index == 0 ? 1 : root.playback_order_index == 1 ? 2 : 0;
+                                root.playback_order_index = next-order;
+                                root.playback_order_changed(next-order);
+                            }
+                            if (action-id == 8) { root.toggle_repeat(); }
+                            if (action-id == 9) { root.open_layout_editor(); }
+                            if (action-id == 10) { root.open_settings(); }
+                        }
+                        request-add-menu(cluster-id) => {
+                            root.control_cluster_menu_target = cluster-id;
+                            root.control_cluster_menu_x = min(root.width - 230px, max(8px, utility-cluster-panel.x + 8px));
+                            root.control_cluster_menu_y = min(root.height - 280px, max(8px, utility-cluster-panel.y + utility-cluster-panel.height + 4px));
+                            root.show_control_cluster_menu = true;
+                        }
+                    }
+                }
+            }
+
+            volume-slider-panel := Rectangle {
+                x: root.layout-region-x(root.layout_volume_slider_region);
+                y: root.layout-region-y(root.layout_volume_slider_region);
+                width: root.layout-region-width(root.layout_volume_slider_region);
+                height: root.layout-region-height(root.layout_volume_slider_region);
+                visible: root.layout-region-is-visible(root.layout_volume_slider_region);
+                clip: true;
+                background: #202020;
+                VolumeSliderControl {
+                    x: 8px;
+                    y: 0px;
+                    height: parent.height;
+                    width: max(0px, parent.width - 16px);
+                    value <=> root.volume-level;
+                    changed(next-volume) => { root.volume-changed(next-volume); }
+                }
+            }
+
+            seek-bar-panel := Rectangle {
+                x: root.layout-region-x(root.layout_seek_bar_region);
+                y: root.layout-region-y(root.layout_seek_bar_region);
+                width: root.layout-region-width(root.layout_seek_bar_region);
+                height: root.layout-region-height(root.layout_seek_bar_region);
+                visible: root.layout-region-is-visible(root.layout_seek_bar_region);
+                clip: true;
+                SeekBarControl {
+                    width: parent.width;
+                    height: parent.height;
+                    position-percentage: root.position-percentage;
+                    elapsed-text: root.format-time(root.elapsed-ms);
+                    total-text: root.format-time(root.total-ms);
+                    seek-requested(next-pos) => { root.seek-to(next-pos); }
                 }
             }
 
@@ -1190,72 +1426,41 @@ export component AppWindow inherits Window {
                 }
             }
 
-            album-art-panel := Rectangle {
-                x: root.layout-region-x(root.layout_album_art_region);
-                y: root.layout-region-y(root.layout_album_art_region);
-                width: root.layout-region-width(root.layout_album_art_region);
-                height: root.layout-region-height(root.layout_album_art_region);
-                visible: root.layout-region-is-visible(root.layout_album_art_region);
+            metadata-viewer-panel := Rectangle {
+                x: root.layout-region-x(root.layout_metadata_viewer_region);
+                y: root.layout-region-y(root.layout_metadata_viewer_region);
+                width: root.layout-region-width(root.layout_metadata_viewer_region);
+                height: root.layout-region-height(root.layout_metadata_viewer_region);
+                visible: root.layout-region-is-visible(root.layout_metadata_viewer_region);
                 clip: true;
                 background: #202020;
+                MetadataViewer {
+                    x: 10px;
+                    y: 10px;
+                    width: parent.width - 20px;
+                    height: parent.height - 20px;
+                    display-title: root.display_title;
+                    display-artist: root.display_artist;
+                    display-album: root.display_album;
+                    display-date: root.display_date;
+                    display-genre: root.display_genre;
+                }
+            }
 
-                VerticalLayout {
-                    padding: 10px;
-                    spacing: 10px;
-
-                    VerticalLayout {
-                        spacing: 4px;
-                        if root.display_title != "" : Text {
-                            text: root.display_title;
-                            color: #eee;
-                            font-size: 14px;
-                            font-weight: 700;
-                            wrap: word-wrap;
-                            overflow: elide;
-                        }
-                        if root.display_artist != "" : Text {
-                            text: root.display_artist;
-                            color: #ccc;
-                            font-size: 13px;
-                            wrap: word-wrap;
-                            overflow: elide;
-                        }
-                        if root.display_album != "" : Text {
-                            text: root.display_album;
-                            color: #aaa;
-                            font-size: 12px;
-                            wrap: word-wrap;
-                            overflow: elide;
-                        }
-                        HorizontalLayout {
-                            spacing: 8px;
-                            if root.display_date != "" : Text {
-                                text: root.display_date;
-                                color: #888;
-                                font-size: 11px;
-                            }
-                            if root.display_genre != "" : Text {
-                                text: root.display_genre;
-                                color: #888;
-                                font-size: 11px;
-                                horizontal-stretch: 1;
-                                overflow: elide;
-                            }
-                        }
-                    }
-
-                    Rectangle {
-                        vertical-stretch: 1;
-                        height: max(100px, min(parent.width, parent.height - 120px));
-                        background: #202020;
-                        border-radius: 4px;
-                        Image {
-                            source: root.current_cover_art;
-                            width: parent.width;
-                            height: parent.height;
-                            image-fit: contain;
-                        }
-                    }
+            album-art-viewer-panel := Rectangle {
+                x: root.layout-region-x(root.layout_album_art_viewer_region);
+                y: root.layout-region-y(root.layout_album_art_viewer_region);
+                width: root.layout-region-width(root.layout_album_art_viewer_region);
+                height: root.layout-region-height(root.layout_album_art_viewer_region);
+                visible: root.layout-region-is-visible(root.layout_album_art_viewer_region);
+                clip: true;
+                background: #202020;
+                AlbumArtViewer {
+                    x: 10px;
+                    y: 10px;
+                    width: parent.width - 20px;
+                    height: parent.height - 20px;
+                    art-source: root.current_cover_art;
                 }
             }
 
@@ -1587,103 +1792,130 @@ export component AppWindow inherits Window {
                 time-range: root.format-time-range(root.elapsed-ms, root.total-ms);
             }
 
-            if root.layout_edit_mode && root.layout_splitter_top_visible : Rectangle {
-                x: root.layout_splitter_top_x_px * 1px;
-                y: root.layout_splitter_top_y_px * 1px;
-                width: root.layout_splitter_top_width_px * 1px;
-                height: root.layout_splitter_top_height_px * 1px;
-                background: splitter-top-ta.has-hover || splitter-top-ta.pressed ? #4b84c9a8 : #2f2f2f88;
-                splitter-top-ta := TouchArea {
-                    mouse-cursor: row-resize;
+            for leaf-id[i] in root.layout_leaf_ids : Rectangle {
+                x: root.layout-region-x(i);
+                y: root.layout-region-y(i);
+                width: root.layout-region-width(i);
+                height: root.layout-region-height(i);
+                visible: root.layout_edit_mode
+                    && root.layout-region-is-visible(i)
+                    && root.layout-region-panel-kind(i) >= 6;
+                background: leaf-select-ta.has-hover ? #4b84c91f : transparent;
+                border-width: 1px;
+                border-color: i == root.layout_selected_leaf_index ? #4b84c9 : #3a3a3a;
+                z: 100;
+                Text {
+                    text: root.layout-panel-label(root.layout-region-panel-kind(i));
+                    color: i == root.layout_selected_leaf_index ? #9fc3ff : #777;
+                    font-size: 11px;
+                    x: 6px;
+                    y: 4px;
+                }
+                leaf-select-ta := TouchArea {
                     pointer-event(event) => {
-                        if (event.kind == PointerEventKind.down && event.button == PointerEventButton.left) {
-                            root.layout_splitter_drag_start_mouse_y = self.mouse-y;
-                            root.layout_splitter_drag_start_size_px = root.layout_top_size_px;
-                        } else if (event.kind == PointerEventKind.up) {
-                            let delta = floor((self.mouse-y - root.layout_splitter_drag_start_mouse_y) / 1px);
-                            let new-size = max(8, root.layout_splitter_drag_start_size_px + delta);
-                            root.preview_layout_region_size(0, new-size);
-                            root.commit_layout_region_size(0, new-size);
-                        } else if (event.kind == PointerEventKind.cancel) {
-                            root.preview_layout_region_size(0, root.layout_splitter_drag_start_size_px);
+                        if (event.kind == PointerEventKind.down && event.button == PointerEventButton.right) {
+                            root.layout_select_leaf(leaf-id);
+                            root.show_layout_splitter_context_menu = false;
+                            root.layout_leaf_context_menu_x = min(root.width - 320px, max(8px, parent.x + self.mouse-x + 6px));
+                            root.layout_leaf_context_menu_y = min(root.height - 250px, max(8px, parent.y + self.mouse-y + 6px));
+                            root.show_layout_leaf_context_menu = true;
+                        } else if (event.kind == PointerEventKind.down && event.button == PointerEventButton.left) {
+                            root.layout_select_leaf(leaf-id);
+                            root.show_layout_leaf_context_menu = false;
+                            root.show_layout_splitter_context_menu = false;
                         }
                     }
                 }
             }
 
-            if root.layout_edit_mode && root.layout_splitter_left_visible : Rectangle {
-                x: root.layout_splitter_left_x_px * 1px;
-                y: root.layout_splitter_left_y_px * 1px;
-                width: root.layout_splitter_left_width_px * 1px;
-                height: root.layout_splitter_left_height_px * 1px;
-                background: splitter-left-ta.has-hover || splitter-left-ta.pressed ? #4b84c9a8 : #2f2f2f88;
-                splitter-left-ta := TouchArea {
-                    mouse-cursor: col-resize;
+            for splitter[i] in root.layout_splitters : Rectangle {
+                visible: root.layout_edit_mode;
+                x: splitter.x_px * 1px;
+                y: splitter.y_px * 1px;
+                width: splitter.width_px * 1px;
+                height: splitter.height_px * 1px;
+                z: 120;
+                background: splitter-ta.has-hover || root.layout_active_splitter_index == i ? #4b84c9a8 : #2f2f2f88;
+                splitter-ta := TouchArea {
+                    x: splitter.axis == 1 ? -4px : 0px;
+                    y: splitter.axis == 0 ? -4px : 0px;
+                    width: splitter.axis == 1 ? parent.width + 8px : parent.width;
+                    height: splitter.axis == 0 ? parent.height + 8px : parent.height;
+                    mouse-cursor: splitter.axis == 1 ? col-resize : row-resize;
                     pointer-event(event) => {
-                        if (event.kind == PointerEventKind.down && event.button == PointerEventButton.left) {
-                            root.layout_splitter_drag_start_mouse_x = self.mouse-x;
-                            root.layout_splitter_drag_start_size_px = root.layout_left_size_px;
-                        } else if (event.kind == PointerEventKind.up) {
-                            let delta = floor((self.mouse-x - root.layout_splitter_drag_start_mouse_x) / 1px);
-                            let new-size = max(8, root.layout_splitter_drag_start_size_px + delta);
-                            root.preview_layout_region_size(1, new-size);
-                            root.commit_layout_region_size(1, new-size);
-                        } else if (event.kind == PointerEventKind.cancel) {
-                            root.preview_layout_region_size(1, root.layout_splitter_drag_start_size_px);
+                        if (event.kind == PointerEventKind.down && event.button == PointerEventButton.right) {
+                            root.layout_active_splitter_index = -1;
+                            root.layout_context_splitter_id = splitter.id;
+                            root.show_layout_leaf_context_menu = false;
+                            root.layout_splitter_context_menu_x = min(root.width - 220px, max(8px, parent.x + self.mouse-x + 6px));
+                            root.layout_splitter_context_menu_y = min(root.height - 120px, max(8px, parent.y + self.mouse-y + 6px));
+                            root.show_layout_splitter_context_menu = true;
+                        } else if (event.kind == PointerEventKind.down && event.button == PointerEventButton.left) {
+                            root.show_layout_leaf_context_menu = false;
+                            root.show_layout_splitter_context_menu = false;
+                            root.layout_active_splitter_index = i;
+                            root.layout_splitter_drag_start_mouse_x = parent.x + self.mouse-x;
+                            root.layout_splitter_drag_start_mouse_y = parent.y + self.mouse-y;
+                            root.layout_splitter_drag_start_ratio = splitter.ratio;
                         }
                     }
                 }
             }
 
-            if root.layout_edit_mode && root.layout_splitter_right_visible : Rectangle {
-                x: root.layout_splitter_right_x_px * 1px;
-                y: root.layout_splitter_right_y_px * 1px;
-                width: root.layout_splitter_right_width_px * 1px;
-                height: root.layout_splitter_right_height_px * 1px;
-                background: splitter-right-ta.has-hover || splitter-right-ta.pressed ? #4b84c9a8 : #2f2f2f88;
-                splitter-right-ta := TouchArea {
-                    mouse-cursor: col-resize;
-                    pointer-event(event) => {
-                        if (event.kind == PointerEventKind.down && event.button == PointerEventButton.left) {
-                            root.layout_splitter_drag_start_mouse_x = self.mouse-x;
-                            root.layout_splitter_drag_start_size_px = root.layout_right_size_px;
-                        } else if (event.kind == PointerEventKind.up) {
-                            let delta = floor((self.mouse-x - root.layout_splitter_drag_start_mouse_x) / 1px);
-                            let new-size = max(8, root.layout_splitter_drag_start_size_px - delta);
-                            root.preview_layout_region_size(3, new-size);
-                            root.commit_layout_region_size(3, new-size);
-                        } else if (event.kind == PointerEventKind.cancel) {
-                            root.preview_layout_region_size(3, root.layout_splitter_drag_start_size_px);
-                        }
-                    }
+            if root.layout_edit_mode
+                    && root.layout_active_splitter_index >= 0
+                    && root.layout_active_splitter_index < root.layout_splitters.length : TouchArea {
+                z: 121;
+                x: 0px;
+                y: 0px;
+                width: parent.width;
+                height: parent.height;
+                mouse-cursor: root.layout_splitters[root.layout_active_splitter_index].axis == 1 ? col-resize : row-resize;
+                moved => {
+                    let active-index = root.layout_active_splitter_index;
+                    let active-splitter = root.layout_splitters[active-index];
+                    let delta-px = active-splitter.axis == 1
+                        ? floor((self.mouse-x - root.layout_splitter_drag_start_mouse_x) / 1px)
+                        : floor((self.mouse-y - root.layout_splitter_drag_start_mouse_y) / 1px);
+                    let ratio-delta = (delta-px * 1.0) / (max(1, active-splitter.track_length_px) * 1.0);
+                    let target-ratio = root.layout_splitter_drag_start_ratio + ratio-delta;
+                    let clamped-ratio = min(active-splitter.max_ratio, max(active-splitter.min_ratio, target-ratio));
+                    root.preview_layout_splitter_ratio(active-splitter.id, clamped-ratio);
                 }
-            }
-
-            if root.layout_edit_mode && root.layout_splitter_bottom_visible : Rectangle {
-                x: root.layout_splitter_bottom_x_px * 1px;
-                y: root.layout_splitter_bottom_y_px * 1px;
-                width: root.layout_splitter_bottom_width_px * 1px;
-                height: root.layout_splitter_bottom_height_px * 1px;
-                background: splitter-bottom-ta.has-hover || splitter-bottom-ta.pressed ? #4b84c9a8 : #2f2f2f88;
-                splitter-bottom-ta := TouchArea {
-                    mouse-cursor: row-resize;
-                    pointer-event(event) => {
-                        if (event.kind == PointerEventKind.down && event.button == PointerEventButton.left) {
-                            root.layout_splitter_drag_start_mouse_y = self.mouse-y;
-                            root.layout_splitter_drag_start_size_px = root.layout_bottom_size_px;
-                        } else if (event.kind == PointerEventKind.up) {
-                            let delta = floor((self.mouse-y - root.layout_splitter_drag_start_mouse_y) / 1px);
-                            let new-size = max(8, root.layout_splitter_drag_start_size_px - delta);
-                            root.preview_layout_region_size(4, new-size);
-                            root.commit_layout_region_size(4, new-size);
-                        } else if (event.kind == PointerEventKind.cancel) {
-                            root.preview_layout_region_size(4, root.layout_splitter_drag_start_size_px);
-                        }
+                pointer-event(event) => {
+                    if (event.kind == PointerEventKind.up) {
+                        let active-index = root.layout_active_splitter_index;
+                        let active-splitter = root.layout_splitters[active-index];
+                        let delta-px = active-splitter.axis == 1
+                            ? floor((self.mouse-x - root.layout_splitter_drag_start_mouse_x) / 1px)
+                            : floor((self.mouse-y - root.layout_splitter_drag_start_mouse_y) / 1px);
+                        let ratio-delta = (delta-px * 1.0) / (max(1, active-splitter.track_length_px) * 1.0);
+                        let target-ratio = root.layout_splitter_drag_start_ratio + ratio-delta;
+                        let clamped-ratio = min(active-splitter.max_ratio, max(active-splitter.min_ratio, target-ratio));
+                        root.preview_layout_splitter_ratio(active-splitter.id, clamped-ratio);
+                        root.commit_layout_splitter_ratio(active-splitter.id, clamped-ratio);
+                        root.layout_active_splitter_index = -1;
+                    } else if (event.kind == PointerEventKind.cancel) {
+                        let active-index = root.layout_active_splitter_index;
+                        let active-splitter = root.layout_splitters[active-index];
+                        root.preview_layout_splitter_ratio(active-splitter.id, root.layout_splitter_drag_start_ratio);
+                        root.layout_active_splitter_index = -1;
                     }
                 }
             }
         }
 
+    }
+
+    if root.layout_edit_mode && (root.show_layout_leaf_context_menu || root.show_layout_splitter_context_menu) : Rectangle {
+        z: 129;
+        background: transparent;
+        touch-to-dismiss-layout-menu := TouchArea {
+            clicked => {
+                root.show_layout_leaf_context_menu = false;
+                root.show_layout_splitter_context_menu = false;
+            }
+        }
     }
 
     if root.show_layout_editor_dialog : Rectangle {
@@ -1693,8 +1925,8 @@ export component AppWindow inherits Window {
         TouchArea {}
 
         Rectangle {
-            width: min(root.width - 40px, 500px);
-            height: min(root.height - 40px, 420px);
+            width: min(root.width - 40px, 560px);
+            height: min(root.height - 40px, 280px);
             x: (parent.width - self.width) / 2;
             y: (parent.height - self.height) / 2;
             border-radius: 6px;
@@ -1708,93 +1940,269 @@ export component AppWindow inherits Window {
 
                 HorizontalLayout {
                     Text {
-                        text: "Layout Editor";
+                        text: "Layout Edit Mode";
                         color: #eee;
                         font-size: 16px;
                         font-weight: 700;
                         vertical-alignment: center;
                     }
                     Rectangle { horizontal-stretch: 1; }
-                    PlayerButton {
-                        icon-text: "✕";
-                        font-size: 14px;
-                        clicked => {
-                            root.show_layout_editor_dialog = false;
-                            root.layout_edit_mode = false;
-                        }
-                    }
                 }
 
                 Rectangle { height: 1px; background: #343434; }
 
                 Text {
-                    text: "Assign a panel type to each docking region. Drag highlighted splitters in edit mode to resize region sizes.";
+                    text: "You are entering layout editing mode. Right-click a panel to replace, split, or delete it. Drag splitters to resize. Right-click a splitter for divider actions.";
                     color: #bbb;
                     font-size: 12px;
                     wrap: word-wrap;
                 }
 
-                VerticalLayout {
-                    spacing: 8px;
-
-                    HorizontalLayout {
-                        spacing: 12px;
-                        Text { text: "Top Region"; color: #ddd; width: 130px; vertical-alignment: center; }
-                        ComboBox { horizontal-stretch: 1; model: root.layout_panel_options; current-index <=> root.layout_editor_top_panel_kind; }
-                    }
-                    HorizontalLayout {
-                        spacing: 12px;
-                        Text { text: "Left Region"; color: #ddd; width: 130px; vertical-alignment: center; }
-                        ComboBox { horizontal-stretch: 1; model: root.layout_panel_options; current-index <=> root.layout_editor_left_panel_kind; }
-                    }
-                    HorizontalLayout {
-                        spacing: 12px;
-                        Text { text: "Center Region"; color: #ddd; width: 130px; vertical-alignment: center; }
-                        ComboBox { horizontal-stretch: 1; model: root.layout_panel_options; current-index <=> root.layout_editor_center_panel_kind; }
-                    }
-                    HorizontalLayout {
-                        spacing: 12px;
-                        Text { text: "Right Region"; color: #ddd; width: 130px; vertical-alignment: center; }
-                        ComboBox { horizontal-stretch: 1; model: root.layout_panel_options; current-index <=> root.layout_editor_right_panel_kind; }
-                    }
-                    HorizontalLayout {
-                        spacing: 12px;
-                        Text { text: "Bottom Region"; color: #ddd; width: 130px; vertical-alignment: center; }
-                        ComboBox { horizontal-stretch: 1; model: root.layout_panel_options; current-index <=> root.layout_editor_bottom_panel_kind; }
-                    }
-                }
-
                 Rectangle { vertical-stretch: 1; }
+
+                HorizontalLayout {
+                    spacing: 8px;
+                    Rectangle {
+                        width: 16px;
+                        height: 16px;
+                        border-radius: 3px;
+                        border-width: 1px;
+                        border-color: #5a5a5a;
+                        background: layout-intro-checkbox-ta.has-hover ? #363636 : #2d2d2d;
+                        Text {
+                            text: root.layout_intro_dont_show_again ? "✓" : "";
+                            color: #8cb1ff;
+                            font-size: 12px;
+                            horizontal-alignment: center;
+                            vertical-alignment: center;
+                        }
+                        layout-intro-checkbox-ta := TouchArea {
+                            clicked => {
+                                root.layout_intro_dont_show_again = !root.layout_intro_dont_show_again;
+                            }
+                        }
+                    }
+                    Text {
+                        text: "Don’t show this again";
+                        color: #ccc;
+                        font-size: 12px;
+                        vertical-alignment: center;
+                    }
+                    Rectangle { horizontal-stretch: 1; }
+                }
 
                 HorizontalLayout {
                     spacing: 10px;
                     Button {
-                        text: "Reset";
+                        text: "Go Back";
                         clicked => {
-                            root.reset_layout_default();
+                            root.layout_intro_cancel(root.layout_intro_dont_show_again);
+                            root.show_layout_editor_dialog = false;
                         }
                     }
                     Rectangle { horizontal-stretch: 1; }
                     Button {
-                        text: "Close";
+                        text: "Start Editing";
+                        primary: true;
                         clicked => {
+                            root.layout_intro_proceed(root.layout_intro_dont_show_again);
                             root.show_layout_editor_dialog = false;
                         }
                     }
-                    Button {
-                        text: "Apply";
-                        primary: true;
-                        clicked => {
-                            root.apply_layout_editor(
-                                root.layout_editor_top_panel_kind,
-                                root.layout_editor_left_panel_kind,
-                                root.layout_editor_center_panel_kind,
-                                root.layout_editor_right_panel_kind,
-                                root.layout_editor_bottom_panel_kind
-                            );
-                            root.layout_edit_mode = true;
-                            root.show_layout_editor_dialog = false;
-                        }
+                }
+            }
+        }
+    }
+
+    if root.layout_edit_mode && root.show_layout_leaf_context_menu : Rectangle {
+        z: 140;
+        x: root.layout_leaf_context_menu_x;
+        y: root.layout_leaf_context_menu_y;
+        width: 312px;
+        height: 214px;
+        border-radius: 6px;
+        background: #262626;
+        border-width: 1px;
+        border-color: #3d3d3d;
+
+        VerticalLayout {
+            padding: 10px;
+            spacing: 8px;
+
+            Text {
+                text: "Panel Actions";
+                color: #eee;
+                font-size: 13px;
+                font-weight: 700;
+            }
+
+            HorizontalLayout {
+                spacing: 8px;
+                Text { text: "Replace"; color: #ccc; width: 56px; vertical-alignment: center; }
+                ComboBox { horizontal-stretch: 1; model: root.layout_panel_options; current-index <=> root.layout_editor_replace_panel_kind; }
+                Button {
+                    text: "Apply";
+                    clicked => {
+                        root.layout_replace_selected_leaf(root.layout_editor_replace_panel_kind);
+                        root.show_layout_leaf_context_menu = false;
+                    }
+                }
+            }
+
+            HorizontalLayout {
+                spacing: 8px;
+                Text { text: "Split"; color: #ccc; width: 56px; vertical-alignment: center; }
+                ComboBox { width: 108px; model: ["Horizontal", "Vertical"]; current-index <=> root.layout_editor_split_axis; }
+                ComboBox { horizontal-stretch: 1; model: root.layout_panel_options; current-index <=> root.layout_editor_split_panel_kind; }
+                Button {
+                    text: "Go";
+                    clicked => {
+                        root.layout_split_selected_leaf(root.layout_editor_split_axis, root.layout_editor_split_panel_kind);
+                        root.show_layout_leaf_context_menu = false;
+                    }
+                }
+            }
+
+            HorizontalLayout {
+                spacing: 8px;
+                Button {
+                    text: "Delete Panel";
+                    clicked => {
+                        root.layout_delete_selected_leaf();
+                        root.show_layout_leaf_context_menu = false;
+                    }
+                }
+                Button {
+                    text: "Undo";
+                    clicked => {
+                        root.layout_undo_last_action();
+                        root.show_layout_leaf_context_menu = false;
+                    }
+                }
+                Button {
+                    text: "Reset Layout";
+                    clicked => {
+                        root.reset_layout_default();
+                        root.show_layout_leaf_context_menu = false;
+                    }
+                }
+            }
+
+            if root.layout_leaf_ids.length == 0 : HorizontalLayout {
+                spacing: 8px;
+                ComboBox { horizontal-stretch: 1; model: root.layout_panel_options; current-index <=> root.layout_editor_new_root_panel_kind; }
+                Button {
+                    text: "Add Root";
+                    clicked => {
+                        root.layout_add_root_leaf(root.layout_editor_new_root_panel_kind);
+                        root.show_layout_leaf_context_menu = false;
+                    }
+                }
+            }
+        }
+    }
+
+    if root.layout_edit_mode && root.show_layout_splitter_context_menu : Rectangle {
+        z: 140;
+        x: root.layout_splitter_context_menu_x;
+        y: root.layout_splitter_context_menu_y;
+        width: 210px;
+        height: 102px;
+        border-radius: 6px;
+        background: #262626;
+        border-width: 1px;
+        border-color: #3d3d3d;
+
+        VerticalLayout {
+            padding: 10px;
+            spacing: 8px;
+
+            Text {
+                text: "Divider Actions";
+                color: #eee;
+                font-size: 13px;
+                font-weight: 700;
+            }
+            Button {
+                text: "Reset To 50 / 50";
+                clicked => {
+                    if (root.layout_context_splitter_id != "") {
+                        root.commit_layout_splitter_ratio(root.layout_context_splitter_id, 0.5);
+                    }
+                    root.show_layout_splitter_context_menu = false;
+                }
+            }
+            Button {
+                text: "Undo";
+                clicked => {
+                    root.layout_undo_last_action();
+                    root.show_layout_splitter_context_menu = false;
+                }
+            }
+        }
+    }
+
+    if root.show_control_cluster_menu : Rectangle {
+        z: 145;
+        background: transparent;
+        TouchArea {
+            clicked => {
+                root.show_control_cluster_menu = false;
+            }
+        }
+    }
+
+    if root.show_control_cluster_menu : Rectangle {
+        z: 146;
+        x: root.control_cluster_menu_x;
+        y: root.control_cluster_menu_y;
+        width: 220px;
+        height: 280px;
+        border-radius: 6px;
+        background: #262626;
+        border-width: 1px;
+        border-color: #3d3d3d;
+
+        VerticalLayout {
+            padding: 10px;
+            spacing: 4px;
+
+            Text {
+                text: "Add Button";
+                color: #eee;
+                font-size: 13px;
+                font-weight: 700;
+            }
+
+            Rectangle { height: 1px; background: #3a3a3a; }
+
+            for option[index] in [
+                "Import (+)",
+                "Back",
+                "Play",
+                "Pause",
+                "Stop",
+                "Next",
+                "Shuffle",
+                "Repeat",
+                "Layout Editor",
+                "Settings"
+            ] : Rectangle {
+                property <int> option-id: index + 1;
+                height: 22px;
+                border-radius: 2px;
+                background: add-option-ta.has-hover ? #363636 : transparent;
+                Text {
+                    text: option;
+                    color: #ddd;
+                    font-size: 12px;
+                    x: 6px;
+                    vertical-alignment: center;
+                }
+                add-option-ta := TouchArea {
+                    clicked => {
+                        root.add_control_cluster_button(root.control_cluster_menu_target, parent.option-id);
+                        root.show_control_cluster_menu = false;
                     }
                 }
             }
@@ -2136,12 +2544,20 @@ export component AppWindow inherits Window {
     callback commit_playlist_column_width(int, int);
     callback reset_playlist_column_width(int);
     callback playlist_columns_viewport_resized(int);
+    callback add_control_cluster_button(int, int);
     callback window_resized(int, int);
     callback layout_workspace_resized(int, int);
     callback open_layout_editor();
-    callback apply_layout_editor(int, int, int, int, int);
-    callback preview_layout_region_size(int, int);
-    callback commit_layout_region_size(int, int);
+    callback layout_intro_proceed(bool);
+    callback layout_intro_cancel(bool);
+    callback layout_select_leaf(string);
+    callback layout_replace_selected_leaf(int);
+    callback layout_split_selected_leaf(int, int);
+    callback layout_delete_selected_leaf();
+    callback layout_add_root_leaf(int);
+    callback preview_layout_splitter_ratio(string, float);
+    callback commit_layout_splitter_ratio(string, float);
+    callback layout_undo_last_action();
     callback reset_layout_default();
     callback open_settings();
     callback apply_settings(int, int, int, int, string, string, string, string);
