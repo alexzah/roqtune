@@ -8,7 +8,7 @@ mod protocol;
 mod ui_manager;
 
 use std::{
-    collections::BTreeSet,
+    collections::{BTreeSet, HashMap},
     rc::Rc,
     sync::{Arc, Mutex},
     thread,
@@ -16,7 +16,7 @@ use std::{
 
 use audio_decoder::AudioDecoder;
 use audio_player::AudioPlayer;
-use config::{BufferingConfig, Config, OutputConfig, UiConfig};
+use config::{BufferingConfig, Config, OutputConfig, PlaylistColumnConfig, UiConfig};
 use cpal::traits::{DeviceTrait, HostTrait};
 use db_manager::DbManager;
 use log::{debug, info};
@@ -333,6 +333,7 @@ fn detect_output_settings_options(config: &Config) -> OutputSettingsOptions {
 }
 
 fn sanitize_config(config: Config) -> Config {
+    let sanitized_playlist_columns = sanitize_playlist_columns(&config.ui.playlist_columns);
     let output_device_name = config.output.output_device_name.trim().to_string();
     let clamped_channels = config.output.channel_count.clamp(1, 8);
     let clamped_sample_rate_hz = config.output.sample_rate_khz.clamp(8_000, 192_000);
@@ -359,6 +360,7 @@ fn sanitize_config(config: Config) -> Config {
         },
         ui: UiConfig {
             show_album_art: config.ui.show_album_art,
+            playlist_columns: sanitized_playlist_columns,
         },
         buffering: BufferingConfig {
             player_low_watermark_ms: clamped_low_watermark,
@@ -367,6 +369,106 @@ fn sanitize_config(config: Config) -> Config {
             decoder_request_chunk_ms: clamped_decoder_chunk,
         },
     }
+}
+
+fn normalize_column_format(format: &str) -> String {
+    format.trim().to_ascii_lowercase()
+}
+
+fn sanitize_playlist_columns(columns: &[PlaylistColumnConfig]) -> Vec<PlaylistColumnConfig> {
+    let default_columns = config::default_playlist_columns();
+    let mut builtin_overrides: HashMap<String, PlaylistColumnConfig> = HashMap::new();
+    let mut custom_columns: Vec<PlaylistColumnConfig> = Vec::new();
+
+    for column in columns {
+        let trimmed_name = column.name.trim();
+        let trimmed_format = column.format.trim();
+        if trimmed_name.is_empty() || trimmed_format.is_empty() {
+            continue;
+        }
+
+        let mut sanitized = PlaylistColumnConfig {
+            name: trimmed_name.to_string(),
+            format: trimmed_format.to_string(),
+            enabled: column.enabled,
+            custom: column.custom,
+        };
+
+        if sanitized.custom {
+            custom_columns.push(sanitized);
+        } else {
+            sanitized.custom = false;
+            builtin_overrides.insert(normalize_column_format(&sanitized.format), sanitized);
+        }
+    }
+
+    let mut merged_columns: Vec<PlaylistColumnConfig> = default_columns
+        .into_iter()
+        .map(|default_column| {
+            let key = normalize_column_format(&default_column.format);
+            builtin_overrides.remove(&key).unwrap_or(default_column)
+        })
+        .collect();
+
+    for custom in custom_columns {
+        if !merged_columns.iter().any(|existing| {
+            existing.custom && existing.name == custom.name && existing.format == custom.format
+        }) {
+            merged_columns.push(custom);
+        }
+    }
+
+    if merged_columns.iter().all(|column| !column.enabled) {
+        if let Some(first_column) = merged_columns.first_mut() {
+            first_column.enabled = true;
+        }
+    }
+
+    merged_columns
+}
+
+fn apply_playlist_columns_to_ui(ui: &AppWindow, config: &Config) {
+    let visible_headers: Vec<slint::SharedString> = config
+        .ui
+        .playlist_columns
+        .iter()
+        .filter(|column| column.enabled)
+        .map(|column| column.name.as_str().into())
+        .collect();
+    let menu_labels: Vec<slint::SharedString> = config
+        .ui
+        .playlist_columns
+        .iter()
+        .map(|column| column.name.as_str().into())
+        .collect();
+    let menu_checked: Vec<bool> = config
+        .ui
+        .playlist_columns
+        .iter()
+        .map(|column| column.enabled)
+        .collect();
+    let menu_is_custom: Vec<bool> = config
+        .ui
+        .playlist_columns
+        .iter()
+        .map(|column| column.custom)
+        .collect();
+
+    ui.set_playlist_visible_column_headers(ModelRc::from(Rc::new(VecModel::from(visible_headers))));
+    ui.set_playlist_column_menu_labels(ModelRc::from(Rc::new(VecModel::from(menu_labels))));
+    ui.set_playlist_column_menu_checked(ModelRc::from(Rc::new(VecModel::from(menu_checked))));
+    ui.set_playlist_column_menu_is_custom(ModelRc::from(Rc::new(VecModel::from(menu_is_custom))));
+}
+
+fn should_apply_custom_column_delete(
+    confirm_dialog_visible: bool,
+    pending_index: i32,
+    requested_index: usize,
+) -> bool {
+    if !confirm_dialog_visible {
+        return false;
+    }
+    pending_index >= 0 && pending_index as usize == requested_index
 }
 
 fn apply_config_to_ui(ui: &AppWindow, config: &Config, output_options: &OutputSettingsOptions) {
@@ -469,6 +571,7 @@ fn apply_config_to_ui(ui: &AppWindow, config: &Config, output_options: &OutputSe
     ui.set_settings_sample_rate_custom_value(config.output.sample_rate_khz.to_string().into());
     ui.set_settings_bits_per_sample_custom_value(config.output.bits_per_sample.to_string().into());
     ui.set_settings_show_album_art(config.ui.show_album_art);
+    apply_playlist_columns_to_ui(ui, config);
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -859,7 +962,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     sample_rate_auto,
                     bits_per_sample_auto,
                 },
-                ui: UiConfig { show_album_art },
+                ui: UiConfig {
+                    show_album_art,
+                    playlist_columns: previous_config.ui.playlist_columns.clone(),
+                },
                 buffering: previous_config.buffering.clone(),
             });
 
@@ -901,6 +1007,263 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             )));
         },
     );
+
+    let bus_sender_clone = bus_sender.clone();
+    let config_state_clone = Arc::clone(&config_state);
+    let output_options_clone = Arc::clone(&output_options);
+    let last_runtime_signature_clone = Arc::clone(&last_runtime_signature);
+    let config_file_clone = config_file.clone();
+    let ui_handle_clone = ui.as_weak().clone();
+    ui.on_toggle_playlist_column(move |column_index| {
+        let column_idx = column_index.max(0) as usize;
+        let previous_config = {
+            let state = config_state_clone
+                .lock()
+                .expect("config state lock poisoned");
+            state.clone()
+        };
+        if column_idx >= previous_config.ui.playlist_columns.len() {
+            return;
+        }
+
+        let mut updated_columns = previous_config.ui.playlist_columns.clone();
+        if let Some(column) = updated_columns.get_mut(column_idx) {
+            column.enabled = !column.enabled;
+        }
+        if updated_columns.iter().all(|column| !column.enabled) {
+            if let Some(first_column) = updated_columns.first_mut() {
+                first_column.enabled = true;
+            }
+        }
+
+        let next_config = sanitize_config(Config {
+            output: previous_config.output.clone(),
+            ui: UiConfig {
+                show_album_art: previous_config.ui.show_album_art,
+                playlist_columns: updated_columns,
+            },
+            buffering: previous_config.buffering.clone(),
+        });
+
+        if let Some(ui) = ui_handle_clone.upgrade() {
+            apply_playlist_columns_to_ui(&ui, &next_config);
+        }
+
+        {
+            let mut state = config_state_clone
+                .lock()
+                .expect("config state lock poisoned");
+            *state = next_config.clone();
+        }
+
+        match toml::to_string(&next_config) {
+            Ok(config_text) => {
+                if let Err(err) = std::fs::write(&config_file_clone, config_text) {
+                    log::error!(
+                        "Failed to persist config to {}: {}",
+                        config_file_clone.display(),
+                        err
+                    );
+                }
+            }
+            Err(err) => {
+                log::error!("Failed to serialize config: {}", err);
+            }
+        }
+
+        let options_snapshot = {
+            let options = output_options_clone
+                .lock()
+                .expect("output options lock poisoned");
+            options.clone()
+        };
+        let runtime_config = resolve_runtime_config(&next_config, &options_snapshot);
+        {
+            let mut last_runtime = last_runtime_signature_clone
+                .lock()
+                .expect("runtime signature lock poisoned");
+            *last_runtime = OutputRuntimeSignature::from_output(&runtime_config.output);
+        }
+        let _ = bus_sender_clone.send(Message::Config(ConfigMessage::ConfigChanged(
+            runtime_config,
+        )));
+    });
+
+    let bus_sender_clone = bus_sender.clone();
+    let config_state_clone = Arc::clone(&config_state);
+    let output_options_clone = Arc::clone(&output_options);
+    let last_runtime_signature_clone = Arc::clone(&last_runtime_signature);
+    let config_file_clone = config_file.clone();
+    let ui_handle_clone = ui.as_weak().clone();
+    ui.on_add_custom_playlist_column(move |name, format| {
+        let trimmed_name = name.trim();
+        let trimmed_format = format.trim();
+        if trimmed_name.is_empty() || trimmed_format.is_empty() {
+            return;
+        }
+
+        let previous_config = {
+            let state = config_state_clone
+                .lock()
+                .expect("config state lock poisoned");
+            state.clone()
+        };
+
+        let mut updated_columns = previous_config.ui.playlist_columns.clone();
+        if let Some(existing) = updated_columns.iter_mut().find(|column| {
+            column.custom && column.name == trimmed_name && column.format == trimmed_format
+        }) {
+            existing.enabled = true;
+        } else {
+            updated_columns.push(PlaylistColumnConfig {
+                name: trimmed_name.to_string(),
+                format: trimmed_format.to_string(),
+                enabled: true,
+                custom: true,
+            });
+        }
+
+        let next_config = sanitize_config(Config {
+            output: previous_config.output.clone(),
+            ui: UiConfig {
+                show_album_art: previous_config.ui.show_album_art,
+                playlist_columns: updated_columns,
+            },
+            buffering: previous_config.buffering.clone(),
+        });
+
+        if let Some(ui) = ui_handle_clone.upgrade() {
+            apply_playlist_columns_to_ui(&ui, &next_config);
+        }
+
+        {
+            let mut state = config_state_clone
+                .lock()
+                .expect("config state lock poisoned");
+            *state = next_config.clone();
+        }
+
+        match toml::to_string(&next_config) {
+            Ok(config_text) => {
+                if let Err(err) = std::fs::write(&config_file_clone, config_text) {
+                    log::error!(
+                        "Failed to persist config to {}: {}",
+                        config_file_clone.display(),
+                        err
+                    );
+                }
+            }
+            Err(err) => {
+                log::error!("Failed to serialize config: {}", err);
+            }
+        }
+
+        let options_snapshot = {
+            let options = output_options_clone
+                .lock()
+                .expect("output options lock poisoned");
+            options.clone()
+        };
+        let runtime_config = resolve_runtime_config(&next_config, &options_snapshot);
+        {
+            let mut last_runtime = last_runtime_signature_clone
+                .lock()
+                .expect("runtime signature lock poisoned");
+            *last_runtime = OutputRuntimeSignature::from_output(&runtime_config.output);
+        }
+        let _ = bus_sender_clone.send(Message::Config(ConfigMessage::ConfigChanged(
+            runtime_config,
+        )));
+    });
+
+    let bus_sender_clone = bus_sender.clone();
+    let config_state_clone = Arc::clone(&config_state);
+    let output_options_clone = Arc::clone(&output_options);
+    let last_runtime_signature_clone = Arc::clone(&last_runtime_signature);
+    let config_file_clone = config_file.clone();
+    let ui_handle_clone = ui.as_weak().clone();
+    ui.on_delete_custom_playlist_column(move |column_index| {
+        let column_idx = column_index.max(0) as usize;
+        if let Some(ui) = ui_handle_clone.upgrade() {
+            if !should_apply_custom_column_delete(
+                ui.get_show_delete_custom_column_confirm(),
+                ui.get_delete_custom_column_index(),
+                column_idx,
+            ) {
+                return;
+            }
+        } else {
+            return;
+        }
+
+        let previous_config = {
+            let state = config_state_clone
+                .lock()
+                .expect("config state lock poisoned");
+            state.clone()
+        };
+        if column_idx >= previous_config.ui.playlist_columns.len() {
+            return;
+        }
+        if !previous_config.ui.playlist_columns[column_idx].custom {
+            return;
+        }
+
+        let mut updated_columns = previous_config.ui.playlist_columns.clone();
+        updated_columns.remove(column_idx);
+
+        let next_config = sanitize_config(Config {
+            output: previous_config.output.clone(),
+            ui: UiConfig {
+                show_album_art: previous_config.ui.show_album_art,
+                playlist_columns: updated_columns,
+            },
+            buffering: previous_config.buffering.clone(),
+        });
+
+        if let Some(ui) = ui_handle_clone.upgrade() {
+            apply_playlist_columns_to_ui(&ui, &next_config);
+        }
+
+        {
+            let mut state = config_state_clone
+                .lock()
+                .expect("config state lock poisoned");
+            *state = next_config.clone();
+        }
+
+        match toml::to_string(&next_config) {
+            Ok(config_text) => {
+                if let Err(err) = std::fs::write(&config_file_clone, config_text) {
+                    log::error!(
+                        "Failed to persist config to {}: {}",
+                        config_file_clone.display(),
+                        err
+                    );
+                }
+            }
+            Err(err) => {
+                log::error!("Failed to serialize config: {}", err);
+            }
+        }
+
+        let options_snapshot = {
+            let options = output_options_clone
+                .lock()
+                .expect("output options lock poisoned");
+            options.clone()
+        };
+        let runtime_config = resolve_runtime_config(&next_config, &options_snapshot);
+        {
+            let mut last_runtime = last_runtime_signature_clone
+                .lock()
+                .expect("runtime signature lock poisoned");
+            *last_runtime = OutputRuntimeSignature::from_output(&runtime_config.output);
+        }
+        let _ = bus_sender_clone.send(Message::Config(ConfigMessage::ConfigChanged(
+            runtime_config,
+        )));
+    });
 
     // Wire up playlist management
     let bus_sender_clone = bus_sender.clone();
@@ -1060,11 +1423,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 mod tests {
     use std::collections::BTreeSet;
 
-    use crate::config::{BufferingConfig, Config, OutputConfig, UiConfig};
+    use crate::config::{BufferingConfig, Config, OutputConfig, PlaylistColumnConfig, UiConfig};
 
     use super::{
         choose_preferred_u16, choose_preferred_u32, resolve_runtime_config,
-        select_output_option_index_u16, select_output_option_index_u32, OutputSettingsOptions,
+        sanitize_playlist_columns, select_output_option_index_u16, select_output_option_index_u32,
+        should_apply_custom_column_delete, OutputSettingsOptions,
     };
 
     #[test]
@@ -1107,6 +1471,41 @@ mod tests {
             slint_ui.contains("root.deselect_all();"),
             "Track overlay should deselect on null-column or empty-space clicks"
         );
+    }
+
+    #[test]
+    fn test_custom_column_menu_supports_delete_with_confirmation() {
+        let slint_ui = include_str!("music_player.slint");
+
+        assert!(
+            slint_ui.contains("in property <[bool]> custom: [];"),
+            "Column header menu should receive custom-column flags"
+        );
+        assert!(
+            slint_ui.contains("callback delete-column(int);"),
+            "Column header menu should expose delete callback"
+        );
+        assert!(
+            slint_ui.contains("background: delete-column-ta.has-hover ? #db3f3f : #b93636;"),
+            "Custom columns should render a red delete icon"
+        );
+        assert!(
+            slint_ui.contains("show_delete_custom_column_confirm"),
+            "App window should expose confirmation state for custom-column deletion"
+        );
+        assert!(
+            slint_ui
+                .contains("root.delete_custom_playlist_column(root.delete_custom_column_index);"),
+            "Confirmed deletion should invoke custom-column delete callback"
+        );
+    }
+
+    #[test]
+    fn test_should_apply_custom_column_delete_requires_matching_confirmation_state() {
+        assert!(!should_apply_custom_column_delete(false, 3, 3));
+        assert!(!should_apply_custom_column_delete(true, -1, 0));
+        assert!(!should_apply_custom_column_delete(true, 1, 0));
+        assert!(should_apply_custom_column_delete(true, 2, 2));
     }
 
     #[test]
@@ -1160,6 +1559,7 @@ mod tests {
             },
             ui: UiConfig {
                 show_album_art: true,
+                playlist_columns: crate::config::default_playlist_columns(),
             },
             buffering: BufferingConfig::default(),
         };
@@ -1179,5 +1579,30 @@ mod tests {
         assert_eq!(runtime.output.sample_rate_khz, 48_000);
         assert_eq!(runtime.output.bits_per_sample, 24);
         assert_eq!(runtime.output.output_device_name, "Device B");
+    }
+
+    #[test]
+    fn test_sanitize_playlist_columns_restores_builtins_and_preserves_custom() {
+        let custom = PlaylistColumnConfig {
+            name: "Album & Year".to_string(),
+            format: "{album} ({year})".to_string(),
+            enabled: true,
+            custom: true,
+        };
+        let input_columns = vec![
+            PlaylistColumnConfig {
+                name: "Artist".to_string(),
+                format: "{artist}".to_string(),
+                enabled: false,
+                custom: false,
+            },
+            custom.clone(),
+        ];
+
+        let sanitized = sanitize_playlist_columns(&input_columns);
+        assert!(sanitized.iter().any(|column| column.format == "{title}"));
+        assert!(sanitized.iter().any(|column| column.format == "{artist}"));
+        assert!(sanitized.iter().any(|column| column == &custom));
+        assert!(sanitized.iter().any(|column| column.enabled));
     }
 }

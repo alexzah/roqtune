@@ -65,10 +65,6 @@ pub enum PlaylistMessage {
         id: String,
         path: PathBuf,
     },
-    UpdateMetadata {
-        id: String,
-        metadata: DetailedMetadata,
-    },
     CreatePlaylist {
         name: String,
     },
@@ -91,7 +87,6 @@ pub enum PlaylistMessage {
     TrackStarted {
         index: usize,
         playlist_id: String,
-        metadata: DetailedMetadata,
     },
     PlaylistIndicesChanged {
         playing_playlist_id: Option<String>,
@@ -112,7 +107,6 @@ pub enum PlaylistMessage {
 pub struct RestoredTrack {
     pub id: String,
     pub path: PathBuf,
-    pub metadata: DetailedMetadata,
 }
 
 #[derive(Debug, Clone, serde::Deserialize, serde::Serialize)]

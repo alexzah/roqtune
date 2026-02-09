@@ -15,7 +15,10 @@ use log::{debug, info, warn};
 use slint::{Model, ModelRc, StandardListViewItem, VecModel};
 use tokio::sync::broadcast::{Receiver, Sender};
 
-use crate::{protocol, AppWindow, TrackRowData};
+use crate::{
+    config::{self, PlaylistColumnConfig},
+    protocol, AppWindow, TrackRowData,
+};
 use governor::{Quota, RateLimiter};
 
 pub struct UiState {
@@ -45,6 +48,7 @@ pub struct UiManager {
     last_total_ms: u64,
     current_playing_track_path: Option<PathBuf>,
     current_playing_track_metadata: Option<protocol::DetailedMetadata>,
+    playlist_columns: Vec<PlaylistColumnConfig>,
     playback_active: bool,
     processed_message_count: u64,
     lagged_message_count: u64,
@@ -58,8 +62,11 @@ struct TrackMetadata {
     title: String,
     artist: String,
     album: String,
+    album_artist: String,
     date: String,
+    year: String,
     genre: String,
+    track_number: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -121,6 +128,7 @@ impl UiManager {
             last_total_ms: 0,
             current_playing_track_path: None,
             current_playing_track_metadata: None,
+            playlist_columns: config::default_playlist_columns(),
             playback_active: false,
             processed_message_count: 0,
             lagged_message_count: 0,
@@ -280,6 +288,107 @@ impl UiManager {
         }
     }
 
+    fn normalize_metadata_key(key: &str) -> String {
+        let mut normalized = String::new();
+        for ch in key.chars() {
+            if ch.is_ascii_alphanumeric() {
+                normalized.push(ch.to_ascii_lowercase());
+            } else if ch == '_' || ch == '-' || ch.is_whitespace() {
+                normalized.push('_');
+            }
+        }
+        normalized
+    }
+
+    fn metadata_value(track_metadata: &TrackMetadata, key: &str) -> String {
+        let normalized = Self::normalize_metadata_key(key);
+        match normalized.as_str() {
+            "title" => track_metadata.title.clone(),
+            "artist" => track_metadata.artist.clone(),
+            "album" => track_metadata.album.clone(),
+            "album_artist" | "albumartist" => track_metadata.album_artist.clone(),
+            "date" => track_metadata.date.clone(),
+            "year" => {
+                if !track_metadata.year.is_empty() {
+                    track_metadata.year.clone()
+                } else if track_metadata.date.len() >= 4 {
+                    track_metadata.date[0..4].to_string()
+                } else {
+                    String::new()
+                }
+            }
+            "genre" => track_metadata.genre.clone(),
+            "track" | "track_number" | "tracknumber" => track_metadata.track_number.clone(),
+            _ => String::new(),
+        }
+    }
+
+    fn render_column_value(track_metadata: &TrackMetadata, format_string: &str) -> String {
+        let mut rendered = String::new();
+        let mut chars = format_string.chars().peekable();
+
+        while let Some(ch) = chars.next() {
+            if ch == '{' {
+                if chars.peek() == Some(&'{') {
+                    chars.next();
+                    rendered.push('{');
+                    continue;
+                }
+
+                let mut token = String::new();
+                let mut found_closing = false;
+                for token_ch in chars.by_ref() {
+                    if token_ch == '}' {
+                        found_closing = true;
+                        break;
+                    }
+                    token.push(token_ch);
+                }
+
+                if found_closing {
+                    let value = Self::metadata_value(track_metadata, token.trim());
+                    rendered.push_str(&value);
+                } else {
+                    rendered.push('{');
+                    rendered.push_str(&token);
+                }
+            } else if ch == '}' {
+                if chars.peek() == Some(&'}') {
+                    chars.next();
+                }
+                rendered.push('}');
+            } else {
+                rendered.push(ch);
+            }
+        }
+
+        rendered
+    }
+
+    fn build_playlist_row_values(
+        track_metadata: &TrackMetadata,
+        playlist_columns: &[PlaylistColumnConfig],
+    ) -> Vec<String> {
+        playlist_columns
+            .iter()
+            .filter(|column| column.enabled)
+            .map(|column| Self::render_column_value(track_metadata, &column.format))
+            .collect()
+    }
+
+    fn status_text_from_track_metadata(track_metadata: &TrackMetadata) -> slint::SharedString {
+        let title = if track_metadata.title.is_empty() {
+            "Unknown".to_string()
+        } else {
+            track_metadata.title.clone()
+        };
+        if !track_metadata.artist.is_empty() {
+            format!("{} - {}", track_metadata.artist, title).into()
+        } else {
+            title.into()
+        }
+    }
+
     fn resolve_display_target(
         selected_indices: &[usize],
         track_paths: &[PathBuf],
@@ -295,7 +404,16 @@ impl UiManager {
             return (selected_path, selected_metadata);
         }
 
-        (playing_track_path.cloned(), playing_track_metadata.cloned())
+        let playing_path = playing_track_path.cloned();
+        if let Some(path) = playing_track_path {
+            if let Some(index) = track_paths.iter().position(|candidate| candidate == path) {
+                if let Some(metadata) = track_metadata.get(index) {
+                    return (playing_path, Some(Self::to_detailed_metadata(metadata)));
+                }
+            }
+        }
+
+        (playing_path, playing_track_metadata.cloned())
     }
 
     fn update_display_for_selection(
@@ -325,20 +443,36 @@ impl UiManager {
             let title = tag.title().unwrap_or("");
             let artist = tag.artist().unwrap_or("");
             let album = tag.album().unwrap_or("");
+            let album_artist = tag.album_artist().unwrap_or("");
             let date = tag
                 .date_recorded()
                 .map(|d| d.to_string())
                 .or_else(|| tag.year().map(|y| y.to_string()))
                 .unwrap_or_default();
+            let year = tag
+                .year()
+                .map(|y| y.to_string())
+                .or_else(|| {
+                    if date.len() >= 4 {
+                        Some(date[0..4].to_string())
+                    } else {
+                        None
+                    }
+                })
+                .unwrap_or_default();
             let genre = tag.genre().unwrap_or("").to_string();
+            let track_number = tag.track().map(|n| n.to_string()).unwrap_or_default();
 
             if !title.is_empty() || !artist.is_empty() || !album.is_empty() {
                 return TrackMetadata {
                     title: title.to_string(),
                     artist: artist.to_string(),
                     album: album.to_string(),
+                    album_artist: album_artist.to_string(),
                     date,
+                    year,
                     genre,
+                    track_number,
                 };
             }
         }
@@ -357,12 +491,27 @@ impl UiManager {
                 .item("album")
                 .and_then(|i| i.try_into().ok())
                 .unwrap_or("");
+            let album_artist: &str = ape_tag
+                .item("album artist")
+                .or_else(|| ape_tag.item("albumartist"))
+                .and_then(|i| i.try_into().ok())
+                .unwrap_or("");
             let date: &str = ape_tag
                 .item("year")
                 .and_then(|i| i.try_into().ok())
                 .unwrap_or("");
+            let year: &str = ape_tag
+                .item("year")
+                .or_else(|| ape_tag.item("date"))
+                .and_then(|i| i.try_into().ok())
+                .unwrap_or("");
             let genre: &str = ape_tag
                 .item("genre")
+                .and_then(|i| i.try_into().ok())
+                .unwrap_or("");
+            let track_number: &str = ape_tag
+                .item("track")
+                .or_else(|| ape_tag.item("tracknumber"))
                 .and_then(|i| i.try_into().ok())
                 .unwrap_or("");
 
@@ -371,8 +520,11 @@ impl UiManager {
                     title: title.to_string(),
                     artist: artist.to_string(),
                     album: album.to_string(),
+                    album_artist: album_artist.to_string(),
                     date: date.to_string(),
+                    year: year.to_string(),
                     genre: genre.to_string(),
+                    track_number: track_number.to_string(),
                 };
             }
         }
@@ -391,13 +543,38 @@ impl UiManager {
                 .get_vorbis("album")
                 .and_then(|mut i| i.next())
                 .unwrap_or("");
+            let album_artist = flac_tag
+                .get_vorbis("albumartist")
+                .and_then(|mut i| i.next())
+                .or_else(|| {
+                    flac_tag
+                        .get_vorbis("album artist")
+                        .and_then(|mut i| i.next())
+                })
+                .unwrap_or("");
             let date = flac_tag
                 .get_vorbis("date")
                 .and_then(|mut i| i.next())
                 .unwrap_or("");
+            let year = flac_tag
+                .get_vorbis("year")
+                .and_then(|mut i| i.next())
+                .or_else(|| {
+                    if date.len() >= 4 {
+                        Some(&date[0..4])
+                    } else {
+                        None
+                    }
+                })
+                .unwrap_or("");
             let genre = flac_tag
                 .get_vorbis("genre")
                 .and_then(|mut i| i.next())
+                .unwrap_or("");
+            let track_number = flac_tag
+                .get_vorbis("tracknumber")
+                .and_then(|mut i| i.next())
+                .or_else(|| flac_tag.get_vorbis("track").and_then(|mut i| i.next()))
                 .unwrap_or("");
 
             if !title.is_empty() || !artist.is_empty() || !album.is_empty() {
@@ -405,8 +582,11 @@ impl UiManager {
                     title: title.to_string(),
                     artist: artist.to_string(),
                     album: album.to_string(),
+                    album_artist: album_artist.to_string(),
                     date: date.to_string(),
+                    year: year.to_string(),
                     genre: genre.to_string(),
+                    track_number: track_number.to_string(),
                 };
             }
         }
@@ -422,8 +602,11 @@ impl UiManager {
             title: filename,
             artist: "".to_string(),
             album: "".to_string(),
+            album_artist: "".to_string(),
             date: "".to_string(),
+            year: "".to_string(),
             genre: "".to_string(),
+            track_number: "".to_string(),
         }
     }
 
@@ -551,25 +734,18 @@ impl UiManager {
                             self.track_paths.clear();
                             self.track_metadata.clear();
 
-                            let mut track_data = Vec::new();
+                            let mut track_row_values: Vec<Vec<String>> = Vec::new();
                             for track in tracks {
                                 self.track_ids.push(track.id.clone());
                                 self.track_paths.push(track.path.clone());
-                                self.track_metadata.push(TrackMetadata {
-                                    title: track.metadata.title.clone(),
-                                    artist: track.metadata.artist.clone(),
-                                    album: track.metadata.album.clone(),
-                                    date: track.metadata.date.clone(),
-                                    genre: track.metadata.genre.clone(),
-                                });
+                                let metadata = self.read_track_metadata(&track.path);
+                                self.track_metadata.push(metadata.clone());
 
-                                track_data.push(TrackRowData {
-                                    status: "".into(),
-                                    title: track.metadata.title.clone().into(),
-                                    artist: track.metadata.artist.clone().into(),
-                                    album: track.metadata.album.clone().into(),
-                                    selected: false,
-                                });
+                                let row_values = Self::build_playlist_row_values(
+                                    &metadata,
+                                    &self.playlist_columns,
+                                );
+                                track_row_values.push(row_values);
                             }
 
                             let _ = self.ui.upgrade_in_event_loop(move |ui| {
@@ -583,8 +759,14 @@ impl UiManager {
                                     track_model.remove(0);
                                 }
 
-                                for track in track_data {
-                                    track_model.push(track);
+                                for row_values in track_row_values {
+                                    let values_shared: Vec<slint::SharedString> =
+                                        row_values.into_iter().map(Into::into).collect();
+                                    track_model.push(TrackRowData {
+                                        status: "".into(),
+                                        values: ModelRc::from(values_shared.as_slice()),
+                                        selected: false,
+                                    });
                                 }
                             });
                         }
@@ -597,30 +779,19 @@ impl UiManager {
                             let tags = self.read_track_metadata(&path);
                             self.track_metadata.push(tags.clone());
 
-                            let _ = self.bus_sender.send(protocol::Message::Playlist(
-                                protocol::PlaylistMessage::UpdateMetadata {
-                                    id,
-                                    metadata: protocol::DetailedMetadata {
-                                        title: tags.title.clone(),
-                                        artist: tags.artist.clone(),
-                                        album: tags.album.clone(),
-                                        date: tags.date.clone(),
-                                        genre: tags.genre.clone(),
-                                    },
-                                },
-                            ));
-
+                            let row_values =
+                                Self::build_playlist_row_values(&tags, &self.playlist_columns);
                             let _ = self.ui.upgrade_in_event_loop(move |ui| {
                                 let track_model_strong = ui.get_track_model();
                                 let track_model = track_model_strong
                                     .as_any()
                                     .downcast_ref::<VecModel<TrackRowData>>()
                                     .expect("VecModel<TrackRowData> expected");
+                                let values_shared: Vec<slint::SharedString> =
+                                    row_values.into_iter().map(Into::into).collect();
                                 track_model.push(TrackRowData {
                                     status: "".into(),
-                                    title: tags.title.clone().into(),
-                                    artist: tags.artist.clone().into(),
-                                    album: tags.album.clone().into(),
+                                    values: ModelRc::from(values_shared.as_slice()),
                                     selected: false,
                                 });
                             });
@@ -669,6 +840,11 @@ impl UiManager {
                         protocol::Message::Playback(
                             protocol::PlaybackMessage::PlayTrackByIndex(index),
                         ) => {
+                            let status_text = self
+                                .track_metadata
+                                .get(index)
+                                .map(Self::status_text_from_track_metadata)
+                                .unwrap_or_else(|| "".into());
                             let _ = self.ui.upgrade_in_event_loop(move |ui| {
                                 let track_model_strong = ui.get_track_model();
                                 let track_model = track_model_strong
@@ -676,15 +852,10 @@ impl UiManager {
                                     .downcast_ref::<VecModel<TrackRowData>>()
                                     .expect("VecModel<TrackRowData> expected");
 
-                                let mut title = slint::SharedString::new();
-                                let mut artist = slint::SharedString::new();
-
                                 for i in 0..track_model.row_count() {
                                     let mut row = track_model.row_data(i).unwrap();
                                     if i == index {
                                         row.status = "▶️".into();
-                                        title = row.title.clone();
-                                        artist = row.artist.clone();
                                         track_model.set_row_data(i, row);
                                     } else if !row.status.is_empty() {
                                         row.status = "".into();
@@ -692,14 +863,11 @@ impl UiManager {
                                     }
                                 }
                                 ui.set_playing_track_index(index as i32);
-                                if !artist.is_empty() {
-                                    ui.set_status_text(format!("{} - {}", artist, title).into());
-                                } else {
-                                    ui.set_status_text(title);
-                                }
+                                ui.set_status_text(status_text);
                             });
                         }
                         protocol::Message::Playback(protocol::PlaybackMessage::Play) => {
+                            let metadata_snapshot = self.track_metadata.clone();
                             let _ = self.ui.upgrade_in_event_loop(move |ui| {
                                 let playing_index = ui.get_playing_track_index();
                                 if playing_index >= 0 {
@@ -711,16 +879,14 @@ impl UiManager {
                                     if (playing_index as usize) < track_model.row_count() {
                                         let mut row =
                                             track_model.row_data(playing_index as usize).unwrap();
-                                        let title = row.title.clone();
-                                        let artist = row.artist.clone();
                                         row.status = "▶️".into();
                                         track_model.set_row_data(playing_index as usize, row);
-                                        if !artist.is_empty() {
+                                        if (playing_index as usize) < metadata_snapshot.len() {
                                             ui.set_status_text(
-                                                format!("{} - {}", artist, title).into(),
+                                                UiManager::status_text_from_track_metadata(
+                                                    &metadata_snapshot[playing_index as usize],
+                                                ),
                                             );
-                                        } else {
-                                            ui.set_status_text(title);
                                         }
                                     }
                                 }
@@ -840,11 +1006,13 @@ impl UiManager {
                         protocol::Message::Playlist(protocol::PlaylistMessage::TrackStarted {
                             index,
                             playlist_id,
-                            metadata,
                         }) => {
                             let is_active_playlist = playlist_id == self.active_playlist_id;
-                            let title = metadata.title.clone();
-                            let artist = metadata.artist.clone();
+                            let status_text = self
+                                .track_metadata
+                                .get(index)
+                                .map(Self::status_text_from_track_metadata)
+                                .unwrap_or_else(|| "".into());
 
                             let _ = self.ui.upgrade_in_event_loop(move |ui| {
                                 if is_active_playlist {
@@ -869,12 +1037,7 @@ impl UiManager {
                                 } else {
                                     ui.set_playing_track_index(-1);
                                 }
-
-                                if !artist.is_empty() {
-                                    ui.set_status_text(format!("{} - {}", artist, title).into());
-                                } else {
-                                    ui.set_status_text(title.into());
-                                }
+                                ui.set_status_text(status_text);
                             });
                         }
                         protocol::Message::Playlist(
@@ -1173,6 +1336,68 @@ impl UiManager {
                                 }
                             });
                         }
+                        protocol::Message::Config(protocol::ConfigMessage::ConfigChanged(
+                            config,
+                        )) => {
+                            self.playlist_columns = config.ui.playlist_columns.clone();
+                            let playlist_columns = self.playlist_columns.clone();
+                            let track_metadata = self.track_metadata.clone();
+
+                            let visible_headers: Vec<slint::SharedString> = playlist_columns
+                                .iter()
+                                .filter(|column| column.enabled)
+                                .map(|column| column.name.as_str().into())
+                                .collect();
+                            let menu_labels: Vec<slint::SharedString> = playlist_columns
+                                .iter()
+                                .map(|column| column.name.as_str().into())
+                                .collect();
+                            let menu_checked: Vec<bool> = playlist_columns
+                                .iter()
+                                .map(|column| column.enabled)
+                                .collect();
+                            let menu_is_custom: Vec<bool> = playlist_columns
+                                .iter()
+                                .map(|column| column.custom)
+                                .collect();
+                            let show_album_art = config.ui.show_album_art;
+
+                            let _ = self.ui.upgrade_in_event_loop(move |ui| {
+                                ui.set_show_album_art(show_album_art);
+                                ui.set_playlist_visible_column_headers(ModelRc::from(Rc::new(
+                                    VecModel::from(visible_headers),
+                                )));
+                                ui.set_playlist_column_menu_labels(ModelRc::from(Rc::new(
+                                    VecModel::from(menu_labels),
+                                )));
+                                ui.set_playlist_column_menu_checked(ModelRc::from(Rc::new(
+                                    VecModel::from(menu_checked),
+                                )));
+                                ui.set_playlist_column_menu_is_custom(ModelRc::from(Rc::new(
+                                    VecModel::from(menu_is_custom),
+                                )));
+
+                                let track_model_strong = ui.get_track_model();
+                                let track_model = track_model_strong
+                                    .as_any()
+                                    .downcast_ref::<VecModel<TrackRowData>>()
+                                    .expect("VecModel<TrackRowData> expected");
+
+                                for i in 0..track_model.row_count() {
+                                    let mut row = track_model.row_data(i).unwrap();
+                                    if i < track_metadata.len() {
+                                        let values = UiManager::build_playlist_row_values(
+                                            &track_metadata[i],
+                                            &playlist_columns,
+                                        );
+                                        let values_shared: Vec<slint::SharedString> =
+                                            values.into_iter().map(Into::into).collect();
+                                        row.values = ModelRc::from(values_shared.as_slice());
+                                        track_model.set_row_data(i, row);
+                                    }
+                                }
+                            });
+                        }
                         protocol::Message::Playlist(
                             protocol::PlaylistMessage::RepeatModeChanged(repeat_mode),
                         ) => {
@@ -1209,8 +1434,11 @@ mod tests {
             title: title.to_string(),
             artist: format!("{title}-artist"),
             album: format!("{title}-album"),
+            album_artist: format!("{title}-album-artist"),
             date: "2026".to_string(),
+            year: "2026".to_string(),
             genre: "test".to_string(),
+            track_number: "1".to_string(),
         }
     }
 
@@ -1288,6 +1516,34 @@ mod tests {
     }
 
     #[test]
+    fn test_resolve_display_target_prefers_cached_metadata_for_playing_path_match() {
+        let selected = vec![];
+        let paths = vec![PathBuf::from("a.mp3"), PathBuf::from("b.mp3")];
+        let metadata = vec![make_meta("A"), make_meta("B")];
+        let playing_path = Some(PathBuf::from("b.mp3"));
+        let stale_playing_meta = crate::protocol::DetailedMetadata {
+            title: "stale".to_string(),
+            artist: "stale".to_string(),
+            album: "stale".to_string(),
+            date: String::new(),
+            genre: String::new(),
+        };
+
+        let (path, meta) = UiManager::resolve_display_target(
+            &selected,
+            &paths,
+            &metadata,
+            playing_path.as_ref(),
+            Some(&stale_playing_meta),
+        );
+
+        assert_eq!(path, Some(PathBuf::from("b.mp3")));
+        let meta = meta.expect("playing metadata should exist");
+        assert_eq!(meta.title, "B");
+        assert_eq!(meta.artist, "B-artist");
+    }
+
+    #[test]
     fn test_resolve_display_target_returns_none_without_selection_or_playing() {
         let selected = vec![];
         let paths = vec![PathBuf::from("a.mp3")];
@@ -1298,6 +1554,20 @@ mod tests {
 
         assert!(path.is_none());
         assert!(meta.is_none());
+    }
+
+    #[test]
+    fn test_render_column_value_replaces_placeholders() {
+        let metadata = make_meta("Song");
+        let rendered = UiManager::render_column_value(&metadata, "{album} ({year})");
+        assert_eq!(rendered, "Song-album (2026)");
+    }
+
+    #[test]
+    fn test_render_column_value_handles_escaping_and_unknown_fields() {
+        let metadata = make_meta("Song");
+        let rendered = UiManager::render_column_value(&metadata, "{{{unknown}}} - {artist}");
+        assert_eq!(rendered, "{} - Song-artist");
     }
 
     fn apply_reorder(paths: &mut Vec<String>, indices: &[usize], gap: usize) -> Vec<usize> {

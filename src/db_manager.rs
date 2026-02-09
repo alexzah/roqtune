@@ -1,4 +1,4 @@
-use crate::protocol::{DetailedMetadata, PlaylistInfo, RestoredTrack};
+use crate::protocol::{PlaylistInfo, RestoredTrack};
 use rusqlite::{params, Connection};
 use std::path::PathBuf;
 use uuid::Uuid;
@@ -154,25 +154,6 @@ impl DbManager {
         Ok(())
     }
 
-    pub fn update_metadata(
-        &self,
-        id: &str,
-        metadata: &DetailedMetadata,
-    ) -> Result<(), rusqlite::Error> {
-        self.conn.execute(
-            "UPDATE tracks SET title = ?1, artist = ?2, album = ?3, date = ?4, genre = ?5 WHERE id = ?6",
-            params![
-                metadata.title,
-                metadata.artist,
-                metadata.album,
-                metadata.date,
-                metadata.genre,
-                id
-            ],
-        )?;
-        Ok(())
-    }
-
     pub fn delete_track(&self, id: &str) -> Result<(), rusqlite::Error> {
         self.conn
             .execute("DELETE FROM tracks WHERE id = ?1", params![id])?;
@@ -192,20 +173,13 @@ impl DbManager {
         &self,
         playlist_id: &str,
     ) -> Result<Vec<RestoredTrack>, rusqlite::Error> {
-        let mut stmt = self.conn.prepare(
-            "SELECT id, path, title, artist, album, date, genre FROM tracks WHERE playlist_id = ?1 ORDER BY position ASC",
-        )?;
+        let mut stmt = self
+            .conn
+            .prepare("SELECT id, path FROM tracks WHERE playlist_id = ?1 ORDER BY position ASC")?;
         let track_iter = stmt.query_map(params![playlist_id], |row| {
             Ok(RestoredTrack {
                 id: row.get(0)?,
                 path: PathBuf::from(row.get::<_, String>(1)?),
-                metadata: DetailedMetadata {
-                    title: row.get(2).unwrap_or_default(),
-                    artist: row.get(3).unwrap_or_default(),
-                    album: row.get(4).unwrap_or_default(),
-                    date: row.get(5).unwrap_or_default(),
-                    genre: row.get(6).unwrap_or_default(),
-                },
             })
         })?;
 
@@ -214,22 +188,6 @@ impl DbManager {
             tracks.push(track?);
         }
         Ok(tracks)
-    }
-
-    pub fn get_track_metadata(&self, id: &str) -> Result<DetailedMetadata, rusqlite::Error> {
-        self.conn.query_row(
-            "SELECT title, artist, album, date, genre FROM tracks WHERE id = ?1",
-            params![id],
-            |row| {
-                Ok(DetailedMetadata {
-                    title: row.get(0).unwrap_or_default(),
-                    artist: row.get(1).unwrap_or_default(),
-                    album: row.get(2).unwrap_or_default(),
-                    date: row.get(3).unwrap_or_default(),
-                    genre: row.get(4).unwrap_or_default(),
-                })
-            },
-        )
     }
 
     pub fn update_positions(&self, ids: Vec<String>) -> Result<(), rusqlite::Error> {

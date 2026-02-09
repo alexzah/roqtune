@@ -2,9 +2,7 @@ import { Button, ComboBox, VerticalBox, StandardTableView, ScrollView, LineEdit,
 
 struct TrackRowData {
     status: string,
-    title: string,
-    artist: string,
-    album: string,
+    values: [string],
     selected: bool,
 }
 
@@ -54,6 +52,96 @@ component ContextMenu inherits PopupWindow {
                 item-ta-delete := TouchArea {
                     clicked => {
                         root.delete();
+                    }
+                }
+            }
+        }
+    }
+}
+
+component ColumnHeaderMenu inherits PopupWindow {
+    in property <[string]> labels: [];
+    in property <[bool]> checked: [];
+    in property <[bool]> custom: [];
+    callback toggle-column(int);
+    callback delete-column(int);
+    callback add-custom();
+
+    width: 220px;
+    height: 16px + labels.length * 24px + 32px;
+
+    Rectangle {
+        background: #2f2f2f;
+        border-width: 1px;
+        border-color: #454545;
+        border-radius: 4px;
+
+        VerticalLayout {
+            padding: 4px;
+            spacing: 2px;
+
+            for label[i] in root.labels : Rectangle {
+                property <bool> is-custom: i < root.custom.length && root.custom[i];
+                height: 22px;
+                border-radius: 2px;
+                background: column-item-ta.has-hover ? #3d3d3d : transparent;
+                Text {
+                    text: (root.checked[i] ? "☑ " : "☐ ") + label;
+                    color: #ddd;
+                    font-size: 12px;
+                    vertical-alignment: center;
+                    horizontal-alignment: left;
+                    x: 6px;
+                    width: parent.width - (parent.is-custom ? 28px : 0px);
+                }
+                column-item-ta := TouchArea {
+                    width: parent.width - (parent.is-custom ? 24px : 0px);
+                    clicked => {
+                        root.toggle-column(i);
+                    }
+                }
+                if self.is-custom : Rectangle {
+                    width: 14px;
+                    height: 14px;
+                    x: parent.width - self.width - 6px;
+                    y: (parent.height - self.height) / 2;
+                    border-radius: self.width / 2;
+                    background: delete-column-ta.has-hover ? #db3f3f : #b93636;
+                    Text {
+                        text: "x";
+                        color: #f7f7f7;
+                        font-size: 9px;
+                        horizontal-alignment: center;
+                        vertical-alignment: center;
+                    }
+                    delete-column-ta := TouchArea {
+                        clicked => {
+                            root.delete-column(i);
+                        }
+                    }
+                }
+            }
+
+            Rectangle {
+                height: 1px;
+                background: #3c3c3c;
+            }
+
+            Rectangle {
+                height: 22px;
+                border-radius: 2px;
+                background: custom-item-ta.has-hover ? #3d3d3d : transparent;
+                Text {
+                    text: "Custom...";
+                    color: #ddd;
+                    font-size: 12px;
+                    vertical-alignment: center;
+                    horizontal-alignment: left;
+                    x: 6px;
+                }
+                custom-item-ta := TouchArea {
+                    clicked => {
+                        root.add-custom();
                     }
                 }
             }
@@ -263,31 +351,9 @@ component TrackRow inherits Rectangle {
             }
         }
 
-        Text {
-            text: root.data.title;
-            color: #eee;
-            font-size: 13px;
-            vertical-alignment: center;
-            horizontal-stretch: 2;
-            min-width: 150px;
-            overflow: elide;
-            horizontal-alignment: left;
-        }
-
-        Text {
-            text: root.data.artist;
-            color: #aaa;
-            font-size: 13px;
-            vertical-alignment: center;
-            horizontal-stretch: 1;
-            min-width: 100px;
-            overflow: elide;
-            horizontal-alignment: left;
-        }
-
-        Text {
-            text: root.data.album;
-            color: #888;
+        for column-value[index] in root.data.values : Text {
+            text: column-value;
+            color: index == 0 ? #eee : #aaa;
             font-size: 13px;
             vertical-alignment: center;
             horizontal-stretch: 1;
@@ -431,8 +497,16 @@ export component AppWindow inherits Window {
     property <int> delete_target_index: -1;
     property <string> delete_confirm_message: "";
     in-out property <bool> show_confirm_dialog: false;
+    in-out property <int> delete_custom_column_index: -1;
+    in-out property <string> delete_custom_column_message: "";
+    in-out property <bool> show_delete_custom_column_confirm: false;
     in-out property <bool> sidebar_has_focus: false;
     property <length> null-column-width: 120px;
+    property <length> column-menu-x: 0px;
+    property <length> column-menu-y: 0px;
+    in-out property <bool> show_custom_column_dialog: false;
+    in-out property <string> custom_column_name: "";
+    in-out property <string> custom_column_format: "";
 
     // Status display at the bottom showing the currently playing track
     in-out property <string> status-text: "";
@@ -966,10 +1040,54 @@ export component AppWindow inherits Window {
                             padding-right: 8px;
                             spacing: 10px;
                             Rectangle { width: 40px; Text { text: "#"; color: #555; font-size: 11px; horizontal-alignment: center; vertical-alignment: center; } }
-                            Text { text: "Title"; color: #888; font-size: 12px; horizontal-stretch: 2; min-width: 150px; vertical-alignment: center; horizontal-alignment: left; }
-                            Text { text: "Artist"; color: #888; font-size: 12px; horizontal-stretch: 1; min-width: 100px; vertical-alignment: center; horizontal-alignment: left; }
-                            Text { text: "Album"; color: #888; font-size: 12px; horizontal-stretch: 1; min-width: 100px; vertical-alignment: center; horizontal-alignment: left; }
+                            for column-header in root.playlist_visible_column_headers : Text {
+                                text: column-header;
+                                color: #888;
+                                font-size: 12px;
+                                horizontal-stretch: 1;
+                                min-width: 100px;
+                                vertical-alignment: center;
+                                horizontal-alignment: left;
+                            }
                             Rectangle { width: root.null-column-width; }
+                        }
+
+                        TouchArea {
+                            pointer-event(event) => {
+                                if (event.button == PointerEventButton.right && event.kind == PointerEventKind.down) {
+                                    root.column-menu-x = self.mouse-x;
+                                    root.column-menu-y = self.mouse-y;
+                                    column-header-menu.show();
+                                }
+                            }
+                        }
+
+                        column-header-menu := ColumnHeaderMenu {
+                            x: root.column-menu-x;
+                            y: root.column-menu-y;
+                            labels: root.playlist_column_menu_labels;
+                            checked: root.playlist_column_menu_checked;
+                            custom: root.playlist_column_menu_is_custom;
+                            toggle-column(index) => {
+                                root.toggle_playlist_column(index);
+                                column-header-menu.close();
+                            }
+                            delete-column(index) => {
+                                if (index >= 0 && index < root.playlist_column_menu_labels.length
+                                        && index < root.playlist_column_menu_is_custom.length
+                                        && root.playlist_column_menu_is_custom[index]) {
+                                    root.delete_custom_column_index = index;
+                                    root.delete_custom_column_message = "Delete custom column '" + root.playlist_column_menu_labels[index] + "'?";
+                                    root.show_delete_custom_column_confirm = true;
+                                    column-header-menu.close();
+                                }
+                            }
+                            add-custom() => {
+                                root.show_custom_column_dialog = true;
+                                root.custom_column_name = "";
+                                root.custom_column_format = "";
+                                column-header-menu.close();
+                            }
                         }
                     }
 
@@ -1123,12 +1241,101 @@ export component AppWindow inherits Window {
         }
     }
 
+    custom_column_delete_overlay := ConfirmationDialog {
+        is-visible: root.show_delete_custom_column_confirm;
+        message: root.delete_custom_column_message;
+        confirmed => {
+            root.delete_custom_playlist_column(root.delete_custom_column_index);
+            root.show_delete_custom_column_confirm = false;
+            root.delete_custom_column_index = -1;
+            root.refocus_main();
+        }
+        cancelled => {
+            root.show_delete_custom_column_confirm = false;
+            root.delete_custom_column_index = -1;
+            root.refocus_main();
+        }
+    }
+
     restart_notice_overlay := InfoDialog {
         is-visible: root.show_settings_restart_notice;
         message: root.settings_restart_notice_message;
         dismissed => {
             root.show_settings_restart_notice = false;
             root.refocus_main();
+        }
+    }
+
+    if root.show_custom_column_dialog : Rectangle {
+        background: #00000088;
+        z: 110;
+
+        TouchArea {}
+
+        Rectangle {
+            width: min(root.width - 40px, 420px);
+            height: 220px;
+            x: (parent.width - self.width) / 2;
+            y: (parent.height - self.height) / 2;
+            border-radius: 6px;
+            background: #242424;
+            border-width: 1px;
+            border-color: #3b3b3b;
+
+            VerticalLayout {
+                padding: 16px;
+                spacing: 10px;
+
+                Text {
+                    text: "Custom Playlist Column";
+                    color: #eee;
+                    font-size: 16px;
+                    font-weight: 700;
+                }
+
+                Text {
+                    text: "Column Name";
+                    color: #bbb;
+                    font-size: 12px;
+                }
+
+                LineEdit {
+                    text <=> root.custom_column_name;
+                    placeholder-text: "Example: Album & Year";
+                }
+
+                Text {
+                    text: "Format String";
+                    color: #bbb;
+                    font-size: 12px;
+                }
+
+                LineEdit {
+                    text <=> root.custom_column_format;
+                    placeholder-text: "Example: {album} ({year})";
+                }
+
+                Rectangle { vertical-stretch: 1; }
+
+                HorizontalLayout {
+                    spacing: 10px;
+                    Rectangle { horizontal-stretch: 1; }
+                    Button {
+                        text: "Cancel";
+                        clicked => {
+                            root.show_custom_column_dialog = false;
+                        }
+                    }
+                    Button {
+                        text: "Add";
+                        primary: true;
+                        clicked => {
+                            root.add_custom_playlist_column(root.custom_column_name, root.custom_column_format);
+                            root.show_custom_column_dialog = false;
+                        }
+                    }
+                }
+            }
         }
     }
 
@@ -1327,6 +1534,10 @@ export component AppWindow inherits Window {
     in-out property <bool> show_settings_dialog: false;
     in-out property <bool> show_settings_restart_notice: false;
     in-out property <string> settings_restart_notice_message: "";
+    in-out property <[string]> playlist_visible_column_headers: [];
+    in-out property <[string]> playlist_column_menu_labels: [];
+    in-out property <[bool]> playlist_column_menu_checked: [];
+    in-out property <[bool]> playlist_column_menu_is_custom: [];
     in-out property <[string]> settings_output_device_options: [];
     in-out property <[string]> settings_channel_options: [];
     in-out property <[string]> settings_sample_rate_options: [];
@@ -1385,6 +1596,9 @@ export component AppWindow inherits Window {
     callback switch_playlist(int);
     callback rename_playlist(int, string);
     callback delete_playlist(int);
+    callback toggle_playlist_column(int);
+    callback add_custom_playlist_column(string, string);
+    callback delete_custom_playlist_column(int);
     callback open_settings();
     callback apply_settings(int, int, int, int, bool, string, string, string, string);
 }

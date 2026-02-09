@@ -355,17 +355,6 @@ impl PlaylistManager {
                         self.started_track_id = Some(track_started.id.clone());
                         if let Some(playing_idx) = self.playback_playlist.get_playing_track_index()
                         {
-                            let metadata = self
-                                .db_manager
-                                .get_track_metadata(&track_started.id)
-                                .unwrap_or(protocol::DetailedMetadata {
-                                    title: "Unknown".to_string(),
-                                    artist: "".to_string(),
-                                    album: "".to_string(),
-                                    date: "".to_string(),
-                                    genre: "".to_string(),
-                                });
-
                             let _ = self.bus_producer.send(protocol::Message::Playlist(
                                 protocol::PlaylistMessage::TrackStarted {
                                     index: playing_idx,
@@ -373,7 +362,6 @@ impl PlaylistManager {
                                         .playback_playlist_id
                                         .clone()
                                         .unwrap_or_default(),
-                                    metadata,
                                 },
                             ));
                             // Also notify UI to update metadata/art if selection is empty
@@ -517,15 +505,6 @@ impl PlaylistManager {
 
                         // Re-cache to ensure next tracks are correct
                         self.cache_tracks(false);
-                    }
-                    protocol::Message::Playlist(protocol::PlaylistMessage::UpdateMetadata {
-                        id,
-                        metadata,
-                    }) => {
-                        debug!("PlaylistManager: Updating metadata for track {}", id);
-                        if let Err(e) = self.db_manager.update_metadata(&id, &metadata) {
-                            error!("Failed to update metadata in database: {}", e);
-                        }
                     }
                     protocol::Message::Playlist(protocol::PlaylistMessage::CreatePlaylist {
                         name,
@@ -917,13 +896,11 @@ impl PlaylistManager {
 
     fn broadcast_playlist_changed(&self) {
         let mut playing_track_path = None;
-        let mut playing_track_metadata = None;
 
         if let Some(playing_idx) = self.playback_playlist.get_playing_track_index() {
             if playing_idx < self.playback_playlist.num_tracks() {
                 let track = self.playback_playlist.get_track(playing_idx);
                 playing_track_path = Some(track.path.clone());
-                playing_track_metadata = self.db_manager.get_track_metadata(&track.id).ok();
             }
         }
 
@@ -932,7 +909,7 @@ impl PlaylistManager {
                 playing_playlist_id: self.playback_playlist_id.clone(),
                 playing_index: self.playback_playlist.get_playing_track_index(),
                 playing_track_path,
-                playing_track_metadata,
+                playing_track_metadata: None,
                 selected_indices: self.editing_playlist.get_selected_indices(),
                 is_playing: self.playback_playlist.is_playing(),
                 playback_order: self.playback_order,
