@@ -48,6 +48,26 @@ struct OutputSettingsOptions {
     channel_values: Vec<u16>,
     sample_rate_values: Vec<u32>,
     bits_per_sample_values: Vec<u16>,
+    auto_channel_value: u16,
+    auto_sample_rate_value: u32,
+    auto_bits_per_sample_value: u16,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct OutputRuntimeSignature {
+    channel_count: u16,
+    sample_rate_hz: u32,
+    bits_per_sample: u16,
+}
+
+impl OutputRuntimeSignature {
+    fn from_output(output: &OutputConfig) -> Self {
+        Self {
+            channel_count: output.channel_count,
+            sample_rate_hz: output.sample_rate_khz,
+            bits_per_sample: output.bits_per_sample,
+        }
+    }
 }
 
 fn filter_common_u16(detected: &BTreeSet<u16>, common_values: &[u16], fallback: u16) -> Vec<u16> {
@@ -86,10 +106,80 @@ fn filter_common_u32(detected: &BTreeSet<u32>, common_values: &[u32], fallback: 
     filtered
 }
 
+fn choose_preferred_u16(detected: &BTreeSet<u16>, preferred_values: &[u16], fallback: u16) -> u16 {
+    preferred_values
+        .iter()
+        .copied()
+        .find(|value| detected.contains(value))
+        .or_else(|| detected.get(&fallback).copied())
+        .or_else(|| detected.iter().next().copied())
+        .unwrap_or(fallback)
+}
+
+fn choose_preferred_u32(detected: &BTreeSet<u32>, preferred_values: &[u32], fallback: u32) -> u32 {
+    preferred_values
+        .iter()
+        .copied()
+        .find(|value| detected.contains(value))
+        .or_else(|| detected.get(&fallback).copied())
+        .or_else(|| detected.iter().next().copied())
+        .unwrap_or(fallback)
+}
+
+fn resolve_runtime_config(config: &Config, output_options: &OutputSettingsOptions) -> Config {
+    let mut runtime = config.clone();
+    if runtime.output.channel_count_auto {
+        runtime.output.channel_count = output_options.auto_channel_value;
+    }
+    if runtime.output.sample_rate_auto {
+        runtime.output.sample_rate_khz = output_options.auto_sample_rate_value;
+    }
+    if runtime.output.bits_per_sample_auto {
+        runtime.output.bits_per_sample = output_options.auto_bits_per_sample_value;
+    }
+    runtime
+}
+
+fn select_output_option_index_u16(
+    is_auto: bool,
+    value: u16,
+    values: &[u16],
+    custom_index: usize,
+) -> usize {
+    if is_auto {
+        return 0;
+    }
+    values
+        .iter()
+        .position(|candidate| *candidate == value)
+        .map(|idx| idx + 1)
+        .unwrap_or(custom_index)
+}
+
+fn select_output_option_index_u32(
+    is_auto: bool,
+    value: u32,
+    values: &[u32],
+    custom_index: usize,
+) -> usize {
+    if is_auto {
+        return 0;
+    }
+    values
+        .iter()
+        .position(|candidate| *candidate == value)
+        .map(|idx| idx + 1)
+        .unwrap_or(custom_index)
+}
+
 fn detect_output_settings_options(config: &Config) -> OutputSettingsOptions {
     const COMMON_SAMPLE_RATES: [u32; 6] = [44_100, 48_000, 88_200, 96_000, 176_400, 192_000];
     const COMMON_CHANNEL_COUNTS: [u16; 4] = [2, 1, 6, 8];
     const COMMON_BIT_DEPTHS: [u16; 3] = [16, 24, 32];
+    const PREFERRED_AUTO_SAMPLE_RATES: [u32; 6] =
+        [44_100, 48_000, 96_000, 88_200, 192_000, 176_400];
+    const PREFERRED_AUTO_CHANNEL_COUNTS: [u16; 4] = [2, 6, 1, 8];
+    const PREFERRED_AUTO_BIT_DEPTHS: [u16; 3] = [24, 32, 16];
     const PROBE_SAMPLE_RATES: [u32; 13] = [
         8_000, 11_025, 12_000, 16_000, 22_050, 24_000, 32_000, 44_100, 48_000, 88_200, 96_000,
         176_400, 192_000,
@@ -144,11 +234,29 @@ fn detect_output_settings_options(config: &Config) -> OutputSettingsOptions {
         &COMMON_BIT_DEPTHS,
         config.output.bits_per_sample.max(8),
     );
+    let auto_channel_value = choose_preferred_u16(
+        &channels,
+        &PREFERRED_AUTO_CHANNEL_COUNTS,
+        config.output.channel_count.max(1),
+    );
+    let auto_sample_rate_value = choose_preferred_u32(
+        &sample_rates,
+        &PREFERRED_AUTO_SAMPLE_RATES,
+        config.output.sample_rate_khz.max(8_000),
+    );
+    let auto_bits_per_sample_value = choose_preferred_u16(
+        &bits_per_sample,
+        &PREFERRED_AUTO_BIT_DEPTHS,
+        config.output.bits_per_sample.max(8),
+    );
 
     OutputSettingsOptions {
         channel_values,
         sample_rate_values,
         bits_per_sample_values,
+        auto_channel_value,
+        auto_sample_rate_value,
+        auto_bits_per_sample_value,
     }
 }
 
@@ -170,6 +278,9 @@ fn sanitize_config(config: Config) -> Config {
             channel_count: clamped_channels,
             sample_rate_khz: clamped_sample_rate_hz,
             bits_per_sample: clamped_bits,
+            channel_count_auto: config.output.channel_count_auto,
+            sample_rate_auto: config.output.sample_rate_auto,
+            bits_per_sample_auto: config.output.bits_per_sample_auto,
         },
         ui: UiConfig {
             show_album_art: config.ui.show_album_art,
@@ -186,27 +297,34 @@ fn sanitize_config(config: Config) -> Config {
 fn apply_config_to_ui(ui: &AppWindow, config: &Config, output_options: &OutputSettingsOptions) {
     ui.set_show_album_art(config.ui.show_album_art);
 
-    let channel_options: Vec<slint::SharedString> = output_options
-        .channel_values
-        .iter()
-        .map(|value| value.to_string().into())
-        .collect();
-    let sample_rate_options: Vec<slint::SharedString> = output_options
-        .sample_rate_values
-        .iter()
-        .map(|value| format!("{} Hz", value).into())
-        .collect();
-    let bit_depth_options: Vec<slint::SharedString> = output_options
-        .bits_per_sample_values
-        .iter()
-        .map(|value| format!("{} bit", value).into())
-        .collect();
-
-    let mut channel_options_with_other = channel_options;
+    let mut channel_options_with_other: Vec<slint::SharedString> =
+        vec![format!("Auto ({})", output_options.auto_channel_value).into()];
+    channel_options_with_other.extend(
+        output_options
+            .channel_values
+            .iter()
+            .map(|value| value.to_string().into()),
+    );
     channel_options_with_other.push("Other...".into());
-    let mut sample_rate_options_with_other = sample_rate_options;
+
+    let mut sample_rate_options_with_other: Vec<slint::SharedString> =
+        vec![format!("Auto ({} Hz)", output_options.auto_sample_rate_value).into()];
+    sample_rate_options_with_other.extend(
+        output_options
+            .sample_rate_values
+            .iter()
+            .map(|value| format!("{} Hz", value).into()),
+    );
     sample_rate_options_with_other.push("Other...".into());
-    let mut bit_depth_options_with_other = bit_depth_options;
+
+    let mut bit_depth_options_with_other: Vec<slint::SharedString> =
+        vec![format!("Auto ({} bit)", output_options.auto_bits_per_sample_value).into()];
+    bit_depth_options_with_other.extend(
+        output_options
+            .bits_per_sample_values
+            .iter()
+            .map(|value| format!("{} bit", value).into()),
+    );
     bit_depth_options_with_other.push("Other...".into());
 
     ui.set_settings_channel_options(ModelRc::from(Rc::new(VecModel::from(
@@ -219,21 +337,28 @@ fn apply_config_to_ui(ui: &AppWindow, config: &Config, output_options: &OutputSe
         bit_depth_options_with_other,
     ))));
 
-    let channel_index = output_options
-        .channel_values
-        .iter()
-        .position(|value| *value == config.output.channel_count)
-        .unwrap_or(output_options.channel_values.len());
-    let sample_rate_index = output_options
-        .sample_rate_values
-        .iter()
-        .position(|value| *value == config.output.sample_rate_khz)
-        .unwrap_or(output_options.sample_rate_values.len());
-    let bits_index = output_options
-        .bits_per_sample_values
-        .iter()
-        .position(|value| *value == config.output.bits_per_sample)
-        .unwrap_or(output_options.bits_per_sample_values.len());
+    let channel_custom_index = output_options.channel_values.len() + 1;
+    let sample_rate_custom_index = output_options.sample_rate_values.len() + 1;
+    let bits_custom_index = output_options.bits_per_sample_values.len() + 1;
+
+    let channel_index = select_output_option_index_u16(
+        config.output.channel_count_auto,
+        config.output.channel_count,
+        &output_options.channel_values,
+        channel_custom_index,
+    );
+    let sample_rate_index = select_output_option_index_u32(
+        config.output.sample_rate_auto,
+        config.output.sample_rate_khz,
+        &output_options.sample_rate_values,
+        sample_rate_custom_index,
+    );
+    let bits_index = select_output_option_index_u16(
+        config.output.bits_per_sample_auto,
+        config.output.bits_per_sample,
+        &output_options.bits_per_sample_values,
+        bits_custom_index,
+    );
 
     ui.set_settings_channel_index(channel_index as i32);
     ui.set_settings_sample_rate_index(sample_rate_index as i32);
@@ -286,11 +411,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let config_content = std::fs::read_to_string(config_file.clone()).unwrap();
     let config = sanitize_config(toml::from_str::<Config>(&config_content).unwrap_or_default());
-    let output_options = Arc::new(detect_output_settings_options(&config));
+    let initial_output_options = detect_output_settings_options(&config);
+    let runtime_config = resolve_runtime_config(&config, &initial_output_options);
 
     setup_app_state_associations(&ui, &ui_state);
-    apply_config_to_ui(&ui, &config, output_options.as_ref());
+    apply_config_to_ui(&ui, &config, &initial_output_options);
     let config_state = Arc::new(Mutex::new(config.clone()));
+    let output_options = Arc::new(Mutex::new(initial_output_options.clone()));
+    let last_runtime_signature = Arc::new(Mutex::new(OutputRuntimeSignature::from_output(
+        &runtime_config.output,
+    )));
 
     // Bus for communication between components
     let (bus_sender, _) = broadcast::channel(1024);
@@ -503,8 +633,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 .expect("config state lock poisoned");
             state.clone()
         };
+        let options_snapshot = {
+            let options = output_options_clone
+                .lock()
+                .expect("output options lock poisoned");
+            options.clone()
+        };
         if let Some(ui) = ui_handle_clone.upgrade() {
-            apply_config_to_ui(&ui, &current_config, output_options_clone.as_ref());
+            apply_config_to_ui(&ui, &current_config, &options_snapshot);
             ui.set_show_settings_dialog(true);
         }
     });
@@ -513,6 +649,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let bus_sender_clone = bus_sender.clone();
     let config_state_clone = Arc::clone(&config_state);
     let output_options_clone = Arc::clone(&output_options);
+    let last_runtime_signature_clone = Arc::clone(&last_runtime_signature);
     let config_file_clone = config_file.clone();
     let ui_handle_clone = ui.as_weak().clone();
     ui.on_apply_settings(
@@ -533,9 +670,18 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             let channel_idx = channel_index.max(0) as usize;
             let sample_rate_idx = sample_rate_index.max(0) as usize;
             let bits_idx = bits_per_sample_index.max(0) as usize;
+            let options_snapshot = {
+                let options = output_options_clone
+                    .lock()
+                    .expect("output options lock poisoned");
+                options.clone()
+            };
 
-            let channel_count = if channel_idx < output_options_clone.channel_values.len() {
-                output_options_clone.channel_values[channel_idx]
+            let channel_count_auto = channel_idx == 0;
+            let channel_count = if channel_count_auto {
+                options_snapshot.auto_channel_value
+            } else if channel_idx <= options_snapshot.channel_values.len() {
+                options_snapshot.channel_values[channel_idx - 1]
             } else {
                 channel_custom_value
                     .trim()
@@ -544,8 +690,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     .filter(|value| *value > 0)
                     .unwrap_or(previous_config.output.channel_count)
             };
-            let sample_rate_hz = if sample_rate_idx < output_options_clone.sample_rate_values.len() {
-                output_options_clone.sample_rate_values[sample_rate_idx]
+            let sample_rate_auto = sample_rate_idx == 0;
+            let sample_rate_hz = if sample_rate_auto {
+                options_snapshot.auto_sample_rate_value
+            } else if sample_rate_idx <= options_snapshot.sample_rate_values.len() {
+                options_snapshot.sample_rate_values[sample_rate_idx - 1]
             } else {
                 sample_rate_custom_value
                     .trim()
@@ -554,8 +703,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     .filter(|value| *value > 0)
                     .unwrap_or(previous_config.output.sample_rate_khz)
             };
-            let bits_per_sample = if bits_idx < output_options_clone.bits_per_sample_values.len() {
-                output_options_clone.bits_per_sample_values[bits_idx]
+            let bits_per_sample_auto = bits_idx == 0;
+            let bits_per_sample = if bits_per_sample_auto {
+                options_snapshot.auto_bits_per_sample_value
+            } else if bits_idx <= options_snapshot.bits_per_sample_values.len() {
+                options_snapshot.bits_per_sample_values[bits_idx - 1]
             } else {
                 bits_custom_value
                     .trim()
@@ -570,24 +722,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     channel_count,
                     sample_rate_khz: sample_rate_hz,
                     bits_per_sample,
+                    channel_count_auto,
+                    sample_rate_auto,
+                    bits_per_sample_auto,
                 },
                 ui: UiConfig { show_album_art },
                 buffering: previous_config.buffering.clone(),
             });
 
-            let mut restart_required_changes = Vec::new();
-            if previous_config.output.channel_count != next_config.output.channel_count {
-                restart_required_changes.push("output channels");
-            }
-            if previous_config.output.sample_rate_khz != next_config.output.sample_rate_khz {
-                restart_required_changes.push("output sample rate");
-            }
-            if previous_config.output.bits_per_sample != next_config.output.bits_per_sample {
-                restart_required_changes.push("output bit depth");
-            }
-
             if let Some(ui) = ui_handle_clone.upgrade() {
-                apply_config_to_ui(&ui, &next_config, output_options_clone.as_ref());
+                apply_config_to_ui(&ui, &next_config, &options_snapshot);
             }
 
             {
@@ -612,24 +756,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 }
             }
 
-            let mut runtime_config = next_config.clone();
-            if !restart_required_changes.is_empty() {
-                runtime_config.output = previous_config.output;
+            let runtime_config = resolve_runtime_config(&next_config, &options_snapshot);
+            {
+                let mut last_runtime = last_runtime_signature_clone
+                    .lock()
+                    .expect("runtime signature lock poisoned");
+                *last_runtime = OutputRuntimeSignature::from_output(&runtime_config.output);
             }
-            let _ =
-                bus_sender_clone.send(Message::Config(ConfigMessage::ConfigChanged(runtime_config)));
-
-            if !restart_required_changes.is_empty() {
-                let formatted = restart_required_changes.join(", ");
-                let message = format!(
-                    "Saved changes to {}. These changes will apply after restarting the application.",
-                    formatted
-                );
-                if let Some(ui) = ui_handle_clone.upgrade() {
-                    ui.set_settings_restart_notice_message(message.into());
-                    ui.set_show_settings_restart_notice(true);
-                }
-            }
+            let _ = bus_sender_clone.send(Message::Config(ConfigMessage::ConfigChanged(
+                runtime_config,
+            )));
         },
     );
 
@@ -719,8 +855,67 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         audio_player.run();
     });
 
+    // Re-detect output options on device-open notifications and refresh auto runtime output.
+    let mut device_event_receiver = bus_sender.subscribe();
     let bus_sender_clone = bus_sender.clone();
-    let _ = bus_sender_clone.send(Message::Config(ConfigMessage::ConfigChanged(config)));
+    let config_state_clone = Arc::clone(&config_state);
+    let output_options_clone = Arc::clone(&output_options);
+    let ui_handle_clone = ui.as_weak().clone();
+    let last_runtime_signature_clone = Arc::clone(&last_runtime_signature);
+    thread::spawn(move || loop {
+        match device_event_receiver.blocking_recv() {
+            Ok(Message::Config(ConfigMessage::AudioDeviceOpened { .. })) => {
+                let persisted_config = {
+                    let state = config_state_clone
+                        .lock()
+                        .expect("config state lock poisoned");
+                    state.clone()
+                };
+                let detected_options = detect_output_settings_options(&persisted_config);
+                {
+                    let mut options = output_options_clone
+                        .lock()
+                        .expect("output options lock poisoned");
+                    *options = detected_options.clone();
+                }
+
+                let runtime = resolve_runtime_config(&persisted_config, &detected_options);
+                let runtime_signature = OutputRuntimeSignature::from_output(&runtime.output);
+                let should_broadcast_runtime = {
+                    let mut last_signature = last_runtime_signature_clone
+                        .lock()
+                        .expect("runtime signature lock poisoned");
+                    if *last_signature == runtime_signature {
+                        false
+                    } else {
+                        *last_signature = runtime_signature;
+                        true
+                    }
+                };
+                if should_broadcast_runtime {
+                    let _ = bus_sender_clone
+                        .send(Message::Config(ConfigMessage::ConfigChanged(runtime)));
+                }
+
+                let ui_weak = ui_handle_clone.clone();
+                let config_for_ui = persisted_config.clone();
+                let options_for_ui = detected_options.clone();
+                let _ = slint::invoke_from_event_loop(move || {
+                    if let Some(ui) = ui_weak.upgrade() {
+                        apply_config_to_ui(&ui, &config_for_ui, &options_for_ui);
+                    }
+                });
+            }
+            Ok(_) => {}
+            Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {}
+            Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+        }
+    });
+
+    let bus_sender_clone = bus_sender.clone();
+    let _ = bus_sender_clone.send(Message::Config(ConfigMessage::ConfigChanged(
+        runtime_config,
+    )));
 
     ui.run()?;
 
@@ -730,6 +925,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeSet;
+
+    use crate::config::{BufferingConfig, Config, OutputConfig, UiConfig};
+
+    use super::{
+        choose_preferred_u16, choose_preferred_u32, resolve_runtime_config,
+        select_output_option_index_u16, select_output_option_index_u32, OutputSettingsOptions,
+    };
+
     #[test]
     fn test_focus_touch_areas_are_not_full_pane_overlays() {
         let slint_ui = include_str!("music_player.slint");
@@ -770,5 +974,72 @@ mod tests {
             slint_ui.contains("root.deselect_all();"),
             "Track overlay should deselect on null-column or empty-space clicks"
         );
+    }
+
+    #[test]
+    fn test_choose_preferred_uses_priority_order_when_available() {
+        let detected_u16 = BTreeSet::from([1, 2, 6]);
+        let detected_u32 = BTreeSet::from([48_000, 96_000]);
+
+        assert_eq!(choose_preferred_u16(&detected_u16, &[6, 2, 1], 2), 6);
+        assert_eq!(
+            choose_preferred_u32(&detected_u32, &[44_100, 48_000, 96_000], 44_100),
+            48_000
+        );
+    }
+
+    #[test]
+    fn test_choose_preferred_falls_back_to_first_detected_when_needed() {
+        let detected_u16 = BTreeSet::from([4, 8]);
+        let detected_u32 = BTreeSet::from([32_000, 192_000]);
+
+        assert_eq!(choose_preferred_u16(&detected_u16, &[2, 6], 2), 4);
+        assert_eq!(
+            choose_preferred_u32(&detected_u32, &[44_100, 48_000], 44_100),
+            32_000
+        );
+    }
+
+    #[test]
+    fn test_select_output_option_index_uses_auto_and_custom_slots() {
+        assert_eq!(select_output_option_index_u16(true, 2, &[1, 2], 3), 0);
+        assert_eq!(select_output_option_index_u16(false, 2, &[1, 2], 3), 2);
+        assert_eq!(select_output_option_index_u16(false, 7, &[1, 2], 3), 3);
+
+        assert_eq!(
+            select_output_option_index_u32(false, 48_000, &[44_100, 48_000], 3),
+            2
+        );
+    }
+
+    #[test]
+    fn test_resolve_runtime_config_applies_auto_values_only_for_auto_fields() {
+        let persisted = Config {
+            output: OutputConfig {
+                channel_count: 6,
+                sample_rate_khz: 48_000,
+                bits_per_sample: 16,
+                channel_count_auto: true,
+                sample_rate_auto: false,
+                bits_per_sample_auto: true,
+            },
+            ui: UiConfig {
+                show_album_art: true,
+            },
+            buffering: BufferingConfig::default(),
+        };
+        let options = OutputSettingsOptions {
+            channel_values: vec![1, 2, 6],
+            sample_rate_values: vec![44_100, 48_000],
+            bits_per_sample_values: vec![16, 24],
+            auto_channel_value: 2,
+            auto_sample_rate_value: 44_100,
+            auto_bits_per_sample_value: 24,
+        };
+
+        let runtime = resolve_runtime_config(&persisted, &options);
+        assert_eq!(runtime.output.channel_count, 2);
+        assert_eq!(runtime.output.sample_rate_khz, 48_000);
+        assert_eq!(runtime.output.bits_per_sample, 24);
     }
 }
