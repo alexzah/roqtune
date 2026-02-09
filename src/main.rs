@@ -23,7 +23,7 @@ use log::{debug, info};
 use playlist::Playlist;
 use playlist_manager::PlaylistManager;
 use protocol::{ConfigMessage, Message, PlaybackMessage, PlaylistMessage};
-use slint::{ComponentHandle, Model, ModelRc, VecModel};
+use slint::{ComponentHandle, LogicalSize, Model, ModelRc, VecModel};
 use tokio::sync::broadcast;
 use ui_manager::{UiManager, UiState};
 
@@ -338,6 +338,9 @@ fn sanitize_config(config: Config) -> Config {
     let clamped_channels = config.output.channel_count.clamp(1, 8);
     let clamped_sample_rate_hz = config.output.sample_rate_khz.clamp(8_000, 192_000);
     let clamped_bits = config.output.bits_per_sample.clamp(8, 32);
+    let clamped_window_width = config.ui.window_width.clamp(600, 10_000);
+    let clamped_window_height = config.ui.window_height.clamp(400, 10_000);
+    let clamped_volume = config.ui.volume.clamp(0.0, 1.0);
     let clamped_low_watermark = config.buffering.player_low_watermark_ms.max(500);
     let clamped_target = config
         .buffering
@@ -361,6 +364,9 @@ fn sanitize_config(config: Config) -> Config {
         ui: UiConfig {
             show_album_art: config.ui.show_album_art,
             playlist_columns: sanitized_playlist_columns,
+            window_width: clamped_window_width,
+            window_height: clamped_window_height,
+            volume: clamped_volume,
         },
         buffering: BufferingConfig {
             player_low_watermark_ms: clamped_low_watermark,
@@ -619,6 +625,7 @@ fn should_apply_custom_column_delete(
 
 fn apply_config_to_ui(ui: &AppWindow, config: &Config, output_options: &OutputSettingsOptions) {
     ui.set_show_album_art(config.ui.show_album_art);
+    ui.set_volume_level(config.ui.volume);
 
     let auto_device_label = if output_options.auto_device_name.is_empty() {
         "Unavailable".to_string()
@@ -773,6 +780,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let config = sanitize_config(toml::from_str::<Config>(&config_content).unwrap_or_default());
     let initial_output_options = detect_output_settings_options(&config);
     let runtime_config = resolve_runtime_config(&config, &initial_output_options);
+
+    ui.window().set_size(LogicalSize::new(
+        config.ui.window_width as f32,
+        config.ui.window_height as f32,
+    ));
 
     setup_app_state_associations(&ui, &ui_state);
     apply_config_to_ui(&ui, &config, &initial_output_options);
@@ -1010,10 +1022,32 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Wire up volume handler
     let bus_sender_clone = bus_sender.clone();
+    let config_state_clone = Arc::clone(&config_state);
     ui.on_volume_changed(move |volume| {
         let clamped = volume.clamp(0.0, 1.0);
         debug!("Volume changed to {}%", clamped * 100.0);
+        {
+            let mut state = config_state_clone
+                .lock()
+                .expect("config state lock poisoned");
+            if (state.ui.volume - clamped).abs() > f32::EPSILON {
+                state.ui.volume = clamped;
+            }
+        }
         let _ = bus_sender_clone.send(Message::Playback(PlaybackMessage::SetVolume(clamped)));
+    });
+
+    let config_state_clone = Arc::clone(&config_state);
+    ui.on_window_resized(move |width_px, height_px| {
+        let width = (width_px.max(600) as u32).min(10_000);
+        let height = (height_px.max(400) as u32).min(10_000);
+        let mut state = config_state_clone
+            .lock()
+            .expect("config state lock poisoned");
+        if state.ui.window_width != width || state.ui.window_height != height {
+            state.ui.window_width = width;
+            state.ui.window_height = height;
+        }
     });
 
     // Wire up settings open handler
@@ -1145,6 +1179,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 ui: UiConfig {
                     show_album_art,
                     playlist_columns: previous_config.ui.playlist_columns.clone(),
+                    window_width: previous_config.ui.window_width,
+                    window_height: previous_config.ui.window_height,
+                    volume: previous_config.ui.volume,
                 },
                 buffering: previous_config.buffering.clone(),
             });
@@ -1221,6 +1258,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             ui: UiConfig {
                 show_album_art: previous_config.ui.show_album_art,
                 playlist_columns: updated_columns,
+                window_width: previous_config.ui.window_width,
+                window_height: previous_config.ui.window_height,
+                volume: previous_config.ui.volume,
             },
             buffering: previous_config.buffering.clone(),
         });
@@ -1313,6 +1353,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             ui: UiConfig {
                 show_album_art: previous_config.ui.show_album_art,
                 playlist_columns: updated_columns,
+                window_width: previous_config.ui.window_width,
+                window_height: previous_config.ui.window_height,
+                volume: previous_config.ui.volume,
             },
             buffering: previous_config.buffering.clone(),
         });
@@ -1407,6 +1450,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             ui: UiConfig {
                 show_album_art: previous_config.ui.show_album_art,
                 playlist_columns: updated_columns,
+                window_width: previous_config.ui.window_width,
+                window_height: previous_config.ui.window_height,
+                volume: previous_config.ui.volume,
             },
             buffering: previous_config.buffering.clone(),
         });
@@ -1495,6 +1541,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             ui: UiConfig {
                 show_album_art: previous_config.ui.show_album_art,
                 playlist_columns: updated_columns,
+                window_width: previous_config.ui.window_width,
+                window_height: previous_config.ui.window_height,
+                volume: previous_config.ui.volume,
             },
             buffering: previous_config.buffering.clone(),
         });
@@ -1706,6 +1755,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         ui: UiConfig {
                             show_album_art: state.ui.show_album_art,
                             playlist_columns: reordered_columns,
+                            window_width: state.ui.window_width,
+                            window_height: state.ui.window_height,
+                            volume: state.ui.volume,
                         },
                         buffering: state.buffering.clone(),
                     });
@@ -1756,7 +1808,31 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         runtime_config,
     )));
 
+    let bus_sender_clone = bus_sender.clone();
+    let _ = bus_sender_clone.send(Message::Playback(PlaybackMessage::SetVolume(
+        config.ui.volume,
+    )));
+
     ui.run()?;
+
+    let final_config = {
+        let state = config_state.lock().expect("config state lock poisoned");
+        state.clone()
+    };
+    match toml::to_string(&final_config) {
+        Ok(config_text) => {
+            if let Err(err) = std::fs::write(&config_file, config_text) {
+                log::error!(
+                    "Failed to persist config to {}: {}",
+                    config_file.display(),
+                    err
+                );
+            }
+        }
+        Err(err) => {
+            log::error!("Failed to serialize config: {}", err);
+        }
+    }
 
     info!("Application exiting");
     Ok(())
@@ -1867,6 +1943,10 @@ mod tests {
         assert!(
             slint_ui.contains("callback playlist_columns_viewport_resized(int);"),
             "App window should expose viewport resize callback for adaptive playlist columns"
+        );
+        assert!(
+            slint_ui.contains("callback window_resized(int, int);"),
+            "App window should expose window resize callback for persistence"
         );
         assert!(
             slint_ui.contains("callback playlist_header_column_at(int) -> int;"),
@@ -2022,6 +2102,9 @@ mod tests {
             ui: UiConfig {
                 show_album_art: true,
                 playlist_columns: crate::config::default_playlist_columns(),
+                window_width: 900,
+                window_height: 650,
+                volume: 1.0,
             },
             buffering: BufferingConfig::default(),
         };

@@ -536,6 +536,13 @@ export component AppWindow inherits Window {
         return 140px;
     }
 
+    changed width => {
+        root.window_resized(max(0, floor(self.width / 1px)), max(0, floor(self.height / 1px)));
+    }
+    changed height => {
+        root.window_resized(max(0, floor(self.width / 1px)), max(0, floor(self.height / 1px)));
+    }
+
     // Status display at the bottom showing the currently playing track
     in-out property <string> status-text: "";
 
@@ -1725,6 +1732,7 @@ export component AppWindow inherits Window {
     callback playlist_header_column_at(int) -> int;
     callback playlist_header_gap_at(int) -> int;
     callback playlist_columns_viewport_resized(int);
+    callback window_resized(int, int);
     callback open_settings();
     callback apply_settings(int, int, int, int, bool, string, string, string, string);
 }
