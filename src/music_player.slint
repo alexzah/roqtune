@@ -1023,6 +1023,8 @@ export component AppWindow inherits Window {
     in-out property <bool> layout_edit_mode: false;
     in-out property <bool> show_layout_editor_dialog: false;
     in-out property <bool> show_layout_leaf_context_menu: false;
+    in-out property <bool> show_layout_leaf_replace_submenu: false;
+    in-out property <bool> layout_leaf_replace_submenu_hover: false;
     in-out property <bool> show_layout_splitter_context_menu: false;
     in-out property <bool> layout_intro_dont_show_again: false;
     in-out property <string> layout_context_splitter_id: "";
@@ -1155,6 +1157,33 @@ export component AppWindow inherits Window {
             return "Status Bar";
         }
         return "None";
+    }
+
+    pure function layout-selected-panel-kind() -> int {
+        if root.layout_selected_leaf_index >= 0
+            && root.layout_selected_leaf_index < root.layout_region_panel_kinds.length {
+            return root.layout_region_panel_kinds[root.layout_selected_leaf_index];
+        }
+        return 0;
+    }
+
+    pure function layout-selected-panel-has-settings() -> bool {
+        let panel-kind = root.layout-selected-panel-kind();
+        return panel-kind == 1 || panel-kind == 2 || panel-kind == 3;
+    }
+
+    pure function layout-selected-panel-settings-target() -> int {
+        let panel-kind = root.layout-selected-panel-kind();
+        if panel-kind == 1 {
+            return 0;
+        }
+        if panel-kind == 2 {
+            return 1;
+        }
+        if panel-kind == 3 {
+            return 2;
+        }
+        return -1;
     }
 
     changed width => {
@@ -1793,34 +1822,43 @@ export component AppWindow inherits Window {
             }
 
             for leaf-id[i] in root.layout_leaf_ids : Rectangle {
+                property <int> panel-kind: root.layout-region-panel-kind(i);
                 x: root.layout-region-x(i);
                 y: root.layout-region-y(i);
                 width: root.layout-region-width(i);
                 height: root.layout-region-height(i);
                 visible: root.layout_edit_mode
                     && root.layout-region-is-visible(i)
-                    && root.layout-region-panel-kind(i) >= 6;
+                    && self.panel-kind != 0;
                 background: leaf-select-ta.has-hover ? #4b84c91f : transparent;
                 border-width: 1px;
                 border-color: i == root.layout_selected_leaf_index ? #4b84c9 : #3a3a3a;
                 z: 100;
                 Text {
-                    text: root.layout-panel-label(root.layout-region-panel-kind(i));
+                    text: root.layout-panel-label(parent.panel-kind);
                     color: i == root.layout_selected_leaf_index ? #9fc3ff : #777;
                     font-size: 11px;
                     x: 6px;
                     y: 4px;
                 }
                 leaf-select-ta := TouchArea {
+                    x: 0px;
+                    y: 0px;
+                    width: parent.width;
+                    height: parent.panel-kind == 3 ? min(parent.height, 22px) : parent.height;
                     pointer-event(event) => {
                         if (event.kind == PointerEventKind.down && event.button == PointerEventButton.right) {
                             root.layout_select_leaf(leaf-id);
                             root.show_layout_splitter_context_menu = false;
-                            root.layout_leaf_context_menu_x = min(root.width - 320px, max(8px, parent.x + self.mouse-x + 6px));
-                            root.layout_leaf_context_menu_y = min(root.height - 250px, max(8px, parent.y + self.mouse-y + 6px));
+                            root.layout_leaf_context_menu_x = min(root.width - 430px, max(8px, parent.x + self.mouse-x + 6px));
+                            root.layout_leaf_context_menu_y = min(root.height - 280px, max(8px, parent.y + self.mouse-y + 6px));
+                            root.show_layout_leaf_replace_submenu = false;
+                            root.layout_leaf_replace_submenu_hover = false;
                             root.show_layout_leaf_context_menu = true;
                         } else if (event.kind == PointerEventKind.down && event.button == PointerEventButton.left) {
                             root.layout_select_leaf(leaf-id);
+                            root.show_layout_leaf_replace_submenu = false;
+                            root.layout_leaf_replace_submenu_hover = false;
                             root.show_layout_leaf_context_menu = false;
                             root.show_layout_splitter_context_menu = false;
                         }
@@ -1846,11 +1884,15 @@ export component AppWindow inherits Window {
                         if (event.kind == PointerEventKind.down && event.button == PointerEventButton.right) {
                             root.layout_active_splitter_index = -1;
                             root.layout_context_splitter_id = splitter.id;
+                            root.show_layout_leaf_replace_submenu = false;
+                            root.layout_leaf_replace_submenu_hover = false;
                             root.show_layout_leaf_context_menu = false;
                             root.layout_splitter_context_menu_x = min(root.width - 220px, max(8px, parent.x + self.mouse-x + 6px));
                             root.layout_splitter_context_menu_y = min(root.height - 120px, max(8px, parent.y + self.mouse-y + 6px));
                             root.show_layout_splitter_context_menu = true;
                         } else if (event.kind == PointerEventKind.down && event.button == PointerEventButton.left) {
+                            root.show_layout_leaf_replace_submenu = false;
+                            root.layout_leaf_replace_submenu_hover = false;
                             root.show_layout_leaf_context_menu = false;
                             root.show_layout_splitter_context_menu = false;
                             root.layout_active_splitter_index = i;
@@ -1912,6 +1954,8 @@ export component AppWindow inherits Window {
         background: transparent;
         touch-to-dismiss-layout-menu := TouchArea {
             clicked => {
+                root.show_layout_leaf_replace_submenu = false;
+                root.layout_leaf_replace_submenu_hover = false;
                 root.show_layout_leaf_context_menu = false;
                 root.show_layout_splitter_context_menu = false;
             }
@@ -2018,84 +2062,188 @@ export component AppWindow inherits Window {
         z: 140;
         x: root.layout_leaf_context_menu_x;
         y: root.layout_leaf_context_menu_y;
-        width: 312px;
-        height: 214px;
+        width: 236px;
+        height: root.layout-selected-panel-has-settings() ? 142px : 116px;
         border-radius: 6px;
         background: #262626;
         border-width: 1px;
         border-color: #3d3d3d;
 
         VerticalLayout {
-            padding: 10px;
-            spacing: 8px;
+            padding: 6px;
+            spacing: 2px;
 
-            Text {
-                text: "Panel Actions";
-                color: #eee;
-                font-size: 13px;
-                font-weight: 700;
+            Rectangle {
+                height: 24px;
+                border-radius: 3px;
+                background: replace-action-ta.has-hover || root.show_layout_leaf_replace_submenu ? #363636 : transparent;
+                Text {
+                    text: "Replace panel with";
+                    color: #ddd;
+                    font-size: 12px;
+                    x: 8px;
+                    vertical-alignment: center;
+                }
+                Text {
+                    text: "▸";
+                    color: #888;
+                    font-size: 12px;
+                    width: parent.width - 8px;
+                    horizontal-alignment: right;
+                    vertical-alignment: center;
+                }
+                replace-action-ta := TouchArea {
+                    changed has-hover => {
+                        if (self.has-hover) {
+                            root.show_layout_leaf_replace_submenu = true;
+                        }
+                    }
+                    moved => {
+                        root.show_layout_leaf_replace_submenu = true;
+                    }
+                    clicked => {
+                        root.show_layout_leaf_replace_submenu = true;
+                    }
+                }
             }
 
-            HorizontalLayout {
-                spacing: 8px;
-                Text { text: "Replace"; color: #ccc; width: 56px; vertical-alignment: center; }
-                ComboBox { horizontal-stretch: 1; model: root.layout_panel_options; current-index <=> root.layout_editor_replace_panel_kind; }
-                Button {
-                    text: "Apply";
+            Rectangle {
+                height: 24px;
+                border-radius: 3px;
+                background: split-vertical-ta.has-hover ? #363636 : transparent;
+                Text {
+                    text: "Split panel vertically";
+                    color: #ddd;
+                    font-size: 12px;
+                    x: 8px;
+                    vertical-alignment: center;
+                }
+                split-vertical-ta := TouchArea {
                     clicked => {
-                        root.layout_replace_selected_leaf(root.layout_editor_replace_panel_kind);
+                        root.layout_split_selected_leaf(1, 0);
+                        root.show_layout_leaf_replace_submenu = false;
+                        root.layout_leaf_replace_submenu_hover = false;
                         root.show_layout_leaf_context_menu = false;
                     }
                 }
             }
 
-            HorizontalLayout {
-                spacing: 8px;
-                Text { text: "Split"; color: #ccc; width: 56px; vertical-alignment: center; }
-                ComboBox { width: 108px; model: ["Horizontal", "Vertical"]; current-index <=> root.layout_editor_split_axis; }
-                ComboBox { horizontal-stretch: 1; model: root.layout_panel_options; current-index <=> root.layout_editor_split_panel_kind; }
-                Button {
-                    text: "Go";
+            Rectangle {
+                height: 24px;
+                border-radius: 3px;
+                background: split-horizontal-ta.has-hover ? #363636 : transparent;
+                Text {
+                    text: "Split panel horizontally";
+                    color: #ddd;
+                    font-size: 12px;
+                    x: 8px;
+                    vertical-alignment: center;
+                }
+                split-horizontal-ta := TouchArea {
                     clicked => {
-                        root.layout_split_selected_leaf(root.layout_editor_split_axis, root.layout_editor_split_panel_kind);
+                        root.layout_split_selected_leaf(0, 0);
+                        root.show_layout_leaf_replace_submenu = false;
+                        root.layout_leaf_replace_submenu_hover = false;
                         root.show_layout_leaf_context_menu = false;
                     }
                 }
             }
 
-            HorizontalLayout {
-                spacing: 8px;
-                Button {
-                    text: "Delete Panel";
+            if root.layout-selected-panel-has-settings() : Rectangle {
+                height: 24px;
+                border-radius: 3px;
+                background: panel-settings-ta.has-hover ? #363636 : transparent;
+                Text {
+                    text: "Panel Settings...";
+                    color: #ddd;
+                    font-size: 12px;
+                    x: 8px;
+                    vertical-alignment: center;
+                }
+                panel-settings-ta := TouchArea {
+                    clicked => {
+                        let target = root.layout-selected-panel-settings-target();
+                        if target != -1 {
+                            root.control_cluster_menu_target = target;
+                            root.control_cluster_menu_x = min(root.width - 230px, max(8px, root.layout_leaf_context_menu_x + parent.width + 6px));
+                            root.control_cluster_menu_y = min(root.height - 280px, max(8px, root.layout_leaf_context_menu_y + 6px));
+                            root.show_control_cluster_menu = true;
+                        }
+                        root.show_layout_leaf_replace_submenu = false;
+                        root.layout_leaf_replace_submenu_hover = false;
+                        root.show_layout_leaf_context_menu = false;
+                    }
+                }
+            }
+
+            Rectangle {
+                height: 1px;
+                background: #3a3a3a;
+            }
+
+            Rectangle {
+                height: 24px;
+                border-radius: 3px;
+                background: delete-panel-ta.has-hover ? #4a2a2a : transparent;
+                Text {
+                    text: "Delete panel";
+                    color: #ffb4b4;
+                    font-size: 12px;
+                    x: 8px;
+                    vertical-alignment: center;
+                }
+                delete-panel-ta := TouchArea {
                     clicked => {
                         root.layout_delete_selected_leaf();
-                        root.show_layout_leaf_context_menu = false;
-                    }
-                }
-                Button {
-                    text: "Undo";
-                    clicked => {
-                        root.layout_undo_last_action();
-                        root.show_layout_leaf_context_menu = false;
-                    }
-                }
-                Button {
-                    text: "Reset Layout";
-                    clicked => {
-                        root.reset_layout_default();
+                        root.show_layout_leaf_replace_submenu = false;
+                        root.layout_leaf_replace_submenu_hover = false;
                         root.show_layout_leaf_context_menu = false;
                     }
                 }
             }
 
-            if root.layout_leaf_ids.length == 0 : HorizontalLayout {
-                spacing: 8px;
-                ComboBox { horizontal-stretch: 1; model: root.layout_panel_options; current-index <=> root.layout_editor_new_root_panel_kind; }
-                Button {
-                    text: "Add Root";
-                    clicked => {
-                        root.layout_add_root_leaf(root.layout_editor_new_root_panel_kind);
-                        root.show_layout_leaf_context_menu = false;
+        }
+
+        if root.show_layout_leaf_replace_submenu : Rectangle {
+            z: 141;
+            x: (root.layout_leaf_context_menu_x + parent.width + 4px + self.width <= root.width - 8px) ? parent.width + 4px : -self.width - 4px;
+            y: 6px;
+            width: 196px;
+            height: min(300px, root.layout_panel_options.length * 24px + 12px);
+            border-radius: 6px;
+            background: #262626;
+            border-width: 1px;
+            border-color: #3d3d3d;
+
+            submenu-hover-ta := TouchArea {
+                changed has-hover => {
+                    root.layout_leaf_replace_submenu_hover = self.has-hover;
+                }
+            }
+
+            VerticalLayout {
+                padding: 6px;
+                spacing: 2px;
+
+                for option[index] in root.layout_panel_options : Rectangle {
+                    height: 24px;
+                    border-radius: 3px;
+                    background: replace-option-ta.has-hover ? #363636 : transparent;
+                    Text {
+                        text: option;
+                        color: #ddd;
+                        font-size: 12px;
+                        x: 8px;
+                        vertical-alignment: center;
+                    }
+                    replace-option-ta := TouchArea {
+                        clicked => {
+                            root.layout_editor_replace_panel_kind = index;
+                            root.layout_replace_selected_leaf(index);
+                            root.show_layout_leaf_replace_submenu = false;
+                            root.layout_leaf_replace_submenu_hover = false;
+                            root.show_layout_leaf_context_menu = false;
+                        }
                     }
                 }
             }
