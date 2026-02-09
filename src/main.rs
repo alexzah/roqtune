@@ -579,6 +579,11 @@ fn resolve_playlist_header_gap_from_x(mouse_x_px: i32, widths_px: &[i32]) -> i32
     widths_px.len() as i32
 }
 
+fn sidebar_width_from_window(window_width_px: u32) -> i32 {
+    let proportional = ((window_width_px as f32) * 0.24).round() as u32;
+    proportional.clamp(180, 300) as i32
+}
+
 fn apply_playlist_columns_to_ui(ui: &AppWindow, config: &Config) {
     let visible_headers: Vec<slint::SharedString> = config
         .ui
@@ -626,6 +631,7 @@ fn should_apply_custom_column_delete(
 fn apply_config_to_ui(ui: &AppWindow, config: &Config, output_options: &OutputSettingsOptions) {
     ui.set_show_album_art(config.ui.show_album_art);
     ui.set_volume_level(config.ui.volume);
+    ui.set_sidebar_width_px(sidebar_width_from_window(config.ui.window_width));
 
     let auto_device_label = if output_options.auto_device_name.is_empty() {
         "Unavailable".to_string()
@@ -729,7 +735,7 @@ fn apply_config_to_ui(ui: &AppWindow, config: &Config, output_options: &OutputSe
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut clog = colog::default_builder();
-    clog.filter(None, log::LevelFilter::Debug);
+    clog.filter(Some("music_player"), log::LevelFilter::Debug);
     clog.init();
 
     std::panic::set_hook(Box::new(|panic_info| {
@@ -785,6 +791,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         config.ui.window_width as f32,
         config.ui.window_height as f32,
     ));
+    ui.set_sidebar_width_px(sidebar_width_from_window(config.ui.window_width));
 
     setup_app_state_associations(&ui, &ui_state);
     apply_config_to_ui(&ui, &config, &initial_output_options);
@@ -1038,9 +1045,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     });
 
     let config_state_clone = Arc::clone(&config_state);
+    let ui_handle_clone = ui.as_weak().clone();
     ui.on_window_resized(move |width_px, height_px| {
         let width = (width_px.max(600) as u32).min(10_000);
         let height = (height_px.max(400) as u32).min(10_000);
+        if let Some(ui) = ui_handle_clone.upgrade() {
+            ui.set_sidebar_width_px(sidebar_width_from_window(width));
+        }
         let mut state = config_state_clone
             .lock()
             .expect("config state lock poisoned");
@@ -1849,7 +1860,7 @@ mod tests {
         reorder_visible_playlist_columns, resolve_playlist_header_column_from_x,
         resolve_playlist_header_gap_from_x, resolve_runtime_config, sanitize_playlist_columns,
         select_output_option_index_u16, select_output_option_index_u32,
-        should_apply_custom_column_delete, OutputSettingsOptions,
+        should_apply_custom_column_delete, sidebar_width_from_window, OutputSettingsOptions,
     };
 
     #[test]
@@ -1956,6 +1967,14 @@ mod tests {
             slint_ui.contains("callback playlist_header_gap_at(int) -> int;"),
             "App window should expose gap hit test callback"
         );
+        assert!(
+            slint_ui.contains("in-out property <int> sidebar_width_px:"),
+            "Sidebar width should be controllable by viewport-driven logic"
+        );
+        assert!(
+            slint_ui.contains("min-width: 0px;"),
+            "Playlist pane should allow internal clipping instead of forcing sidebar shrink"
+        );
     }
 
     #[test]
@@ -1978,6 +1997,13 @@ mod tests {
         assert_eq!(resolve_playlist_header_gap_from_x(279, &widths), 2);
         assert_eq!(resolve_playlist_header_gap_from_x(285, &widths), 2);
         assert_eq!(resolve_playlist_header_gap_from_x(460, &widths), 3);
+    }
+
+    #[test]
+    fn test_sidebar_width_from_window_is_responsive_and_clamped() {
+        assert_eq!(sidebar_width_from_window(600), 180);
+        assert_eq!(sidebar_width_from_window(900), 216);
+        assert_eq!(sidebar_width_from_window(2000), 300);
     }
 
     #[test]

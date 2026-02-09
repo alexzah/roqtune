@@ -528,6 +528,7 @@ export component AppWindow inherits Window {
     in-out property <[int]> playlist_column_gap_positions_px: [];
     in-out property <int> playlist_columns_content_width_px: 0;
     in-out property <int> playlist_columns_available_width_px: 0;
+    in-out property <int> sidebar_width_px: 220;
 
     pure function playlist-column-width(index: int) -> length {
         if index >= 0 && index < root.playlist_column_widths_px.length {
@@ -932,9 +933,7 @@ export component AppWindow inherits Window {
             
             // Left Sidebar
             Rectangle {
-                horizontal-stretch: 1;
-                min-width: 150px;
-                max-width: 250px;
+                width: max(180px, min(300px, root.sidebar_width_px * 1px));
                 background: #202020;
                 
                 VerticalLayout {
@@ -1062,7 +1061,9 @@ export component AppWindow inherits Window {
             }
 
             Rectangle {
-                horizontal-stretch: 4;
+                horizontal-stretch: 1;
+                min-width: 0px;
+                clip: true;
                 background: #282828;
                 
                 VerticalLayout {
