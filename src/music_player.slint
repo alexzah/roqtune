@@ -479,7 +479,11 @@ component ControlActionButton inherits Rectangle {
         font-size: root.font-size-for-action(root.action-id);
         is-primary: root.primary-for-action(root.action-id);
         clicked => { root.invoked(root.action-id); }
-        right-clicked => { root.open-add-menu(root.cluster-id); }
+        right-clicked => {
+            if (root.layout-edit-mode) {
+                root.open-add-menu(root.cluster-id);
+            }
+        }
     }
 
     if root.action-id == 7 && root.playback-order-index == 2 : Rectangle {
@@ -545,7 +549,9 @@ component ButtonCluster inherits Rectangle {
         }
         empty-cluster-ta := TouchArea {
             pointer-event(event) => {
-                if (event.button == PointerEventButton.right && event.kind == PointerEventKind.down) {
+                if (root.layout-edit-mode
+                    && event.button == PointerEventButton.right
+                    && event.kind == PointerEventKind.down) {
                     root.request-add-menu(root.cluster-id);
                 }
             }
