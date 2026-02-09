@@ -2,6 +2,7 @@ mod audio_decoder;
 mod audio_player;
 mod config;
 mod db_manager;
+mod layout;
 mod playlist;
 mod playlist_manager;
 mod protocol;
@@ -16,9 +17,17 @@ use std::{
 
 use audio_decoder::AudioDecoder;
 use audio_player::AudioPlayer;
-use config::{BufferingConfig, Config, OutputConfig, PlaylistColumnConfig, UiConfig};
+use config::{
+    BufferingConfig, ButtonClusterInstanceConfig, Config, OutputConfig, PlaylistColumnConfig,
+    UiConfig,
+};
 use cpal::traits::{DeviceTrait, HostTrait};
 use db_manager::DbManager;
+use layout::{
+    add_root_leaf_if_empty, compute_tree_layout_metrics, delete_leaf, first_leaf_id,
+    replace_leaf_panel, sanitize_layout_config, set_split_ratio, split_leaf, LayoutConfig,
+    LayoutNode, LayoutPanelKind, SplitAxis, SPLITTER_THICKNESS_PX,
+};
 use log::{debug, info};
 use playlist::Playlist;
 use playlist_manager::PlaylistManager;
@@ -75,6 +84,10 @@ impl OutputRuntimeSignature {
         }
     }
 }
+
+const IMPORT_CLUSTER_PRESET: [i32; 1] = [1];
+const TRANSPORT_CLUSTER_PRESET: [i32; 5] = [2, 3, 4, 5, 6];
+const UTILITY_CLUSTER_PRESET: [i32; 4] = [7, 8, 9, 10];
 
 fn filter_common_u16(detected: &BTreeSet<u16>, common_values: &[u16], fallback: u16) -> Vec<u16> {
     let mut filtered: Vec<u16> = common_values
@@ -342,6 +355,13 @@ fn sanitize_config(config: Config) -> Config {
     let clamped_bits = config.output.bits_per_sample.clamp(8, 32);
     let clamped_window_width = config.ui.window_width.clamp(600, 10_000);
     let clamped_window_height = config.ui.window_height.clamp(400, 10_000);
+    let sanitized_layout = sanitize_layout_config(
+        &config.ui.layout,
+        clamped_window_width,
+        clamped_window_height,
+    );
+    let sanitized_button_cluster_instances =
+        sanitize_button_cluster_instances(&sanitized_layout, &config.ui.button_cluster_instances);
     let clamped_volume = config.ui.volume.clamp(0.0, 1.0);
     let clamped_low_watermark = config.buffering.player_low_watermark_ms.max(500);
     let clamped_target = config
@@ -365,6 +385,9 @@ fn sanitize_config(config: Config) -> Config {
         },
         ui: UiConfig {
             show_album_art: true,
+            show_layout_edit_intro: config.ui.show_layout_edit_intro,
+            layout: sanitized_layout,
+            button_cluster_instances: sanitized_button_cluster_instances,
             playlist_columns: sanitized_playlist_columns,
             window_width: clamped_window_width,
             window_height: clamped_window_height,
@@ -377,6 +400,103 @@ fn sanitize_config(config: Config) -> Config {
             decoder_request_chunk_ms: clamped_decoder_chunk,
         },
     }
+}
+
+fn collect_button_cluster_leaf_ids(node: &LayoutNode, out: &mut Vec<String>) {
+    match node {
+        LayoutNode::Leaf { id, panel } => {
+            if *panel == LayoutPanelKind::ButtonCluster {
+                out.push(id.clone());
+            }
+        }
+        LayoutNode::Split { first, second, .. } => {
+            collect_button_cluster_leaf_ids(first, out);
+            collect_button_cluster_leaf_ids(second, out);
+        }
+        LayoutNode::Empty => {}
+    }
+}
+
+fn button_cluster_leaf_ids(layout: &LayoutConfig) -> Vec<String> {
+    let mut ids = Vec::new();
+    collect_button_cluster_leaf_ids(&layout.root, &mut ids);
+    ids
+}
+
+fn collect_all_leaf_ids(node: &LayoutNode, out: &mut Vec<String>) {
+    match node {
+        LayoutNode::Leaf { id, .. } => out.push(id.clone()),
+        LayoutNode::Split { first, second, .. } => {
+            collect_all_leaf_ids(first, out);
+            collect_all_leaf_ids(second, out);
+        }
+        LayoutNode::Empty => {}
+    }
+}
+
+fn layout_leaf_ids(layout: &LayoutConfig) -> Vec<String> {
+    let mut ids = Vec::new();
+    collect_all_leaf_ids(&layout.root, &mut ids);
+    ids
+}
+
+fn newly_added_leaf_ids(previous_layout: &LayoutConfig, next_layout: &LayoutConfig) -> Vec<String> {
+    let previous_ids: HashSet<String> = layout_leaf_ids(previous_layout).into_iter().collect();
+    layout_leaf_ids(next_layout)
+        .into_iter()
+        .filter(|id| !previous_ids.contains(id))
+        .collect()
+}
+
+fn sanitize_button_actions(actions: &[i32]) -> Vec<i32> {
+    actions
+        .iter()
+        .copied()
+        .filter(|action| (1..=10).contains(action))
+        .collect()
+}
+
+fn default_button_cluster_actions_by_index(index: usize) -> Vec<i32> {
+    match index {
+        0 => IMPORT_CLUSTER_PRESET.to_vec(),
+        1 => TRANSPORT_CLUSTER_PRESET.to_vec(),
+        2 => UTILITY_CLUSTER_PRESET.to_vec(),
+        _ => Vec::new(),
+    }
+}
+
+fn sanitize_button_cluster_instances(
+    layout: &LayoutConfig,
+    instances: &[ButtonClusterInstanceConfig],
+) -> Vec<ButtonClusterInstanceConfig> {
+    let leaf_ids = button_cluster_leaf_ids(layout);
+    let had_existing_instances = !instances.is_empty();
+    let mut actions_by_leaf: HashMap<&str, Vec<i32>> = HashMap::new();
+    for instance in instances {
+        let leaf_id = instance.leaf_id.trim();
+        if leaf_id.is_empty() {
+            continue;
+        }
+        actions_by_leaf.insert(leaf_id, sanitize_button_actions(&instance.actions));
+    }
+
+    leaf_ids
+        .iter()
+        .enumerate()
+        .map(|(index, leaf_id)| ButtonClusterInstanceConfig {
+            leaf_id: leaf_id.clone(),
+            actions: actions_by_leaf
+                .get(leaf_id.as_str())
+                .cloned()
+                .unwrap_or_else(|| {
+                    if had_existing_instances {
+                        Vec::new()
+                    } else {
+                        default_button_cluster_actions_by_index(index)
+                    }
+                }),
+        })
+        .collect()
 }
 
 fn normalize_column_format(format: &str) -> String {
@@ -731,6 +851,234 @@ fn sidebar_width_from_window(window_width_px: u32) -> i32 {
     proportional.clamp(180, 300) as i32
 }
 
+fn workspace_size_snapshot(workspace_size: &Arc<Mutex<(u32, u32)>>) -> (u32, u32) {
+    let (width, height) = *workspace_size
+        .lock()
+        .expect("layout workspace size lock poisoned");
+    (width.max(1), height.max(1))
+}
+
+fn layout_panel_options() -> Vec<slint::SharedString> {
+    vec![
+        "None".into(),
+        "Button Cluster".into(),
+        "Transport Button Cluster".into(),
+        "Utility Button Cluster".into(),
+        "Volume Slider".into(),
+        "Seek Bar".into(),
+        "Playlist Switcher".into(),
+        "Track List".into(),
+        "Metadata Viewer".into(),
+        "Album Art Viewer".into(),
+        "Spacer".into(),
+        "Status Bar".into(),
+        "Import Button Cluster".into(),
+    ]
+}
+
+fn resolve_layout_panel_selection(panel_code: i32) -> (LayoutPanelKind, Option<Vec<i32>>) {
+    match panel_code {
+        2 => (
+            LayoutPanelKind::ButtonCluster,
+            Some(TRANSPORT_CLUSTER_PRESET.to_vec()),
+        ),
+        3 => (
+            LayoutPanelKind::ButtonCluster,
+            Some(UTILITY_CLUSTER_PRESET.to_vec()),
+        ),
+        12 => (
+            LayoutPanelKind::ButtonCluster,
+            Some(IMPORT_CLUSTER_PRESET.to_vec()),
+        ),
+        _ => (LayoutPanelKind::from_code(panel_code), None),
+    }
+}
+
+fn button_cluster_actions_for_leaf(
+    instances: &[ButtonClusterInstanceConfig],
+    leaf_id: &str,
+) -> Vec<i32> {
+    instances
+        .iter()
+        .find(|instance| instance.leaf_id == leaf_id)
+        .map(|instance| instance.actions.clone())
+        .unwrap_or_default()
+}
+
+fn upsert_button_cluster_actions_for_leaf(
+    instances: &mut Vec<ButtonClusterInstanceConfig>,
+    leaf_id: &str,
+    actions: Vec<i32>,
+) {
+    if let Some(existing) = instances
+        .iter_mut()
+        .find(|instance| instance.leaf_id == leaf_id)
+    {
+        existing.actions = sanitize_button_actions(&actions);
+        return;
+    }
+    instances.push(ButtonClusterInstanceConfig {
+        leaf_id: leaf_id.to_string(),
+        actions: sanitize_button_actions(&actions),
+    });
+}
+
+fn remove_button_cluster_instance_for_leaf(
+    instances: &mut Vec<ButtonClusterInstanceConfig>,
+    leaf_id: &str,
+) {
+    instances.retain(|instance| instance.leaf_id != leaf_id);
+}
+
+fn apply_control_cluster_menu_actions_for_leaf(ui: &AppWindow, config: &Config, leaf_id: &str) {
+    let actions = button_cluster_actions_for_leaf(&config.ui.button_cluster_instances, leaf_id);
+    ui.set_control_cluster_menu_actions(ModelRc::from(Rc::new(VecModel::from(actions))));
+}
+
+fn apply_button_cluster_views_to_ui(
+    ui: &AppWindow,
+    metrics: &layout::TreeLayoutMetrics,
+    config: &Config,
+) {
+    let views: Vec<LayoutButtonClusterPanelModel> = metrics
+        .leaves
+        .iter()
+        .filter(|leaf| leaf.panel == LayoutPanelKind::ButtonCluster)
+        .map(|leaf| LayoutButtonClusterPanelModel {
+            leaf_id: leaf.id.clone().into(),
+            x_px: leaf.x,
+            y_px: leaf.y,
+            width_px: leaf.width,
+            height_px: leaf.height,
+            visible: true,
+            actions: ModelRc::from(Rc::new(VecModel::from(button_cluster_actions_for_leaf(
+                &config.ui.button_cluster_instances,
+                &leaf.id,
+            )))),
+        })
+        .collect();
+    ui.set_layout_button_cluster_panels(ModelRc::from(Rc::new(VecModel::from(views))));
+}
+
+fn persist_config_file(config: &Config, path: &std::path::Path) {
+    match toml::to_string(config) {
+        Ok(config_text) => {
+            if let Err(err) = std::fs::write(path, config_text) {
+                log::error!("Failed to persist config to {}: {}", path.display(), err);
+            }
+        }
+        Err(err) => {
+            log::error!("Failed to serialize config: {}", err);
+        }
+    }
+}
+
+fn with_updated_layout(previous: &Config, layout: LayoutConfig) -> Config {
+    sanitize_config(Config {
+        output: previous.output.clone(),
+        ui: UiConfig {
+            show_album_art: previous.ui.show_album_art,
+            show_layout_edit_intro: previous.ui.show_layout_edit_intro,
+            layout,
+            button_cluster_instances: previous.ui.button_cluster_instances.clone(),
+            playlist_columns: previous.ui.playlist_columns.clone(),
+            window_width: previous.ui.window_width,
+            window_height: previous.ui.window_height,
+            volume: previous.ui.volume,
+        },
+        buffering: previous.buffering.clone(),
+    })
+}
+
+fn push_layout_undo_snapshot(undo_stack: &Arc<Mutex<Vec<LayoutConfig>>>, layout: &LayoutConfig) {
+    let mut stack = undo_stack.lock().expect("layout undo stack lock poisoned");
+    stack.push(layout.clone());
+    if stack.len() > 128 {
+        let overflow = stack.len() - 128;
+        stack.drain(0..overflow);
+    }
+}
+
+fn pop_layout_undo_snapshot(undo_stack: &Arc<Mutex<Vec<LayoutConfig>>>) -> Option<LayoutConfig> {
+    undo_stack
+        .lock()
+        .expect("layout undo stack lock poisoned")
+        .pop()
+}
+
+fn apply_layout_to_ui(
+    ui: &AppWindow,
+    config: &Config,
+    workspace_width_px: u32,
+    workspace_height_px: u32,
+) {
+    let sanitized_layout =
+        sanitize_layout_config(&config.ui.layout, workspace_width_px, workspace_height_px);
+    let splitter_thickness_px = if ui.get_layout_edit_mode() {
+        SPLITTER_THICKNESS_PX
+    } else {
+        0
+    };
+    let metrics = compute_tree_layout_metrics(
+        &sanitized_layout,
+        workspace_width_px,
+        workspace_height_px,
+        splitter_thickness_px,
+    );
+
+    let leaf_ids: Vec<slint::SharedString> = metrics
+        .leaves
+        .iter()
+        .map(|leaf| leaf.id.clone().into())
+        .collect();
+    let region_panel_codes: Vec<i32> = metrics
+        .leaves
+        .iter()
+        .map(|leaf| leaf.panel.to_code())
+        .collect();
+    let region_x: Vec<i32> = metrics.leaves.iter().map(|leaf| leaf.x).collect();
+    let region_y: Vec<i32> = metrics.leaves.iter().map(|leaf| leaf.y).collect();
+    let region_widths: Vec<i32> = metrics.leaves.iter().map(|leaf| leaf.width).collect();
+    let region_heights: Vec<i32> = metrics.leaves.iter().map(|leaf| leaf.height).collect();
+    let region_visible: Vec<bool> = vec![true; metrics.leaves.len()];
+
+    let selected_leaf_index = sanitized_layout
+        .selected_leaf_id
+        .as_ref()
+        .and_then(|selected| metrics.leaves.iter().position(|leaf| &leaf.id == selected))
+        .map(|index| index as i32)
+        .unwrap_or(-1);
+
+    let splitter_model: Vec<LayoutSplitterModel> = metrics
+        .splitters
+        .iter()
+        .map(|splitter| LayoutSplitterModel {
+            id: splitter.id.clone().into(),
+            axis: splitter.axis.to_code(),
+            x_px: splitter.x,
+            y_px: splitter.y,
+            width_px: splitter.width,
+            height_px: splitter.height,
+            ratio: splitter.ratio,
+            min_ratio: splitter.min_ratio,
+            max_ratio: splitter.max_ratio,
+            track_start_px: splitter.track_start_px,
+            track_length_px: splitter.track_length_px,
+        })
+        .collect();
+
+    ui.set_layout_leaf_ids(ModelRc::from(Rc::new(VecModel::from(leaf_ids))));
+    ui.set_layout_region_panel_kinds(ModelRc::from(Rc::new(VecModel::from(region_panel_codes))));
+    ui.set_layout_region_x_px(ModelRc::from(Rc::new(VecModel::from(region_x))));
+    ui.set_layout_region_y_px(ModelRc::from(Rc::new(VecModel::from(region_y))));
+    ui.set_layout_region_width_px(ModelRc::from(Rc::new(VecModel::from(region_widths))));
+    ui.set_layout_region_height_px(ModelRc::from(Rc::new(VecModel::from(region_heights))));
+    ui.set_layout_region_visible(ModelRc::from(Rc::new(VecModel::from(region_visible))));
+    ui.set_layout_splitters(ModelRc::from(Rc::new(VecModel::from(splitter_model))));
+    ui.set_layout_selected_leaf_index(selected_leaf_index);
+    apply_button_cluster_views_to_ui(ui, &metrics, config);
+}
+
 fn apply_playlist_columns_to_ui(ui: &AppWindow, config: &Config) {
     let visible_headers: Vec<slint::SharedString> = config
         .ui
@@ -775,10 +1123,19 @@ fn should_apply_custom_column_delete(
     pending_index >= 0 && pending_index as usize == requested_index
 }
 
-fn apply_config_to_ui(ui: &AppWindow, config: &Config, output_options: &OutputSettingsOptions) {
+fn apply_config_to_ui(
+    ui: &AppWindow,
+    config: &Config,
+    output_options: &OutputSettingsOptions,
+    workspace_width_px: u32,
+    workspace_height_px: u32,
+) {
     ui.set_show_album_art(true);
     ui.set_volume_level(config.ui.volume);
     ui.set_sidebar_width_px(sidebar_width_from_window(config.ui.window_width));
+    ui.set_layout_panel_options(ModelRc::from(Rc::new(VecModel::from(
+        layout_panel_options(),
+    ))));
 
     let auto_device_label = if output_options.auto_device_name.is_empty() {
         "Unavailable".to_string()
@@ -877,6 +1234,7 @@ fn apply_config_to_ui(ui: &AppWindow, config: &Config, output_options: &OutputSe
     ui.set_settings_sample_rate_custom_value(config.output.sample_rate_khz.to_string().into());
     ui.set_settings_bits_per_sample_custom_value(config.output.bits_per_sample.to_string().into());
     apply_playlist_columns_to_ui(ui, config);
+    apply_layout_to_ui(ui, config, workspace_width_px, workspace_height_px);
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -938,11 +1296,24 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         config.ui.window_height as f32,
     ));
     ui.set_sidebar_width_px(sidebar_width_from_window(config.ui.window_width));
+    let initial_workspace_width_px = config.ui.window_width.max(1);
+    let initial_workspace_height_px = config.ui.window_height.max(1);
 
     setup_app_state_associations(&ui, &ui_state);
-    apply_config_to_ui(&ui, &config, &initial_output_options);
+    apply_config_to_ui(
+        &ui,
+        &config,
+        &initial_output_options,
+        initial_workspace_width_px,
+        initial_workspace_height_px,
+    );
     let config_state = Arc::new(Mutex::new(config.clone()));
     let output_options = Arc::new(Mutex::new(initial_output_options.clone()));
+    let layout_workspace_size = Arc::new(Mutex::new((
+        initial_workspace_width_px,
+        initial_workspace_height_px,
+    )));
+    let layout_undo_stack: Arc<Mutex<Vec<LayoutConfig>>> = Arc::new(Mutex::new(Vec::new()));
     let last_runtime_signature = Arc::new(Mutex::new(OutputRuntimeSignature::from_output(
         &runtime_config.output,
     )));
@@ -1304,24 +1675,609 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let config_state_clone = Arc::clone(&config_state);
     let ui_handle_clone = ui.as_weak().clone();
+    ui.on_open_control_cluster_menu_for_leaf(move |leaf_id, x_px, y_px| {
+        if leaf_id.trim().is_empty() {
+            return;
+        }
+        let config_snapshot = {
+            let state = config_state_clone
+                .lock()
+                .expect("config state lock poisoned");
+            state.clone()
+        };
+        if let Some(ui) = ui_handle_clone.upgrade() {
+            ui.set_control_cluster_menu_target_leaf_id(leaf_id.clone());
+            ui.set_control_cluster_menu_x(x_px.max(8) as f32);
+            ui.set_control_cluster_menu_y(y_px.max(8) as f32);
+            apply_control_cluster_menu_actions_for_leaf(&ui, &config_snapshot, &leaf_id);
+            ui.set_show_control_cluster_menu(true);
+        }
+    });
+
+    let config_state_clone = Arc::clone(&config_state);
+    let layout_workspace_size_clone = Arc::clone(&layout_workspace_size);
+    let config_file_clone = config_file.clone();
+    let ui_handle_clone = ui.as_weak().clone();
+    ui.on_add_control_cluster_button(move |leaf_id, action_id| {
+        if leaf_id.trim().is_empty() || !(1..=10).contains(&action_id) {
+            return;
+        }
+        let (next_config, workspace_width_px, workspace_height_px) = {
+            let mut state = config_state_clone
+                .lock()
+                .expect("config state lock poisoned");
+            let mut next_config = state.clone();
+            let mut actions =
+                button_cluster_actions_for_leaf(&next_config.ui.button_cluster_instances, &leaf_id);
+            actions.push(action_id);
+            upsert_button_cluster_actions_for_leaf(
+                &mut next_config.ui.button_cluster_instances,
+                &leaf_id,
+                actions,
+            );
+            next_config = sanitize_config(next_config);
+            *state = next_config.clone();
+            let (workspace_width_px, workspace_height_px) =
+                workspace_size_snapshot(&layout_workspace_size_clone);
+            (next_config, workspace_width_px, workspace_height_px)
+        };
+        persist_config_file(&next_config, &config_file_clone);
+        if let Some(ui) = ui_handle_clone.upgrade() {
+            apply_layout_to_ui(&ui, &next_config, workspace_width_px, workspace_height_px);
+            ui.set_control_cluster_menu_target_leaf_id(leaf_id.clone());
+            apply_control_cluster_menu_actions_for_leaf(&ui, &next_config, &leaf_id);
+            ui.set_show_control_cluster_menu(true);
+        }
+    });
+
+    let config_state_clone = Arc::clone(&config_state);
+    let layout_workspace_size_clone = Arc::clone(&layout_workspace_size);
+    let config_file_clone = config_file.clone();
+    let ui_handle_clone = ui.as_weak().clone();
+    ui.on_remove_control_cluster_button(move |leaf_id, button_index| {
+        if leaf_id.trim().is_empty() || button_index < 0 {
+            return;
+        }
+        let index = button_index as usize;
+        let (next_config, workspace_width_px, workspace_height_px) = {
+            let mut state = config_state_clone
+                .lock()
+                .expect("config state lock poisoned");
+            let mut next_config = state.clone();
+            let mut actions =
+                button_cluster_actions_for_leaf(&next_config.ui.button_cluster_instances, &leaf_id);
+            if index >= actions.len() {
+                return;
+            }
+            actions.remove(index);
+            upsert_button_cluster_actions_for_leaf(
+                &mut next_config.ui.button_cluster_instances,
+                &leaf_id,
+                actions,
+            );
+            next_config = sanitize_config(next_config);
+            *state = next_config.clone();
+            let (workspace_width_px, workspace_height_px) =
+                workspace_size_snapshot(&layout_workspace_size_clone);
+            (next_config, workspace_width_px, workspace_height_px)
+        };
+        persist_config_file(&next_config, &config_file_clone);
+        if let Some(ui) = ui_handle_clone.upgrade() {
+            apply_layout_to_ui(&ui, &next_config, workspace_width_px, workspace_height_px);
+            ui.set_control_cluster_menu_target_leaf_id(leaf_id.clone());
+            apply_control_cluster_menu_actions_for_leaf(&ui, &next_config, &leaf_id);
+            ui.set_show_control_cluster_menu(true);
+        }
+    });
+
+    let config_state_clone = Arc::clone(&config_state);
+    let layout_workspace_size_clone = Arc::clone(&layout_workspace_size);
+    let ui_handle_clone = ui.as_weak().clone();
     ui.on_window_resized(move |width_px, height_px| {
         let width = (width_px.max(600) as u32).min(10_000);
         let height = (height_px.max(400) as u32).min(10_000);
+        let workspace_width_px = width.max(1);
+        let workspace_height_px = height.max(1);
+        {
+            let mut workspace_size = layout_workspace_size_clone
+                .lock()
+                .expect("layout workspace size lock poisoned");
+            *workspace_size = (workspace_width_px, workspace_height_px);
+        }
+        let config_snapshot = {
+            let mut state = config_state_clone
+                .lock()
+                .expect("config state lock poisoned");
+            if state.ui.window_width != width || state.ui.window_height != height {
+                state.ui.window_width = width;
+                state.ui.window_height = height;
+            }
+            state.clone()
+        };
         if let Some(ui) = ui_handle_clone.upgrade() {
             ui.set_sidebar_width_px(sidebar_width_from_window(width));
+            apply_layout_to_ui(
+                &ui,
+                &config_snapshot,
+                workspace_width_px,
+                workspace_height_px,
+            );
         }
-        let mut state = config_state_clone
-            .lock()
-            .expect("config state lock poisoned");
-        if state.ui.window_width != width || state.ui.window_height != height {
-            state.ui.window_width = width;
-            state.ui.window_height = height;
+    });
+
+    let config_state_clone = Arc::clone(&config_state);
+    let layout_workspace_size_clone = Arc::clone(&layout_workspace_size);
+    let ui_handle_clone = ui.as_weak().clone();
+    ui.on_layout_workspace_resized(move |width_px, height_px| {
+        let workspace_width_px = width_px.max(1) as u32;
+        let workspace_height_px = height_px.max(1) as u32;
+        {
+            let mut workspace_size = layout_workspace_size_clone
+                .lock()
+                .expect("layout workspace size lock poisoned");
+            *workspace_size = (workspace_width_px, workspace_height_px);
+        }
+        let config_snapshot = {
+            let state = config_state_clone
+                .lock()
+                .expect("config state lock poisoned");
+            state.clone()
+        };
+        if let Some(ui) = ui_handle_clone.upgrade() {
+            apply_layout_to_ui(
+                &ui,
+                &config_snapshot,
+                workspace_width_px,
+                workspace_height_px,
+            );
+        }
+    });
+
+    let config_state_clone = Arc::clone(&config_state);
+    let config_file_clone = config_file.clone();
+    let layout_workspace_size_clone = Arc::clone(&layout_workspace_size);
+    let ui_handle_clone = ui.as_weak().clone();
+    ui.on_open_layout_editor(move || {
+        if let Some(ui) = ui_handle_clone.upgrade() {
+            if ui.get_layout_edit_mode() {
+                ui.set_show_layout_editor_dialog(false);
+                ui.set_show_layout_leaf_context_menu(false);
+                ui.set_show_layout_splitter_context_menu(false);
+                ui.set_layout_edit_mode(false);
+                let (workspace_width_px, workspace_height_px) =
+                    workspace_size_snapshot(&layout_workspace_size_clone);
+                let config_snapshot = {
+                    let state = config_state_clone
+                        .lock()
+                        .expect("config state lock poisoned");
+                    state.clone()
+                };
+                apply_layout_to_ui(
+                    &ui,
+                    &config_snapshot,
+                    workspace_width_px,
+                    workspace_height_px,
+                );
+                return;
+            }
+        }
+
+        let (workspace_width_px, workspace_height_px) =
+            workspace_size_snapshot(&layout_workspace_size_clone);
+        let next = {
+            let mut state = config_state_clone
+                .lock()
+                .expect("config state lock poisoned");
+            let mut layout =
+                sanitize_layout_config(&state.ui.layout, workspace_width_px, workspace_height_px);
+            if layout.selected_leaf_id.is_none() {
+                layout.selected_leaf_id = first_leaf_id(&layout.root);
+            }
+            state.ui.layout = layout;
+            state.clone()
+        };
+        if let Some(ui) = ui_handle_clone.upgrade() {
+            ui.set_layout_editor_replace_panel_kind(LayoutPanelKind::Spacer.to_code());
+            ui.set_layout_editor_split_panel_kind(LayoutPanelKind::Spacer.to_code());
+            ui.set_layout_editor_split_axis(SplitAxis::Vertical.to_code());
+            ui.set_layout_editor_new_root_panel_kind(LayoutPanelKind::TrackList.to_code());
+            ui.set_layout_active_splitter_index(-1);
+            ui.set_show_layout_leaf_context_menu(false);
+            ui.set_show_layout_splitter_context_menu(false);
+            ui.set_layout_intro_dont_show_again(false);
+            ui.set_layout_edit_mode(true);
+            ui.set_show_layout_editor_dialog(next.ui.show_layout_edit_intro);
+            apply_layout_to_ui(&ui, &next, workspace_width_px, workspace_height_px);
+        }
+        persist_config_file(&next, &config_file_clone);
+    });
+
+    let config_state_clone = Arc::clone(&config_state);
+    let config_file_clone = config_file.clone();
+    ui.on_layout_intro_proceed(move |dont_show_again| {
+        if !dont_show_again {
+            return;
+        }
+        let next = {
+            let mut state = config_state_clone
+                .lock()
+                .expect("config state lock poisoned");
+            if state.ui.show_layout_edit_intro {
+                state.ui.show_layout_edit_intro = false;
+            }
+            state.clone()
+        };
+        persist_config_file(&next, &config_file_clone);
+    });
+
+    let config_state_clone = Arc::clone(&config_state);
+    let config_file_clone = config_file.clone();
+    let layout_workspace_size_clone = Arc::clone(&layout_workspace_size);
+    let ui_handle_clone = ui.as_weak().clone();
+    ui.on_layout_intro_cancel(move |dont_show_again| {
+        let (workspace_width_px, workspace_height_px) =
+            workspace_size_snapshot(&layout_workspace_size_clone);
+        let next = {
+            let mut state = config_state_clone
+                .lock()
+                .expect("config state lock poisoned");
+            if dont_show_again && state.ui.show_layout_edit_intro {
+                state.ui.show_layout_edit_intro = false;
+            }
+            state.clone()
+        };
+        if let Some(ui) = ui_handle_clone.upgrade() {
+            ui.set_layout_edit_mode(false);
+            ui.set_show_layout_leaf_context_menu(false);
+            ui.set_show_layout_splitter_context_menu(false);
+            apply_layout_to_ui(&ui, &next, workspace_width_px, workspace_height_px);
+        }
+        persist_config_file(&next, &config_file_clone);
+    });
+
+    let config_state_clone = Arc::clone(&config_state);
+    let layout_workspace_size_clone = Arc::clone(&layout_workspace_size);
+    let ui_handle_clone = ui.as_weak().clone();
+    ui.on_layout_select_leaf(move |leaf_id| {
+        let (workspace_width_px, workspace_height_px) =
+            workspace_size_snapshot(&layout_workspace_size_clone);
+        let next = {
+            let mut state = config_state_clone
+                .lock()
+                .expect("config state lock poisoned");
+            let mut layout =
+                sanitize_layout_config(&state.ui.layout, workspace_width_px, workspace_height_px);
+            layout.selected_leaf_id = if leaf_id.trim().is_empty() {
+                None
+            } else {
+                Some(leaf_id.to_string())
+            };
+            state.ui.layout = layout;
+            state.clone()
+        };
+        if let Some(ui) = ui_handle_clone.upgrade() {
+            apply_layout_to_ui(&ui, &next, workspace_width_px, workspace_height_px);
+        }
+    });
+
+    let config_state_clone = Arc::clone(&config_state);
+    let layout_undo_stack_clone = Arc::clone(&layout_undo_stack);
+    let config_file_clone = config_file.clone();
+    let layout_workspace_size_clone = Arc::clone(&layout_workspace_size);
+    let ui_handle_clone = ui.as_weak().clone();
+    ui.on_layout_replace_selected_leaf(move |panel_code| {
+        let (workspace_width_px, workspace_height_px) =
+            workspace_size_snapshot(&layout_workspace_size_clone);
+        let previous = {
+            let state = config_state_clone
+                .lock()
+                .expect("config state lock poisoned");
+            state.clone()
+        };
+        let selected_leaf_id = previous.ui.layout.selected_leaf_id.clone();
+        let Some(selected_leaf_id) = selected_leaf_id else {
+            return;
+        };
+        let (panel, preset_actions) = resolve_layout_panel_selection(panel_code);
+        let Some(mut updated_layout) =
+            replace_leaf_panel(&previous.ui.layout, &selected_leaf_id, panel)
+        else {
+            return;
+        };
+        updated_layout.selected_leaf_id = if panel == LayoutPanelKind::None {
+            first_leaf_id(&updated_layout.root)
+        } else {
+            Some(selected_leaf_id.clone())
+        };
+        let mut next = with_updated_layout(&previous, updated_layout);
+        if panel == LayoutPanelKind::ButtonCluster {
+            if let Some(actions) = preset_actions {
+                upsert_button_cluster_actions_for_leaf(
+                    &mut next.ui.button_cluster_instances,
+                    &selected_leaf_id,
+                    actions,
+                );
+            }
+        } else {
+            remove_button_cluster_instance_for_leaf(
+                &mut next.ui.button_cluster_instances,
+                &selected_leaf_id,
+            );
+        }
+        next = sanitize_config(next);
+        push_layout_undo_snapshot(&layout_undo_stack_clone, &previous.ui.layout);
+        {
+            let mut state = config_state_clone
+                .lock()
+                .expect("config state lock poisoned");
+            *state = next.clone();
+        }
+        persist_config_file(&next, &config_file_clone);
+        if let Some(ui) = ui_handle_clone.upgrade() {
+            apply_layout_to_ui(&ui, &next, workspace_width_px, workspace_height_px);
+        }
+    });
+
+    let config_state_clone = Arc::clone(&config_state);
+    let layout_undo_stack_clone = Arc::clone(&layout_undo_stack);
+    let config_file_clone = config_file.clone();
+    let layout_workspace_size_clone = Arc::clone(&layout_workspace_size);
+    let ui_handle_clone = ui.as_weak().clone();
+    ui.on_layout_split_selected_leaf(move |axis_code, panel_code| {
+        let (workspace_width_px, workspace_height_px) =
+            workspace_size_snapshot(&layout_workspace_size_clone);
+        let previous = {
+            let state = config_state_clone
+                .lock()
+                .expect("config state lock poisoned");
+            state.clone()
+        };
+        let Some(selected_leaf_id) = previous.ui.layout.selected_leaf_id.clone() else {
+            return;
+        };
+        let axis = if axis_code == SplitAxis::Horizontal.to_code() {
+            SplitAxis::Horizontal
+        } else {
+            SplitAxis::Vertical
+        };
+        let (panel, preset_actions) = resolve_layout_panel_selection(panel_code);
+        let Some(mut updated_layout) =
+            split_leaf(&previous.ui.layout, &selected_leaf_id, axis, panel)
+        else {
+            return;
+        };
+        let added_leaf_ids = newly_added_leaf_ids(&previous.ui.layout, &updated_layout);
+        let added_leaf_id = added_leaf_ids.first().cloned();
+        updated_layout.selected_leaf_id = if panel == LayoutPanelKind::None {
+            Some(selected_leaf_id.clone())
+        } else {
+            added_leaf_id
+                .clone()
+                .or_else(|| first_leaf_id(&updated_layout.root))
+        };
+        let mut next = with_updated_layout(&previous, updated_layout);
+        if panel == LayoutPanelKind::ButtonCluster {
+            if let (Some(new_leaf_id), Some(actions)) = (added_leaf_id, preset_actions) {
+                upsert_button_cluster_actions_for_leaf(
+                    &mut next.ui.button_cluster_instances,
+                    &new_leaf_id,
+                    actions,
+                );
+            }
+        }
+        next = sanitize_config(next);
+        push_layout_undo_snapshot(&layout_undo_stack_clone, &previous.ui.layout);
+        {
+            let mut state = config_state_clone
+                .lock()
+                .expect("config state lock poisoned");
+            *state = next.clone();
+        }
+        persist_config_file(&next, &config_file_clone);
+        if let Some(ui) = ui_handle_clone.upgrade() {
+            apply_layout_to_ui(&ui, &next, workspace_width_px, workspace_height_px);
+        }
+    });
+
+    let config_state_clone = Arc::clone(&config_state);
+    let layout_undo_stack_clone = Arc::clone(&layout_undo_stack);
+    let config_file_clone = config_file.clone();
+    let layout_workspace_size_clone = Arc::clone(&layout_workspace_size);
+    let ui_handle_clone = ui.as_weak().clone();
+    ui.on_layout_delete_selected_leaf(move || {
+        let (workspace_width_px, workspace_height_px) =
+            workspace_size_snapshot(&layout_workspace_size_clone);
+        let previous = {
+            let state = config_state_clone
+                .lock()
+                .expect("config state lock poisoned");
+            state.clone()
+        };
+        let Some(selected_leaf_id) = previous.ui.layout.selected_leaf_id.clone() else {
+            return;
+        };
+        let Some(mut updated_layout) = delete_leaf(&previous.ui.layout, &selected_leaf_id) else {
+            return;
+        };
+        updated_layout.selected_leaf_id = first_leaf_id(&updated_layout.root);
+        let next = with_updated_layout(&previous, updated_layout);
+        push_layout_undo_snapshot(&layout_undo_stack_clone, &previous.ui.layout);
+        {
+            let mut state = config_state_clone
+                .lock()
+                .expect("config state lock poisoned");
+            *state = next.clone();
+        }
+        persist_config_file(&next, &config_file_clone);
+        if let Some(ui) = ui_handle_clone.upgrade() {
+            apply_layout_to_ui(&ui, &next, workspace_width_px, workspace_height_px);
+        }
+    });
+
+    let config_state_clone = Arc::clone(&config_state);
+    let layout_undo_stack_clone = Arc::clone(&layout_undo_stack);
+    let config_file_clone = config_file.clone();
+    let layout_workspace_size_clone = Arc::clone(&layout_workspace_size);
+    let ui_handle_clone = ui.as_weak().clone();
+    ui.on_layout_add_root_leaf(move |panel_code| {
+        let (panel, preset_actions) = resolve_layout_panel_selection(panel_code);
+        let (workspace_width_px, workspace_height_px) =
+            workspace_size_snapshot(&layout_workspace_size_clone);
+        let previous = {
+            let state = config_state_clone
+                .lock()
+                .expect("config state lock poisoned");
+            state.clone()
+        };
+        let mut updated_layout = add_root_leaf_if_empty(&previous.ui.layout, panel);
+        let added_leaf_ids = newly_added_leaf_ids(&previous.ui.layout, &updated_layout);
+        let added_leaf_id = added_leaf_ids.first().cloned();
+        updated_layout.selected_leaf_id = first_leaf_id(&updated_layout.root);
+        let mut next = with_updated_layout(&previous, updated_layout);
+        if panel == LayoutPanelKind::ButtonCluster {
+            if let (Some(new_leaf_id), Some(actions)) = (added_leaf_id, preset_actions) {
+                upsert_button_cluster_actions_for_leaf(
+                    &mut next.ui.button_cluster_instances,
+                    &new_leaf_id,
+                    actions,
+                );
+            }
+        }
+        next = sanitize_config(next);
+        push_layout_undo_snapshot(&layout_undo_stack_clone, &previous.ui.layout);
+        {
+            let mut state = config_state_clone
+                .lock()
+                .expect("config state lock poisoned");
+            *state = next.clone();
+        }
+        persist_config_file(&next, &config_file_clone);
+        if let Some(ui) = ui_handle_clone.upgrade() {
+            apply_layout_to_ui(&ui, &next, workspace_width_px, workspace_height_px);
+        }
+    });
+
+    let config_state_clone = Arc::clone(&config_state);
+    let layout_workspace_size_clone = Arc::clone(&layout_workspace_size);
+    let ui_handle_clone = ui.as_weak().clone();
+    ui.on_preview_layout_splitter_ratio(move |split_id, ratio| {
+        let (workspace_width_px, workspace_height_px) =
+            workspace_size_snapshot(&layout_workspace_size_clone);
+        let snapshot = {
+            let state = config_state_clone
+                .lock()
+                .expect("config state lock poisoned");
+            state.clone()
+        };
+        let Some(updated_layout) = set_split_ratio(&snapshot.ui.layout, &split_id, ratio) else {
+            return;
+        };
+        let preview_config = with_updated_layout(&snapshot, updated_layout);
+        if let Some(ui) = ui_handle_clone.upgrade() {
+            apply_layout_to_ui(
+                &ui,
+                &preview_config,
+                workspace_width_px,
+                workspace_height_px,
+            );
+        }
+    });
+
+    let config_state_clone = Arc::clone(&config_state);
+    let layout_undo_stack_clone = Arc::clone(&layout_undo_stack);
+    let config_file_clone = config_file.clone();
+    let layout_workspace_size_clone = Arc::clone(&layout_workspace_size);
+    let ui_handle_clone = ui.as_weak().clone();
+    ui.on_commit_layout_splitter_ratio(move |split_id, ratio| {
+        let (workspace_width_px, workspace_height_px) =
+            workspace_size_snapshot(&layout_workspace_size_clone);
+        let previous = {
+            let state = config_state_clone
+                .lock()
+                .expect("config state lock poisoned");
+            state.clone()
+        };
+        let Some(updated_layout) = set_split_ratio(&previous.ui.layout, &split_id, ratio) else {
+            return;
+        };
+        let next = with_updated_layout(&previous, updated_layout);
+        push_layout_undo_snapshot(&layout_undo_stack_clone, &previous.ui.layout);
+        {
+            let mut state = config_state_clone
+                .lock()
+                .expect("config state lock poisoned");
+            *state = next.clone();
+        }
+        persist_config_file(&next, &config_file_clone);
+        if let Some(ui) = ui_handle_clone.upgrade() {
+            apply_layout_to_ui(&ui, &next, workspace_width_px, workspace_height_px);
+        }
+    });
+
+    let config_state_clone = Arc::clone(&config_state);
+    let layout_undo_stack_clone = Arc::clone(&layout_undo_stack);
+    let config_file_clone = config_file.clone();
+    let layout_workspace_size_clone = Arc::clone(&layout_workspace_size);
+    let ui_handle_clone = ui.as_weak().clone();
+    ui.on_layout_undo_last_action(move || {
+        let Some(previous_layout) = pop_layout_undo_snapshot(&layout_undo_stack_clone) else {
+            return;
+        };
+        let (workspace_width_px, workspace_height_px) =
+            workspace_size_snapshot(&layout_workspace_size_clone);
+        let current = {
+            let state = config_state_clone
+                .lock()
+                .expect("config state lock poisoned");
+            state.clone()
+        };
+        let next = with_updated_layout(&current, previous_layout);
+        {
+            let mut state = config_state_clone
+                .lock()
+                .expect("config state lock poisoned");
+            *state = next.clone();
+        }
+        persist_config_file(&next, &config_file_clone);
+        if let Some(ui) = ui_handle_clone.upgrade() {
+            apply_layout_to_ui(&ui, &next, workspace_width_px, workspace_height_px);
+        }
+    });
+
+    let config_state_clone = Arc::clone(&config_state);
+    let layout_undo_stack_clone = Arc::clone(&layout_undo_stack);
+    let config_file_clone = config_file.clone();
+    let layout_workspace_size_clone = Arc::clone(&layout_workspace_size);
+    let ui_handle_clone = ui.as_weak().clone();
+    ui.on_reset_layout_default(move || {
+        let (workspace_width_px, workspace_height_px) =
+            workspace_size_snapshot(&layout_workspace_size_clone);
+        let previous = {
+            let state = config_state_clone
+                .lock()
+                .expect("config state lock poisoned");
+            state.clone()
+        };
+        let mut reset_layout = LayoutConfig::default();
+        reset_layout.selected_leaf_id = first_leaf_id(&reset_layout.root);
+        let next = with_updated_layout(&previous, reset_layout);
+        push_layout_undo_snapshot(&layout_undo_stack_clone, &previous.ui.layout);
+        {
+            let mut state = config_state_clone
+                .lock()
+                .expect("config state lock poisoned");
+            *state = next.clone();
+        }
+        persist_config_file(&next, &config_file_clone);
+        if let Some(ui) = ui_handle_clone.upgrade() {
+            apply_layout_to_ui(&ui, &next, workspace_width_px, workspace_height_px);
         }
     });
 
     // Wire up settings open handler
     let config_state_clone = Arc::clone(&config_state);
     let output_options_clone = Arc::clone(&output_options);
+    let layout_workspace_size_clone = Arc::clone(&layout_workspace_size);
     let ui_handle_clone = ui.as_weak().clone();
     ui.on_open_settings(move || {
         let current_config = {
@@ -1336,8 +2292,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 .expect("output options lock poisoned");
             options.clone()
         };
+        let (workspace_width_px, workspace_height_px) =
+            workspace_size_snapshot(&layout_workspace_size_clone);
         if let Some(ui) = ui_handle_clone.upgrade() {
-            apply_config_to_ui(&ui, &current_config, &options_snapshot);
+            apply_config_to_ui(
+                &ui,
+                &current_config,
+                &options_snapshot,
+                workspace_width_px,
+                workspace_height_px,
+            );
             ui.set_show_settings_dialog(true);
         }
     });
@@ -1348,6 +2312,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let output_options_clone = Arc::clone(&output_options);
     let last_runtime_signature_clone = Arc::clone(&last_runtime_signature);
     let config_file_clone = config_file.clone();
+    let layout_workspace_size_clone = Arc::clone(&layout_workspace_size);
     let ui_handle_clone = ui.as_weak().clone();
     ui.on_apply_settings(
         move |output_device_index,
@@ -1446,6 +2411,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 },
                 ui: UiConfig {
                     show_album_art: true,
+                    show_layout_edit_intro: previous_config.ui.show_layout_edit_intro,
+                    layout: previous_config.ui.layout.clone(),
+                    button_cluster_instances: previous_config.ui.button_cluster_instances.clone(),
                     playlist_columns: previous_config.ui.playlist_columns.clone(),
                     window_width: previous_config.ui.window_width,
                     window_height: previous_config.ui.window_height,
@@ -1454,8 +2422,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 buffering: previous_config.buffering.clone(),
             });
 
+            let (workspace_width_px, workspace_height_px) =
+                workspace_size_snapshot(&layout_workspace_size_clone);
             if let Some(ui) = ui_handle_clone.upgrade() {
-                apply_config_to_ui(&ui, &next_config, &options_snapshot);
+                apply_config_to_ui(
+                    &ui,
+                    &next_config,
+                    &options_snapshot,
+                    workspace_width_px,
+                    workspace_height_px,
+                );
             }
 
             {
@@ -1525,6 +2501,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             output: previous_config.output.clone(),
             ui: UiConfig {
                 show_album_art: previous_config.ui.show_album_art,
+                show_layout_edit_intro: previous_config.ui.show_layout_edit_intro,
+                layout: previous_config.ui.layout.clone(),
+                button_cluster_instances: previous_config.ui.button_cluster_instances.clone(),
                 playlist_columns: updated_columns,
                 window_width: previous_config.ui.window_width,
                 window_height: previous_config.ui.window_height,
@@ -1620,6 +2599,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             output: previous_config.output.clone(),
             ui: UiConfig {
                 show_album_art: previous_config.ui.show_album_art,
+                show_layout_edit_intro: previous_config.ui.show_layout_edit_intro,
+                layout: previous_config.ui.layout.clone(),
+                button_cluster_instances: previous_config.ui.button_cluster_instances.clone(),
                 playlist_columns: updated_columns,
                 window_width: previous_config.ui.window_width,
                 window_height: previous_config.ui.window_height,
@@ -1717,6 +2699,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             output: previous_config.output.clone(),
             ui: UiConfig {
                 show_album_art: previous_config.ui.show_album_art,
+                show_layout_edit_intro: previous_config.ui.show_layout_edit_intro,
+                layout: previous_config.ui.layout.clone(),
+                button_cluster_instances: previous_config.ui.button_cluster_instances.clone(),
                 playlist_columns: updated_columns,
                 window_width: previous_config.ui.window_width,
                 window_height: previous_config.ui.window_height,
@@ -1808,6 +2793,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             output: previous_config.output.clone(),
             ui: UiConfig {
                 show_album_art: previous_config.ui.show_album_art,
+                show_layout_edit_intro: previous_config.ui.show_layout_edit_intro,
+                layout: previous_config.ui.layout.clone(),
+                button_cluster_instances: previous_config.ui.button_cluster_instances.clone(),
                 playlist_columns: updated_columns,
                 window_width: previous_config.ui.window_width,
                 window_height: previous_config.ui.window_height,
@@ -1957,6 +2945,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let config_state_clone = Arc::clone(&config_state);
     let output_options_clone = Arc::clone(&output_options);
     let ui_handle_clone = ui.as_weak().clone();
+    let layout_workspace_size_clone = Arc::clone(&layout_workspace_size);
     let last_runtime_signature_clone = Arc::clone(&last_runtime_signature);
     thread::spawn(move || loop {
         match device_event_receiver.blocking_recv() {
@@ -1996,9 +2985,17 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 let ui_weak = ui_handle_clone.clone();
                 let config_for_ui = persisted_config.clone();
                 let options_for_ui = detected_options.clone();
+                let (workspace_width_px, workspace_height_px) =
+                    workspace_size_snapshot(&layout_workspace_size_clone);
                 let _ = slint::invoke_from_event_loop(move || {
                     if let Some(ui) = ui_weak.upgrade() {
-                        apply_config_to_ui(&ui, &config_for_ui, &options_for_ui);
+                        apply_config_to_ui(
+                            &ui,
+                            &config_for_ui,
+                            &options_for_ui,
+                            workspace_width_px,
+                            workspace_height_px,
+                        );
                     }
                 });
             }
@@ -2022,6 +3019,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         output: state.output.clone(),
                         ui: UiConfig {
                             show_album_art: state.ui.show_album_art,
+                            show_layout_edit_intro: state.ui.show_layout_edit_intro,
+                            layout: state.ui.layout.clone(),
+                            button_cluster_instances: state.ui.button_cluster_instances.clone(),
                             playlist_columns: reordered_columns,
                             window_width: state.ui.window_width,
                             window_height: state.ui.window_height,
@@ -2054,9 +3054,17 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 let ui_weak = ui_handle_clone.clone();
                 let config_for_ui = next_config;
                 let options_for_ui = options_snapshot;
+                let (workspace_width_px, workspace_height_px) =
+                    workspace_size_snapshot(&layout_workspace_size_clone);
                 let _ = slint::invoke_from_event_loop(move || {
                     if let Some(ui) = ui_weak.upgrade() {
-                        apply_config_to_ui(&ui, &config_for_ui, &options_for_ui);
+                        apply_config_to_ui(
+                            &ui,
+                            &config_for_ui,
+                            &options_for_ui,
+                            workspace_width_px,
+                            workspace_height_px,
+                        );
                     }
                 });
             }
@@ -2116,6 +3124,7 @@ mod tests {
     use std::collections::BTreeSet;
 
     use crate::config::{BufferingConfig, Config, OutputConfig, PlaylistColumnConfig, UiConfig};
+    use crate::layout::LayoutConfig;
 
     use super::{
         apply_column_order_keys, choose_preferred_u16, choose_preferred_u32,
@@ -2260,8 +3269,92 @@ mod tests {
             "Sidebar width should be controllable by viewport-driven logic"
         );
         assert!(
-            slint_ui.contains("min-width: 0px;"),
-            "Playlist pane should allow internal clipping instead of forcing sidebar shrink"
+            slint_ui.contains("for leaf-id[i] in root.layout_leaf_ids : Rectangle {")
+                && slint_ui.contains("root.layout-region-panel-kind(i) == 7"),
+            "Track list should be rendered as a movable docking panel that supports duplicate instances"
+        );
+    }
+
+    #[test]
+    fn test_layout_editor_and_splitter_callbacks_are_wired_in_slint() {
+        let slint_ui = include_str!("music_player.slint");
+        assert!(
+            slint_ui.contains("callback open_layout_editor();"),
+            "Layout editor open callback should be declared"
+        );
+        assert!(
+            slint_ui.contains("callback layout_intro_proceed(bool);")
+                && slint_ui.contains("callback layout_intro_cancel(bool);"),
+            "Layout intro callbacks should be declared"
+        );
+        assert!(
+            slint_ui.contains("callback layout_select_leaf(string);")
+                && slint_ui.contains("callback layout_replace_selected_leaf(int);")
+                && slint_ui.contains("callback layout_split_selected_leaf(int, int);")
+                && slint_ui.contains("callback layout_delete_selected_leaf();"),
+            "Leaf edit callbacks should be declared"
+        );
+        assert!(
+            slint_ui.contains("callback preview_layout_splitter_ratio(string, float);"),
+            "Splitter preview callback should be declared"
+        );
+        assert!(
+            slint_ui.contains("callback commit_layout_splitter_ratio(string, float);"),
+            "Splitter commit callback should be declared"
+        );
+        assert!(
+            slint_ui.contains("callback layout_workspace_resized(int, int);"),
+            "Workspace resize callback should be declared"
+        );
+        assert!(
+            slint_ui.contains("in-out property <[int]> layout_region_panel_kinds:"),
+            "Layout region assignment property should exist"
+        );
+        assert!(
+            slint_ui.contains("component StatusBar inherits Rectangle"),
+            "Status bar should be extracted into a reusable component"
+        );
+        assert!(
+            slint_ui.contains("in-out property <[LayoutSplitterModel]> layout_splitters: []"),
+            "Layout editor should expose dynamic splitter model"
+        );
+        assert!(
+            slint_ui.contains("component ButtonCluster inherits Rectangle")
+                && slint_ui.contains("component SeekBarControl inherits Rectangle")
+                && slint_ui.contains("component VolumeSliderControl inherits Rectangle"),
+            "Control bar should be composed from reusable sub-components"
+        );
+        assert!(
+            slint_ui.contains("component AlbumArtViewer inherits Rectangle")
+                && slint_ui.contains("component MetadataViewer inherits Rectangle"),
+            "Album art panel should be split into viewer and metadata components"
+        );
+        assert!(
+            slint_ui.contains("callback open_control_cluster_menu_for_leaf(string, int, int);"),
+            "Control cluster menu open callback should be declared"
+        );
+        assert!(
+            slint_ui.contains("callback add_control_cluster_button(string, int);"),
+            "Control cluster add callback should be declared"
+        );
+        assert!(
+            slint_ui.contains("callback remove_control_cluster_button(string, int);"),
+            "Control cluster remove callback should be declared"
+        );
+        assert!(
+            slint_ui.contains("event.text == Key.F6")
+                && slint_ui.contains("event.modifiers.control")
+                && slint_ui.contains("root.open_layout_editor();"),
+            "Layout editor should be reachable via keyboard shortcut"
+        );
+        assert!(
+            slint_ui.contains("event.text == Key.Escape && root.layout_edit_mode"),
+            "Escape should exit layout edit mode quickly"
+        );
+        assert!(
+            slint_ui.contains("root.show_layout_editor_dialog = false;")
+                && slint_ui.contains("text: \"Start Editing\""),
+            "Layout intro dialog should expose proceed action"
         );
     }
 
@@ -2512,6 +3605,9 @@ mod tests {
             },
             ui: UiConfig {
                 show_album_art: true,
+                show_layout_edit_intro: true,
+                layout: LayoutConfig::default(),
+                button_cluster_instances: Vec::new(),
                 playlist_columns: crate::config::default_playlist_columns(),
                 window_width: 900,
                 window_height: 650,

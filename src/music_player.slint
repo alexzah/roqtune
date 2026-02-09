@@ -6,6 +6,30 @@ struct TrackRowData {
     selected: bool,
 }
 
+struct LayoutSplitterModel {
+    id: string,
+    axis: int,
+    x_px: int,
+    y_px: int,
+    width_px: int,
+    height_px: int,
+    ratio: float,
+    min_ratio: float,
+    max_ratio: float,
+    track_start_px: int,
+    track_length_px: int,
+}
+
+struct LayoutButtonClusterPanelModel {
+    leaf_id: string,
+    x_px: int,
+    y_px: int,
+    width_px: int,
+    height_px: int,
+    visible: bool,
+    actions: [int],
+}
+
 component ContextMenu inherits PopupWindow {
     callback rename();
     callback delete();
@@ -403,11 +427,417 @@ component PlayerButton inherits Rectangle {
     }
 
     touch-area := TouchArea {
+        pointer-event(event) => {
+            if (event.button == PointerEventButton.right && event.kind == PointerEventKind.down) {
+                root.right-clicked();
+            }
+        }
         clicked => {
             if (root.enabled) {
                 root.clicked();
             }
         }
+    }
+    callback right-clicked;
+}
+
+component ControlActionButton inherits Rectangle {
+    in property <int> action-id: 0;
+    in property <string> cluster-leaf-id: "";
+    in property <int> playback-order-index: 0;
+    in property <int> repeat-mode: 0;
+    in property <bool> layout-edit-mode: false;
+    callback invoked(int);
+    callback open-add-menu(string);
+
+    pure function icon-for-action(action: int) -> string {
+        if action == 1 { return "+"; }
+        if action == 2 { return "⏮"; }
+        if action == 3 { return "▶"; }
+        if action == 4 { return "⏸"; }
+        if action == 5 { return "⏹"; }
+        if action == 6 { return "⏭"; }
+        if action == 7 { return "⇄"; }
+        if action == 8 { return "⟳"; }
+        if action == 9 { return "◫"; }
+        if action == 10 { return "⚙"; }
+        return "•";
+    }
+
+    pure function font-size-for-action(action: int) -> length {
+        if action == 1 { return 20px; }
+        if action == 3 { return 20px; }
+        if action == 10 { return 21px; }
+        if action == 7 { return 20px; }
+        if action == 8 { return 19px; }
+        return 18px;
+    }
+
+    pure function primary-for-action(action: int) -> bool {
+        if action == 3 { return true; }
+        if action == 7 { return root.playback-order-index != 0; }
+        if action == 8 { return root.repeat-mode != 0; }
+        if action == 9 { return root.layout-edit-mode; }
+        return false;
+    }
+
+    width: 32px;
+    height: 32px;
+
+    PlayerButton {
+        icon-text: root.icon-for-action(root.action-id);
+        font-size: root.font-size-for-action(root.action-id);
+        is-primary: root.primary-for-action(root.action-id);
+        clicked => { root.invoked(root.action-id); }
+        right-clicked => {
+            if (root.layout-edit-mode) {
+                root.open-add-menu(root.cluster-leaf-id);
+            }
+        }
+    }
+
+    if root.action-id == 7 && root.playback-order-index == 2 : Rectangle {
+        width: 10px;
+        height: 10px;
+        x: 15px;
+        y: 11px;
+        border-radius: 5px;
+        background: #2a6def;
+        Text {
+            text: "?";
+            color: white;
+            font-size: 7px;
+            font-weight: 700;
+            horizontal-alignment: center;
+            vertical-alignment: center;
+        }
+    }
+
+    if root.action-id == 8 && root.repeat-mode == 2 : Rectangle {
+        width: 10px;
+        height: 10px;
+        x: 15px;
+        y: 11px;
+        border-radius: 5px;
+        background: #2a6def;
+        Text {
+            text: "1";
+            color: white;
+            font-size: 7px;
+            font-weight: 700;
+            horizontal-alignment: center;
+            vertical-alignment: center;
+        }
+    }
+}
+
+component ButtonCluster inherits Rectangle {
+    in property <string> cluster-leaf-id: "";
+    in property <[int]> button-actions: [];
+    in property <int> playback-order-index: 0;
+    in property <int> repeat-mode: 0;
+    in property <bool> layout-edit-mode: false;
+    callback action-invoked(int);
+    callback request-add-menu(string);
+
+    width: max(32px, button-actions.length * 32px + max(0, button-actions.length - 1) * 8px);
+    height: 32px;
+
+    if root.button-actions.length == 0 : Rectangle {
+        width: 32px;
+        height: 32px;
+        border-radius: 3px;
+        border-width: 1px;
+        border-color: #3d3d3d;
+        background: empty-cluster-ta.has-hover ? #333 : #2a2a2a;
+        Text {
+            text: "…";
+            color: #999;
+            font-size: 16px;
+            horizontal-alignment: center;
+            vertical-alignment: center;
+        }
+        empty-cluster-ta := TouchArea {
+            pointer-event(event) => {
+                if (root.layout-edit-mode
+                    && event.button == PointerEventButton.right
+                    && event.kind == PointerEventKind.down) {
+                    root.request-add-menu(root.cluster-leaf-id);
+                }
+            }
+        }
+    }
+
+    HorizontalLayout {
+        spacing: 8px;
+        for action in root.button-actions : ControlActionButton {
+            action-id: action;
+            cluster-leaf-id: root.cluster-leaf-id;
+            playback-order-index: root.playback-order-index;
+            repeat-mode: root.repeat-mode;
+            layout-edit-mode: root.layout-edit-mode;
+            invoked(action-id) => { root.action-invoked(action-id); }
+            open-add-menu(cluster-leaf-id) => { root.request-add-menu(cluster-leaf-id); }
+        }
+    }
+}
+
+component VolumeSliderControl inherits Rectangle {
+    in-out property <float> value: 1.0;
+    callback changed(float);
+
+    private property <length> icon-slot-width: 18px;
+    private property <length> track-height: 6px;
+    private property <length> handle-base-size: 10px;
+    private property <length> handle-hover-size: 12px;
+    private property <length> track-center-adjust: root.track-height / 3;
+    background: transparent;
+
+    HorizontalLayout {
+        spacing: 6px;
+
+        icon-slot := Rectangle {
+            width: root.icon-slot-width;
+            height: root.height;
+            background: transparent;
+            Text {
+                width: parent.width;
+                height: parent.height;
+                text: "🔊";
+                color: #888;
+                font-size: max(9px, min(12px, root.height * 0.45));
+                horizontal-alignment: center;
+                vertical-alignment: center;
+            }
+        }
+
+        slider-area := Rectangle {
+            horizontal-stretch: 1;
+            height: root.height;
+            background: transparent;
+
+            volume-track := Rectangle {
+                x: 0px;
+                y: (parent.height - self.height) / 2 - root.track-center-adjust;
+                width: parent.width;
+                height: root.track-height;
+                border-radius: 3px;
+                background: #333;
+            }
+
+            Rectangle {
+                x: volume-track.x;
+                y: volume-track.y;
+                width: volume-track.width * root.value;
+                height: volume-track.height;
+                background: #2a6def;
+                border-radius: 3px;
+            }
+
+            volume-handle := Rectangle {
+                width: root.handle-base-size;
+                height: root.handle-base-size;
+                x: volume-track.width > 0px ? volume-track.x + (volume-track.width * root.value) - self.width / 2 : volume-track.x;
+                y: volume-track.y + (volume-track.height - self.height) / 2;
+                background: white;
+                border-radius: 5px;
+                animate x { duration: 100ms; easing: ease-out; }
+            }
+
+            states [
+                hover when ta-volume.has-hover || ta-volume.pressed: {
+                    volume-handle.width: root.handle-hover-size;
+                    volume-handle.height: root.handle-hover-size;
+                }
+            ]
+
+            ta-volume := TouchArea {
+                x: 0px;
+                y: 0px;
+                width: parent.width;
+                height: parent.height;
+                mouse-cursor: pointer;
+                clicked => {
+                    if (volume-track.width > 0px) {
+                        root.value = max(0, min(1, self.mouse-x / volume-track.width));
+                        root.changed(root.value);
+                    }
+                }
+                moved => {
+                    if (self.pressed && volume-track.width > 0px) {
+                        root.value = max(0, min(1, self.mouse-x / volume-track.width));
+                        root.changed(root.value);
+                    }
+                }
+            }
+
+            if ta-volume.pressed : Rectangle {
+                width: 32px;
+                height: 12px;
+                x: min(
+                    volume-track.x + volume-track.width - self.width - 2px,
+                    max(volume-track.x + 2px, volume-handle.x - self.width / 2)
+                );
+                y: max(0px, volume-track.y - self.height - 2px);
+                z: 10;
+                border-radius: 3px;
+                background: #1f1f1f;
+                border-width: 1px;
+                border-color: #3a3a3a;
+                Text {
+                    text: floor(root.value * 100) + "%";
+                    color: #ddd;
+                    font-size: 8px;
+                    horizontal-alignment: center;
+                    vertical-alignment: center;
+                }
+            }
+        }
+    }
+}
+
+component SeekBarControl inherits Rectangle {
+    in property <float> position-percentage: 0.0;
+    in property <string> elapsed-text: "0:00";
+    in property <string> total-text: "0:00";
+    callback seek-requested(float);
+
+    height: 32px;
+    background: #242424;
+    HorizontalLayout {
+        padding-left: 12px;
+        padding-right: 12px;
+        padding-top: 8px;
+        padding-bottom: 8px;
+        spacing: 10px;
+
+        Text {
+            text: root.elapsed-text;
+            color: #888;
+            font-size: 12px;
+            vertical-alignment: center;
+            horizontal-alignment: right;
+            width: 45px;
+        }
+
+        seekbar := Rectangle {
+            height: 6px;
+            border-radius: 3px;
+            background: #333;
+            horizontal-stretch: 1;
+            Rectangle {
+                x: 0;
+                y: 0;
+                width: seekbar.width * root.position-percentage;
+                height: parent.height;
+                background: #2a6def;
+                border-radius: 3px;
+                animate width { duration: 150ms; easing: ease-out; }
+            }
+            handle := Rectangle {
+                width: 12px;
+                height: 12px;
+                x: (seekbar.width * root.position-percentage) - self.width / 2;
+                y: (parent.height - self.height) / 2;
+                background: white;
+                border-radius: 6px;
+                drop-shadow-offset-y: 1px;
+                drop-shadow-blur: 2px;
+                drop-shadow-color: #00000080;
+                animate x { duration: 150ms; easing: ease-out; }
+            }
+            states [
+                hover when ta-seek.has-hover || ta-seek.pressed: {
+                    handle.background: #ffffff;
+                    handle.width: 14px;
+                    handle.height: 14px;
+                }
+            ]
+            ta-seek := TouchArea {
+                width: parent.width;
+                height: 20px;
+                mouse-cursor: pointer;
+                clicked => { root.seek-requested(max(0, min(1, self.mouse-x / seekbar.width))); }
+                moved => {
+                    if (self.pressed) {
+                        root.seek-requested(max(0, min(1, self.mouse-x / seekbar.width)));
+                    }
+                }
+            }
+        }
+
+        Text {
+            text: root.total-text;
+            color: #888;
+            font-size: 12px;
+            vertical-alignment: center;
+            width: 45px;
+        }
+    }
+}
+
+component MetadataViewer inherits Rectangle {
+    in property <string> display-title: "";
+    in property <string> display-artist: "";
+    in property <string> display-album: "";
+    in property <string> display-date: "";
+    in property <string> display-genre: "";
+
+    background: transparent;
+    VerticalLayout {
+        spacing: 4px;
+        if root.display-title != "" : Text {
+            text: root.display-title;
+            color: #eee;
+            font-size: 14px;
+            font-weight: 700;
+            wrap: word-wrap;
+            overflow: elide;
+        }
+        if root.display-artist != "" : Text {
+            text: root.display-artist;
+            color: #ccc;
+            font-size: 13px;
+            wrap: word-wrap;
+            overflow: elide;
+        }
+        if root.display-album != "" : Text {
+            text: root.display-album;
+            color: #aaa;
+            font-size: 12px;
+            wrap: word-wrap;
+            overflow: elide;
+        }
+        HorizontalLayout {
+            spacing: 8px;
+            if root.display-date != "" : Text {
+                text: root.display-date;
+                color: #888;
+                font-size: 11px;
+            }
+            if root.display-genre != "" : Text {
+                text: root.display-genre;
+                color: #888;
+                font-size: 11px;
+                horizontal-stretch: 1;
+                overflow: elide;
+            }
+        }
+    }
+}
+
+component AlbumArtViewer inherits Rectangle {
+    in property <image> art-source;
+
+    vertical-stretch: 1;
+    height: 100px;
+    background: #202020;
+    border-radius: 4px;
+    Image {
+        source: root.art-source;
+        width: parent.width;
+        height: parent.height;
+        image-fit: contain;
     }
 }
 
@@ -466,6 +896,53 @@ component SettingsDropdownControl inherits Rectangle {
     }
 }
 
+component StatusBar inherits Rectangle {
+    in property <string> status-text: "";
+    in property <string> technical-info: "";
+    in property <string> time-range: "0:00 / 0:00";
+
+    background: #1a1a1a;
+
+    HorizontalLayout {
+        padding-left: 12px;
+        padding-right: 12px;
+        spacing: 15px;
+
+        Text {
+            text: root.status-text == "" ? "" : "Now Playing: " + root.status-text;
+            color: #aaa;
+            font-size: 12px;
+            vertical-alignment: center;
+            overflow: elide;
+            horizontal-stretch: 1;
+        }
+
+        Rectangle { horizontal-stretch: 1; }
+
+        Text {
+            text: root.technical-info;
+            color: #777;
+            font-size: 11px;
+            vertical-alignment: center;
+            overflow: elide;
+        }
+
+        VerticalLayout {
+            alignment: center;
+            Rectangle { width: 1px; background: #333; height: 12px; }
+        }
+
+        Text {
+            text: root.time-range;
+            color: #999;
+            font-size: 12px;
+            vertical-alignment: center;
+            width: 100px;
+            horizontal-alignment: right;
+        }
+    }
+}
+
 export component AppWindow inherits Window {
     preferred-width: 900px;
     preferred-height: 650px;
@@ -478,6 +955,17 @@ export component AppWindow inherits Window {
         width: 0px;
         height: 0px;
         key-pressed(event) => {
+            if (event.text == Key.F6 || ((event.text == "l" || event.text == "L") && event.modifiers.control)) {
+                root.open_layout_editor();
+                return accept;
+            }
+            if (event.text == Key.Escape && root.layout_edit_mode) {
+                root.show_layout_editor_dialog = false;
+                root.show_layout_leaf_context_menu = false;
+                root.show_layout_splitter_context_menu = false;
+                root.open_layout_editor();
+                return accept;
+            }
             if (event.text == Key.Delete) {
                 if (root.editing_playlist_index != -1 || root.show_confirm_dialog) {
                     return reject;
@@ -495,6 +983,10 @@ export component AppWindow inherits Window {
             }
             reject
         }
+    }
+
+    init => {
+        key-handler.focus();
     }
     
     public function refocus_main() {
@@ -536,7 +1028,65 @@ export component AppWindow inherits Window {
     in-out property <[int]> playlist_column_gap_positions_px: [];
     in-out property <int> playlist_columns_content_width_px: 0;
     in-out property <int> playlist_columns_available_width_px: 0;
+    in-out property <[LayoutButtonClusterPanelModel]> layout_button_cluster_panels: [];
+    in-out property <bool> show_control_cluster_menu: false;
+    in-out property <string> control_cluster_menu_target_leaf_id: "";
+    in-out property <[int]> control_cluster_menu_actions: [];
+    in-out property <int> control_cluster_add_option_index: 0;
+    in-out property <length> control_cluster_menu_x: 0px;
+    in-out property <length> control_cluster_menu_y: 0px;
     in-out property <int> sidebar_width_px: 220;
+    in-out property <bool> layout_edit_mode: false;
+    in-out property <bool> show_layout_editor_dialog: false;
+    in-out property <bool> show_layout_leaf_context_menu: false;
+    in-out property <bool> show_layout_leaf_replace_submenu: false;
+    in-out property <bool> layout_leaf_replace_submenu_hover: false;
+    in-out property <bool> show_layout_leaf_panels_submenu: false;
+    in-out property <bool> layout_leaf_panels_submenu_hover: false;
+    in-out property <bool> show_layout_leaf_presets_submenu: false;
+    in-out property <bool> layout_leaf_presets_submenu_hover: false;
+    in-out property <bool> show_layout_splitter_context_menu: false;
+    in-out property <bool> layout_intro_dont_show_again: false;
+    in-out property <string> layout_context_splitter_id: "";
+    property <length> layout_leaf_context_menu_x: 0px;
+    property <length> layout_leaf_context_menu_y: 0px;
+    property <length> layout_splitter_context_menu_x: 0px;
+    property <length> layout_splitter_context_menu_y: 0px;
+    in-out property <[string]> layout_panel_options: [];
+    in-out property <int> layout_editor_replace_panel_kind: 0;
+    in-out property <int> layout_editor_split_panel_kind: 10;
+    in-out property <int> layout_editor_new_root_panel_kind: 7;
+    in-out property <int> layout_editor_split_axis: 1;
+    in-out property <[string]> layout_leaf_ids: [];
+    in-out property <int> layout_selected_leaf_index: -1;
+    in-out property <[int]> layout_region_panel_kinds: [];
+    in-out property <[int]> layout_region_x_px: [];
+    in-out property <[int]> layout_region_y_px: [];
+    in-out property <[int]> layout_region_width_px: [];
+    in-out property <[int]> layout_region_height_px: [];
+    in-out property <[bool]> layout_region_visible: [];
+    property <[string]> layout_panel_submenu_labels: [
+        "Button Cluster",
+        "Volume Slider",
+        "Seek Bar",
+        "Playlist Switcher",
+        "Track List",
+        "Metadata Viewer",
+        "Album Art Viewer",
+        "Status Bar"
+    ];
+    property <[int]> layout_panel_submenu_codes: [1, 4, 5, 6, 7, 8, 9, 11];
+    property <[string]> layout_replace_preset_labels: [
+        "Import Button Cluster",
+        "Transport Button Cluster",
+        "Utility Button Cluster"
+    ];
+    property <[int]> layout_replace_preset_codes: [12, 2, 3];
+    in-out property <[LayoutSplitterModel]> layout_splitters: [];
+    in-out property <int> layout_active_splitter_index: -1;
+    property <length> layout_splitter_drag_start_mouse_x: 0px;
+    property <length> layout_splitter_drag_start_mouse_y: 0px;
+    in-out property <float> layout_splitter_drag_start_ratio: 0.5;
 
     pure function playlist-column-width(index: int) -> length {
         if index >= 0 && index < root.playlist_column_widths_px.length {
@@ -557,6 +1107,116 @@ export component AppWindow inherits Window {
         return gap_index < root.playlist_column_widths_px.length ? gap_position - 10 : gap_position;
     }
 
+    pure function layout-region-is-visible(region: int) -> bool {
+        if region >= 0 && region < root.layout_region_visible.length {
+            return root.layout_region_visible[region];
+        }
+        return false;
+    }
+
+    pure function layout-region-x(region: int) -> length {
+        if region >= 0 && region < root.layout_region_x_px.length {
+            return root.layout_region_x_px[region] * 1px;
+        }
+        return 0px;
+    }
+
+    pure function layout-region-y(region: int) -> length {
+        if region >= 0 && region < root.layout_region_y_px.length {
+            return root.layout_region_y_px[region] * 1px;
+        }
+        return 0px;
+    }
+
+    pure function layout-region-width(region: int) -> length {
+        if region >= 0 && region < root.layout_region_width_px.length {
+            return max(0px, root.layout_region_width_px[region] * 1px);
+        }
+        return 0px;
+    }
+
+    pure function layout-region-height(region: int) -> length {
+        if region >= 0 && region < root.layout_region_height_px.length {
+            return max(0px, root.layout_region_height_px[region] * 1px);
+        }
+        return 0px;
+    }
+
+    pure function layout-region-panel-kind(region: int) -> int {
+        if region >= 0 && region < root.layout_region_panel_kinds.length {
+            return root.layout_region_panel_kinds[region];
+        }
+        return 0;
+    }
+
+    pure function layout-panel-label(panel-kind: int) -> string {
+        if panel-kind == 1 {
+            return "Button Cluster";
+        }
+        if panel-kind == 2 {
+            return "Transport Preset";
+        }
+        if panel-kind == 3 {
+            return "Utility Preset";
+        }
+        if panel-kind == 4 {
+            return "Volume Slider";
+        }
+        if panel-kind == 5 {
+            return "Seek Bar";
+        }
+        if panel-kind == 6 {
+            return "Playlist Switcher";
+        }
+        if panel-kind == 7 {
+            return "Track List";
+        }
+        if panel-kind == 8 {
+            return "Metadata Viewer";
+        }
+        if panel-kind == 9 {
+            return "Album Art Viewer";
+        }
+        if panel-kind == 10 {
+            return "Spacer";
+        }
+        if panel-kind == 11 {
+            return "Status Bar";
+        }
+        return "None";
+    }
+
+    pure function layout-selected-panel-kind() -> int {
+        if root.layout_selected_leaf_index >= 0
+            && root.layout_selected_leaf_index < root.layout_region_panel_kinds.length {
+            return root.layout_region_panel_kinds[root.layout_selected_leaf_index];
+        }
+        return 0;
+    }
+
+    pure function layout-selected-panel-has-settings() -> bool {
+        let panel-kind = root.layout-selected-panel-kind();
+        return panel-kind == 1;
+    }
+
+    pure function control-action-label(action-id: int) -> string {
+        if action-id == 1 { return "Import (+)"; }
+        if action-id == 2 { return "Back"; }
+        if action-id == 3 { return "Play"; }
+        if action-id == 4 { return "Pause"; }
+        if action-id == 5 { return "Stop"; }
+        if action-id == 6 { return "Next"; }
+        if action-id == 7 { return "Shuffle"; }
+        if action-id == 8 { return "Repeat"; }
+        if action-id == 9 { return "Layout Editor"; }
+        if action-id == 10 { return "Settings"; }
+        return "Unknown";
+    }
+
+    pure function control-cluster-label() -> string {
+        return "Button Cluster";
+    }
+
     changed width => {
         root.window_resized(max(0, floor(self.width / 1px)), max(0, floor(self.height / 1px)));
     }
@@ -568,526 +1228,225 @@ export component AppWindow inherits Window {
     in-out property <string> status-text: "";
 
     VerticalLayout {
-        // Toolbar with open and playback controls
-        Rectangle {
-            height: 42px;
-            background: #202020;
-            HorizontalLayout {
-                padding-left: 12px;
-                padding-right: 12px;
-                padding-top: 8px;
-                padding-bottom: 8px;
-                spacing: 12px;
-                
-                // Left Group: Open
-                Rectangle {
-                    width: 32px;
-                    height: 26px;
-                    border-radius: 2px;
-                    background: touch-area-open.pressed ? #444 : touch-area-open.has-hover ? #555 : #373737;
-                    animate background { duration: 150ms; }
-                    
-                    Text {
-                        text: "+";
-                        color: #eee;
-                        font-size: 20px;
-                        font-weight: 700;
-                        vertical-alignment: center;
-                        horizontal-alignment: center;
-                    }
+        layout-workspace := Rectangle {
+            vertical-stretch: 1;
+            background: #282828;
+            clip: true;
+            changed width => {
+                root.layout_workspace_resized(max(0, floor(self.width / 1px)), max(0, floor(self.height / 1px)));
+            }
+            changed height => {
+                root.layout_workspace_resized(max(0, floor(self.width / 1px)), max(0, floor(self.height / 1px)));
+            }
 
-                    touch-area-open := TouchArea {
-                        clicked => {
-                            root.open_file();
-                        }
-                    }
+            for leaf-id[i] in root.layout_leaf_ids : Rectangle {
+                x: root.layout-region-x(i);
+                y: root.layout-region-y(i);
+                width: root.layout-region-width(i);
+                height: root.layout-region-height(i);
+                visible: root.layout-region-is-visible(i) && root.layout-region-panel-kind(i) == 10;
+                background: #252525;
+                border-width: root.layout_edit_mode ? 1px : 0px;
+                border-color: #3a3a3a;
+                Text {
+                    text: "Spacer";
+                    color: #666;
+                    horizontal-alignment: center;
+                    vertical-alignment: center;
                 }
+            }
 
-                // Spacer 1
-                Rectangle { horizontal-stretch: 1; }
-                
-                // Center Group: Playback controls
+            for cluster-panel in root.layout_button_cluster_panels : Rectangle {
+                x: cluster-panel.x_px * 1px;
+                y: cluster-panel.y_px * 1px;
+                width: cluster-panel.width_px * 1px;
+                height: cluster-panel.height_px * 1px;
+                visible: cluster-panel.visible;
+                clip: true;
+                background: #202020;
                 HorizontalLayout {
-                    spacing: 12px;
-                    PlayerButton {
-                        icon-text: "⏮";
-                        font-size: 18px;
-                        clicked => {
-                            root.previous();
-                        }
-                    }
-
-                    PlayerButton {
-                        icon-text: "▶";
-                        is-primary: true;
-                        font-size: 20px;
-                        clicked => {
-                            root.play();
-                        }
-                    }
-
-                    PlayerButton {
-                        icon-text: "⏸";
-                        font-size: 18px;
-                        clicked => {
-                            root.pause();
-                        }
-                    }
-
-                    PlayerButton {
-                        icon-text: "⏹";
-                        font-size: 18px;
-                        clicked => {
-                            root.stop();
-                        }
-                    }
-
-                    PlayerButton {
-                        icon-text: "⏭";
-                        font-size: 18px;
-                        clicked => {
-                            root.next();
-                        }
-                    }
-                }
-
-                // Spacer 2
-                Rectangle { horizontal-stretch: 1; }
-                
-                // Right Group: Playback mode selection
-                HorizontalLayout {
-                    spacing: 12px;
-
-                    Rectangle {
-                        width: 32px;
-                        height: 32px;
-                        PlayerButton {
-                            icon-text: "⇄";
-                            font-size: 20px;
-                            is-primary: root.playback_order_index != 0;
-                            clicked => {
+                    padding-left: 8px;
+                    padding-right: 8px;
+                    alignment: center;
+                    dynamic-cluster := ButtonCluster {
+                        cluster-leaf-id: cluster-panel.leaf_id;
+                        button-actions: cluster-panel.actions;
+                        playback-order-index: root.playback_order_index;
+                        repeat-mode: root.repeat_mode;
+                        layout-edit-mode: root.layout_edit_mode;
+                        action-invoked(action-id) => {
+                            if (action-id == 1) { root.open_file(); }
+                            if (action-id == 2) { root.previous(); }
+                            if (action-id == 3) { root.play(); }
+                            if (action-id == 4) { root.pause(); }
+                            if (action-id == 5) { root.stop(); }
+                            if (action-id == 6) { root.next(); }
+                            if (action-id == 7) {
                                 let next-order = root.playback_order_index == 0 ? 1 : root.playback_order_index == 1 ? 2 : 0;
                                 root.playback_order_index = next-order;
                                 root.playback_order_changed(next-order);
                             }
+                            if (action-id == 8) { root.toggle_repeat(); }
+                            if (action-id == 9) { root.open_layout_editor(); }
+                            if (action-id == 10) { root.open_settings(); }
                         }
-                        if root.playback_order_index == 2 : Rectangle {
-                            width: 10px;
-                            height: 10px;
-                            x: 15px;
-                            y: 11px;
-                            border-radius: 5px;
-                            background: #2a6def;
-                            Text {
-                                text: "?";
-                                color: white;
-                                font-size: 7px;
-                                font-weight: 700;
-                                horizontal-alignment: center;
-                                vertical-alignment: center;
-                            }
+                        request-add-menu(cluster-leaf-id) => {
+                            root.open_control_cluster_menu_for_leaf(
+                                cluster-leaf-id,
+                                max(8, cluster-panel.x_px + 8),
+                                max(8, cluster-panel.y_px + cluster-panel.height_px + 4)
+                            );
                         }
                     }
+                }
+            }
 
-                    Rectangle {
-                        width: 32px;
-                        height: 32px;
-                        PlayerButton {
-                            icon-text: "⟳";
-                            font-size: 19px;
-                            is-primary: root.repeat_mode != 0;
-                            clicked => {
-                                root.toggle_repeat();
-                            }
-                        }
-                        if root.repeat_mode == 2 : Rectangle {
-                            width: 10px;
-                            height: 10px;
-                            x: 15px;
-                            y: 11px;
-                            border-radius: 5px;
-                            background: #2a6def;
-                            Text {
-                                text: "1";
-                                color: white;
-                                font-size: 7px;
-                                font-weight: 700;
-                                horizontal-alignment: center;
-                                vertical-alignment: center;
-                            }
-                        }
-                    }
+            for leaf-id[i] in root.layout_leaf_ids : Rectangle {
+                x: root.layout-region-x(i);
+                y: root.layout-region-y(i);
+                width: root.layout-region-width(i);
+                height: root.layout-region-height(i);
+                visible: root.layout-region-is-visible(i) && root.layout-region-panel-kind(i) == 4;
+                clip: true;
+                background: #202020;
+                VolumeSliderControl {
+                    x: 8px;
+                    y: 0px;
+                    height: parent.height;
+                    width: max(0px, parent.width - 16px);
+                    value <=> root.volume-level;
+                    changed(next-volume) => { root.volume-changed(next-volume); }
+                }
+            }
 
-                    PlayerButton {
-                        icon-text: "⚙";
-                        font-size: 21px;
-                        clicked => {
-                            root.open_settings();
-                        }
-                    }
+            for leaf-id[i] in root.layout_leaf_ids : Rectangle {
+                x: root.layout-region-x(i);
+                y: root.layout-region-y(i);
+                width: root.layout-region-width(i);
+                height: root.layout-region-height(i);
+                visible: root.layout-region-is-visible(i) && root.layout-region-panel-kind(i) == 5;
+                clip: true;
+                SeekBarControl {
+                    width: parent.width;
+                    height: parent.height;
+                    position-percentage: root.position-percentage;
+                    elapsed-text: root.format-time(root.elapsed-ms);
+                    total-text: root.format-time(root.total-ms);
+                    seek-requested(next-pos) => { root.seek-to(next-pos); }
+                }
+            }
 
-                    Rectangle {
-                        width: 20px;
-                        height: 26px;
-                        background: transparent;
-
-                        Rectangle {
-                            x: 0px;
-                            y: 10px;
-                            width: 4px;
-                            height: 6px;
-                            border-radius: 1px;
-                            background: #888;
-                        }
-
-                        Rectangle {
-                            x: 4px;
-                            y: 9px;
-                            width: 2px;
-                            height: 8px;
-                            border-radius: 1px;
-                            background: #888;
-                        }
-
-                        Rectangle {
-                            x: 6px;
-                            y: 8px;
-                            width: 1px;
-                            height: 10px;
-                            background: #888;
-                        }
-
+            for leaf-id[i] in root.layout_leaf_ids : Rectangle {
+                x: root.layout-region-x(i);
+                y: root.layout-region-y(i);
+                width: root.layout-region-width(i);
+                height: root.layout-region-height(i);
+                visible: root.layout-region-is-visible(i) && root.layout-region-panel-kind(i) == 6;
+                clip: true;
+                background: #202020;
+                VerticalLayout {
+                    padding: 8px;
+                    spacing: 4px;
+                    HorizontalLayout {
                         Text {
-                            x: 8px;
-                            y: 5px;
-                            text: "))";
+                            text: "Playlists";
                             color: #888;
-                            font-size: 11px;
+                            font-size: 12px;
+                            font-weight: 700;
                             vertical-alignment: center;
                         }
-                    }
-
-                    volume-slider := Rectangle {
-                        width: 110px;
-                        height: 26px;
-                        background: transparent;
-
-                        volume-track := Rectangle {
-                            x: 0;
-                            y: 10px;
-                            width: parent.width;
-                            height: 6px;
-                            border-radius: 3px;
-                            background: #333;
-                        }
-
-                        Rectangle {
-                            x: 0;
-                            y: volume-track.y;
-                            width: volume-track.width * root.volume-level;
-                            height: volume-track.height;
-                            background: #2a6def;
-                            border-radius: 3px;
-                        }
-
-                        volume-handle := Rectangle {
-                            width: 10px;
-                            height: 10px;
-                            x: (volume-track.width * root.volume-level) - self.width / 2;
-                            y: volume-track.y + (volume-track.height - self.height) / 2;
-                            background: white;
-                            border-radius: 5px;
-                            animate x {
-                                duration: 100ms;
-                                easing: ease-out;
-                            }
-                        }
-
-                        states [
-                            hover when ta-volume.has-hover || ta-volume.pressed: {
-                                volume-handle.width: 12px;
-                                volume-handle.height: 12px;
-                            }
-                        ]
-
-                        ta-volume := TouchArea {
-                            width: parent.width;
-                            height: 20px;
-                            y: 3px;
-                            mouse-cursor: pointer;
-                            clicked => {
-                                root.volume-level = max(0, min(1, self.mouse-x / volume-track.width));
-                                root.volume-changed(root.volume-level);
-                            }
-                            moved => {
-                                if (self.pressed) {
-                                    root.volume-level = max(0, min(1, self.mouse-x / volume-track.width));
-                                    root.volume-changed(root.volume-level);
-                                }
-                            }
-                        }
-                        
-                        if ta-volume.pressed : Rectangle {
-                            width: 34px;
-                            height: 13px;
-                            x: min(volume-track.width - self.width - 2px, max(2px, (volume-track.width * root.volume-level) - self.width / 2));
-                            y: -4px;
-                            border-radius: 3px;
-                            background: #1f1f1f;
-                            border-width: 1px;
-                            border-color: #3a3a3a;
-
-                            Text {
-                                text: floor(root.volume-level * 100) + "%";
-                                color: #ddd;
-                                font-size: 8px;
-                                horizontal-alignment: center;
-                                vertical-alignment: center;
-                            }
+                        Rectangle { horizontal-stretch: 1; }
+                        PlayerButton {
+                            icon-text: "+";
+                            font-size: 18px;
+                            clicked => { root.create_playlist(); }
                         }
                     }
-                }
-            }
-        }
-        
-        // Progress bar section
-        Rectangle {
-            height: 32px;
-            background: #242424;
-            HorizontalLayout {
-                padding-left: 12px;
-                padding-right: 12px;
-                padding-top: 8px;
-                padding-bottom: 8px;
-                spacing: 10px;
-                
-                // Current time display
-                Text {
-                    text: root.format-time(root.elapsed-ms);
-                    color: #888;
-                    font-size: 12px;
-                    vertical-alignment: center;
-                    horizontal-alignment: right;
-                    width: 45px;
-                }
-                
-                // Improved interactive seek bar
-                seekbar := Rectangle {
-                    height: 6px;
-                    border-radius: 3px;
-                    background: #333;
-                    horizontal-stretch: 1;
-                    
-                    // Progress indicator
-                    Rectangle {
-                        x: 0;
-                        y: 0;
-                        width: seekbar.width * root.position-percentage;
-                        height: parent.height;
-                        background: #2a6def;
-                        border-radius: 3px;
-                        animate width {
-                            duration: 150ms;
-                            easing: ease-out;
-                        }
-                    }
-                    
-                    // Handle over the progress bar
-                    handle := Rectangle {
-                        width: 12px;
-                        height: 12px;
-                        x: (seekbar.width * root.position-percentage) - self.width / 2;
-                        y: (parent.height - self.height) / 2;
-                        background: white;
-                        border-radius: 6px;
-                        drop-shadow-offset-y: 1px;
-                        drop-shadow-blur: 2px;
-                        drop-shadow-color: #00000080;
-                        
-                        // Smooth animation for handle position updates
-                        animate x {
-                            duration: 150ms;
-                            easing: ease-out;
-                        }
-                    }
-                    
-                    // Focus highlighting when hovering
-                    states [
-                        hover when ta-seek.has-hover || ta-seek.pressed: {
-                            handle.background: #ffffff;
-                            handle.width: 14px;
-                            handle.height: 14px;
-                        }
-                    ]
-                    
-                    // Simple touch area for seeking
-                    ta-seek := TouchArea {
-                        width: parent.width;
-                        height: 20px; 
-                        mouse-cursor: pointer;
-                        clicked => {
-                            root.seek-to(max(0, min(1, self.mouse-x / seekbar.width)));
-                        }
-                        moved => {
-                            if (self.pressed) {
-                                root.seek-to(max(0, min(1, self.mouse-x / seekbar.width)));
-                            }
-                        }
-                    }
-                }
-                
-                // Total duration display
-                Text {
-                    text: root.format-time(root.total-ms);
-                    color: #888;
-                    font-size: 12px;
-                    vertical-alignment: center;
-                    width: 45px;
-                }
-            }
-        }
-        
-        // Main content: Sidebar and Playlist
-        HorizontalLayout {
-            vertical-stretch: 1;
-            
-            // Left Sidebar
-            Rectangle {
-                width: max(180px, min(300px, root.sidebar_width_px * 1px));
-                background: #202020;
-                
-                VerticalLayout {
-                    // Top Half: Playlist Picker
-                    VerticalLayout {
+
+                    Rectangle { height: 1px; background: #333; }
+                    ScrollView {
                         vertical-stretch: 1;
-                        padding: 8px;
-                        spacing: 4px;
-                        
-                        HorizontalLayout {
-                            Text {
-                                text: "Playlists";
-                                color: #888;
-                                font-size: 12px;
-                                font-weight: 700;
-                                vertical-alignment: center;
-                            }
-                            Rectangle { horizontal-stretch: 1; }
-                            PlayerButton {
-                                icon-text: "+";
-                                font-size: 18px;
-                                clicked => { root.create_playlist(); }
-                            }
-                        }
-                        
-                        Rectangle { height: 1px; background: #333; }
-                        
-                        ScrollView {
-                            vertical-stretch: 1;
-                            VerticalLayout {
-                                alignment: start;
-                                for p[i] in root.playlists : PlaylistRow {
-                                    name: p.text;
-                                    is-active: root.active_playlist_index == i;
-                                    is-editing: root.editing_playlist_index == i;
-                                    clicked => { 
-                                        root.switch_playlist(i); 
-                                        root.editing_playlist_index = -1;
-                                        root.sidebar_has_focus = true;
-                                        root.refocus_main();
-                                    }
-                                    renamed(new-name) => {
-                                        root.rename_playlist(i, new-name);
-                                        root.editing_playlist_index = -1;
-                                        root.refocus_main();
-                                    }
-                                    cancel-edit() => {
-                                        root.editing_playlist_index = -1;
-                                        root.refocus_main();
-                                    }
-                                    context-menu-rename() => {
-                                        root.editing_playlist_index = i;
-                                    }
-                                    context-menu-delete() => {
-                                        root.confirm_delete_playlist(i);
-                                    }
-                                }
-                            }
-                        }
-                    }
-                    
-                    // Bottom Half: Metadata and Album Art
-                    VerticalLayout {
-                        vertical-stretch: 1;
-                        padding: 10px;
-                        alignment: end;
-                        spacing: 10px;
-                        
-                        // Metadata display
                         VerticalLayout {
-                            spacing: 4px;
-                            if root.display_title != "" : Text {
-                                text: root.display_title;
-                                color: #eee;
-                                font-size: 14px;
-                                font-weight: 700;
-                                wrap: word-wrap;
-                                overflow: elide;
-                            }
-                            if root.display_artist != "" : Text {
-                                text: root.display_artist;
-                                color: #ccc;
-                                font-size: 13px;
-                                wrap: word-wrap;
-                                overflow: elide;
-                            }
-                            if root.display_album != "" : Text {
-                                text: root.display_album;
-                                color: #aaa;
-                                font-size: 12px;
-                                wrap: word-wrap;
-                                overflow: elide;
-                            }
-                            HorizontalLayout {
-                                spacing: 8px;
-                                if root.display_date != "" : Text {
-                                    text: root.display_date;
-                                    color: #888;
-                                    font-size: 11px;
+                            alignment: start;
+                            for p[i] in root.playlists : PlaylistRow {
+                                name: p.text;
+                                is-active: root.active_playlist_index == i;
+                                is-editing: root.editing_playlist_index == i;
+                                clicked => {
+                                    root.switch_playlist(i);
+                                    root.editing_playlist_index = -1;
+                                    root.sidebar_has_focus = true;
+                                    root.refocus_main();
                                 }
-                                if root.display_genre != "" : Text {
-                                    text: root.display_genre;
-                                    color: #888;
-                                    font-size: 11px;
-                                    horizontal-stretch: 1;
-                                    overflow: elide;
+                                renamed(new-name) => {
+                                    root.rename_playlist(i, new-name);
+                                    root.editing_playlist_index = -1;
+                                    root.refocus_main();
                                 }
-                            }
-                        }
-                        
-                        Rectangle {
-                            height: self.width;
-                            background: #202020;
-                            border-radius: 4px;
-                            
-                            Image {
-                                source: root.current_cover_art;
-                                width: parent.width;
-                                height: parent.height;
-                                image-fit: contain;
+                                cancel-edit() => {
+                                    root.editing_playlist_index = -1;
+                                    root.refocus_main();
+                                }
+                                context-menu-rename() => {
+                                    root.editing_playlist_index = i;
+                                }
+                                context-menu-delete() => {
+                                    root.confirm_delete_playlist(i);
+                                }
                             }
                         }
                     }
                 }
             }
 
-            Rectangle {
-                horizontal-stretch: 1;
-                min-width: 0px;
+            for leaf-id[i] in root.layout_leaf_ids : Rectangle {
+                x: root.layout-region-x(i);
+                y: root.layout-region-y(i);
+                width: root.layout-region-width(i);
+                height: root.layout-region-height(i);
+                visible: root.layout-region-is-visible(i) && root.layout-region-panel-kind(i) == 8;
+                clip: true;
+                background: #202020;
+                MetadataViewer {
+                    x: 10px;
+                    y: 10px;
+                    width: parent.width - 20px;
+                    height: parent.height - 20px;
+                    display-title: root.display_title;
+                    display-artist: root.display_artist;
+                    display-album: root.display_album;
+                    display-date: root.display_date;
+                    display-genre: root.display_genre;
+                }
+            }
+
+            for leaf-id[i] in root.layout_leaf_ids : Rectangle {
+                x: root.layout-region-x(i);
+                y: root.layout-region-y(i);
+                width: root.layout-region-width(i);
+                height: root.layout-region-height(i);
+                visible: root.layout-region-is-visible(i) && root.layout-region-panel-kind(i) == 9;
+                clip: true;
+                background: #202020;
+                AlbumArtViewer {
+                    x: 10px;
+                    y: 10px;
+                    width: parent.width - 20px;
+                    height: parent.height - 20px;
+                    art-source: root.current_cover_art;
+                }
+            }
+
+            for leaf-id[i] in root.layout_leaf_ids : Rectangle {
+                x: root.layout-region-x(i);
+                y: root.layout-region-y(i);
+                width: root.layout-region-width(i);
+                height: root.layout-region-height(i);
+                visible: root.layout-region-is-visible(i) && root.layout-region-panel-kind(i) == 7;
                 clip: true;
                 background: #282828;
-                
+
                 VerticalLayout {
-                    // Header
                     Rectangle {
                         height: 28px;
                         background: #202020;
@@ -1223,12 +1582,8 @@ export component AppWindow inherits Window {
                                             && self.mouse-x >= 0px && self.mouse-x < self.width
                                             ? root.playlist_header_gap_at(floor(self.mouse-x / 1px))
                                             : -1;
-                                        let final_gap = hovered_gap != -1
-                                            ? hovered_gap
-                                            : root.column_drop_gap;
-                                        let final_drop_index = final_gap <= root.column_drag_from
-                                            ? final_gap
-                                            : final_gap - 1;
+                                        let final_gap = hovered_gap != -1 ? hovered_gap : root.column_drop_gap;
+                                        let final_drop_index = final_gap <= root.column_drag_from ? final_gap : final_gap - 1;
                                         if (final_drop_index != -1 && root.column_drag_from != final_drop_index) {
                                             root.reorder_playlist_columns(root.column_drag_from, final_drop_index);
                                         }
@@ -1237,10 +1592,7 @@ export component AppWindow inherits Window {
                                     root.column_drop_gap = -1;
                                 } else if (event.kind == PointerEventKind.cancel) {
                                     if (root.column_resize_active && root.column_resize_index != -1) {
-                                        root.preview_playlist_column_width(
-                                            root.column_resize_index,
-                                            root.column_resize_start_width_px,
-                                        );
+                                        root.preview_playlist_column_width(root.column_resize_index, root.column_resize_start_width_px);
                                         root.column_resize_active = false;
                                         root.column_resize_index = -1;
                                         root.column_resize_preview_width_px = root.column_resize_start_width_px;
@@ -1268,8 +1620,7 @@ export component AppWindow inherits Window {
                                 && root.column_drop_gap != -1
                                 && column-header-drag-ta.visible_column_count > 0
                                 && root.column_drop_gap < root.playlist_column_gap_positions_px.length : Rectangle {
-                            x: column-header-drag-ta.x
-                                + root.playlist_column_gap_positions_px[root.column_drop_gap] * 1px - 1px;
+                            x: column-header-drag-ta.x + root.playlist_column_gap_positions_px[root.column_drop_gap] * 1px - 1px;
                             y: 3px;
                             width: 2px;
                             height: parent.height - 6px;
@@ -1288,42 +1639,13 @@ export component AppWindow inherits Window {
                             background: #5da8ff;
                         }
 
-                        column-header-menu := ColumnHeaderMenu {
-                            x: root.column-menu-x;
-                            y: root.column-menu-y;
-                            labels: root.playlist_column_menu_labels;
-                            checked: root.playlist_column_menu_checked;
-                            custom: root.playlist_column_menu_is_custom;
-                            toggle-column(index) => {
-                                root.toggle_playlist_column(index);
-                                column-header-menu.close();
-                            }
-                            delete-column(index) => {
-                                if (index >= 0 && index < root.playlist_column_menu_labels.length
-                                        && index < root.playlist_column_menu_is_custom.length
-                                        && root.playlist_column_menu_is_custom[index]) {
-                                    root.delete_custom_column_index = index;
-                                    root.delete_custom_column_message = "Delete custom column '" + root.playlist_column_menu_labels[index] + "'?";
-                                    root.show_delete_custom_column_confirm = true;
-                                    column-header-menu.close();
-                                }
-                            }
-                            add-custom() => {
-                                root.show_custom_column_dialog = true;
-                                root.custom_column_name = "";
-                                root.custom_column_format = "";
-                                column-header-menu.close();
-                            }
-                        }
                     }
 
                     track-list-container := Rectangle {
                         clip: true;
-
                         track-list := ListView {
                             property <length> row-height: 30px;
                             property <length> header-height: 28px;
-
                             for track[i] in root.track_model : TrackRow {
                                 data: track;
                                 is-playing: root.playing_track_index == i;
@@ -1339,7 +1661,6 @@ export component AppWindow inherits Window {
                             y: 0;
                             width: parent.width;
                             height: parent.height;
-
                             property <length> row-height: 30px;
                             property <length> header-height: 28px;
                             property <length> content-y: self.mouse-y - track-list.viewport-y;
@@ -1395,7 +1716,6 @@ export component AppWindow inherits Window {
                             }
                         }
 
-                        // Visual Drop Indicator
                         if (root.is-dragging && root.drop-index != -1) : Rectangle {
                             x: 0;
                             y: max(0 , track-list.header-height + (root.drop-index - 1) * 30px) + track-list.viewport-y;
@@ -1406,49 +1726,863 @@ export component AppWindow inherits Window {
                     }
                 }
             }
+
+            for leaf-id[i] in root.layout_leaf_ids : StatusBar {
+                x: root.layout-region-x(i);
+                y: root.layout-region-y(i);
+                width: root.layout-region-width(i);
+                height: root.layout-region-height(i);
+                visible: root.layout-region-is-visible(i) && root.layout-region-panel-kind(i) == 11;
+                status-text: root.status-text;
+                technical-info: root.technical-info;
+                time-range: root.format-time-range(root.elapsed-ms, root.total-ms);
+            }
+
+            for leaf-id[i] in root.layout_leaf_ids : Rectangle {
+                property <int> panel-kind: root.layout-region-panel-kind(i);
+                x: root.layout-region-x(i);
+                y: root.layout-region-y(i);
+                width: root.layout-region-width(i);
+                height: root.layout-region-height(i);
+                visible: root.layout_edit_mode
+                    && root.layout-region-is-visible(i)
+                    && self.panel-kind != 0;
+                background: leaf-select-ta.has-hover ? #4b84c91f : transparent;
+                border-width: 1px;
+                border-color: i == root.layout_selected_leaf_index ? #4b84c9 : #3a3a3a;
+                z: 100;
+                Text {
+                    visible: leaf-select-ta.has-hover || i == root.layout_selected_leaf_index;
+                    text: root.layout-panel-label(parent.panel-kind);
+                    color: i == root.layout_selected_leaf_index ? #9fc3ff : #777;
+                    font-size: 11px;
+                    x: 6px;
+                    y: 4px;
+                    width: max(0px, parent.width - 12px);
+                    overflow: elide;
+                }
+                leaf-select-ta := TouchArea {
+                    x: 0px;
+                    y: 0px;
+                    width: parent.width;
+                    height: parent.panel-kind == 1 ? min(parent.height, 22px) : parent.height;
+                    pointer-event(event) => {
+                        if (event.kind == PointerEventKind.down && event.button == PointerEventButton.right) {
+                            root.layout_select_leaf(leaf-id);
+                            root.show_layout_splitter_context_menu = false;
+                            root.layout_leaf_context_menu_x = min(root.width - 430px, max(8px, parent.x + self.mouse-x + 6px));
+                            root.layout_leaf_context_menu_y = min(root.height - 280px, max(8px, parent.y + self.mouse-y + 6px));
+                            root.show_layout_leaf_replace_submenu = false;
+                            root.layout_leaf_replace_submenu_hover = false;
+                            root.show_layout_leaf_panels_submenu = false;
+                            root.layout_leaf_panels_submenu_hover = false;
+                            root.show_layout_leaf_presets_submenu = false;
+                            root.layout_leaf_presets_submenu_hover = false;
+                            root.show_layout_leaf_context_menu = true;
+                        } else if (event.kind == PointerEventKind.down && event.button == PointerEventButton.left) {
+                            root.layout_select_leaf(leaf-id);
+                            root.show_layout_leaf_replace_submenu = false;
+                            root.layout_leaf_replace_submenu_hover = false;
+                            root.show_layout_leaf_panels_submenu = false;
+                            root.layout_leaf_panels_submenu_hover = false;
+                            root.show_layout_leaf_presets_submenu = false;
+                            root.layout_leaf_presets_submenu_hover = false;
+                            root.show_layout_leaf_context_menu = false;
+                            root.show_layout_splitter_context_menu = false;
+                        }
+                    }
+                }
+            }
+
+            for splitter[i] in root.layout_splitters : Rectangle {
+                visible: root.layout_edit_mode;
+                x: splitter.x_px * 1px;
+                y: splitter.y_px * 1px;
+                width: splitter.width_px * 1px;
+                height: splitter.height_px * 1px;
+                z: 120;
+                background: splitter-ta.has-hover || root.layout_active_splitter_index == i ? #4b84c9a8 : #2f2f2f88;
+                splitter-ta := TouchArea {
+                    x: splitter.axis == 1 ? -4px : 0px;
+                    y: splitter.axis == 0 ? -4px : 0px;
+                    width: splitter.axis == 1 ? parent.width + 8px : parent.width;
+                    height: splitter.axis == 0 ? parent.height + 8px : parent.height;
+                    mouse-cursor: splitter.axis == 1 ? col-resize : row-resize;
+                    pointer-event(event) => {
+                        if (event.kind == PointerEventKind.down && event.button == PointerEventButton.right) {
+                            root.layout_active_splitter_index = -1;
+                            root.layout_context_splitter_id = splitter.id;
+                            root.show_layout_leaf_replace_submenu = false;
+                            root.layout_leaf_replace_submenu_hover = false;
+                            root.show_layout_leaf_panels_submenu = false;
+                            root.layout_leaf_panels_submenu_hover = false;
+                            root.show_layout_leaf_presets_submenu = false;
+                            root.layout_leaf_presets_submenu_hover = false;
+                            root.show_layout_leaf_context_menu = false;
+                            root.layout_splitter_context_menu_x = min(root.width - 220px, max(8px, parent.x + self.x + self.mouse-x + 6px));
+                            root.layout_splitter_context_menu_y = min(root.height - 120px, max(8px, parent.y + self.y + self.mouse-y + 6px));
+                            root.show_layout_splitter_context_menu = true;
+                        } else if (event.kind == PointerEventKind.down && event.button == PointerEventButton.left) {
+                            root.show_layout_leaf_replace_submenu = false;
+                            root.layout_leaf_replace_submenu_hover = false;
+                            root.show_layout_leaf_panels_submenu = false;
+                            root.layout_leaf_panels_submenu_hover = false;
+                            root.show_layout_leaf_presets_submenu = false;
+                            root.layout_leaf_presets_submenu_hover = false;
+                            root.show_layout_leaf_context_menu = false;
+                            root.show_layout_splitter_context_menu = false;
+                            root.layout_active_splitter_index = i;
+                            // Include touch-area offsets to store the true absolute pointer position.
+                            root.layout_splitter_drag_start_mouse_x = parent.x + self.x + self.mouse-x;
+                            root.layout_splitter_drag_start_mouse_y = parent.y + self.y + self.mouse-y;
+                            root.layout_splitter_drag_start_ratio = splitter.ratio;
+                        } else if (event.kind == PointerEventKind.move && root.layout_active_splitter_index == i) {
+                            let current-mouse-x = parent.x + self.x + self.mouse-x;
+                            let current-mouse-y = parent.y + self.y + self.mouse-y;
+                            let delta-px = splitter.axis == 1
+                                ? (current-mouse-x - root.layout_splitter_drag_start_mouse_x) / 1px
+                                : (current-mouse-y - root.layout_splitter_drag_start_mouse_y) / 1px;
+                            let ratio-delta = delta-px / (max(1, splitter.track_length_px) * 1.0);
+                            let target-ratio = root.layout_splitter_drag_start_ratio + ratio-delta;
+                            let clamped-ratio = min(splitter.max_ratio, max(splitter.min_ratio, target-ratio));
+                            root.preview_layout_splitter_ratio(splitter.id, clamped-ratio);
+                        } else if (event.kind == PointerEventKind.up && root.layout_active_splitter_index == i) {
+                            let current-mouse-x = parent.x + self.x + self.mouse-x;
+                            let current-mouse-y = parent.y + self.y + self.mouse-y;
+                            let delta-px = splitter.axis == 1
+                                ? (current-mouse-x - root.layout_splitter_drag_start_mouse_x) / 1px
+                                : (current-mouse-y - root.layout_splitter_drag_start_mouse_y) / 1px;
+                            let ratio-delta = delta-px / (max(1, splitter.track_length_px) * 1.0);
+                            let target-ratio = root.layout_splitter_drag_start_ratio + ratio-delta;
+                            let clamped-ratio = min(splitter.max_ratio, max(splitter.min_ratio, target-ratio));
+                            root.preview_layout_splitter_ratio(splitter.id, clamped-ratio);
+                            root.commit_layout_splitter_ratio(splitter.id, clamped-ratio);
+                            root.layout_active_splitter_index = -1;
+                        } else if (event.kind == PointerEventKind.cancel && root.layout_active_splitter_index == i) {
+                            root.preview_layout_splitter_ratio(splitter.id, root.layout_splitter_drag_start_ratio);
+                            root.layout_active_splitter_index = -1;
+                        }
+                    }
+                }
+            }
         }
 
-        // Status bar
+    }
+
+    column-header-menu := ColumnHeaderMenu {
+        x: root.column-menu-x;
+        y: root.column-menu-y;
+        labels: root.playlist_column_menu_labels;
+        checked: root.playlist_column_menu_checked;
+        custom: root.playlist_column_menu_is_custom;
+        toggle-column(index) => {
+            root.toggle_playlist_column(index);
+            column-header-menu.close();
+        }
+        delete-column(index) => {
+            if (index >= 0 && index < root.playlist_column_menu_labels.length
+                    && index < root.playlist_column_menu_is_custom.length
+                    && root.playlist_column_menu_is_custom[index]) {
+                root.delete_custom_column_index = index;
+                root.delete_custom_column_message = "Delete custom column '" + root.playlist_column_menu_labels[index] + "'?";
+                root.show_delete_custom_column_confirm = true;
+                column-header-menu.close();
+            }
+        }
+        add-custom() => {
+            root.show_custom_column_dialog = true;
+            root.custom_column_name = "";
+            root.custom_column_format = "";
+            column-header-menu.close();
+        }
+    }
+
+    if root.layout_edit_mode && (root.show_layout_leaf_context_menu || root.show_layout_splitter_context_menu) : Rectangle {
+        z: 129;
+        background: transparent;
+        touch-to-dismiss-layout-menu := TouchArea {
+            clicked => {
+                root.show_layout_leaf_replace_submenu = false;
+                root.layout_leaf_replace_submenu_hover = false;
+                root.show_layout_leaf_panels_submenu = false;
+                root.layout_leaf_panels_submenu_hover = false;
+                root.show_layout_leaf_presets_submenu = false;
+                root.layout_leaf_presets_submenu_hover = false;
+                root.show_layout_leaf_context_menu = false;
+                root.show_layout_splitter_context_menu = false;
+            }
+        }
+    }
+
+    if root.show_layout_editor_dialog : Rectangle {
+        background: #00000088;
+        z: 130;
+
+        TouchArea {}
+
         Rectangle {
-            height: 24px;
-            background: #1a1a1a;
-            HorizontalLayout {
-                padding-left: 12px;
-                padding-right: 12px;
-                spacing: 15px;
-                
+            width: min(root.width - 40px, 560px);
+            height: min(root.height - 40px, 280px);
+            x: (parent.width - self.width) / 2;
+            y: (parent.height - self.height) / 2;
+            border-radius: 6px;
+            background: #242424;
+            border-width: 1px;
+            border-color: #3b3b3b;
+
+            VerticalLayout {
+                padding: 16px;
+                spacing: 12px;
+
+                HorizontalLayout {
+                    Text {
+                        text: "Layout Edit Mode";
+                        color: #eee;
+                        font-size: 16px;
+                        font-weight: 700;
+                        vertical-alignment: center;
+                    }
+                    Rectangle { horizontal-stretch: 1; }
+                }
+
+                Rectangle { height: 1px; background: #343434; }
+
                 Text {
-                    text: root.status-text == "" ? "" : "Now Playing: " + root.status-text;
-                    color: #aaa;
+                    text: "You are entering layout editing mode. Right-click a panel to replace, split, or delete it. Drag splitters to resize. Right-click a splitter for divider actions.";
+                    color: #bbb;
                     font-size: 12px;
-                    vertical-alignment: center;
-                    overflow: elide;
-                    horizontal-stretch: 1;
+                    wrap: word-wrap;
                 }
-                
-                // Technical info area
-                Rectangle { horizontal-stretch: 1; }
-                
+
+                Rectangle { vertical-stretch: 1; }
+
+                HorizontalLayout {
+                    spacing: 8px;
+                    Rectangle {
+                        width: 16px;
+                        height: 16px;
+                        border-radius: 3px;
+                        border-width: 1px;
+                        border-color: #5a5a5a;
+                        background: layout-intro-checkbox-ta.has-hover ? #363636 : #2d2d2d;
+                        Text {
+                            text: root.layout_intro_dont_show_again ? "✓" : "";
+                            color: #8cb1ff;
+                            font-size: 12px;
+                            horizontal-alignment: center;
+                            vertical-alignment: center;
+                        }
+                        layout-intro-checkbox-ta := TouchArea {
+                            clicked => {
+                                root.layout_intro_dont_show_again = !root.layout_intro_dont_show_again;
+                            }
+                        }
+                    }
+                    Text {
+                        text: "Don’t show this again";
+                        color: #ccc;
+                        font-size: 12px;
+                        vertical-alignment: center;
+                    }
+                    Rectangle { horizontal-stretch: 1; }
+                }
+
+                HorizontalLayout {
+                    spacing: 10px;
+                    Button {
+                        text: "Go Back";
+                        clicked => {
+                            root.layout_intro_cancel(root.layout_intro_dont_show_again);
+                            root.show_layout_editor_dialog = false;
+                        }
+                    }
+                    Rectangle { horizontal-stretch: 1; }
+                    Button {
+                        text: "Start Editing";
+                        primary: true;
+                        clicked => {
+                            root.layout_intro_proceed(root.layout_intro_dont_show_again);
+                            root.show_layout_editor_dialog = false;
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    if root.layout_edit_mode && root.show_layout_leaf_context_menu : Rectangle {
+        z: 140;
+        x: root.layout_leaf_context_menu_x;
+        y: root.layout_leaf_context_menu_y;
+        width: 236px;
+        height: root.layout-selected-panel-has-settings() ? 142px : 116px;
+        border-radius: 6px;
+        background: #262626;
+        border-width: 1px;
+        border-color: #3d3d3d;
+
+        VerticalLayout {
+            padding: 6px;
+            spacing: 2px;
+
+            Rectangle {
+                height: 24px;
+                border-radius: 3px;
+                background: replace-action-ta.has-hover || root.show_layout_leaf_replace_submenu ? #363636 : transparent;
                 Text {
-                    text: root.technical-info;
-                    color: #777;
-                    font-size: 11px;
-                    vertical-alignment: center;
-                    overflow: elide;
-                }
-                
-                VerticalLayout {
-                    alignment: center;
-                    Rectangle { width: 1px; background: #333; height: 12px; }
-                }
-                
-                Text {
-                    text: root.format-time-range(root.elapsed-ms, root.total-ms);
-                    color: #999;
+                    text: "Replace panel with";
+                    color: #ddd;
                     font-size: 12px;
+                    x: 8px;
                     vertical-alignment: center;
-                    width: 100px;
+                }
+                Text {
+                    text: "▸";
+                    color: #888;
+                    font-size: 12px;
+                    width: parent.width - 8px;
                     horizontal-alignment: right;
+                    vertical-alignment: center;
+                }
+                replace-action-ta := TouchArea {
+                    changed has-hover => {
+                        if (self.has-hover) {
+                            root.show_layout_leaf_replace_submenu = true;
+                        }
+                    }
+                    moved => {
+                        root.show_layout_leaf_replace_submenu = true;
+                    }
+                    clicked => {
+                        root.show_layout_leaf_replace_submenu = true;
+                    }
+                }
+            }
+
+            Rectangle {
+                height: 24px;
+                border-radius: 3px;
+                background: split-vertical-ta.has-hover ? #363636 : transparent;
+                Text {
+                    text: "Split panel vertically";
+                    color: #ddd;
+                    font-size: 12px;
+                    x: 8px;
+                    vertical-alignment: center;
+                }
+                split-vertical-ta := TouchArea {
+                    clicked => {
+                        root.layout_split_selected_leaf(1, root.layout_editor_split_panel_kind);
+                        root.show_layout_leaf_replace_submenu = false;
+                        root.layout_leaf_replace_submenu_hover = false;
+                        root.show_layout_leaf_panels_submenu = false;
+                        root.layout_leaf_panels_submenu_hover = false;
+                        root.show_layout_leaf_presets_submenu = false;
+                        root.layout_leaf_presets_submenu_hover = false;
+                        root.show_layout_leaf_context_menu = false;
+                    }
+                }
+            }
+
+            Rectangle {
+                height: 24px;
+                border-radius: 3px;
+                background: split-horizontal-ta.has-hover ? #363636 : transparent;
+                Text {
+                    text: "Split panel horizontally";
+                    color: #ddd;
+                    font-size: 12px;
+                    x: 8px;
+                    vertical-alignment: center;
+                }
+                split-horizontal-ta := TouchArea {
+                    clicked => {
+                        root.layout_split_selected_leaf(0, root.layout_editor_split_panel_kind);
+                        root.show_layout_leaf_replace_submenu = false;
+                        root.layout_leaf_replace_submenu_hover = false;
+                        root.show_layout_leaf_panels_submenu = false;
+                        root.layout_leaf_panels_submenu_hover = false;
+                        root.show_layout_leaf_presets_submenu = false;
+                        root.layout_leaf_presets_submenu_hover = false;
+                        root.show_layout_leaf_context_menu = false;
+                    }
+                }
+            }
+
+            if root.layout-selected-panel-has-settings() : Rectangle {
+                height: 24px;
+                border-radius: 3px;
+                background: panel-settings-ta.has-hover ? #363636 : transparent;
+                Text {
+                    text: "Panel Settings...";
+                    color: #ddd;
+                    font-size: 12px;
+                    x: 8px;
+                    vertical-alignment: center;
+                }
+                panel-settings-ta := TouchArea {
+                    clicked => {
+                        if root.layout_selected_leaf_index >= 0
+                                && root.layout_selected_leaf_index < root.layout_leaf_ids.length {
+                            root.open_control_cluster_menu_for_leaf(
+                                root.layout_leaf_ids[root.layout_selected_leaf_index],
+                                max(8, floor((root.layout_leaf_context_menu_x + parent.width + 6px) / 1px)),
+                                max(8, floor((root.layout_leaf_context_menu_y + 6px) / 1px))
+                            );
+                        }
+                        root.show_layout_leaf_replace_submenu = false;
+                        root.layout_leaf_replace_submenu_hover = false;
+                        root.show_layout_leaf_panels_submenu = false;
+                        root.layout_leaf_panels_submenu_hover = false;
+                        root.show_layout_leaf_presets_submenu = false;
+                        root.layout_leaf_presets_submenu_hover = false;
+                        root.show_layout_leaf_context_menu = false;
+                    }
+                }
+            }
+
+            Rectangle {
+                height: 1px;
+                background: #3a3a3a;
+            }
+
+            Rectangle {
+                height: 24px;
+                border-radius: 3px;
+                background: delete-panel-ta.has-hover ? #4a2a2a : transparent;
+                Text {
+                    text: "Delete panel";
+                    color: #ffb4b4;
+                    font-size: 12px;
+                    x: 8px;
+                    vertical-alignment: center;
+                }
+                delete-panel-ta := TouchArea {
+                    clicked => {
+                        root.layout_delete_selected_leaf();
+                        root.show_layout_leaf_replace_submenu = false;
+                        root.layout_leaf_replace_submenu_hover = false;
+                        root.show_layout_leaf_panels_submenu = false;
+                        root.layout_leaf_panels_submenu_hover = false;
+                        root.show_layout_leaf_presets_submenu = false;
+                        root.layout_leaf_presets_submenu_hover = false;
+                        root.show_layout_leaf_context_menu = false;
+                    }
+                }
+            }
+
+        }
+
+        if root.show_layout_leaf_replace_submenu : Rectangle {
+            z: 141;
+            x: (root.layout_leaf_context_menu_x + parent.width + 4px + self.width <= root.width - 8px) ? parent.width + 4px : -self.width - 4px;
+            y: 6px;
+            width: 268px;
+            height: 92px;
+            border-radius: 6px;
+            background: #262626;
+            border-width: 1px;
+            border-color: #3d3d3d;
+
+            submenu-hover-ta := TouchArea {
+                changed has-hover => {
+                    root.layout_leaf_replace_submenu_hover = self.has-hover;
+                }
+            }
+
+            VerticalLayout {
+                padding: 6px;
+                spacing: 2px;
+                Rectangle {
+                    height: 24px;
+                    border-radius: 3px;
+                    background: spacer-action-ta.has-hover ? #363636 : transparent;
+                    Text {
+                        text: "Spacer";
+                        color: #ddd;
+                        font-size: 12px;
+                        x: 8px;
+                        vertical-alignment: center;
+                    }
+                    spacer-action-ta := TouchArea {
+                        clicked => {
+                            root.layout_editor_replace_panel_kind = 10;
+                            root.layout_replace_selected_leaf(10);
+                            root.show_layout_leaf_replace_submenu = false;
+                            root.layout_leaf_replace_submenu_hover = false;
+                            root.show_layout_leaf_panels_submenu = false;
+                            root.layout_leaf_panels_submenu_hover = false;
+                            root.show_layout_leaf_presets_submenu = false;
+                            root.layout_leaf_presets_submenu_hover = false;
+                            root.show_layout_leaf_context_menu = false;
+                        }
+                    }
+                }
+
+                Rectangle {
+                    height: 24px;
+                    border-radius: 3px;
+                    background: panels-action-ta.has-hover || root.show_layout_leaf_panels_submenu ? #363636 : transparent;
+                    Text {
+                        text: "Panels";
+                        color: #ddd;
+                        font-size: 12px;
+                        x: 8px;
+                        vertical-alignment: center;
+                    }
+                    Text {
+                        text: "▸";
+                        color: #888;
+                        font-size: 12px;
+                        width: parent.width - 8px;
+                        horizontal-alignment: right;
+                        vertical-alignment: center;
+                    }
+                    panels-action-ta := TouchArea {
+                        changed has-hover => {
+                            if (self.has-hover) {
+                                root.show_layout_leaf_panels_submenu = true;
+                                root.show_layout_leaf_presets_submenu = false;
+                            }
+                        }
+                        moved => {
+                            root.show_layout_leaf_panels_submenu = true;
+                            root.show_layout_leaf_presets_submenu = false;
+                        }
+                        clicked => {
+                            root.show_layout_leaf_panels_submenu = true;
+                            root.show_layout_leaf_presets_submenu = false;
+                        }
+                    }
+                }
+
+                Rectangle {
+                    height: 24px;
+                    border-radius: 3px;
+                    background: presets-action-ta.has-hover || root.show_layout_leaf_presets_submenu ? #363636 : transparent;
+                    Text {
+                        text: "Presets";
+                        color: #ddd;
+                        font-size: 12px;
+                        x: 8px;
+                        vertical-alignment: center;
+                    }
+                    Text {
+                        text: "▸";
+                        color: #888;
+                        font-size: 12px;
+                        width: parent.width - 8px;
+                        horizontal-alignment: right;
+                        vertical-alignment: center;
+                    }
+                    presets-action-ta := TouchArea {
+                        changed has-hover => {
+                            if (self.has-hover) {
+                                root.show_layout_leaf_presets_submenu = true;
+                                root.show_layout_leaf_panels_submenu = false;
+                            }
+                        }
+                        moved => {
+                            root.show_layout_leaf_presets_submenu = true;
+                            root.show_layout_leaf_panels_submenu = false;
+                        }
+                        clicked => {
+                            root.show_layout_leaf_presets_submenu = true;
+                            root.show_layout_leaf_panels_submenu = false;
+                        }
+                    }
+                }
+            }
+
+            if root.show_layout_leaf_panels_submenu : Rectangle {
+                z: 142;
+                x: (root.layout_leaf_context_menu_x + parent.x + parent.width + 4px + self.width <= root.width - 8px) ? parent.width + 4px : -self.width - 4px;
+                y: 32px;
+                width: 252px;
+                height: min(220px, root.layout_panel_submenu_labels.length * 24px + 12px);
+                border-radius: 6px;
+                background: #262626;
+                border-width: 1px;
+                border-color: #3d3d3d;
+
+                panels-submenu-hover-ta := TouchArea {
+                    changed has-hover => {
+                        root.layout_leaf_panels_submenu_hover = self.has-hover;
+                    }
+                }
+
+                VerticalLayout {
+                    padding: 6px;
+                    spacing: 0px;
+                    ScrollView {
+                        vertical-stretch: 1;
+                        Rectangle {
+                            x: 4px;
+                            width: max(0px, parent.width - 8px);
+                            height: max(24px, root.layout_panel_submenu_labels.length * 24px);
+                            background: transparent;
+                            for panel-option[index] in root.layout_panel_submenu_labels : Rectangle {
+                                x: 0px;
+                                y: index * 24px;
+                                width: parent.width;
+                                height: 24px;
+                                border-radius: 3px;
+                                background: panel-option-ta.has-hover ? #363636 : transparent;
+                                Text {
+                                    text: panel-option;
+                                    color: #ddd;
+                                    font-size: 12px;
+                                    x: 10px;
+                                    width: max(0px, parent.width - 20px);
+                                    height: parent.height;
+                                    overflow: elide;
+                                    vertical-alignment: center;
+                                    horizontal-alignment: left;
+                                }
+                                panel-option-ta := TouchArea {
+                                    clicked => {
+                                        let panel-code = root.layout_panel_submenu_codes[index];
+                                        root.layout_editor_replace_panel_kind = panel-code;
+                                        root.layout_replace_selected_leaf(panel-code);
+                                        root.show_layout_leaf_replace_submenu = false;
+                                        root.layout_leaf_replace_submenu_hover = false;
+                                        root.show_layout_leaf_panels_submenu = false;
+                                        root.layout_leaf_panels_submenu_hover = false;
+                                        root.show_layout_leaf_presets_submenu = false;
+                                        root.layout_leaf_presets_submenu_hover = false;
+                                        root.show_layout_leaf_context_menu = false;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            if root.show_layout_leaf_presets_submenu : Rectangle {
+                z: 142;
+                x: (root.layout_leaf_context_menu_x + parent.x + parent.width + 4px + self.width <= root.width - 8px) ? parent.width + 4px : -self.width - 4px;
+                y: 58px;
+                width: 252px;
+                height: min(140px, root.layout_replace_preset_labels.length * 24px + 12px);
+                border-radius: 6px;
+                background: #262626;
+                border-width: 1px;
+                border-color: #3d3d3d;
+
+                presets-submenu-hover-ta := TouchArea {
+                    changed has-hover => {
+                        root.layout_leaf_presets_submenu_hover = self.has-hover;
+                    }
+                }
+
+                VerticalLayout {
+                    padding: 6px;
+                    spacing: 0px;
+                    for preset-option[index] in root.layout_replace_preset_labels : Rectangle {
+                        height: 24px;
+                        border-radius: 3px;
+                        background: preset-option-ta.has-hover ? #363636 : transparent;
+                        Text {
+                            text: preset-option;
+                            color: #ddd;
+                            font-size: 12px;
+                            x: 10px;
+                            width: max(0px, parent.width - 20px);
+                            overflow: elide;
+                            vertical-alignment: center;
+                        }
+                        preset-option-ta := TouchArea {
+                            clicked => {
+                                let panel-code = root.layout_replace_preset_codes[index];
+                                root.layout_editor_replace_panel_kind = panel-code;
+                                root.layout_replace_selected_leaf(panel-code);
+                                root.show_layout_leaf_presets_submenu = false;
+                                root.layout_leaf_presets_submenu_hover = false;
+                                root.show_layout_leaf_panels_submenu = false;
+                                root.layout_leaf_panels_submenu_hover = false;
+                                root.show_layout_leaf_replace_submenu = false;
+                                root.layout_leaf_replace_submenu_hover = false;
+                                root.show_layout_leaf_context_menu = false;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    if root.layout_edit_mode && root.show_layout_splitter_context_menu : Rectangle {
+        z: 140;
+        x: root.layout_splitter_context_menu_x;
+        y: root.layout_splitter_context_menu_y;
+        width: 210px;
+        height: 102px;
+        border-radius: 6px;
+        background: #262626;
+        border-width: 1px;
+        border-color: #3d3d3d;
+
+        VerticalLayout {
+            padding: 10px;
+            spacing: 8px;
+
+            Text {
+                text: "Divider Actions";
+                color: #eee;
+                font-size: 13px;
+                font-weight: 700;
+            }
+            Button {
+                text: "Reset To 50 / 50";
+                clicked => {
+                    if (root.layout_context_splitter_id != "") {
+                        root.commit_layout_splitter_ratio(root.layout_context_splitter_id, 0.5);
+                    }
+                    root.show_layout_splitter_context_menu = false;
+                }
+            }
+            Button {
+                text: "Undo";
+                clicked => {
+                    root.layout_undo_last_action();
+                    root.show_layout_splitter_context_menu = false;
+                }
+            }
+        }
+    }
+
+    if root.show_control_cluster_menu : Rectangle {
+        z: 145;
+        background: transparent;
+        TouchArea {
+            clicked => {
+                root.show_control_cluster_menu = false;
+            }
+        }
+    }
+
+    if root.show_control_cluster_menu : Rectangle {
+        z: 146;
+        x: root.control_cluster_menu_x;
+        y: root.control_cluster_menu_y;
+        width: 300px;
+        height: 340px;
+        border-radius: 6px;
+        background: #262626;
+        border-width: 1px;
+        border-color: #3d3d3d;
+
+        VerticalLayout {
+            padding: 10px;
+            spacing: 8px;
+
+            Text {
+                text: root.control-cluster-label() + " Buttons";
+                color: #eee;
+                font-size: 13px;
+                font-weight: 700;
+            }
+
+            Rectangle { height: 1px; background: #3a3a3a; }
+
+            ScrollView {
+                vertical-stretch: 1;
+                HorizontalLayout {
+                    Rectangle {
+                        width: 1px;
+                    }
+                    VerticalLayout {
+                        spacing: 2px;
+
+                        Rectangle {
+                            height: max(22px, root.control_cluster_menu_actions.length * 24px);
+                            background: transparent;
+                            VerticalLayout {
+                                spacing: 2px;
+                                for action-id[index] in root.control_cluster_menu_actions : Rectangle {
+                                    height: 22px;
+                                    border-radius: 2px;
+                                    background: transparent;
+                                    HorizontalLayout {
+                                        padding-left: 6px;
+                                        padding-right: 4px;
+                                        spacing: 8px;
+                                        Text {
+                                            text: root.control-action-label(action-id);
+                                            color: #ddd;
+                                            font-size: 12px;
+                                            vertical-alignment: center;
+                                            horizontal-stretch: 1;
+                                            overflow: elide;
+                                        }
+                                        Rectangle {
+                                            width: 18px;
+                                            height: 18px;
+                                            border-radius: 2px;
+                                            background: delete-action-ta.has-hover ? #4a2a2a : transparent;
+                                            Text {
+                                                text: "✕";
+                                                color: #ffb4b4;
+                                                font-size: 11px;
+                                                horizontal-alignment: center;
+                                                vertical-alignment: center;
+                                            }
+                                            delete-action-ta := TouchArea {
+                                                clicked => {
+                                                    if root.control_cluster_menu_target_leaf_id != "" {
+                                                        root.remove_control_cluster_button(
+                                                            root.control_cluster_menu_target_leaf_id,
+                                                            index
+                                                        );
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    Rectangle {
+                        width: 1px;
+                    }
+                }
+            }
+
+            Rectangle { height: 1px; background: #3a3a3a; }
+
+            HorizontalLayout {
+                spacing: 8px;
+                Rectangle {
+                    horizontal-stretch: 1;
+                    height: 32px;
+                    ComboBox {
+                        width: parent.width;
+                        height: parent.height;
+                        model: [
+                            "Import (+)",
+                            "Back",
+                            "Play",
+                            "Pause",
+                            "Stop",
+                            "Next",
+                            "Shuffle",
+                            "Repeat",
+                            "Layout Editor",
+                            "Settings"
+                        ];
+                        current-index <=> root.control_cluster_add_option_index;
+                    }
+                }
+                Button {
+                    text: "Add";
+                    clicked => {
+                        root.add_control_cluster_button(
+                            root.control_cluster_menu_target_leaf_id,
+                            root.control_cluster_add_option_index + 1
+                        );
+                    }
                 }
             }
         }
@@ -1789,7 +2923,23 @@ export component AppWindow inherits Window {
     callback commit_playlist_column_width(int, int);
     callback reset_playlist_column_width(int);
     callback playlist_columns_viewport_resized(int);
+    callback open_control_cluster_menu_for_leaf(string, int, int);
+    callback add_control_cluster_button(string, int);
+    callback remove_control_cluster_button(string, int);
     callback window_resized(int, int);
+    callback layout_workspace_resized(int, int);
+    callback open_layout_editor();
+    callback layout_intro_proceed(bool);
+    callback layout_intro_cancel(bool);
+    callback layout_select_leaf(string);
+    callback layout_replace_selected_leaf(int);
+    callback layout_split_selected_leaf(int, int);
+    callback layout_delete_selected_leaf();
+    callback layout_add_root_leaf(int);
+    callback preview_layout_splitter_ratio(string, float);
+    callback commit_layout_splitter_ratio(string, float);
+    callback layout_undo_last_action();
+    callback reset_layout_default();
     callback open_settings();
     callback apply_settings(int, int, int, int, string, string, string, string);
 }
