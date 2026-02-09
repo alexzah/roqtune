@@ -1,13 +1,17 @@
+//! SQLite-backed persistence for playlists and playlist-scoped UI metadata.
+
 use crate::protocol::{PlaylistColumnWidthOverride, PlaylistInfo, RestoredTrack};
 use rusqlite::{params, Connection, OptionalExtension};
 use std::path::PathBuf;
 use uuid::Uuid;
 
+/// Database gateway for playlist and track persistence.
 pub struct DbManager {
     conn: Connection,
 }
 
 impl DbManager {
+    /// Opens the on-disk database, initializes schema, and applies migrations.
     pub fn new() -> Result<Self, rusqlite::Error> {
         let data_dir = dirs::data_dir()
             .expect("Could not find data directory")
@@ -27,6 +31,7 @@ impl DbManager {
     }
 
     #[cfg(test)]
+    /// Creates an in-memory database instance for tests.
     pub fn new_in_memory() -> Result<Self, rusqlite::Error> {
         let conn = Connection::open_in_memory()?;
         let db_manager = Self { conn };
@@ -132,6 +137,7 @@ impl DbManager {
         Ok(())
     }
 
+    /// Inserts a playlist record with a caller-supplied id.
     pub fn create_playlist(&self, id: &str, name: &str) -> Result<(), rusqlite::Error> {
         self.conn.execute(
             "INSERT INTO playlists (id, name) VALUES (?1, ?2)",
@@ -140,6 +146,7 @@ impl DbManager {
         Ok(())
     }
 
+    /// Renames an existing playlist.
     pub fn rename_playlist(&self, id: &str, name: &str) -> Result<(), rusqlite::Error> {
         self.conn.execute(
             "UPDATE playlists SET name = ?1 WHERE id = ?2",
@@ -148,6 +155,7 @@ impl DbManager {
         Ok(())
     }
 
+    /// Returns all playlists currently stored in the database.
     pub fn get_all_playlists(&self) -> Result<Vec<PlaylistInfo>, rusqlite::Error> {
         let mut stmt = self.conn.prepare("SELECT id, name FROM playlists")?;
         let playlist_iter = stmt.query_map([], |row| {
@@ -164,6 +172,7 @@ impl DbManager {
         Ok(playlists)
     }
 
+    /// Persists one track row in the given playlist at the provided position.
     pub fn save_track(
         &self,
         id: &str,
@@ -178,12 +187,14 @@ impl DbManager {
         Ok(())
     }
 
+    /// Deletes one track by id.
     pub fn delete_track(&self, id: &str) -> Result<(), rusqlite::Error> {
         self.conn
             .execute("DELETE FROM tracks WHERE id = ?1", params![id])?;
         Ok(())
     }
 
+    /// Deletes a playlist and all tracks that belong to it.
     pub fn delete_playlist(&self, id: &str) -> Result<(), rusqlite::Error> {
         // Delete tracks first due to foreign key (even if not enforced, it's good practice)
         self.conn
@@ -193,6 +204,7 @@ impl DbManager {
         Ok(())
     }
 
+    /// Loads tracks for one playlist ordered by stored position.
     pub fn get_tracks_for_playlist(
         &self,
         playlist_id: &str,
@@ -214,6 +226,7 @@ impl DbManager {
         Ok(tracks)
     }
 
+    /// Rewrites positional ordering for the supplied track ids.
     pub fn update_positions(&self, ids: Vec<String>) -> Result<(), rusqlite::Error> {
         let mut stmt = self
             .conn
@@ -224,6 +237,7 @@ impl DbManager {
         Ok(())
     }
 
+    /// Persists a complete playlist column ordering payload.
     pub fn set_playlist_column_order(
         &self,
         playlist_id: &str,
@@ -238,6 +252,7 @@ impl DbManager {
         Ok(())
     }
 
+    /// Loads the saved column ordering for a playlist, if present.
     pub fn get_playlist_column_order(
         &self,
         playlist_id: &str,
@@ -263,6 +278,7 @@ impl DbManager {
         Ok(None)
     }
 
+    /// Persists the full set of width overrides for a playlist.
     pub fn set_playlist_column_width_overrides(
         &self,
         playlist_id: &str,
@@ -283,6 +299,7 @@ impl DbManager {
         Ok(())
     }
 
+    /// Loads all persisted width overrides for a playlist, if present.
     pub fn get_playlist_column_width_overrides(
         &self,
         playlist_id: &str,
@@ -308,6 +325,7 @@ impl DbManager {
         Ok(None)
     }
 
+    /// Upserts one width override entry by column key.
     pub fn set_playlist_column_width_override(
         &self,
         playlist_id: &str,
@@ -331,6 +349,7 @@ impl DbManager {
         self.set_playlist_column_width_overrides(playlist_id, &overrides)
     }
 
+    /// Deletes one width override entry by column key.
     pub fn clear_playlist_column_width_override(
         &self,
         playlist_id: &str,

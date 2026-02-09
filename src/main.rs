@@ -43,6 +43,7 @@ fn panic_payload_to_string(payload: &(dyn std::any::Any + Send)) -> String {
     "non-string panic payload".to_string()
 }
 
+/// Detected and filtered output-setting choices presented in the settings dialog.
 #[derive(Debug, Clone)]
 struct OutputSettingsOptions {
     device_names: Vec<String>,
@@ -55,6 +56,7 @@ struct OutputSettingsOptions {
     auto_bits_per_sample_value: u16,
 }
 
+/// Lightweight signature used to detect meaningful runtime-output changes.
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct OutputRuntimeSignature {
     output_device_name: String,
@@ -459,6 +461,7 @@ fn playlist_column_order_keys(columns: &[PlaylistColumnConfig]) -> Vec<String> {
     columns.iter().map(playlist_column_key).collect()
 }
 
+/// Min/max width constraints for one visible playlist column.
 #[derive(Clone, Copy)]
 struct ColumnWidthBounds {
     min_px: i32,

@@ -1,3 +1,9 @@
+//! Audio decode and resample pipeline.
+//!
+//! The `AudioDecoder` listens to bus commands and forwards work to a dedicated
+//! decode worker thread that performs file decode, optional seek, resampling,
+//! and packet emission.
+
 use crate::config::{BufferingConfig, Config, OutputConfig, UiConfig};
 use crate::protocol::{self, AudioMessage, AudioPacket, ConfigMessage, Message, TrackIdentifier};
 use log::{debug, error, warn};
@@ -21,6 +27,7 @@ use tokio::sync::broadcast::{Receiver, Sender};
 use tokio::sync::mpsc::error::TrySendError;
 use tokio::sync::mpsc::{self, Receiver as MpscReceiver, Sender as MpscSender};
 
+/// Work items consumed by the decode worker thread.
 #[derive(Debug, Clone)]
 enum DecodeWorkItem {
     DecodeTracks {
@@ -37,6 +44,7 @@ enum DecodeWorkItem {
     ConfigChanged(Config),
 }
 
+/// Decoder state for the track currently being produced.
 struct ActiveDecodeTrack {
     track_identifier: TrackIdentifier,
     source_track_id: u32,
@@ -48,7 +56,7 @@ struct ActiveDecodeTrack {
     consecutive_decode_errors: u32,
 }
 
-// Worker to decode in a separate thread
+/// Single-threaded decode worker that owns decoder/resampler mutable state.
 struct DecodeWorker {
     bus_sender: Sender<Message>,
     work_receiver: MpscReceiver<DecodeWorkItem>,
@@ -66,6 +74,7 @@ struct DecodeWorker {
 }
 
 impl DecodeWorker {
+    /// Creates a decode worker instance backed by a work queue receiver.
     pub fn new(
         bus_sender: Sender<Message>,
         work_receiver: MpscReceiver<DecodeWorkItem>,
@@ -92,6 +101,7 @@ impl DecodeWorker {
         tracks.iter().any(|track| track.play_immediately)
     }
 
+    /// Runs the decode worker loop, draining queued work items forever.
     pub fn run(&mut self) {
         loop {
             while let Some(item) = self.work_queue.pop_front() {
@@ -639,6 +649,7 @@ fn get_metadata_size(path: &PathBuf) -> u64 {
     total_size
 }
 
+/// Bus-facing decoder orchestrator that manages decode generations.
 pub struct AudioDecoder {
     bus_receiver: Receiver<Message>,
     bus_sender: Sender<Message>,
@@ -648,6 +659,7 @@ pub struct AudioDecoder {
 }
 
 impl AudioDecoder {
+    /// Creates the decoder and spawns its dedicated decode worker thread.
     pub fn new(bus_receiver: Receiver<Message>, bus_sender: Sender<Message>) -> Self {
         let (worker_sender, worker_receiver) = mpsc::channel(128);
         let mut audio_decoder = Self {
@@ -661,6 +673,7 @@ impl AudioDecoder {
         audio_decoder
     }
 
+    /// Starts the blocking event loop that translates bus commands into decode work.
     pub fn run(&mut self) {
         loop {
             match self.bus_receiver.blocking_recv() {

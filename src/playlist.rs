@@ -1,14 +1,20 @@
+//! In-memory playlist model used by both editing and playback flows.
+
 use crate::protocol::{PlaybackOrder, RepeatMode};
 use log::debug;
 use rand::{rngs::StdRng, Rng, SeedableRng};
 use std::path::PathBuf;
 
+/// One playlist entry containing source path and stable id.
 #[derive(Clone)]
 pub struct Track {
+    /// Source file path.
     pub path: PathBuf,
+    /// Stable track id used across components.
     pub id: String,
 }
 
+/// Mutable playlist state with selection, playback, and ordering behavior.
 #[derive(Clone)]
 pub struct Playlist {
     tracks: Vec<Track>,
@@ -24,6 +30,7 @@ pub struct Playlist {
 }
 
 impl Playlist {
+    /// Creates an empty playlist with default playback/repeat modes.
     pub fn new() -> Playlist {
         // Generate a random seed
         let mut seed = [0u8; 32];
@@ -42,6 +49,7 @@ impl Playlist {
         }
     }
 
+    /// Appends a track to the playlist and updates shuffle order if needed.
     pub fn add_track(&mut self, track: Track) {
         self.tracks.push(track);
         // Update shuffled indices when adding a new track
@@ -53,10 +61,12 @@ impl Playlist {
         }
     }
 
+    /// Sets whether this playlist is currently in a playing state.
     pub fn set_playing(&mut self, is_playing: bool) {
         self.is_playing = is_playing;
     }
 
+    /// Replaces selected indices after bounds/sorting normalization.
     pub fn set_selected_indices(&mut self, mut indices: Vec<usize>) {
         indices.retain(|&i| i < self.tracks.len());
         indices.sort();
@@ -64,22 +74,27 @@ impl Playlist {
         self.selected_indices = indices;
     }
 
+    /// Returns a copy of selected indices.
     pub fn get_selected_indices(&self) -> Vec<usize> {
         self.selected_indices.clone()
     }
 
+    /// Returns the first selected index, or `0` when selection is empty.
     pub fn get_selected_track_index(&self) -> usize {
         self.selected_indices.first().copied().unwrap_or(0)
     }
 
+    /// Returns the currently playing track index, if any.
     pub fn get_playing_track_index(&self) -> Option<usize> {
         self.playing_track_index
     }
 
+    /// Sets the currently playing track index.
     pub fn set_playing_track_index(&mut self, index: Option<usize>) {
         self.playing_track_index = index;
     }
 
+    /// Applies single/ctrl/shift selection semantics for one clicked index.
     pub fn select_track_multi(&mut self, index: usize, ctrl: bool, shift: bool) {
         if index >= self.tracks.len() {
             return;
@@ -113,23 +128,28 @@ impl Playlist {
         self.selected_indices.dedup();
     }
 
+    /// Clears all selection and selection anchor state.
     pub fn deselect_all(&mut self) {
         self.selected_indices.clear();
         self.anchor_index = None;
     }
 
+    /// Returns whether playback is active for this playlist.
     pub fn is_playing(&self) -> bool {
         self.is_playing
     }
 
+    /// Returns a track by absolute index.
     pub fn get_track(&self, index: usize) -> &Track {
         &self.tracks[index]
     }
 
+    /// Returns the number of tracks in this playlist.
     pub fn num_tracks(&self) -> usize {
         self.tracks.len()
     }
 
+    /// Deletes one track and updates selection/playing/shuffle indices accordingly.
     pub fn delete_track(&mut self, index: usize) {
         if index >= self.tracks.len() {
             return;
@@ -183,10 +203,12 @@ impl Playlist {
         );
     }
 
+    /// Returns the stable id for a track at `index`.
     pub fn get_track_id(&self, index: usize) -> String {
         self.tracks[index].id.clone()
     }
 
+    /// Moves a set of tracks to the target gap index.
     pub fn move_tracks(&mut self, mut indices: Vec<usize>, to_gap: usize) {
         let len = self.tracks.len();
         if len == 0 {
@@ -282,6 +304,7 @@ impl Playlist {
         after_removal + inserted_before
     }
 
+    /// Resolves the next track index according to order/repeat policy.
     pub fn get_next_track_index(&mut self, current_index: usize) -> Option<usize> {
         if self.tracks.is_empty() {
             return None;
@@ -349,6 +372,7 @@ impl Playlist {
         }
     }
 
+    /// Resolves the previous track index according to order/repeat policy.
     pub fn get_previous_track_index(&mut self, current_index: usize) -> Option<usize> {
         if self.tracks.is_empty() {
             return None;
@@ -408,6 +432,7 @@ impl Playlist {
         }
     }
 
+    /// Forces reshuffle generation when shuffle mode is active.
     pub fn force_re_randomize_shuffle(&mut self) {
         if self.playback_order == PlaybackOrder::Shuffle {
             self.generate_shuffle_order(Some(self.get_selected_track_index()));
@@ -443,6 +468,7 @@ impl Playlist {
         self.shuffled_indices = indices;
     }
 
+    /// Sets playback order and initializes shuffle sequence when entering shuffle mode.
     pub fn set_playback_order(&mut self, order: PlaybackOrder) {
         if self.playback_order != order {
             self.playback_order = order;
@@ -455,6 +481,7 @@ impl Playlist {
         }
     }
 
+    /// Cycles repeat mode Off -> Playlist -> Track -> Off.
     pub fn toggle_repeat(&mut self) -> RepeatMode {
         self.repeat_mode = match self.repeat_mode {
             RepeatMode::Off => RepeatMode::Playlist,
@@ -464,6 +491,7 @@ impl Playlist {
         self.repeat_mode
     }
 
+    /// Sets repeat mode explicitly.
     pub fn set_repeat_mode(&mut self, mode: RepeatMode) {
         self.repeat_mode = mode;
     }

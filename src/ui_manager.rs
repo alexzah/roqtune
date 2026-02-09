@@ -1,3 +1,8 @@
+//! UI adapter and presentation-state manager.
+//!
+//! This component bridges event-bus messages to Slint model updates, performs
+//! metadata/cover-art lookup, and owns playlist table presentation behavior.
+
 use std::hash::{Hash, Hasher};
 use std::io::Write;
 use std::time::{Duration, Instant};
@@ -22,11 +27,13 @@ use crate::{
 };
 use governor::{Quota, RateLimiter};
 
+/// Shared UI models that are created in `main` and attached to the Slint window.
 pub struct UiState {
+    /// Track table model consumed directly by Slint.
     pub track_model: Rc<VecModel<TrackRowData>>,
 }
 
-// Manages the playlist
+/// Consumes bus messages and applies corresponding UI state updates.
 pub struct UiManager {
     ui: slint::Weak<AppWindow>,
     bus_receiver: Receiver<protocol::Message>,
@@ -63,6 +70,7 @@ pub struct UiManager {
     last_health_log_at: Instant,
 }
 
+/// Normalized track metadata snapshot used for row rendering and side panel display.
 #[derive(Clone)]
 struct TrackMetadata {
     title: String,
@@ -75,6 +83,7 @@ struct TrackMetadata {
     track_number: String,
 }
 
+/// Width policy used by adaptive playlist column sizing.
 #[derive(Clone, Copy, Debug)]
 struct ColumnWidthProfile {
     min_px: u32,
@@ -82,6 +91,7 @@ struct ColumnWidthProfile {
     max_px: u32,
 }
 
+/// Cover-art lookup request payload used by the internal worker thread.
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct CoverArtLookupRequest {
     track_path: Option<PathBuf>,
@@ -145,6 +155,7 @@ impl UiManager {
         latest
     }
 
+    /// Creates a UI manager and starts an internal cover-art lookup worker thread.
     pub fn new(
         ui: slint::Weak<AppWindow>,
         bus_receiver: Receiver<protocol::Message>,
@@ -942,6 +953,7 @@ impl UiManager {
         }
     }
 
+    /// Handles selection gesture start from the UI overlay.
     pub fn on_pointer_down(&mut self, pressed_index: usize, ctrl: bool, shift: bool) {
         debug!(
             "on_pointer_down: index={}, ctrl={}, shift={}",
@@ -961,6 +973,7 @@ impl UiManager {
         }
     }
 
+    /// Starts drag state for track row reordering.
     pub fn on_drag_start(&mut self, pressed_index: usize) {
         debug!(
             ">>> on_drag_start START: pressed_index={}, self.selected_indices={:?}",
@@ -984,6 +997,7 @@ impl UiManager {
         self.is_dragging = true;
     }
 
+    /// Updates the visual drag target gap during row drag.
     pub fn on_drag_move(&mut self, drop_gap: usize) {
         if self.is_dragging {
             let _ = self.ui.upgrade_in_event_loop(move |ui| {
@@ -992,6 +1006,7 @@ impl UiManager {
         }
     }
 
+    /// Finalizes drag state and emits track reorder command when applicable.
     pub fn on_drag_end(&mut self, drop_gap: usize) {
         debug!(
             ">>> on_drag_end START: is_dragging={}, drop_gap={}, drag_indices={:?}",
@@ -1021,6 +1036,7 @@ impl UiManager {
         });
     }
 
+    /// Starts the blocking UI event loop that listens for bus messages.
     pub fn run(&mut self) {
         loop {
             match self.bus_receiver.blocking_recv() {

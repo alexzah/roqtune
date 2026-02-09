@@ -1,3 +1,8 @@
+//! Playlist-domain orchestrator.
+//!
+//! This component owns editable and playback playlist state, persists playlist
+//! mutations, and coordinates decode/playback queueing behavior via the event bus.
+
 use std::collections::{HashMap, HashSet};
 
 use log::{debug, error, info, trace};
@@ -10,7 +15,7 @@ use crate::{
     protocol::{self, TrackIdentifier},
 };
 
-// Manages the playlist
+/// Coordinates playlist editing, playback sequencing, and decode cache intent.
 pub struct PlaylistManager {
     editing_playlist: Playlist,
     active_playlist_id: String,
@@ -33,6 +38,7 @@ pub struct PlaylistManager {
 }
 
 impl PlaylistManager {
+    /// Creates a playlist manager bound to bus channels and storage backend.
     pub fn new(
         playlist: Playlist,
         bus_consumer: Receiver<protocol::Message>,
@@ -132,6 +138,7 @@ impl PlaylistManager {
         }
     }
 
+    /// Starts the blocking event loop for playlist messages and playback coordination.
     pub fn run(&mut self) {
         // Restore playlists from database
         let playlists = match self.db_manager.get_all_playlists() {

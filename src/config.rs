@@ -1,12 +1,19 @@
+//! Persistent application configuration model and defaults.
+
+/// Root configuration persisted to `music_player.toml`.
 #[derive(Debug, Clone, Default, serde::Deserialize, serde::Serialize)]
 pub struct Config {
+    /// Audio output and device preferences.
     pub output: OutputConfig,
     #[serde(default)]
+    /// UI and layout preferences.
     pub ui: UiConfig,
     #[serde(default)]
+    /// Decoder/player buffering behavior.
     pub buffering: BufferingConfig,
 }
 
+/// Output device and format preferences.
 #[derive(Debug, Clone, serde::Deserialize, serde::Serialize)]
 pub struct OutputConfig {
     #[serde(default)]
@@ -24,6 +31,7 @@ pub struct OutputConfig {
     pub bits_per_sample_auto: bool,
 }
 
+/// UI preferences persisted between sessions.
 #[derive(Debug, Clone, serde::Deserialize, serde::Serialize)]
 pub struct UiConfig {
     #[serde(default = "default_true")]
@@ -38,9 +46,12 @@ pub struct UiConfig {
     pub volume: f32,
 }
 
+/// Declarative playlist column definition.
 #[derive(Debug, Clone, serde::Deserialize, serde::Serialize, PartialEq, Eq)]
 pub struct PlaylistColumnConfig {
+    /// Header label.
     pub name: String,
+    /// Format string used to render each row cell.
     pub format: String,
     #[serde(default = "default_true")]
     pub enabled: bool,
@@ -48,6 +59,7 @@ pub struct PlaylistColumnConfig {
     pub custom: bool,
 }
 
+/// Tuning knobs for decode/playback buffering.
 #[derive(Debug, Clone, serde::Deserialize, serde::Serialize)]
 pub struct BufferingConfig {
     #[serde(default = "default_player_low_watermark_ms")]
@@ -130,6 +142,7 @@ fn default_volume() -> f32 {
     1.0
 }
 
+/// Returns the built-in playlist column set used for new configs.
 pub fn default_playlist_columns() -> Vec<PlaylistColumnConfig> {
     vec![
         PlaylistColumnConfig {

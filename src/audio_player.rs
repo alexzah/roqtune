@@ -1,3 +1,8 @@
+//! Audio output engine.
+//!
+//! Consumes decoded packets, manages queue/cursor state, drives the CPAL output
+//! stream, and emits playback progress/track lifecycle notifications.
+
 use crate::protocol::{
     AudioMessage, AudioPacket, ConfigMessage, Message, PlaybackMessage, TrackStarted,
 };
@@ -14,12 +19,16 @@ use std::{
 };
 use tokio::sync::broadcast::{Receiver, Sender};
 
+/// Queue marker used to announce track start inside the audio stream.
 #[derive(Debug, Clone)]
 pub struct TrackHeader {
+    /// Stable track id.
     pub id: String,
+    /// Start offset applied when this track entered playback.
     pub start_offset_ms: u64,
 }
 
+/// Queue item variants consumed by the audio callback.
 #[derive(Debug, Clone)]
 enum AudioQueueEntry {
     Samples(Vec<f32>),
@@ -27,6 +36,7 @@ enum AudioQueueEntry {
     TrackFooter(String),
 }
 
+/// Cached queue index span for one decoded track.
 #[derive(Debug, Clone)]
 struct TrackIndex {
     start: usize,
@@ -35,6 +45,7 @@ struct TrackIndex {
     technical_metadata: crate::protocol::TechnicalMetadata,
 }
 
+/// Runtime audio output controller and packet queue owner.
 pub struct AudioPlayer {
     bus_receiver: Receiver<Message>,
     bus_sender: Sender<Message>,
@@ -144,6 +155,7 @@ impl AudioPlayer {
         cursor
     }
 
+    /// Creates an audio player, initializes output device, and spawns helper threads.
     pub fn new(bus_receiver: Receiver<Message>, bus_sender: Sender<Message>) -> Self {
         let is_playing = Arc::new(AtomicBool::new(false));
         let current_track_position = Arc::new(AtomicUsize::new(0));
@@ -664,6 +676,7 @@ impl AudioPlayer {
         }
     }
 
+    /// Starts the blocking event loop that reacts to bus messages.
     pub fn run(&mut self) {
         loop {
             match self.bus_receiver.blocking_recv() {
