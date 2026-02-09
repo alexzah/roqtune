@@ -1,4 +1,387 @@
-import { Button, VerticalBox, StandardTableView, ComboBox } from "std-widgets.slint";
+import { Button, ComboBox, VerticalBox, StandardTableView, ScrollView, LineEdit, ListView } from "std-widgets.slint";
+
+struct TrackRowData {
+    status: string,
+    values: [string],
+    selected: bool,
+}
+
+component ContextMenu inherits PopupWindow {
+    callback rename();
+    callback delete();
+    in property <bool> is-playlist: false;
+    width: 120px;
+    height: is-playlist ? 56px : 32px;
+    
+    Rectangle {
+        background: #333;
+        border-width: 1px;
+        border-color: #444;
+        
+        VerticalLayout {
+            padding: 4px;
+            spacing: 4px;
+            Rectangle {
+                height: 24px;
+                background: item-ta-rename.has-hover ? #444 : transparent;
+                border-radius: 2px;
+                Text {
+                    x: 8px;
+                    text: "Rename";
+                    color: #eee;
+                    font-size: 13px;
+                    vertical-alignment: center;
+                }
+                item-ta-rename := TouchArea {
+                    clicked => {
+                        root.rename();
+                    }
+                }
+            }
+            if is-playlist : Rectangle {
+                height: 24px;
+                background: item-ta-delete.has-hover ? #444 : transparent;
+                border-radius: 2px;
+                Text {
+                    x: 8px;
+                    text: "Delete";
+                    color: #ff5555;
+                    font-size: 13px;
+                    vertical-alignment: center;
+                }
+                item-ta-delete := TouchArea {
+                    clicked => {
+                        root.delete();
+                    }
+                }
+            }
+        }
+    }
+}
+
+component ColumnHeaderMenu inherits PopupWindow {
+    in property <[string]> labels: [];
+    in property <[bool]> checked: [];
+    in property <[bool]> custom: [];
+    callback toggle-column(int);
+    callback delete-column(int);
+    callback add-custom();
+
+    width: 220px;
+    height: 16px + labels.length * 24px + 32px;
+
+    Rectangle {
+        background: #2f2f2f;
+        border-width: 1px;
+        border-color: #454545;
+        border-radius: 4px;
+
+        VerticalLayout {
+            padding: 4px;
+            spacing: 2px;
+
+            for label[i] in root.labels : Rectangle {
+                property <bool> is-custom: i < root.custom.length && root.custom[i];
+                height: 22px;
+                border-radius: 2px;
+                background: column-item-ta.has-hover ? #3d3d3d : transparent;
+                Text {
+                    text: (root.checked[i] ? "☑ " : "☐ ") + label;
+                    color: #ddd;
+                    font-size: 12px;
+                    vertical-alignment: center;
+                    horizontal-alignment: left;
+                    x: 6px;
+                    width: parent.width - (parent.is-custom ? 28px : 0px);
+                }
+                column-item-ta := TouchArea {
+                    width: parent.width - (parent.is-custom ? 24px : 0px);
+                    clicked => {
+                        root.toggle-column(i);
+                    }
+                }
+                if self.is-custom : Rectangle {
+                    width: 14px;
+                    height: 14px;
+                    x: parent.width - self.width - 6px;
+                    y: (parent.height - self.height) / 2;
+                    border-radius: self.width / 2;
+                    background: delete-column-ta.has-hover ? #db3f3f : #b93636;
+                    Text {
+                        text: "x";
+                        color: #f7f7f7;
+                        font-size: 9px;
+                        horizontal-alignment: center;
+                        vertical-alignment: center;
+                    }
+                    delete-column-ta := TouchArea {
+                        clicked => {
+                            root.delete-column(i);
+                        }
+                    }
+                }
+            }
+
+            Rectangle {
+                height: 1px;
+                background: #3c3c3c;
+            }
+
+            Rectangle {
+                height: 22px;
+                border-radius: 2px;
+                background: custom-item-ta.has-hover ? #3d3d3d : transparent;
+                Text {
+                    text: "Custom...";
+                    color: #ddd;
+                    font-size: 12px;
+                    vertical-alignment: center;
+                    horizontal-alignment: left;
+                    x: 6px;
+                }
+                custom-item-ta := TouchArea {
+                    clicked => {
+                        root.add-custom();
+                    }
+                }
+            }
+        }
+    }
+}
+
+component ConfirmationDialog inherits Rectangle {
+    callback confirmed();
+    callback cancelled();
+    in property <string> message: "Are you sure?";
+    in property <bool> is-visible: false;
+    
+    visible: is-visible;
+    background: #00000080;
+    
+    // Prevent clicks from passing through
+    TouchArea {}
+    
+    Rectangle {
+        width: 350px;
+        height: 150px;
+        background: #282828;
+        border-width: 1px;
+        border-color: #444;
+        border-radius: 4px;
+        
+        VerticalLayout {
+            padding: 20px;
+            spacing: 20px;
+            
+            Text {
+                text: root.message;
+                color: #eee;
+                font-size: 14px;
+                horizontal-alignment: center;
+                wrap: word-wrap;
+            }
+            
+            HorizontalLayout {
+                spacing: 15px;
+                alignment: center;
+                
+                Button {
+                    text: "Cancel";
+                    clicked => { root.cancelled(); }
+                }
+                
+                Button {
+                    text: "Delete";
+                    primary: true;
+                    clicked => { root.confirmed(); }
+                }
+            }
+        }
+    }
+}
+
+component InfoDialog inherits Rectangle {
+    callback dismissed();
+    in property <string> message: "";
+    in property <bool> is-visible: false;
+
+    visible: is-visible;
+    background: #00000080;
+
+    TouchArea {}
+
+    Rectangle {
+        width: 430px;
+        height: 180px;
+        background: #282828;
+        border-width: 1px;
+        border-color: #444;
+        border-radius: 4px;
+
+        VerticalLayout {
+            padding: 16px;
+            spacing: 14px;
+
+            Text {
+                text: "Restart Required";
+                color: #eee;
+                font-size: 16px;
+                font-weight: 700;
+                horizontal-alignment: left;
+            }
+
+            Text {
+                text: root.message;
+                color: #ddd;
+                font-size: 13px;
+                wrap: word-wrap;
+                vertical-stretch: 1;
+            }
+
+            HorizontalLayout {
+                Rectangle { horizontal-stretch: 1; }
+                Button {
+                    text: "OK";
+                    primary: true;
+                    clicked => { root.dismissed(); }
+                }
+            }
+        }
+    }
+}
+
+component PlaylistRow inherits Rectangle {
+    in property <string> name;
+    in property <bool> is-active;
+    in property <bool> is-editing;
+    callback clicked();
+    callback renamed(string);
+    callback context-menu-rename();
+    callback context-menu-delete();
+    callback cancel-edit();
+    
+    property <length> menu-x;
+    property <length> menu-y;
+    
+    height: 24px;
+    background: is-active ? #3d3d3d : ta.has-hover ? #333 : transparent;
+    border-radius: 2px;
+    
+    if !is-editing : Text {
+        x: 8px;
+        text: root.name;
+        color: is-active ? #eee : #aaa;
+        font-size: 13px;
+        vertical-alignment: center;
+        horizontal-alignment: left;
+    }
+    
+    if is-editing : LineEdit {
+        x: 4px;
+        width: parent.width - 8px;
+        height: parent.height - 4px;
+        text: root.name;
+        accepted => {
+            root.renamed(self.text);
+        }
+        init => {
+            self.focus();
+        }
+    }
+    
+    ta := TouchArea {
+        visible: !is-editing;
+        clicked => { root.clicked(); }
+        pointer-event(event) => {
+            if (event.button == PointerEventButton.right && event.kind == PointerEventKind.down) {
+                root.menu-x = self.mouse-x;
+                root.menu-y = self.mouse-y;
+                menu.show();
+            }
+        }
+    }
+
+    menu := ContextMenu {
+        is-playlist: true;
+        x: root.menu-x;
+        y: root.menu-y;
+        rename => {
+            root.context-menu-rename();
+        }
+        delete => {
+            root.context-menu-delete();
+        }
+    }
+
+    FocusScope {
+        visible: root.is-editing;
+        key-pressed(event) => {
+            if (event.text == Key.Escape) {
+                root.cancel-edit();
+                return accept;
+            }
+            reject
+        }
+    }
+}
+
+component TrackRow inherits Rectangle {
+    in property <TrackRowData> data;
+    in property <bool> is-playing;
+    in property <bool> is-hover;
+    in property <[string]> headers: [];
+    in property <[int]> column-widths-px: [];
+    in property <length> null-column-width: 120px;
+
+    pure function column-width-for-index(index: int) -> length {
+        if index >= 0 && index < root.column-widths-px.length {
+            return max(48px, root.column-widths-px[index] * 1px);
+        }
+        return 140px;
+    }
+
+    height: 30px;
+    background: data.selected ? #3d3d3d : is-hover ? #333 : transparent;
+    animate background { duration: 100ms; }
+
+    HorizontalLayout {
+        padding-left: 8px;
+        padding-right: 8px;
+        spacing: 10px;
+
+        Rectangle {
+            width: 40px;
+            Text {
+                text: root.data.status;
+                color: #2a6def;
+                font-size: 14px;
+                horizontal-alignment: center;
+                vertical-alignment: center;
+            }
+        }
+
+        for column-value[index] in root.data.values : Rectangle {
+            width: root.column-width-for-index(index);
+            clip: true;
+            Text {
+                x: 0px;
+                width: parent.width;
+                text: column-value;
+                color: (index < root.headers.length && root.headers[index] == "Title") ? #eee : #aaa;
+                font-size: 13px;
+                vertical-alignment: center;
+                overflow: elide;
+                horizontal-alignment: left;
+            }
+        }
+
+        Rectangle { horizontal-stretch: 1; }
+
+        Rectangle {
+            width: root.null-column-width;
+        }
+    }
+}
 
 component PlayerButton inherits Rectangle {
     width: 32px;
@@ -15,6 +398,7 @@ component PlayerButton inherits Rectangle {
         font-size: root.font-size;
         color: root.is-primary ? #2a6def : #eee;
         horizontal-alignment: center;
+        vertical-alignment: center;
         opacity: root.enabled ? 1.0 : 0.5;
     }
 
@@ -27,14 +411,161 @@ component PlayerButton inherits Rectangle {
     }
 }
 
+component SettingsDropdownControl inherits Rectangle {
+    in property <string> label;
+    in property <[string]> options;
+    in-out property <int> selected_index;
+    in-out property <string> custom_value;
+    in property <string> custom_placeholder;
+
+    property <bool> use_custom: root.options.length > 0 && root.selected_index == root.options.length - 1;
+    height: root.use_custom ? 76px : 40px;
+
+    VerticalLayout {
+        spacing: 4px;
+
+        HorizontalLayout {
+            spacing: 12px;
+
+            Text {
+                text: root.label;
+                color: #ddd;
+                font-size: 12px;
+                width: 220px;
+                vertical-alignment: center;
+                horizontal-alignment: left;
+            }
+
+            Rectangle {
+                horizontal-stretch: 1;
+                height: 34px;
+                background: transparent;
+                ComboBox {
+                    width: parent.width;
+                    height: parent.height;
+                    model: root.options;
+                    current-index <=> root.selected_index;
+                }
+            }
+        }
+
+        if root.use_custom : HorizontalLayout {
+            spacing: 12px;
+            Rectangle {
+                width: 220px;
+            }
+            LineEdit {
+                horizontal-stretch: 1;
+                text <=> root.custom_value;
+                placeholder-text: root.custom_placeholder;
+            }
+            Rectangle {
+                width: 32px;
+            }
+        }
+    }
+}
+
 export component AppWindow inherits Window {
-    width: 900px;
-    height: 600px;
+    preferred-width: 900px;
+    preferred-height: 650px;
+    min-width: 600px;
+    min-height: 400px;
     title: "fooBar-like Music Player";
     background: #282828;
+
+    key-handler := FocusScope {
+        width: 0px;
+        height: 0px;
+        key-pressed(event) => {
+            if (event.text == Key.Delete) {
+                if (root.editing_playlist_index != -1 || root.show_confirm_dialog) {
+                    return reject;
+                }
+                if (root.sidebar_has_focus) {
+                    root.confirm_delete_playlist(root.active_playlist_index);
+                } else {
+                    root.delete_selected_tracks();
+                }
+                return accept;
+            }
+            if (event.text == Key.F2) {
+                root.editing_playlist_index = root.active_playlist_index;
+                return accept;
+            }
+            reject
+        }
+    }
     
+    public function refocus_main() {
+        key-handler.focus();
+    }
+
+    public function confirm_delete_playlist(index: int) {
+        if (index >= 0 && index < root.playlists.length) {
+            root.delete_target_index = index;
+            root.delete_confirm_message = "Are you sure you want to delete the playlist '" + root.playlists[index].text + "'?";
+            root.show_confirm_dialog = true;
+        }
+    }
+
+    property <int> delete_target_index: -1;
+    property <string> delete_confirm_message: "";
+    in-out property <bool> show_confirm_dialog: false;
+    in-out property <int> delete_custom_column_index: -1;
+    in-out property <string> delete_custom_column_message: "";
+    in-out property <bool> show_delete_custom_column_confirm: false;
+    in-out property <bool> sidebar_has_focus: false;
+    property <length> null-column-width: 120px;
+    property <length> column-menu-x: 0px;
+    property <length> column-menu-y: 0px;
+    in-out property <int> column_drag_from: -1;
+    in-out property <int> column_drop_gap: -1;
+    in-out property <int> column_resize_index: -1;
+    in-out property <bool> column_resize_active: false;
+    in-out property <int> column_hover_divider: -1;
+    in-out property <int> column_resize_start_width_px: 0;
+    in-out property <int> column_resize_min_width_px: 48;
+    in-out property <int> column_resize_max_width_px: 1024;
+    in-out property <int> column_resize_preview_width_px: 0;
+    property <length> column_resize_start_mouse_x: 0px;
+    in-out property <bool> show_custom_column_dialog: false;
+    in-out property <string> custom_column_name: "";
+    in-out property <string> custom_column_format: "";
+    in-out property <[int]> playlist_column_widths_px: [];
+    in-out property <[int]> playlist_column_gap_positions_px: [];
+    in-out property <int> playlist_columns_content_width_px: 0;
+    in-out property <int> playlist_columns_available_width_px: 0;
+    in-out property <int> sidebar_width_px: 220;
+
+    pure function playlist-column-width(index: int) -> length {
+        if index >= 0 && index < root.playlist_column_widths_px.length {
+            return max(48px, root.playlist_column_widths_px[index] * 1px);
+        }
+        return 140px;
+    }
+
+    pure function playlist-column-divider-x(index: int) -> int {
+        if index < 0 || index >= root.playlist_column_widths_px.length {
+            return 0;
+        }
+        let gap_index = index + 1;
+        if gap_index < 0 || gap_index >= root.playlist_column_gap_positions_px.length {
+            return 0;
+        }
+        let gap_position = root.playlist_column_gap_positions_px[gap_index];
+        return gap_index < root.playlist_column_widths_px.length ? gap_position - 10 : gap_position;
+    }
+
+    changed width => {
+        root.window_resized(max(0, floor(self.width / 1px)), max(0, floor(self.height / 1px)));
+    }
+    changed height => {
+        root.window_resized(max(0, floor(self.width / 1px)), max(0, floor(self.height / 1px)));
+    }
+
     // Status display at the bottom showing the currently playing track
-    property <string> status-display: file_path != "" ? file_path : "No track selected";
+    in-out property <string> status-text: "";
 
     VerticalLayout {
         // Toolbar with open and playback controls
@@ -42,45 +573,45 @@ export component AppWindow inherits Window {
             height: 42px;
             background: #202020;
             HorizontalLayout {
-                padding-left: 8px;
-                padding-right: 8px;
-                spacing: 8px;
+                padding-left: 12px;
+                padding-right: 12px;
+                padding-top: 8px;
+                padding-bottom: 8px;
+                spacing: 12px;
                 
-                // Open file button
+                // Left Group: Open
                 Rectangle {
-                    width: 80px;
-                    height: 28px;
+                    width: 32px;
+                    height: 26px;
                     border-radius: 2px;
-                    background: #373737;
-                    HorizontalLayout {
-                        alignment: center;
-                        spacing: 4px;
-                        Text {
-                            text: "📂"; 
-                            color: #ddd;
-                            font-size: 14px;
-                        }
-
-                        Text {
-                            text: "Open";
-                            color: #ddd;
-                            font-size: 14px;
-                        }
+                    background: touch-area-open.pressed ? #444 : touch-area-open.has-hover ? #555 : #373737;
+                    animate background { duration: 150ms; }
+                    
+                    Text {
+                        text: "+";
+                        color: #eee;
+                        font-size: 20px;
+                        font-weight: 700;
+                        vertical-alignment: center;
+                        horizontal-alignment: center;
                     }
 
-                    TouchArea {
+                    touch-area-open := TouchArea {
                         clicked => {
                             root.open_file();
                         }
                     }
                 }
+
+                // Spacer 1
+                Rectangle { horizontal-stretch: 1; }
                 
-                // Playback controls
+                // Center Group: Playback controls
                 HorizontalLayout {
-                    alignment: center;
-                    spacing: 14px;
+                    spacing: 12px;
                     PlayerButton {
                         icon-text: "⏮";
+                        font-size: 18px;
                         clicked => {
                             root.previous();
                         }
@@ -89,6 +620,7 @@ export component AppWindow inherits Window {
                     PlayerButton {
                         icon-text: "▶";
                         is-primary: true;
+                        font-size: 20px;
                         clicked => {
                             root.play();
                         }
@@ -96,6 +628,7 @@ export component AppWindow inherits Window {
 
                     PlayerButton {
                         icon-text: "⏸";
+                        font-size: 18px;
                         clicked => {
                             root.pause();
                         }
@@ -103,6 +636,7 @@ export component AppWindow inherits Window {
 
                     PlayerButton {
                         icon-text: "⏹";
+                        font-size: 18px;
                         clicked => {
                             root.stop();
                         }
@@ -110,96 +644,246 @@ export component AppWindow inherits Window {
 
                     PlayerButton {
                         icon-text: "⏭";
+                        font-size: 18px;
                         clicked => {
                             root.next();
                         }
                     }
                 }
-                
-                // Playback mode selection
-                HorizontalLayout {
-                    spacing: 8px;
-                    Text {
-                        text: "Order:";
-                        color: #aaa;
-                        font-size: 14px;
-                    }
 
-                    ComboBox {
-                        width: 120px;
-                        height: 28px;
-                        model: ["Sequential", "Shuffle", "Random"];
-                        current-index: root.playback_order_index;
-                        selected => {
-                            root.playback_order_changed(self.current-index);
+                // Spacer 2
+                Rectangle { horizontal-stretch: 1; }
+                
+                // Right Group: Playback mode selection
+                HorizontalLayout {
+                    spacing: 12px;
+
+                    Rectangle {
+                        width: 32px;
+                        height: 32px;
+                        PlayerButton {
+                            icon-text: "⇄";
+                            font-size: 20px;
+                            is-primary: root.playback_order_index != 0;
+                            clicked => {
+                                let next-order = root.playback_order_index == 0 ? 1 : root.playback_order_index == 1 ? 2 : 0;
+                                root.playback_order_index = next-order;
+                                root.playback_order_changed(next-order);
+                            }
+                        }
+                        if root.playback_order_index == 2 : Rectangle {
+                            width: 10px;
+                            height: 10px;
+                            x: 15px;
+                            y: 11px;
+                            border-radius: 5px;
+                            background: #2a6def;
+                            Text {
+                                text: "?";
+                                color: white;
+                                font-size: 7px;
+                                font-weight: 700;
+                                horizontal-alignment: center;
+                                vertical-alignment: center;
+                            }
                         }
                     }
 
-                    Text {
-                        text: "Repeat:";
-                        color: #aaa;
-                        font-size: 14px;
+                    Rectangle {
+                        width: 32px;
+                        height: 32px;
+                        PlayerButton {
+                            icon-text: "⟳";
+                            font-size: 19px;
+                            is-primary: root.repeat_mode != 0;
+                            clicked => {
+                                root.toggle_repeat();
+                            }
+                        }
+                        if root.repeat_mode == 2 : Rectangle {
+                            width: 10px;
+                            height: 10px;
+                            x: 15px;
+                            y: 11px;
+                            border-radius: 5px;
+                            background: #2a6def;
+                            Text {
+                                text: "1";
+                                color: white;
+                                font-size: 7px;
+                                font-weight: 700;
+                                horizontal-alignment: center;
+                                vertical-alignment: center;
+                            }
+                        }
                     }
 
                     PlayerButton {
-                        icon-text: root.repeat_on ? "🔁" : "↩";
-                        font-size: 14px;
-                        is-primary: root.repeat_on;
+                        icon-text: "⚙";
+                        font-size: 21px;
                         clicked => {
-                            root.toggle_repeat();
+                            root.open_settings();
                         }
                     }
-                }
-                
-                // Spacer to push notification area to the right
-                Rectangle { }
-                
-                // Status area
-                Text {
-                    text: status;
-                    color: #aaa;
-                    font-size: 13px;
+
+                    Rectangle {
+                        width: 20px;
+                        height: 26px;
+                        background: transparent;
+
+                        Rectangle {
+                            x: 0px;
+                            y: 10px;
+                            width: 4px;
+                            height: 6px;
+                            border-radius: 1px;
+                            background: #888;
+                        }
+
+                        Rectangle {
+                            x: 4px;
+                            y: 9px;
+                            width: 2px;
+                            height: 8px;
+                            border-radius: 1px;
+                            background: #888;
+                        }
+
+                        Rectangle {
+                            x: 6px;
+                            y: 8px;
+                            width: 1px;
+                            height: 10px;
+                            background: #888;
+                        }
+
+                        Text {
+                            x: 8px;
+                            y: 5px;
+                            text: "))";
+                            color: #888;
+                            font-size: 11px;
+                            vertical-alignment: center;
+                        }
+                    }
+
+                    volume-slider := Rectangle {
+                        width: 110px;
+                        height: 26px;
+                        background: transparent;
+
+                        volume-track := Rectangle {
+                            x: 0;
+                            y: 10px;
+                            width: parent.width;
+                            height: 6px;
+                            border-radius: 3px;
+                            background: #333;
+                        }
+
+                        Rectangle {
+                            x: 0;
+                            y: volume-track.y;
+                            width: volume-track.width * root.volume-level;
+                            height: volume-track.height;
+                            background: #2a6def;
+                            border-radius: 3px;
+                        }
+
+                        volume-handle := Rectangle {
+                            width: 10px;
+                            height: 10px;
+                            x: (volume-track.width * root.volume-level) - self.width / 2;
+                            y: volume-track.y + (volume-track.height - self.height) / 2;
+                            background: white;
+                            border-radius: 5px;
+                            animate x {
+                                duration: 100ms;
+                                easing: ease-out;
+                            }
+                        }
+
+                        states [
+                            hover when ta-volume.has-hover || ta-volume.pressed: {
+                                volume-handle.width: 12px;
+                                volume-handle.height: 12px;
+                            }
+                        ]
+
+                        ta-volume := TouchArea {
+                            width: parent.width;
+                            height: 20px;
+                            y: 3px;
+                            mouse-cursor: pointer;
+                            clicked => {
+                                root.volume-level = max(0, min(1, self.mouse-x / volume-track.width));
+                                root.volume-changed(root.volume-level);
+                            }
+                            moved => {
+                                if (self.pressed) {
+                                    root.volume-level = max(0, min(1, self.mouse-x / volume-track.width));
+                                    root.volume-changed(root.volume-level);
+                                }
+                            }
+                        }
+                        
+                        if ta-volume.pressed : Rectangle {
+                            width: 34px;
+                            height: 13px;
+                            x: min(volume-track.width - self.width - 2px, max(2px, (volume-track.width * root.volume-level) - self.width / 2));
+                            y: -4px;
+                            border-radius: 3px;
+                            background: #1f1f1f;
+                            border-width: 1px;
+                            border-color: #3a3a3a;
+
+                            Text {
+                                text: floor(root.volume-level * 100) + "%";
+                                color: #ddd;
+                                font-size: 8px;
+                                horizontal-alignment: center;
+                                vertical-alignment: center;
+                            }
+                        }
+                    }
                 }
             }
         }
         
         // Progress bar section
         Rectangle {
-            height: 36px;
+            height: 32px;
             background: #242424;
             HorizontalLayout {
-                padding-left: 16px;
-                padding-right: 16px;
-                padding-top: 10px;
-                padding-bottom: 10px;
-                spacing: 8px;
+                padding-left: 12px;
+                padding-right: 12px;
+                padding-top: 8px;
+                padding-bottom: 8px;
+                spacing: 10px;
                 
                 // Current time display
-                Rectangle {
-                    background: #444;
-                    border-radius: 2px;
-                    width: 70px;
-                    Text {
-                        text: root.current-position-text;
-                        color: #bbb;
-                        font-size: 13px;
-                        vertical-alignment: center;
-                        horizontal-alignment: center;
-                    }
+                Text {
+                    text: root.format-time(root.elapsed-ms);
+                    color: #888;
+                    font-size: 12px;
+                    vertical-alignment: center;
+                    horizontal-alignment: right;
+                    width: 45px;
                 }
                 
                 // Improved interactive seek bar
                 seekbar := Rectangle {
-                    height: 16px;
+                    height: 6px;
                     border-radius: 3px;
                     background: #333;
                     horizontal-stretch: 1;
-                    property <length> handle-position: self.width * root.position-percentage;
                     
-                    // Progress indicator - shows playback progress with smooth animation
-                    progress := Rectangle {
+                    // Progress indicator
+                    Rectangle {
+                        x: 0;
+                        y: 0;
+                        width: seekbar.width * root.position-percentage;
                         height: parent.height;
-                        width: seekbar.handle-position;
                         background: #2a6def;
                         border-radius: 3px;
                         animate width {
@@ -208,23 +892,14 @@ export component AppWindow inherits Window {
                         }
                     }
                     
-                    // Position percentage label for debugging
-                    Text {
-                        text: round(root.position-percentage * 100) + "%";
-                        color: white;
-                        font-size: 10px;
-                        y: -16px;
-                        x: seekbar.width / 2 - self.width / 2;
-                    }
-                    
-                    // Handle over the progress bar with smooth animation
+                    // Handle over the progress bar
                     handle := Rectangle {
-                        width: 10px;
-                        height: parent.height + 4px;
-                        x: seekbar.handle-position - self.width / 2;
-                        y: -2px;
+                        width: 12px;
+                        height: 12px;
+                        x: (seekbar.width * root.position-percentage) - self.width / 2;
+                        y: (parent.height - self.height) / 2;
                         background: white;
-                        border-radius: 5px;
+                        border-radius: 6px;
                         drop-shadow-offset-y: 1px;
                         drop-shadow-blur: 2px;
                         drop-shadow-color: #00000080;
@@ -234,31 +909,27 @@ export component AppWindow inherits Window {
                             duration: 150ms;
                             easing: ease-out;
                         }
-                        animate height { duration: 80ms; }
-                        animate y { duration: 80ms; }
                     }
                     
                     // Focus highlighting when hovering
                     states [
-                        hover when ta.has-hover || ta.pressed: {
-                            handle.background: #f0f0f0;
-                            handle.height: parent.height + 6px;
-                            handle.y: -3px;
+                        hover when ta-seek.has-hover || ta-seek.pressed: {
+                            handle.background: #ffffff;
+                            handle.width: 14px;
+                            handle.height: 14px;
                         }
                     ]
                     
                     // Simple touch area for seeking
-                    ta := TouchArea {
+                    ta-seek := TouchArea {
                         width: parent.width;
-                        height: parent.height + 10px; // Make touch area slightly larger
+                        height: 20px; 
                         mouse-cursor: pointer;
                         clicked => {
-                            // Calculate position as percentage of width and send seek command
                             root.seek-to(max(0, min(1, self.mouse-x / seekbar.width)));
                         }
                         moved => {
                             if (self.pressed) {
-                                // Update while dragging
                                 root.seek-to(max(0, min(1, self.mouse-x / seekbar.width)));
                             }
                         }
@@ -267,60 +938,819 @@ export component AppWindow inherits Window {
                 
                 // Total duration display
                 Text {
-                    text: root.total-duration-text;
-                    color: #bbb;
-                    font-size: 13px;
+                    text: root.format-time(root.total-ms);
+                    color: #888;
+                    font-size: 12px;
                     vertical-alignment: center;
                     width: 45px;
                 }
             }
         }
         
-        // Main content: Playlist 
-        StandardTableView {
-            columns: [
-                // { title: "#", width: 40px },
-                { title: "Title", width: 300px },
-                { title: "Artist", width: 200px },
-                { title: "Album", width: 200px },
-            ];
-            rows: track_model;
-            horizontal-stretch: 1;
+        // Main content: Sidebar and Playlist
+        HorizontalLayout {
             vertical-stretch: 1;
-            row-pointer-event(int, PointerEvent, Point) => {
-                root.playlist_item_click(int, PointerEvent, Point);
+            
+            // Left Sidebar
+            Rectangle {
+                width: max(180px, min(300px, root.sidebar_width_px * 1px));
+                background: #202020;
+                
+                VerticalLayout {
+                    // Top Half: Playlist Picker
+                    VerticalLayout {
+                        vertical-stretch: 1;
+                        padding: 8px;
+                        spacing: 4px;
+                        
+                        HorizontalLayout {
+                            Text {
+                                text: "Playlists";
+                                color: #888;
+                                font-size: 12px;
+                                font-weight: 700;
+                                vertical-alignment: center;
+                            }
+                            Rectangle { horizontal-stretch: 1; }
+                            PlayerButton {
+                                icon-text: "+";
+                                font-size: 18px;
+                                clicked => { root.create_playlist(); }
+                            }
+                        }
+                        
+                        Rectangle { height: 1px; background: #333; }
+                        
+                        ScrollView {
+                            vertical-stretch: 1;
+                            VerticalLayout {
+                                alignment: start;
+                                for p[i] in root.playlists : PlaylistRow {
+                                    name: p.text;
+                                    is-active: root.active_playlist_index == i;
+                                    is-editing: root.editing_playlist_index == i;
+                                    clicked => { 
+                                        root.switch_playlist(i); 
+                                        root.editing_playlist_index = -1;
+                                        root.sidebar_has_focus = true;
+                                        root.refocus_main();
+                                    }
+                                    renamed(new-name) => {
+                                        root.rename_playlist(i, new-name);
+                                        root.editing_playlist_index = -1;
+                                        root.refocus_main();
+                                    }
+                                    cancel-edit() => {
+                                        root.editing_playlist_index = -1;
+                                        root.refocus_main();
+                                    }
+                                    context-menu-rename() => {
+                                        root.editing_playlist_index = i;
+                                    }
+                                    context-menu-delete() => {
+                                        root.confirm_delete_playlist(i);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    
+                    // Bottom Half: Metadata and Album Art
+                    VerticalLayout {
+                        vertical-stretch: 1;
+                        padding: 10px;
+                        alignment: end;
+                        spacing: 10px;
+                        
+                        // Metadata display
+                        VerticalLayout {
+                            spacing: 4px;
+                            if root.display_title != "" : Text {
+                                text: root.display_title;
+                                color: #eee;
+                                font-size: 14px;
+                                font-weight: 700;
+                                wrap: word-wrap;
+                                overflow: elide;
+                            }
+                            if root.display_artist != "" : Text {
+                                text: root.display_artist;
+                                color: #ccc;
+                                font-size: 13px;
+                                wrap: word-wrap;
+                                overflow: elide;
+                            }
+                            if root.display_album != "" : Text {
+                                text: root.display_album;
+                                color: #aaa;
+                                font-size: 12px;
+                                wrap: word-wrap;
+                                overflow: elide;
+                            }
+                            HorizontalLayout {
+                                spacing: 8px;
+                                if root.display_date != "" : Text {
+                                    text: root.display_date;
+                                    color: #888;
+                                    font-size: 11px;
+                                }
+                                if root.display_genre != "" : Text {
+                                    text: root.display_genre;
+                                    color: #888;
+                                    font-size: 11px;
+                                    horizontal-stretch: 1;
+                                    overflow: elide;
+                                }
+                            }
+                        }
+                        
+                        Rectangle {
+                            height: self.width;
+                            background: #202020;
+                            border-radius: 4px;
+                            
+                            Image {
+                                source: root.current_cover_art;
+                                width: parent.width;
+                                height: parent.height;
+                                image-fit: contain;
+                            }
+                        }
+                    }
+                }
+            }
+
+            Rectangle {
+                horizontal-stretch: 1;
+                min-width: 0px;
+                clip: true;
+                background: #282828;
+                
+                VerticalLayout {
+                    // Header
+                    Rectangle {
+                        height: 28px;
+                        background: #202020;
+                        property <int> viewport-width-px: max(0, floor((self.width - 16px - 40px - root.null-column-width - 20px) / 1px));
+                        changed viewport-width-px => {
+                            if self.viewport-width-px != root.playlist_columns_available_width_px {
+                                root.playlist_columns_available_width_px = self.viewport-width-px;
+                                root.playlist_columns_viewport_resized(self.viewport-width-px);
+                            }
+                        }
+                        HorizontalLayout {
+                            padding-left: 8px;
+                            padding-right: 8px;
+                            spacing: 10px;
+                            Rectangle {
+                                width: 40px;
+                                Text {
+                                    text: "▶";
+                                    color: #555;
+                                    font-size: 11px;
+                                    horizontal-alignment: center;
+                                    vertical-alignment: center;
+                                }
+                            }
+                            for column-header[i] in root.playlist_visible_column_headers : Rectangle {
+                                property <bool> is-drag-source: root.column_drag_from == i;
+                                property <bool> is-resize-target: root.column_resize_active && root.column_resize_index == i;
+                                width: root.playlist-column-width(i);
+                                border-radius: 2px;
+                                background: self.is-drag-source ? #2f3b4d : self.is-resize-target ? #243247 : transparent;
+                                border-width: (self.is-drag-source || self.is-resize-target) ? 1px : 0px;
+                                border-color: #496180;
+                                Text {
+                                    text: column-header;
+                                    color: (parent.is-drag-source || parent.is-resize-target) ? #afc4de : #888;
+                                    font-size: 12px;
+                                    x: 0px;
+                                    width: parent.width;
+                                    vertical-alignment: center;
+                                    horizontal-alignment: left;
+                                    overflow: elide;
+                                }
+                                Rectangle {
+                                    x: parent.width - 1px;
+                                    y: 4px;
+                                    width: 1px;
+                                    height: parent.height - 8px;
+                                    background: (root.column_resize_active && root.column_resize_index == i)
+                                        || (!root.column_resize_active && root.column_hover_divider == i) ? #5da8ff : #3a3a3a;
+                                }
+                            }
+                            Rectangle { horizontal-stretch: 1; }
+                            Rectangle {
+                                width: root.null-column-width;
+                                background: #202020;
+                            }
+                        }
+
+                        column-header-drag-ta := TouchArea {
+                            x: 8px + 40px + 10px;
+                            y: 0px;
+                            property <length> max-drag-width: max(0px, parent.width - 16px - 40px - root.null-column-width - 20px);
+                            width: root.playlist_columns_content_width_px > 0
+                                ? min(self.max-drag-width, root.playlist_columns_content_width_px * 1px)
+                                : self.max-drag-width;
+                            height: parent.height;
+                            property <int> visible_column_count: root.playlist_visible_column_headers.length;
+                            mouse-cursor: (root.column_resize_active || root.column_hover_divider != -1) ? col-resize : default;
+                            pointer-event(event) => {
+                                if (event.button == PointerEventButton.right && event.kind == PointerEventKind.down) {
+                                    root.column-menu-x = self.x + self.mouse-x;
+                                    root.column-menu-y = self.y + self.mouse-y;
+                                    column-header-menu.show();
+                                } else if (event.kind == PointerEventKind.down && event.button == PointerEventButton.left) {
+                                    let hovered_divider = visible_column_count > 0
+                                        && self.mouse-x >= 0px && self.mouse-x < self.width
+                                        ? root.playlist_header_divider_at(floor(self.mouse-x / 1px))
+                                        : -1;
+                                    root.column_hover_divider = hovered_divider;
+                                    let hovered_column = visible_column_count > 0
+                                        && self.mouse-x >= 0px && self.mouse-x < self.width
+                                        ? root.playlist_header_column_at(floor(self.mouse-x / 1px))
+                                        : -1;
+                                    let hovered_gap = visible_column_count > 0
+                                        && self.mouse-x >= 0px && self.mouse-x < self.width
+                                        ? root.playlist_header_gap_at(floor(self.mouse-x / 1px))
+                                        : -1;
+                                    if (hovered_divider != -1 && hovered_divider < root.playlist_column_widths_px.length) {
+                                        root.column_resize_index = hovered_divider;
+                                        root.column_resize_active = true;
+                                        root.column_resize_start_width_px = root.playlist_column_widths_px[hovered_divider];
+                                        root.column_resize_preview_width_px = root.column_resize_start_width_px;
+                                        root.column_resize_min_width_px = root.playlist_header_column_min_width(hovered_divider);
+                                        root.column_resize_max_width_px = root.playlist_header_column_max_width(hovered_divider);
+                                        root.column_resize_start_mouse_x = self.mouse-x;
+                                        root.column_drag_from = -1;
+                                        root.column_drop_gap = -1;
+                                    } else if (hovered_column != -1) {
+                                        root.column_drag_from = hovered_column;
+                                        root.column_drop_gap = hovered_gap;
+                                    }
+                                } else if (event.kind == PointerEventKind.move) {
+                                    let hovered_divider = visible_column_count > 0
+                                        && self.mouse-x >= 0px && self.mouse-x < self.width
+                                        ? root.playlist_header_divider_at(floor(self.mouse-x / 1px))
+                                        : -1;
+                                    root.column_hover_divider = hovered_divider;
+                                    if (root.column_resize_active && root.column_resize_index != -1) {
+                                        let delta_px = floor((self.mouse-x - root.column_resize_start_mouse_x) / 1px);
+                                        let min_width_px = max(48, root.column_resize_min_width_px);
+                                        let max_width_px = max(min_width_px, root.column_resize_max_width_px);
+                                        let new_width_px = min(max_width_px, max(min_width_px, root.column_resize_start_width_px + delta_px));
+                                        root.column_resize_preview_width_px = new_width_px;
+                                        root.preview_playlist_column_width(root.column_resize_index, new_width_px);
+                                    } else {
+                                        let hovered_gap = visible_column_count > 0
+                                            && self.mouse-x >= 0px && self.mouse-x < self.width
+                                            ? root.playlist_header_gap_at(floor(self.mouse-x / 1px))
+                                            : -1;
+                                        if (root.column_drag_from != -1 && hovered_gap != -1) {
+                                            root.column_drop_gap = hovered_gap;
+                                        }
+                                    }
+                                } else if (event.kind == PointerEventKind.up) {
+                                    if (root.column_resize_active && root.column_resize_index != -1) {
+                                        let new_width_px = root.column_resize_preview_width_px;
+                                        root.commit_playlist_column_width(root.column_resize_index, new_width_px);
+                                        root.column_resize_active = false;
+                                        root.column_resize_index = -1;
+                                        root.column_hover_divider = -1;
+                                    } else if (root.column_drag_from != -1) {
+                                        let hovered_gap = visible_column_count > 0
+                                            && self.mouse-x >= 0px && self.mouse-x < self.width
+                                            ? root.playlist_header_gap_at(floor(self.mouse-x / 1px))
+                                            : -1;
+                                        let final_gap = hovered_gap != -1
+                                            ? hovered_gap
+                                            : root.column_drop_gap;
+                                        let final_drop_index = final_gap <= root.column_drag_from
+                                            ? final_gap
+                                            : final_gap - 1;
+                                        if (final_drop_index != -1 && root.column_drag_from != final_drop_index) {
+                                            root.reorder_playlist_columns(root.column_drag_from, final_drop_index);
+                                        }
+                                    }
+                                    root.column_drag_from = -1;
+                                    root.column_drop_gap = -1;
+                                } else if (event.kind == PointerEventKind.cancel) {
+                                    if (root.column_resize_active && root.column_resize_index != -1) {
+                                        root.preview_playlist_column_width(
+                                            root.column_resize_index,
+                                            root.column_resize_start_width_px,
+                                        );
+                                        root.column_resize_active = false;
+                                        root.column_resize_index = -1;
+                                        root.column_resize_preview_width_px = root.column_resize_start_width_px;
+                                    }
+                                    root.column_drag_from = -1;
+                                    root.column_drop_gap = -1;
+                                    root.column_hover_divider = -1;
+                                }
+                            }
+
+                            double-clicked => {
+                                if (visible_column_count > 0 && self.mouse-x >= 0px && self.mouse-x < self.width) {
+                                    let hovered_divider = root.playlist_header_divider_at(floor(self.mouse-x / 1px));
+                                    if (hovered_divider != -1) {
+                                        root.column_resize_active = false;
+                                        root.column_resize_index = -1;
+                                        root.column_hover_divider = -1;
+                                        root.reset_playlist_column_width(hovered_divider);
+                                    }
+                                }
+                            }
+                        }
+
+                        if root.column_drag_from != -1
+                                && root.column_drop_gap != -1
+                                && column-header-drag-ta.visible_column_count > 0
+                                && root.column_drop_gap < root.playlist_column_gap_positions_px.length : Rectangle {
+                            x: column-header-drag-ta.x
+                                + root.playlist_column_gap_positions_px[root.column_drop_gap] * 1px - 1px;
+                            y: 3px;
+                            width: 2px;
+                            height: parent.height - 6px;
+                            border-radius: 1px;
+                            background: #5da8ff;
+                        }
+
+                        if root.column_resize_active
+                                && root.column_resize_index >= 0
+                                && root.column_resize_index < root.playlist_column_widths_px.length : Rectangle {
+                            x: column-header-drag-ta.x + root.playlist-column-divider-x(root.column_resize_index) * 1px - 1px;
+                            y: 3px;
+                            width: 2px;
+                            height: parent.height - 6px;
+                            border-radius: 1px;
+                            background: #5da8ff;
+                        }
+
+                        column-header-menu := ColumnHeaderMenu {
+                            x: root.column-menu-x;
+                            y: root.column-menu-y;
+                            labels: root.playlist_column_menu_labels;
+                            checked: root.playlist_column_menu_checked;
+                            custom: root.playlist_column_menu_is_custom;
+                            toggle-column(index) => {
+                                root.toggle_playlist_column(index);
+                                column-header-menu.close();
+                            }
+                            delete-column(index) => {
+                                if (index >= 0 && index < root.playlist_column_menu_labels.length
+                                        && index < root.playlist_column_menu_is_custom.length
+                                        && root.playlist_column_menu_is_custom[index]) {
+                                    root.delete_custom_column_index = index;
+                                    root.delete_custom_column_message = "Delete custom column '" + root.playlist_column_menu_labels[index] + "'?";
+                                    root.show_delete_custom_column_confirm = true;
+                                    column-header-menu.close();
+                                }
+                            }
+                            add-custom() => {
+                                root.show_custom_column_dialog = true;
+                                root.custom_column_name = "";
+                                root.custom_column_format = "";
+                                column-header-menu.close();
+                            }
+                        }
+                    }
+
+                    track-list-container := Rectangle {
+                        clip: true;
+
+                        track-list := ListView {
+                            property <length> row-height: 30px;
+                            property <length> header-height: 28px;
+
+                            for track[i] in root.track_model : TrackRow {
+                                data: track;
+                                is-playing: root.playing_track_index == i;
+                                is-hover: root.hover-index == i && !root.is-dragging;
+                                headers: root.playlist_visible_column_headers;
+                                column-widths-px: root.playlist_column_widths_px;
+                                null-column-width: root.null-column-width;
+                            }
+                        }
+
+                        track-list-overlay := TouchArea {
+                            x: 0;
+                            y: 0;
+                            width: parent.width;
+                            height: parent.height;
+
+                            property <length> row-height: 30px;
+                            property <length> header-height: 28px;
+                            property <length> content-y: self.mouse-y - track-list.viewport-y;
+                            property <int> raw-row: floor(content-y / row-height);
+                            property <bool> is-in-rows: raw-row >= 0 && raw-row < root.track_model.length;
+                            property <bool> in-null-column: self.mouse-x >= (self.width - root.null-column-width);
+                            property <int> hovered-row: is-in-rows ? raw-row : -1;
+                            property <int> drop-gap: max(0, min(root.track_model.length, floor((content-y + row-height / 2) / row-height)));
+
+                            pointer-event(event) => {
+                                if (event.button == PointerEventButton.left) {
+                                    if (event.kind == PointerEventKind.down) {
+                                        if (!self.is-in-rows || self.in-null-column) {
+                                            root.sidebar_has_focus = false;
+                                            key-handler.focus();
+                                            root.pressed-index = -1;
+                                            root.hover-index = -1;
+                                            root.deselect_all();
+                                            return;
+                                        }
+                                        root.pressed-index = self.hovered-row;
+                                        root.press-y = self.mouse-y;
+                                        root.sidebar_has_focus = false;
+                                        key-handler.focus();
+                                        root.on_pointer_down(self.hovered-row, event.modifiers.control, event.modifiers.shift);
+                                    } else if (event.kind == PointerEventKind.up) {
+                                        if (root.pressed-index != -1) {
+                                            root.on_drag_end(self.drop-gap);
+                                        }
+                                        root.hover-index = -1;
+                                    }
+                                }
+                            }
+
+                            moved => {
+                                if (!self.pressed) {
+                                    root.hover-index = (self.is-in-rows && !self.in-null-column) ? self.hovered-row : -1;
+                                } else {
+                                    if (root.pressed-index != -1 && !root.is-dragging && abs(self.mouse-y - root.press-y) > 5px) {
+                                        root.is-dragging = true;
+                                        root.on_drag_start(root.pressed-index);
+                                    }
+                                    if (root.is-dragging && root.pressed-index != -1) {
+                                        root.on_drag_move(self.drop-gap);
+                                    }
+                                }
+                            }
+
+                            double-clicked => {
+                                if (self.is-in-rows && !self.in-null-column) {
+                                    root.playlist_item_double_click(self.hovered-row);
+                                }
+                            }
+                        }
+
+                        // Visual Drop Indicator
+                        if (root.is-dragging && root.drop-index != -1) : Rectangle {
+                            x: 0;
+                            y: max(0 , track-list.header-height + (root.drop-index - 1) * 30px) + track-list.viewport-y;
+                            width: 100%;
+                            height: 2px;
+                            background: #2a6def;
+                        }
+                    }
+                }
             }
         }
-        
+
         // Status bar
         Rectangle {
-            height: 28px;
+            height: 24px;
             background: #1a1a1a;
             HorizontalLayout {
-                padding-left: 10px;
-                padding-right: 10px;
+                padding-left: 12px;
+                padding-right: 12px;
+                spacing: 15px;
+                
                 Text {
-                    text: "Now Playing: " + root.status-display;
+                    text: root.status-text == "" ? "" : "Now Playing: " + root.status-text;
+                    color: #aaa;
+                    font-size: 12px;
+                    vertical-alignment: center;
+                    overflow: elide;
+                    horizontal-stretch: 1;
+                }
+                
+                // Technical info area
+                Rectangle { horizontal-stretch: 1; }
+                
+                Text {
+                    text: root.technical-info;
+                    color: #777;
+                    font-size: 11px;
+                    vertical-alignment: center;
+                    overflow: elide;
+                }
+                
+                VerticalLayout {
+                    alignment: center;
+                    Rectangle { width: 1px; background: #333; height: 12px; }
+                }
+                
+                Text {
+                    text: root.format-time-range(root.elapsed-ms, root.total-ms);
+                    color: #999;
+                    font-size: 12px;
+                    vertical-alignment: center;
+                    width: 100px;
+                    horizontal-alignment: right;
+                }
+            }
+        }
+    }
+
+    // Modal overlay for confirmation
+    confirm_overlay := ConfirmationDialog {
+        is-visible: root.show_confirm_dialog;
+        message: root.delete_confirm_message;
+        confirmed => {
+            root.delete_playlist(root.delete_target_index);
+            root.show_confirm_dialog = false;
+            root.refocus_main();
+        }
+        cancelled => {
+            root.show_confirm_dialog = false;
+            root.refocus_main();
+        }
+    }
+
+    custom_column_delete_overlay := ConfirmationDialog {
+        is-visible: root.show_delete_custom_column_confirm;
+        message: root.delete_custom_column_message;
+        confirmed => {
+            root.delete_custom_playlist_column(root.delete_custom_column_index);
+            root.show_delete_custom_column_confirm = false;
+            root.delete_custom_column_index = -1;
+            root.refocus_main();
+        }
+        cancelled => {
+            root.show_delete_custom_column_confirm = false;
+            root.delete_custom_column_index = -1;
+            root.refocus_main();
+        }
+    }
+
+    restart_notice_overlay := InfoDialog {
+        is-visible: root.show_settings_restart_notice;
+        message: root.settings_restart_notice_message;
+        dismissed => {
+            root.show_settings_restart_notice = false;
+            root.refocus_main();
+        }
+    }
+
+    if root.show_custom_column_dialog : Rectangle {
+        background: #00000088;
+        z: 110;
+
+        TouchArea {}
+
+        Rectangle {
+            width: min(root.width - 40px, 420px);
+            height: 220px;
+            x: (parent.width - self.width) / 2;
+            y: (parent.height - self.height) / 2;
+            border-radius: 6px;
+            background: #242424;
+            border-width: 1px;
+            border-color: #3b3b3b;
+
+            VerticalLayout {
+                padding: 16px;
+                spacing: 10px;
+
+                Text {
+                    text: "Custom Playlist Column";
+                    color: #eee;
+                    font-size: 16px;
+                    font-weight: 700;
+                }
+
+                Text {
+                    text: "Column Name";
                     color: #bbb;
-                    font-size: 13px;
+                    font-size: 12px;
+                }
+
+                LineEdit {
+                    text <=> root.custom_column_name;
+                    placeholder-text: "Example: Album & Year";
+                }
+
+                Text {
+                    text: "Format String";
+                    color: #bbb;
+                    font-size: 12px;
+                }
+
+                LineEdit {
+                    text <=> root.custom_column_format;
+                    placeholder-text: "Example: {album} ({year})";
+                }
+
+                Rectangle { vertical-stretch: 1; }
+
+                HorizontalLayout {
+                    spacing: 10px;
+                    Rectangle { horizontal-stretch: 1; }
+                    Button {
+                        text: "Cancel";
+                        clicked => {
+                            root.show_custom_column_dialog = false;
+                        }
+                    }
+                    Button {
+                        text: "Add";
+                        primary: true;
+                        clicked => {
+                            root.add_custom_playlist_column(root.custom_column_name, root.custom_column_format);
+                            root.show_custom_column_dialog = false;
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    if root.show_settings_dialog : Rectangle {
+        background: #00000088;
+        z: 100;
+
+        TouchArea {}
+
+        Rectangle {
+            width: min(root.width - 40px, 620px);
+            height: min(root.height - 40px, 370px);
+            x: (parent.width - self.width) / 2;
+            y: (parent.height - self.height) / 2;
+            border-radius: 6px;
+            background: #242424;
+            border-width: 1px;
+            border-color: #3b3b3b;
+
+            VerticalLayout {
+                padding: 16px;
+                spacing: 12px;
+
+                HorizontalLayout {
+                    Text {
+                        text: "Settings";
+                        color: #eee;
+                        font-size: 16px;
+                        font-weight: 700;
+                        vertical-alignment: center;
+                    }
+                    Rectangle { horizontal-stretch: 1; }
+                    PlayerButton {
+                        icon-text: "✕";
+                        font-size: 14px;
+                        clicked => {
+                            root.show_settings_dialog = false;
+                        }
+                    }
+                }
+
+                Rectangle { height: 1px; background: #343434; }
+
+                    VerticalLayout {
+                        vertical-stretch: 1;
+                        spacing: 8px;
+
+                        SettingsDropdownControl {
+                            label: "Output Device";
+                            options: root.settings_output_device_options;
+                            selected_index <=> root.settings_output_device_index;
+                            custom_value <=> root.settings_output_device_custom_value;
+                            custom_placeholder: "Enter output device name";
+                        }
+
+                        SettingsDropdownControl {
+                            label: "Output Channels";
+                            options: root.settings_channel_options;
+                        selected_index <=> root.settings_channel_index;
+                        custom_value <=> root.settings_channel_custom_value;
+                        custom_placeholder: "Enter channel count";
+                    }
+
+                    SettingsDropdownControl {
+                        label: "Output Sample Rate";
+                        options: root.settings_sample_rate_options;
+                        selected_index <=> root.settings_sample_rate_index;
+                        custom_value <=> root.settings_sample_rate_custom_value;
+                        custom_placeholder: "Enter sample rate in Hz";
+                    }
+
+                    SettingsDropdownControl {
+                        label: "Output Bits Per Sample";
+                        options: root.settings_bits_per_sample_options;
+                        selected_index <=> root.settings_bits_per_sample_index;
+                        custom_value <=> root.settings_bits_per_sample_custom_value;
+                        custom_placeholder: "Enter bit depth";
+                    }
+
+                }
+
+                Rectangle { height: 1px; background: #343434; }
+
+                HorizontalLayout {
+                    spacing: 10px;
+                    Rectangle { horizontal-stretch: 1; }
+                    Button {
+                        text: "Cancel";
+                        clicked => {
+                            root.show_settings_dialog = false;
+                        }
+                    }
+                    Button {
+                        text: "Apply";
+                        primary: true;
+                        clicked => {
+                            root.apply_settings(
+                                root.settings_output_device_index,
+                                root.settings_channel_index,
+                                root.settings_sample_rate_index,
+                                root.settings_bits_per_sample_index,
+                                root.settings_output_device_custom_value,
+                                root.settings_channel_custom_value,
+                                root.settings_sample_rate_custom_value,
+                                root.settings_bits_per_sample_custom_value
+                            );
+                            root.show_settings_dialog = false;
+                        }
+                    }
                 }
             }
         }
     }
 
     // Properties to communicate with Rust
-    in-out property <string> file_path: "";
-    in-out property <string> status: "Ready";
-    in-out property <[[StandardListViewItem]]> track_model: []; // holds rows of strings
+    in-out property <[StandardListViewItem]> playlists: [];
+    in-out property <int> active_playlist_index: 0;
+    in-out property <int> editing_playlist_index: -1;
+    in-out property <[TrackRowData]> track_model: [];
     in-out property <int> playback_order_index: 0;
-    in-out property <bool> repeat_on: false;
-    
-    // Seek bar properties
-    in-out property <float> current-position: 0.0; // in seconds
-    in-out property <float> total-duration: 0.0; // in seconds
+    in-out property <int> repeat_mode: 0; // 0: Off, 1: Playlist, 2: Track
+    in-out property <int> selected_track_index: -1;
+    in-out property <int> playing_track_index: -1;
+
+    // Album art properties
+    in-out property <bool> show_album_art: true;
+    in-out property <image> current_cover_art;
+
+    // Metadata display properties
+    in-out property <string> display_title: "";
+    in-out property <string> display_artist: "";
+    in-out property <string> display_album: "";
+    in-out property <string> display_date: "";
+    in-out property <string> display_genre: "";
+
+    // Drag and drop state
+    in-out property <int> pressed-index: -1;
+    property <length> press-y: 0;
+    in-out property <bool> is-dragging: false;
+    in-out property <int> drop-index: -1;
+    property <int> hover-index: -1;
+
+    // Seek bar properties - raw integer values from Rust (no string allocations)
+    in-out property <int> elapsed-ms: 0;
+    in-out property <int> total-ms: 0;
     in-out property <float> position-percentage: 0.0; // between 0.0 and 1.0
-    in-out property <string> current-position-text: "0:00";
-    in-out property <string> total-duration-text: "0:00";
+    in-out property <float> volume-level: 1.0; // between 0.0 and 1.0
+    in-out property <string> technical-info: "";
+    in-out property <bool> show_settings_dialog: false;
+    in-out property <bool> show_settings_restart_notice: false;
+    in-out property <string> settings_restart_notice_message: "";
+    in-out property <[string]> playlist_visible_column_headers: [];
+    in-out property <[string]> playlist_column_menu_labels: [];
+    in-out property <[bool]> playlist_column_menu_checked: [];
+    in-out property <[bool]> playlist_column_menu_is_custom: [];
+    in-out property <[string]> settings_output_device_options: [];
+    in-out property <[string]> settings_channel_options: [];
+    in-out property <[string]> settings_sample_rate_options: [];
+    in-out property <[string]> settings_bits_per_sample_options: [];
+    in-out property <int> settings_output_device_index: 0;
+    in-out property <int> settings_channel_index: 0;
+    in-out property <int> settings_sample_rate_index: 0;
+    in-out property <int> settings_bits_per_sample_index: 0;
+    in-out property <string> settings_output_device_custom_value: "";
+    in-out property <string> settings_channel_custom_value: "";
+    in-out property <string> settings_sample_rate_custom_value: "";
+    in-out property <string> settings_bits_per_sample_custom_value: "";
+    
+    // Computed time display strings (derived from integer ms values)
+    // These are computed in Slint to avoid Rust string allocations
+    pure function format-time-component(value: int) -> string {
+        if value < 10 {
+            return "0" + value;
+        }
+        return value;
+    }
+    
+    pure function format-time(ms: int) -> string {
+        if ms <= 0 {
+            return "0:00";
+        }
+        return floor(ms / 60000) + ":" + root.format-time-component(mod(floor(ms / 1000), 60));
+    }
+    
+    pure function format-time-range(elapsed: int, total: int) -> string {
+        return root.format-time(elapsed) + " / " + root.format-time(total);
+    }
 
     // Callback declarations
     callback open_file();
@@ -329,8 +1759,37 @@ export component AppWindow inherits Window {
     callback stop();
     callback next();
     callback previous();
-    callback playlist_item_click(int, PointerEvent, Point);
+    callback handle_track_click(int, bool, bool);
+    callback on_pointer_down(int, bool, bool);
+    callback on_drag_start(int);
+    callback on_drag_move(int);
+    callback on_drag_end(int);
+    callback playlist_item_double_click(int);
     callback playback_order_changed(int);
     callback toggle_repeat();
     callback seek-to(float); // Position between 0.0 and 1.0
+    callback volume-changed(float); // Volume between 0.0 and 1.0
+    callback delete_selected_tracks();
+    callback reorder_tracks([int], int); // indices, to
+    callback deselect_all();
+    callback create_playlist();
+    callback switch_playlist(int);
+    callback rename_playlist(int, string);
+    callback delete_playlist(int);
+    callback toggle_playlist_column(int);
+    callback add_custom_playlist_column(string, string);
+    callback delete_custom_playlist_column(int);
+    callback reorder_playlist_columns(int, int);
+    callback playlist_header_column_at(int) -> int;
+    callback playlist_header_gap_at(int) -> int;
+    callback playlist_header_divider_at(int) -> int;
+    callback playlist_header_column_min_width(int) -> int;
+    callback playlist_header_column_max_width(int) -> int;
+    callback preview_playlist_column_width(int, int);
+    callback commit_playlist_column_width(int, int);
+    callback reset_playlist_column_width(int);
+    callback playlist_columns_viewport_resized(int);
+    callback window_resized(int, int);
+    callback open_settings();
+    callback apply_settings(int, int, int, int, string, string, string, string);
 }

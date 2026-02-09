@@ -1,67 +1,374 @@
-use crate::protocol::{AudioMessage, Message, PlaybackMessage};
-use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
-use log::{debug, error, trace};
-use rubato::{
-    FftFixedIn, Resampler, SincFixedIn, SincInterpolationParameters, SincInterpolationType,
-    WindowFunction,
+//! Audio output engine.
+//!
+//! Consumes decoded packets, manages queue/cursor state, drives the CPAL output
+//! stream, and emits playback progress/track lifecycle notifications.
+
+use crate::protocol::{
+    AudioMessage, AudioPacket, ConfigMessage, Message, PlaybackMessage, TrackStarted,
 };
+use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
+use log::{debug, error, warn};
 use std::{
-    collections::VecDeque,
-    path::PathBuf,
+    collections::{HashMap, VecDeque},
     sync::{
-        atomic::{AtomicBool, AtomicU64, Ordering},
+        atomic::{AtomicBool, AtomicU32, AtomicUsize, Ordering},
         Arc, Mutex,
     },
+    thread,
+    time::Duration,
 };
-use symphonia::core::{codecs::Decoder, formats::Packet};
 use tokio::sync::broadcast::{Receiver, Sender};
 
-pub struct Sample {
-    sample: f32,
-    sample_rate: u32,
-    channels: u16,
+/// Queue marker used to announce track start inside the audio stream.
+#[derive(Debug, Clone)]
+pub struct TrackHeader {
+    /// Stable track id.
+    pub id: String,
+    /// Start offset applied when this track entered playback.
+    pub start_offset_ms: u64,
 }
 
+/// Queue item variants consumed by the audio callback.
+#[derive(Debug, Clone)]
+enum AudioQueueEntry {
+    Samples(Vec<f32>),
+    TrackHeader(TrackHeader),
+    TrackFooter(String),
+}
+
+/// Cached queue index span for one decoded track.
+#[derive(Debug, Clone)]
+struct TrackIndex {
+    start: usize,
+    end: Option<usize>,
+    start_offset_ms: u64,
+    technical_metadata: crate::protocol::TechnicalMetadata,
+}
+
+/// Runtime audio output controller and packet queue owner.
 pub struct AudioPlayer {
     bus_receiver: Receiver<Message>,
     bus_sender: Sender<Message>,
     // Audio state
-    target_sample_rate: u32,
-    target_channels: u16,
-    sample_queue: Arc<Mutex<VecDeque<Sample>>>,
-    buffer_position: Arc<AtomicU64>,
+    target_sample_rate: Arc<AtomicUsize>,
+    target_channels: Arc<AtomicUsize>,
+    target_bits_per_sample: u16,
+    target_output_device_name: Arc<Mutex<Option<String>>>,
+    sample_queue: Arc<Mutex<VecDeque<AudioQueueEntry>>>,
+    queue_start_position: Arc<AtomicUsize>,
+    queue_end_position: Arc<AtomicUsize>,
     is_playing: Arc<AtomicBool>,
+    current_track_id: Arc<Mutex<String>>,
+    current_track_position: Arc<AtomicUsize>,
+    current_track_offset_ms: Arc<AtomicUsize>,
+    current_metadata: Arc<Mutex<Option<crate::protocol::TechnicalMetadata>>>,
+    decode_bootstrap_pending: Arc<AtomicBool>,
+    volume: Arc<AtomicU32>,
+    buffer_low_watermark_ms: Arc<AtomicUsize>,
+    buffer_target_ms: Arc<AtomicUsize>,
+    buffer_request_interval_ms: Arc<AtomicUsize>,
+
+    // Setup cache
+    cached_track_indices: Arc<Mutex<HashMap<String, TrackIndex>>>,
+
     // Audio stream
     config: Option<cpal::StreamConfig>,
     device: Option<cpal::Device>,
     stream: Option<cpal::Stream>,
-    resampler: Option<FftFixedIn<f32>>,
 }
 
 impl AudioPlayer {
+    fn queue_entry_len(entry: &AudioQueueEntry) -> usize {
+        match entry {
+            AudioQueueEntry::Samples(samples) => samples.len(),
+            AudioQueueEntry::TrackHeader(_) | AudioQueueEntry::TrackFooter(_) => 1,
+        }
+    }
+
+    fn locate_position_in_queue(
+        queue: &VecDeque<AudioQueueEntry>,
+        queue_start_position: usize,
+        target_position: usize,
+    ) -> Option<(usize, usize)> {
+        if target_position < queue_start_position {
+            return None;
+        }
+
+        let mut cursor = queue_start_position;
+        for (entry_index, entry) in queue.iter().enumerate() {
+            let len = Self::queue_entry_len(entry);
+            if target_position < cursor.saturating_add(len) {
+                return Some((entry_index, target_position - cursor));
+            }
+            cursor = cursor.saturating_add(len);
+        }
+        None
+    }
+
+    fn truncate_queue_after_position(
+        queue: &mut VecDeque<AudioQueueEntry>,
+        queue_start_position: usize,
+        keep_inclusive_position: usize,
+    ) -> usize {
+        let keep_exclusive_position = keep_inclusive_position.saturating_add(1);
+        let mut cursor = queue_start_position;
+        let mut truncated = VecDeque::new();
+
+        while let Some(entry) = queue.pop_front() {
+            if cursor >= keep_exclusive_position {
+                break;
+            }
+
+            let len = Self::queue_entry_len(&entry);
+            if cursor.saturating_add(len) <= keep_exclusive_position {
+                cursor = cursor.saturating_add(len);
+                truncated.push_back(entry);
+                continue;
+            }
+
+            let keep_len = keep_exclusive_position.saturating_sub(cursor);
+            match entry {
+                AudioQueueEntry::Samples(mut samples) => {
+                    samples.truncate(keep_len);
+                    if !samples.is_empty() {
+                        truncated.push_back(AudioQueueEntry::Samples(samples));
+                        cursor = cursor.saturating_add(keep_len);
+                    }
+                }
+                AudioQueueEntry::TrackHeader(header) => {
+                    if keep_len > 0 {
+                        truncated.push_back(AudioQueueEntry::TrackHeader(header));
+                        cursor = cursor.saturating_add(1);
+                    }
+                }
+                AudioQueueEntry::TrackFooter(id) => {
+                    if keep_len > 0 {
+                        truncated.push_back(AudioQueueEntry::TrackFooter(id));
+                        cursor = cursor.saturating_add(1);
+                    }
+                }
+            }
+            break;
+        }
+
+        *queue = truncated;
+        cursor
+    }
+
+    /// Creates an audio player, initializes output device, and spawns helper threads.
     pub fn new(bus_receiver: Receiver<Message>, bus_sender: Sender<Message>) -> Self {
+        let is_playing = Arc::new(AtomicBool::new(false));
+        let current_track_position = Arc::new(AtomicUsize::new(0));
+        let cached_track_indices = Arc::new(Mutex::new(HashMap::new()));
+        let current_track_id = Arc::new(Mutex::new(String::new()));
+        let current_metadata = Arc::new(Mutex::new(None));
+        let decode_bootstrap_pending = Arc::new(AtomicBool::new(false));
+        let current_track_offset_ms = Arc::new(AtomicUsize::new(0));
+        let queue_start_position = Arc::new(AtomicUsize::new(0));
+        let queue_end_position = Arc::new(AtomicUsize::new(0));
+        let target_sample_rate = Arc::new(AtomicUsize::new(44100));
+        let target_channels = Arc::new(AtomicUsize::new(2));
+        let target_output_device_name = Arc::new(Mutex::new(None));
+        let volume = Arc::new(AtomicU32::new(1.0f32.to_bits()));
+        let buffer_low_watermark_ms = Arc::new(AtomicUsize::new(12_000));
+        let buffer_target_ms = Arc::new(AtomicUsize::new(24_000));
+        let buffer_request_interval_ms = Arc::new(AtomicUsize::new(120));
+
         let mut player = Self {
             bus_receiver,
-            bus_sender,
+            bus_sender: bus_sender.clone(),
             sample_queue: Arc::new(Mutex::new(VecDeque::new())),
-            buffer_position: Arc::new(AtomicU64::new(0)),
-            is_playing: Arc::new(AtomicBool::new(false)),
+            queue_start_position: queue_start_position.clone(),
+            queue_end_position: queue_end_position.clone(),
+            cached_track_indices: cached_track_indices.clone(),
+            is_playing: is_playing.clone(),
             device: None,
             config: None,
             stream: None,
-            target_sample_rate: 0,
-            target_channels: 0,
-            resampler: None,
+            target_sample_rate: target_sample_rate.clone(),
+            target_channels: target_channels.clone(),
+            target_bits_per_sample: 0,
+            target_output_device_name,
+            current_track_id: current_track_id.clone(),
+            current_track_position: current_track_position.clone(),
+            current_track_offset_ms: current_track_offset_ms.clone(),
+            current_metadata: current_metadata.clone(),
+            decode_bootstrap_pending: decode_bootstrap_pending.clone(),
+            volume: volume.clone(),
+            buffer_low_watermark_ms: buffer_low_watermark_ms.clone(),
+            buffer_target_ms: buffer_target_ms.clone(),
+            buffer_request_interval_ms: buffer_request_interval_ms.clone(),
         };
 
-        // Initialize audio device once during construction
         player.setup_audio_device();
+
+        // Spawn progress reporter thread
+        let bus_sender_clone = bus_sender.clone();
+        let is_playing_clone = is_playing.clone();
+        let current_track_position_clone = current_track_position.clone();
+        let cached_track_indices_clone = cached_track_indices.clone();
+        let current_track_id_clone = current_track_id.clone();
+        let current_metadata_clone = current_metadata.clone();
+        let current_track_offset_ms_clone = current_track_offset_ms.clone();
+        let target_sample_rate_clone = target_sample_rate.clone();
+        let target_channels_clone = target_channels.clone();
+
+        thread::spawn(move || loop {
+            thread::sleep(Duration::from_millis(50));
+            if is_playing_clone.load(Ordering::Relaxed) {
+                let metadata = current_metadata_clone.lock().unwrap().clone();
+                let track_id = current_track_id_clone.lock().unwrap().clone();
+                let sample_rate = target_sample_rate_clone.load(Ordering::Relaxed);
+                let channels = target_channels_clone.load(Ordering::Relaxed);
+                let offset_ms = current_track_offset_ms_clone.load(Ordering::Relaxed) as u64;
+
+                if let Some(meta) = metadata {
+                    let current_pos = current_track_position_clone.load(Ordering::Relaxed);
+                    let start_pos = cached_track_indices_clone
+                        .lock()
+                        .unwrap()
+                        .get(&track_id)
+                        .map(|i| i.start)
+                        .unwrap_or(0);
+
+                    let elapsed_samples = current_pos.saturating_sub(start_pos);
+                    if sample_rate > 0 && channels > 0 {
+                        let elapsed_ms = offset_ms
+                            + (elapsed_samples as f64 * 1000.0
+                                / (sample_rate as f64 * channels as f64))
+                                as u64;
+
+                        // debug!("Track id {} current_pos: {}, start_pos: {}, elapsed_samples: {}, offset_ms: {} elapsed_ms: {}", track_id, current_pos, start_pos, elapsed_samples, offset_ms, elapsed_ms);
+
+                        let _ = bus_sender_clone.send(Message::Playback(
+                            PlaybackMessage::PlaybackProgress {
+                                elapsed_ms,
+                                total_ms: meta.duration_ms,
+                            },
+                        ));
+                    }
+                }
+            }
+        });
+
+        // Spawn decode prefetch thread. It requests more decoded audio when
+        // buffered samples ahead of playback fall below a configurable threshold.
+        let bus_sender_clone = bus_sender.clone();
+        let current_track_position_clone = current_track_position.clone();
+        let queue_end_position_clone = queue_end_position.clone();
+        let target_sample_rate_clone = target_sample_rate.clone();
+        let target_channels_clone = target_channels.clone();
+        let current_metadata_clone = current_metadata.clone();
+        let decode_bootstrap_pending_clone = decode_bootstrap_pending.clone();
+        let buffer_low_watermark_ms_clone = buffer_low_watermark_ms.clone();
+        let buffer_target_ms_clone = buffer_target_ms.clone();
+        let buffer_request_interval_ms_clone = buffer_request_interval_ms.clone();
+        thread::spawn(move || loop {
+            let interval_ms = buffer_request_interval_ms_clone
+                .load(Ordering::Relaxed)
+                .max(20) as u64;
+            thread::sleep(Duration::from_millis(interval_ms));
+
+            let sample_rate = target_sample_rate_clone.load(Ordering::Relaxed);
+            let channels = target_channels_clone.load(Ordering::Relaxed);
+            let low_watermark_ms = buffer_low_watermark_ms_clone.load(Ordering::Relaxed);
+            let target_buffer_ms = buffer_target_ms_clone
+                .load(Ordering::Relaxed)
+                .max(low_watermark_ms.saturating_add(500));
+
+            let low_watermark_samples =
+                Self::milliseconds_to_samples(low_watermark_ms, sample_rate, channels);
+            let target_buffer_samples =
+                Self::milliseconds_to_samples(target_buffer_ms, sample_rate, channels);
+
+            let has_active_track = current_metadata_clone
+                .lock()
+                .map(|metadata| metadata.is_some())
+                .unwrap_or(false);
+            let has_bootstrap_pending = decode_bootstrap_pending_clone.load(Ordering::Relaxed);
+
+            let current_position = current_track_position_clone.load(Ordering::Relaxed);
+            let queue_end_position = queue_end_position_clone.load(Ordering::Relaxed);
+            let buffered_samples = queue_end_position.saturating_sub(current_position);
+
+            let requested_samples = Self::compute_decode_request_samples_for_state(
+                has_active_track,
+                has_bootstrap_pending,
+                buffered_samples,
+                low_watermark_samples,
+                target_buffer_samples,
+            );
+            if requested_samples > 0 {
+                let _ = bus_sender_clone.send(Message::Audio(AudioMessage::RequestDecodeChunk {
+                    requested_samples,
+                }));
+            }
+        });
+
         player
+    }
+
+    fn milliseconds_to_samples(milliseconds: usize, sample_rate: usize, channels: usize) -> usize {
+        let sr = sample_rate.max(1) as u128;
+        let ch = channels.max(1) as u128;
+        let samples = milliseconds as u128 * sr * ch / 1000;
+        samples.min(usize::MAX as u128) as usize
+    }
+
+    fn compute_decode_request_samples(
+        buffered_samples: usize,
+        low_watermark_samples: usize,
+        target_buffer_samples: usize,
+    ) -> usize {
+        if buffered_samples >= low_watermark_samples {
+            return 0;
+        }
+        target_buffer_samples.saturating_sub(buffered_samples)
+    }
+
+    fn compute_decode_request_samples_for_state(
+        has_active_track: bool,
+        has_bootstrap_pending: bool,
+        buffered_samples: usize,
+        low_watermark_samples: usize,
+        target_buffer_samples: usize,
+    ) -> usize {
+        if !has_active_track && !has_bootstrap_pending {
+            return 0;
+        }
+        Self::compute_decode_request_samples(
+            buffered_samples,
+            low_watermark_samples,
+            target_buffer_samples,
+        )
     }
 
     fn setup_audio_device(&mut self) {
         let host = cpal::default_host();
-        let device = match host.default_output_device() {
+        let requested_device_name = self
+            .target_output_device_name
+            .lock()
+            .unwrap()
+            .as_ref()
+            .cloned();
+        let selected_device = requested_device_name.as_ref().and_then(|device_name| {
+            host.output_devices().ok().and_then(|devices| {
+                devices
+                    .filter_map(|device| {
+                        let name = device.name().ok()?;
+                        if name == *device_name {
+                            Some(device)
+                        } else {
+                            None
+                        }
+                    })
+                    .next()
+            })
+        });
+        if requested_device_name.is_some() && selected_device.is_none() {
+            warn!("AudioPlayer: requested output device not found. Falling back to system default");
+        }
+        let device = match selected_device.or_else(|| host.default_output_device()) {
             Some(device) => device,
             None => {
                 error!("No output device available");
@@ -69,131 +376,204 @@ impl AudioPlayer {
             }
         };
 
-        let sample_rate = 48000u32;
-        let channels = 2usize;
-        // Setup stream config
+        let sample_rate = self.target_sample_rate.load(Ordering::Relaxed) as u32;
+        let channels = self.target_channels.load(Ordering::Relaxed) as u16;
+
         let config = match device.supported_output_configs() {
-            Ok(mut configs) => {
-                match configs.find(|config| {
-                    config.channels() == channels as u16
-                        && config.min_sample_rate().0 <= sample_rate
-                        && config.max_sample_rate().0 >= sample_rate
-                }) {
-                    Some(config) => config.with_sample_rate(cpal::SampleRate(sample_rate)),
-                    None => {
-                        error!("No matching device config found");
-                        return;
-                    }
+            Ok(mut configs) => match configs.find(|config| {
+                (channels == 0 || config.channels() == channels)
+                    && (sample_rate == 0
+                        || (config.min_sample_rate().0 <= sample_rate
+                            && config.max_sample_rate().0 >= sample_rate))
+            }) {
+                Some(config) => {
+                    let sr = if sample_rate == 0 {
+                        config.max_sample_rate().0
+                    } else {
+                        sample_rate
+                    };
+                    config.with_sample_rate(cpal::SampleRate(sr))
                 }
-            }
+                None => {
+                    error!("No matching device config found");
+                    return;
+                }
+            },
             Err(e) => {
                 error!("Error getting device configs: {}", e);
                 return;
             }
         };
 
-        self.target_channels = config.channels(); // config.channels();
-        self.target_sample_rate = config.sample_rate().0; // config.sample_rate().0;
+        self.target_channels
+            .store(config.channels() as usize, Ordering::Relaxed);
+        self.target_sample_rate
+            .store(config.sample_rate().0 as usize, Ordering::Relaxed);
+
+        let actual_sample_rate = config.sample_rate().0;
+        let actual_channels = config.channels();
+
         self.config = Some(config.into());
         self.device = Some(device);
         debug!(
-            "AudioPlayer: Audio device initialized with target sample rate: {} and channels: {}",
-            self.target_sample_rate, self.target_channels
+            "AudioPlayer: Audio device initialized: sr={}, channels={}",
+            self.target_sample_rate.load(Ordering::Relaxed),
+            self.target_channels.load(Ordering::Relaxed)
         );
-    }
 
-    fn create_resampler(&mut self, source_sample_rate: u32, chunk_size: usize) -> FftFixedIn<f32> {
-        // let params = SincInterpolationParameters {
-        //     sinc_len: 256,
-        //     f_cutoff: 0.95,
-        //     interpolation: SincInterpolationType::Nearest,
-        //     oversampling_factor: 128,
-        //     window: WindowFunction::BlackmanHarris2,
-        // };
-        let resampler = FftFixedIn::<f32>::new(
-            source_sample_rate as usize,
-            self.target_sample_rate as usize,
-            chunk_size,
-            4,
-            self.target_channels as usize,
-        );
-        resampler.unwrap()
-    }
-
-    fn load_samples(&mut self, samples: Vec<f32>, sample_rate: u32, channels: u16) {
-        // Create new stream if none exists or if config changed
-        if self.stream.is_none() {
-            self.create_stream();
-        }
-        trace!("AudioPlayer: Loading {} samples", samples.len());
-        let mut queue = self.sample_queue.lock().unwrap();
-        for sample in samples {
-            queue.push_back(Sample {
-                sample,
-                sample_rate,
-                channels,
-            });
-        }
+        let _ = self.bus_sender.send(crate::protocol::Message::Config(
+            crate::protocol::ConfigMessage::AudioDeviceOpened {
+                sample_rate: actual_sample_rate,
+                channels: actual_channels,
+            },
+        ));
     }
 
     fn create_stream(&mut self) {
-        let device = match &self.device {
-            Some(device) => device,
-            None => {
-                error!("Cannot create stream: no audio device initialized");
-                return;
-            }
-        };
+        if self.stream.is_some() {
+            return;
+        }
 
-        let config = match &self.config {
-            Some(config) => config,
-            None => {
-                error!("Cannot create stream: no stream config set");
-                return;
-            }
-        };
+        let device = self.device.as_ref().unwrap();
+        let config = self.config.as_ref().unwrap();
 
-        // Clone our handles for the audio callback
-        let buffer = self.sample_queue.clone();
-        let buffer_position = self.buffer_position.clone();
+        let sample_queue = self.sample_queue.clone();
+        let queue_start_position = self.queue_start_position.clone();
+        let queue_end_position = self.queue_end_position.clone();
+        let cached_track_indices = self.cached_track_indices.clone();
+        let current_track_id = self.current_track_id.clone();
+        let bus_sender_clone = self.bus_sender.clone();
         let is_playing = self.is_playing.clone();
-        let bus_sender = self.bus_sender.clone();
+        let current_track_position = self.current_track_position.clone();
+        let volume = self.volume.clone();
 
-        // Build the output stream
         match device.build_output_stream(
             config,
-            move |data: &mut [f32], _: &cpal::OutputCallbackInfo| {
+            move |output_buffer: &mut [f32], _: &cpal::OutputCallbackInfo| {
                 if !is_playing.load(Ordering::Relaxed) {
-                    data.fill(0.0);
+                    output_buffer.fill(0.0);
                     return;
                 }
 
-                let buffer_lock = buffer.lock().unwrap();
-                let pos = buffer_position.load(Ordering::Relaxed) as usize;
-
-                // Check if we've reached the end
-                if pos >= buffer_lock.len() {
-                    data.fill(0.0);
-                    let _ = bus_sender.send(Message::Playback(PlaybackMessage::TrackFinished));
-                    return;
+                let mut sample_queue_unlocked = sample_queue.lock().unwrap();
+                let mut queue_start = queue_start_position.load(Ordering::Relaxed);
+                let mut input_current_position = current_track_position.load(Ordering::Relaxed);
+                if input_current_position < queue_start {
+                    input_current_position = queue_start;
                 }
+                let mut output_current_position = 0;
+                let gain = f32::from_bits(volume.load(Ordering::Relaxed)).clamp(0.0, 1.0);
+                let mut queue_cursor = Self::locate_position_in_queue(
+                    &sample_queue_unlocked,
+                    queue_start,
+                    input_current_position,
+                );
 
-                // Copy samples to output
-                for (i, sample) in data.iter_mut().enumerate() {
-                    *sample = if pos + i < buffer_lock.len() {
-                        buffer_lock[pos + i].sample
-                    } else {
-                        0.0
+                while output_current_position < output_buffer.len() {
+                    let Some((entry_index, entry_offset)) = queue_cursor else {
+                        for sample in &mut output_buffer[output_current_position..] {
+                            *sample = 0.0;
+                        }
+                        break;
                     };
+
+                    let Some(entry) = sample_queue_unlocked.get(entry_index) else {
+                        for sample in &mut output_buffer[output_current_position..] {
+                            *sample = 0.0;
+                        }
+                        break;
+                    };
+
+                    match entry {
+                        AudioQueueEntry::Samples(samples) => {
+                            if entry_offset >= samples.len() {
+                                queue_cursor = Some((entry_index + 1, 0));
+                                continue;
+                            }
+                            output_buffer[output_current_position] = samples[entry_offset] * gain;
+                            input_current_position = input_current_position.saturating_add(1);
+                            output_current_position += 1;
+
+                            if entry_offset + 1 < samples.len() {
+                                queue_cursor = Some((entry_index, entry_offset + 1));
+                            } else {
+                                queue_cursor = Some((entry_index + 1, 0));
+                            }
+                        }
+                        AudioQueueEntry::TrackHeader(TrackHeader {
+                            id,
+                            start_offset_ms,
+                        }) => {
+                            let _ = bus_sender_clone.send(Message::Playback(
+                                PlaybackMessage::TrackStarted(TrackStarted {
+                                    id: id.clone(),
+                                    start_offset_ms: *start_offset_ms,
+                                }),
+                            ));
+                            input_current_position = input_current_position.saturating_add(1);
+                            queue_cursor = Some((entry_index + 1, 0));
+                        }
+                        AudioQueueEntry::TrackFooter(id) => {
+                            let _ = bus_sender_clone.send(Message::Playback(
+                                PlaybackMessage::TrackFinished(id.clone()),
+                            ));
+                            input_current_position = input_current_position.saturating_add(1);
+                            queue_cursor = Some((entry_index + 1, 0));
+                        }
+                    }
                 }
 
-                trace!("AudioPlayer: Copied {} samples to output", data.len());
-                buffer_position.store((pos + data.len()) as u64, Ordering::Relaxed);
+                let mut popped_any = false;
+                while let Some(front) = sample_queue_unlocked.front() {
+                    let front_len = Self::queue_entry_len(front);
+                    if queue_start.saturating_add(front_len) <= input_current_position {
+                        sample_queue_unlocked.pop_front();
+                        queue_start = queue_start.saturating_add(front_len);
+                        popped_any = true;
+                    } else {
+                        break;
+                    }
+                }
+                current_track_position.store(input_current_position, Ordering::Relaxed);
+                if popped_any {
+                    queue_start_position.store(queue_start, Ordering::Relaxed);
+                }
+                let queue_end = queue_end_position.load(Ordering::Relaxed).max(queue_start);
+                queue_end_position.store(queue_end, Ordering::Relaxed);
+
+                drop(sample_queue_unlocked);
+                if popped_any {
+                    let active_track_id = current_track_id.lock().unwrap().clone();
+                    let mut indices = cached_track_indices.lock().unwrap();
+                    let evicted_ids: Vec<String> = indices
+                        .iter()
+                        .filter_map(|(id, info)| {
+                            if id == &active_track_id {
+                                return None;
+                            }
+                            match info.end {
+                                Some(end) if end < queue_start => Some(id.clone()),
+                                _ => None,
+                            }
+                        })
+                        .collect();
+
+                    for evicted_id in &evicted_ids {
+                        indices.remove(evicted_id);
+                    }
+                    drop(indices);
+
+                    for evicted_id in evicted_ids {
+                        let _ = bus_sender_clone
+                            .send(Message::Audio(AudioMessage::TrackEvicted(evicted_id)));
+                    }
+                }
             },
             |err| error!("Audio stream error: {}", err),
             None,
         ) {
             Ok(stream) => {
+                let _ = stream.play();
                 self.stream = Some(stream);
                 debug!("Audio stream created");
             }
@@ -201,49 +581,315 @@ impl AudioPlayer {
         }
     }
 
+    fn load_samples(&mut self, samples: AudioPacket) {
+        if self.stream.is_none() {
+            self.create_stream();
+        }
+
+        match samples {
+            AudioPacket::Samples { samples, .. } => {
+                if samples.is_empty() {
+                    return;
+                }
+                self.decode_bootstrap_pending
+                    .store(false, Ordering::Relaxed);
+                let sample_count = samples.len();
+                let mut queue = self.sample_queue.lock().unwrap();
+                queue.push_back(AudioQueueEntry::Samples(samples));
+                drop(queue);
+                self.queue_end_position
+                    .fetch_add(sample_count, Ordering::Relaxed);
+            }
+            AudioPacket::TrackHeader {
+                id,
+                play_immediately,
+                technical_metadata,
+                start_offset_ms,
+            } => {
+                self.decode_bootstrap_pending
+                    .store(false, Ordering::Relaxed);
+                let start_index = self.queue_end_position.load(Ordering::Relaxed);
+                let mut queue = self.sample_queue.lock().unwrap();
+                queue.push_back(AudioQueueEntry::TrackHeader(TrackHeader {
+                    id: id.clone(),
+                    start_offset_ms,
+                }));
+                drop(queue);
+                self.queue_end_position.fetch_add(1, Ordering::Relaxed);
+
+                // debug!("AudioPlayer: Loaded track header: id {} technical metadata {:?}", id, technical_metadata);
+                self.cached_track_indices.lock().unwrap().insert(
+                    id.clone(),
+                    TrackIndex {
+                        start: start_index,
+                        end: None,
+                        start_offset_ms,
+                        technical_metadata: technical_metadata.clone(),
+                    },
+                );
+
+                if play_immediately {
+                    // This is the case where some kind of user action caused immediate playback
+                    *self.current_track_id.lock().unwrap() = id.clone();
+                    *self.current_metadata.lock().unwrap() = Some(technical_metadata.clone());
+                    self.current_track_offset_ms
+                        .store(start_offset_ms as usize, Ordering::Relaxed);
+                    self.current_track_position
+                        .store(start_index, Ordering::Relaxed);
+                    self.is_playing.store(true, Ordering::Relaxed);
+                    let _ = self.bus_sender.send(Message::Playback(
+                        PlaybackMessage::TechnicalMetadataChanged(technical_metadata),
+                    ));
+                }
+            }
+            AudioPacket::TrackFooter { id } => {
+                self.decode_bootstrap_pending
+                    .store(false, Ordering::Relaxed);
+                let footer_index = self.queue_end_position.load(Ordering::Relaxed);
+                let mut queue = self.sample_queue.lock().unwrap();
+                queue.push_back(AudioQueueEntry::TrackFooter(id.clone()));
+                drop(queue);
+                self.queue_end_position.fetch_add(1, Ordering::Relaxed);
+
+                let start_offset_ms =
+                    if let Some(info) = self.cached_track_indices.lock().unwrap().get_mut(&id) {
+                        info.end = Some(footer_index);
+                        info.start_offset_ms
+                    } else {
+                        0
+                    };
+
+                self.bus_sender
+                    .send(Message::Audio(AudioMessage::TrackCached(
+                        id.clone(),
+                        start_offset_ms,
+                    )))
+                    .unwrap();
+
+                let is_current = *self.current_track_id.lock().unwrap() == id;
+                if !is_current || !self.is_playing.load(Ordering::Relaxed) {
+                    self.bus_sender
+                        .send(Message::Playback(PlaybackMessage::ReadyForPlayback(id)))
+                        .unwrap();
+                }
+            }
+        }
+    }
+
+    /// Starts the blocking event loop that reacts to bus messages.
     pub fn run(&mut self) {
         loop {
-            while let Ok(message) = self.bus_receiver.blocking_recv() {
-                match message {
-                    Message::Audio(AudioMessage::BufferReady {
-                        samples,
-                        sample_rate,
-                        channels,
-                    }) => {
-                        trace!("AudioPlayer: Received {} samples", samples.len());
-                        self.load_samples(samples, sample_rate, channels);
+            match self.bus_receiver.blocking_recv() {
+                Ok(message) => match message {
+                    Message::Audio(AudioMessage::DecodeTracks(tracks)) => {
+                        let needs_bootstrap = tracks.iter().any(|track| track.play_immediately);
+                        self.decode_bootstrap_pending
+                            .store(needs_bootstrap, Ordering::Relaxed);
+                    }
+                    Message::Audio(AudioMessage::AudioPacket(buffer)) => {
+                        self.load_samples(buffer);
                     }
                     Message::Playback(PlaybackMessage::Play) => {
-                        if let Some(stream) = &self.stream {
-                            if let Err(e) = stream.play() {
-                                error!("AudioPlayer: Failed to start playback: {}", e);
-                            } else {
-                                self.is_playing.store(true, Ordering::Relaxed);
-                                debug!("AudioPlayer: Playback started");
-                            }
-                        } else {
-                            debug!("No audio stream available to play");
-                        }
+                        self.is_playing.store(true, Ordering::Relaxed);
+                        debug!("AudioPlayer: Playback resumed");
+                    }
+                    Message::Playback(PlaybackMessage::Pause) => {
+                        self.is_playing.store(false, Ordering::Relaxed);
+                        debug!("AudioPlayer: Playback paused");
                     }
                     Message::Playback(PlaybackMessage::Stop) => {
-                        if let Some(stream) = &self.stream {
-                            stream.pause().unwrap();
-                            self.buffer_position.store(0, Ordering::Relaxed);
-                            self.is_playing.store(false, Ordering::Relaxed);
+                        self.is_playing.store(false, Ordering::Relaxed);
+                        self.decode_bootstrap_pending
+                            .store(false, Ordering::Relaxed);
+                        debug!("AudioPlayer: Playback stopped");
+                    }
+                    Message::Playback(PlaybackMessage::PlayTrackById(id)) => {
+                        let queue_start = self.queue_start_position.load(Ordering::Relaxed);
+                        let mut indices = self.cached_track_indices.lock().unwrap();
+                        let track_info = indices.get(&id).cloned();
+                        if let Some(info) = track_info {
+                            if info.start < queue_start {
+                                indices.remove(&id);
+                                let _ = self
+                                    .bus_sender
+                                    .send(Message::Audio(AudioMessage::TrackEvicted(id)));
+                                continue;
+                            }
+                            *self.current_track_id.lock().unwrap() = id;
+                            *self.current_metadata.lock().unwrap() =
+                                Some(info.technical_metadata.clone());
+                            self.current_track_position
+                                .store(info.start, Ordering::Relaxed);
+                            self.current_track_offset_ms.store(0, Ordering::Relaxed);
+                            self.is_playing.store(true, Ordering::Relaxed);
+                            debug!("AudioPlayer: Playback started (manual)");
+                            let _ = self.bus_sender.send(Message::Playback(
+                                PlaybackMessage::TechnicalMetadataChanged(info.technical_metadata),
+                            ));
+                        }
+                    }
+                    Message::Playback(PlaybackMessage::ClearNextTracks) => {
+                        let current_id = self.current_track_id.lock().unwrap().clone();
+                        let mut indices = self.cached_track_indices.lock().unwrap();
+                        let mut queue = self.sample_queue.lock().unwrap();
+                        let queue_start = self.queue_start_position.load(Ordering::Relaxed);
+
+                        if let Some(info) = indices.get(&current_id) {
+                            if let Some(footer_pos) = info.end {
+                                // Truncate queue after current track's footer.
+                                let new_queue_end = Self::truncate_queue_after_position(
+                                    &mut queue,
+                                    queue_start,
+                                    footer_pos,
+                                );
+                                self.queue_end_position
+                                    .store(new_queue_end, Ordering::Relaxed);
+                                let current_position =
+                                    self.current_track_position.load(Ordering::Relaxed);
+                                if current_position > new_queue_end {
+                                    self.current_track_position
+                                        .store(new_queue_end, Ordering::Relaxed);
+                                }
+
+                                // Remove all other tracks from indices
+                                indices.retain(|id, _| id == &current_id);
+                                debug!("AudioPlayer: Cleared next tracks after {}", current_id);
+                            }
                         }
                     }
                     Message::Playback(PlaybackMessage::ClearPlayerCache) => {
-                        debug!("AudioPlayer: Clearing cache");
-                        self.buffer_position.store(0, Ordering::Relaxed);
+                        self.is_playing.store(false, Ordering::Relaxed);
+                        self.decode_bootstrap_pending
+                            .store(false, Ordering::Relaxed);
                         self.sample_queue.lock().unwrap().clear();
-                        self.bus_sender
-                            .send(Message::Playback(PlaybackMessage::ReadyForPlayback))
-                            .unwrap();
+                        self.cached_track_indices.lock().unwrap().clear();
+                        self.queue_start_position.store(0, Ordering::Relaxed);
+                        self.queue_end_position.store(0, Ordering::Relaxed);
+                        self.current_track_position.store(0, Ordering::Relaxed);
+                        *self.current_metadata.lock().unwrap() = None;
+                        debug!("AudioPlayer: Cache cleared");
                     }
-                    _ => {} // Ignore other messages
+                    Message::Config(ConfigMessage::ConfigChanged(config)) => {
+                        self.target_sample_rate
+                            .store(config.output.sample_rate_khz as usize, Ordering::Relaxed);
+                        self.target_channels
+                            .store(config.output.channel_count as usize, Ordering::Relaxed);
+                        self.target_bits_per_sample = config.output.bits_per_sample;
+                        *self.target_output_device_name.lock().unwrap() =
+                            if config.output.output_device_name.trim().is_empty() {
+                                None
+                            } else {
+                                Some(config.output.output_device_name.trim().to_string())
+                            };
+                        let low_watermark_ms = config.buffering.player_low_watermark_ms as usize;
+                        let target_buffer_ms = (config.buffering.player_target_buffer_ms as usize)
+                            .max(low_watermark_ms.saturating_add(500));
+                        self.buffer_low_watermark_ms
+                            .store(low_watermark_ms, Ordering::Relaxed);
+                        self.buffer_target_ms
+                            .store(target_buffer_ms, Ordering::Relaxed);
+                        self.buffer_request_interval_ms.store(
+                            config.buffering.player_request_interval_ms.max(20) as usize,
+                            Ordering::Relaxed,
+                        );
+                        self.setup_audio_device();
+                        if self.stream.is_some() {
+                            self.stream = None;
+                            self.create_stream();
+                        }
+                    }
+                    Message::Audio(AudioMessage::StopDecoding) => {
+                        self.decode_bootstrap_pending
+                            .store(false, Ordering::Relaxed);
+                    }
+                    Message::Playback(PlaybackMessage::TrackStarted(track_started)) => {
+                        debug!("AudioPlayer: Track started: {}", track_started.id);
+                        // Handle the case when a track automatically starts playing (not caused by a user action)
+                        self.current_track_id
+                            .lock()
+                            .unwrap()
+                            .clone_from(&track_started.id);
+                        self.current_track_offset_ms
+                            .store(track_started.start_offset_ms as usize, Ordering::Relaxed);
+                        let track_info = self
+                            .cached_track_indices
+                            .lock()
+                            .unwrap()
+                            .get(&track_started.id)
+                            .cloned();
+                        if let Some(info) = track_info {
+                            let _ = self.bus_sender.send(Message::Playback(
+                                PlaybackMessage::TechnicalMetadataChanged(
+                                    info.technical_metadata.clone(),
+                                ),
+                            ));
+                            *self.current_metadata.lock().unwrap() = Some(info.technical_metadata);
+                        }
+                    }
+                    Message::Playback(PlaybackMessage::SetVolume(volume)) => {
+                        let clamped = volume.clamp(0.0, 1.0);
+                        self.volume.store(clamped.to_bits(), Ordering::Relaxed);
+                        debug!("AudioPlayer: Volume set to {:.2}", clamped);
+                    }
+                    _ => {}
+                },
+                Err(tokio::sync::broadcast::error::RecvError::Lagged(skipped)) => {
+                    warn!("AudioPlayer: bus lagged by {} messages", skipped);
                 }
+                Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
             }
-            error!("AudioPlayer: receiver error, restarting loop");
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::AudioPlayer;
+
+    #[test]
+    fn test_milliseconds_to_samples_stereo() {
+        let samples = AudioPlayer::milliseconds_to_samples(1000, 44_100, 2);
+        assert_eq!(samples, 88_200);
+    }
+
+    #[test]
+    fn test_milliseconds_to_samples_clamps_zero_inputs() {
+        let samples = AudioPlayer::milliseconds_to_samples(1000, 0, 0);
+        assert_eq!(samples, 1);
+    }
+
+    #[test]
+    fn test_compute_decode_request_samples_when_above_watermark() {
+        let request = AudioPlayer::compute_decode_request_samples(50_000, 20_000, 40_000);
+        assert_eq!(request, 0);
+    }
+
+    #[test]
+    fn test_compute_decode_request_samples_when_below_watermark() {
+        let request = AudioPlayer::compute_decode_request_samples(10_000, 20_000, 40_000);
+        assert_eq!(request, 30_000);
+    }
+
+    #[test]
+    fn test_compute_decode_request_samples_for_state_without_active_track() {
+        let request =
+            AudioPlayer::compute_decode_request_samples_for_state(false, false, 0, 20_000, 40_000);
+        assert_eq!(request, 0);
+    }
+
+    #[test]
+    fn test_compute_decode_request_samples_for_state_with_active_track() {
+        let request = AudioPlayer::compute_decode_request_samples_for_state(
+            true, false, 10_000, 20_000, 40_000,
+        );
+        assert_eq!(request, 30_000);
+    }
+
+    #[test]
+    fn test_compute_decode_request_samples_for_state_with_bootstrap_pending() {
+        let request = AudioPlayer::compute_decode_request_samples_for_state(
+            false, true, 10_000, 20_000, 40_000,
+        );
+        assert_eq!(request, 30_000);
     }
 }

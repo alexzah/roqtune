@@ -1,96 +1,188 @@
-use crate::protocol::{self, AudioMessage, Message, PlaybackMessage, PlaylistMessage};
-use log::{debug, error, trace};
+//! Audio decode and resample pipeline.
+//!
+//! The `AudioDecoder` listens to bus commands and forwards work to a dedicated
+//! decode worker thread that performs file decode, optional seek, resampling,
+//! and packet emission.
+
+use crate::config::{BufferingConfig, Config, OutputConfig, UiConfig};
+use crate::protocol::{self, AudioMessage, AudioPacket, ConfigMessage, Message, TrackIdentifier};
+use log::{debug, error, warn};
 use rubato::{
-    FftFixedIn, Resampler, SincFixedIn, SincInterpolationParameters, SincInterpolationType,
-    WindowFunction,
+    Resampler, SincFixedIn, SincInterpolationParameters, SincInterpolationType, WindowFunction,
 };
 use std::cmp::min;
 use std::collections::VecDeque;
-use std::path::{self, PathBuf};
-use std::rc::Rc;
-use std::sync::{Arc, Mutex};
+use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 use std::thread;
-use std::time::Duration;
-use symphonia::core::audio::{Channels, SampleBuffer};
-use symphonia::core::codecs::DecoderOptions;
-use symphonia::core::formats::FormatOptions;
+use symphonia::core::audio::SampleBuffer;
+use symphonia::core::codecs::{CodecParameters, Decoder, DecoderOptions};
+use symphonia::core::errors::Error;
+use symphonia::core::formats::{FormatOptions, FormatReader, SeekMode, SeekTo};
 use symphonia::core::io::MediaSourceStream;
 use symphonia::core::meta::MetadataOptions;
 use symphonia::core::probe::Hint;
 use tokio::sync::broadcast::{Receiver, Sender};
+use tokio::sync::mpsc::error::TrySendError;
 use tokio::sync::mpsc::{self, Receiver as MpscReceiver, Sender as MpscSender};
 
+/// Work items consumed by the decode worker thread.
 #[derive(Debug, Clone)]
 enum DecodeWorkItem {
-    DecodeFile(PathBuf),
-    Stop,
+    DecodeTracks {
+        tracks: Vec<TrackIdentifier>,
+        generation: u64,
+    },
+    RequestDecodeChunk {
+        requested_samples: usize,
+        generation: u64,
+    },
+    Stop {
+        generation: u64,
+    },
+    ConfigChanged(Config),
 }
 
-// Worker to decode in a separate thread
+/// Decoder state for the track currently being produced.
+struct ActiveDecodeTrack {
+    track_identifier: TrackIdentifier,
+    source_track_id: u32,
+    codec_params: CodecParameters,
+    format_reader: Box<dyn FormatReader>,
+    decoder: Box<dyn Decoder>,
+    source_sample_rate: u32,
+    input_exhausted: bool,
+    consecutive_decode_errors: u32,
+}
+
+/// Single-threaded decode worker that owns decoder/resampler mutable state.
 struct DecodeWorker {
     bus_sender: Sender<Message>,
     work_receiver: MpscReceiver<DecodeWorkItem>,
+    decode_request_inflight: Arc<AtomicBool>,
     work_queue: VecDeque<DecodeWorkItem>,
+    pending_tracks: VecDeque<TrackIdentifier>,
+    active_track: Option<ActiveDecodeTrack>,
     resampler: Option<SincFixedIn<f32>>,
     resample_buffer: VecDeque<f32>,
+    target_sample_rate: u32,
+    target_channels: u16,
+    target_bits_per_sample: u16,
+    decoder_request_chunk_ms: u32,
+    decode_generation: u64,
 }
 
 impl DecodeWorker {
-    pub fn new(bus_sender: Sender<Message>, work_receiver: MpscReceiver<DecodeWorkItem>) -> Self {
+    /// Creates a decode worker instance backed by a work queue receiver.
+    pub fn new(
+        bus_sender: Sender<Message>,
+        work_receiver: MpscReceiver<DecodeWorkItem>,
+        decode_request_inflight: Arc<AtomicBool>,
+    ) -> Self {
         Self {
             bus_sender,
-            work_receiver: work_receiver,
+            work_receiver,
+            decode_request_inflight,
             work_queue: VecDeque::new(),
+            pending_tracks: VecDeque::new(),
+            active_track: None,
             resampler: None,
             resample_buffer: VecDeque::new(),
+            target_sample_rate: 44100,
+            target_channels: 2,
+            target_bits_per_sample: 16,
+            decoder_request_chunk_ms: BufferingConfig::default().decoder_request_chunk_ms,
+            decode_generation: 0,
         }
     }
 
+    fn should_bootstrap_decode(tracks: &[TrackIdentifier]) -> bool {
+        tracks.iter().any(|track| track.play_immediately)
+    }
+
+    /// Runs the decode worker loop, draining queued work items forever.
     pub fn run(&mut self) {
         loop {
-            while let Some(item) = self.work_receiver.blocking_recv() {
-                match item {
-                    DecodeWorkItem::Stop => {
-                        debug!("DecodeWorker: Received stop signal");
-                        self.work_queue.clear();
-                        self.bus_sender
-                            .send(Message::Playback(PlaybackMessage::ClearPlayerCache))
-                            .unwrap();
-                    }
-                    DecodeWorkItem::DecodeFile(path) => {
-                        self.work_queue
-                            .push_back(DecodeWorkItem::DecodeFile(path.clone()));
-                        if let Some(DecodeWorkItem::DecodeFile(path)) = self.work_queue.pop_front()
-                        {
-                            self.decode_file(path);
-                        }
-                    }
+            while let Some(item) = self.work_queue.pop_front() {
+                self.handle_work_item(item);
+            }
+
+            if let Some(item) = self.work_receiver.blocking_recv() {
+                self.work_queue.push_back(item);
+            }
+        }
+    }
+
+    fn handle_work_item(&mut self, item: DecodeWorkItem) {
+        match item {
+            DecodeWorkItem::Stop { generation } => {
+                if generation < self.decode_generation {
+                    debug!(
+                        "DecodeWorker: Ignoring stale stop. stale_generation={} current_generation={}",
+                        generation, self.decode_generation
+                    );
+                    return;
+                }
+                debug!(
+                    "DecodeWorker: Received stop signal for generation={}",
+                    generation
+                );
+                self.clear_state();
+                self.decode_generation = generation;
+            }
+            DecodeWorkItem::DecodeTracks { tracks, generation } => {
+                if generation < self.decode_generation {
+                    debug!(
+                        "DecodeWorker: Ignoring stale decode tracks. stale_generation={} current_generation={}",
+                        generation, self.decode_generation
+                    );
+                    return;
+                }
+                if generation > self.decode_generation {
+                    self.clear_state();
+                    self.decode_generation = generation;
+                }
+                let should_bootstrap = Self::should_bootstrap_decode(&tracks);
+                for track in tracks {
+                    self.pending_tracks.push_back(track);
+                }
+                if should_bootstrap {
+                    let bootstrap_samples =
+                        self.ms_to_samples(self.decoder_request_chunk_ms.max(1));
+                    self.decode_requested_samples(bootstrap_samples.max(1));
                 }
             }
+            DecodeWorkItem::RequestDecodeChunk {
+                requested_samples,
+                generation,
+            } => {
+                self.decode_request_inflight.store(false, Ordering::Relaxed);
+                if generation != self.decode_generation {
+                    debug!(
+                        "DecodeWorker: Ignoring decode chunk request for non-active generation. requested_generation={} current_generation={}",
+                        generation, self.decode_generation
+                    );
+                    return;
+                }
+                self.decode_requested_samples(requested_samples);
+            }
+            DecodeWorkItem::ConfigChanged(config) => {
+                self.target_sample_rate = config.output.sample_rate_khz;
+                self.target_channels = config.output.channel_count;
+                self.target_bits_per_sample = config.output.bits_per_sample;
+                self.decoder_request_chunk_ms = config.buffering.decoder_request_chunk_ms;
+                self.resampler = None;
+                self.resample_buffer.clear();
+            }
         }
     }
 
-    fn should_continue(&mut self) -> bool {
-        // try_recv() returns None if channel is empty, Some if there's a message
-        match self.work_receiver.try_recv() {
-            Ok(DecodeWorkItem::Stop) => {
-                self.work_queue.clear();
-                self.bus_sender
-                    .send(Message::Playback(PlaybackMessage::ClearPlayerCache))
-                    .unwrap();
-                false
-            }
-            Ok(other) => {
-                self.work_queue.push_back(other);
-                true
-            }
-            Err(_) => true,
-        }
-    }
-
-    pub fn load_file(&mut self, path: PathBuf) {
-        debug!("DecodeWorker: Loading file: {:?}", path);
-        self.work_queue.push_back(DecodeWorkItem::DecodeFile(path));
+    fn clear_state(&mut self) {
+        self.pending_tracks.clear();
+        self.active_track = None;
+        self.resample_buffer.clear();
+        self.resampler = None;
     }
 
     fn create_resampler(&mut self, source_sample_rate: u32, chunk_size: usize) -> SincFixedIn<f32> {
@@ -101,15 +193,12 @@ impl DecodeWorker {
             oversampling_factor: 256,
             window: WindowFunction::BlackmanHarris2,
         };
-        // TODO: get sample_rate and channels as message from player
-        let target_sample_rate = 48000;
-        let target_channels = 2;
         SincFixedIn::<f32>::new(
-            source_sample_rate as f64 / target_sample_rate as f64,
+            self.target_sample_rate as f64 / source_sample_rate as f64,
             2.0,
             params,
             chunk_size,
-            target_channels,
+            self.target_channels as usize,
         )
         .unwrap()
     }
@@ -132,30 +221,42 @@ impl DecodeWorker {
         interleaved
     }
 
-    pub fn resample_next_frame(&mut self, sample_rate: u32) -> Vec<f32> {
+    fn resampler_input_chunk_size(&mut self, source_sample_rate: u32) -> usize {
+        if self.resampler.is_none() {
+            self.resampler = Some(self.create_resampler(source_sample_rate, 2048));
+        }
+
+        let channels = self.target_channels.max(1) as usize;
+        self.resampler
+            .as_ref()
+            .expect("resampler initialized")
+            .input_frames_next()
+            * channels
+    }
+
+    fn resample_next_frame(&mut self, sample_rate: u32) -> Vec<f32> {
         let mut samples = Vec::new();
-        // Resample the incoming audio
         if self.resampler.is_none() {
             self.resampler = Some(self.create_resampler(sample_rate, 2048));
         }
 
-        // TODO: get channels as message from player
-        let channels: usize = 2;
-        let target_sample_rate: u32 = 48000;
-        let mut resampled: Vec<Vec<f32>> = vec![vec![]; channels];
+        let channels: usize = self.target_channels.max(1) as usize;
         let mut result: Vec<f32> = Vec::new();
         if let Some(resampler) = &mut self.resampler {
-            debug!(
-                "Attempting to pull {} samples from resample buffer of size {}",
-                resampler.input_frames_next() * channels,
-                self.resample_buffer.len()
-            );
             for _ in 0..min(
                 resampler.input_frames_next() * channels,
                 self.resample_buffer.len(),
             ) {
-                samples.push(self.resample_buffer.pop_front().unwrap());
+                if let Some(sample) = self.resample_buffer.pop_front() {
+                    samples.push(sample);
+                }
             }
+
+            // No need to resample
+            if sample_rate == self.target_sample_rate {
+                return samples;
+            }
+
             let deinterleaved = Self::deinterleave(&samples, channels);
             let mut waves_out = vec![vec![]; channels];
             if deinterleaved[0].len() == resampler.input_frames_next() {
@@ -164,315 +265,736 @@ impl DecodeWorker {
                 waves_out = resampler
                     .process_partial(Some(&deinterleaved), None)
                     .unwrap();
+                if let Ok(flush_result) = resampler.process_partial::<&[f32]>(None, None) {
+                    for i in 0..channels {
+                        waves_out[i].extend(flush_result[i].iter());
+                    }
+                }
             }
             result = Self::interleave(&waves_out);
-            // resampler.reset();
-            // debug!(
-            //     "Attempting to pull {} samples from resample buffer of size {}",
-            //     resampler.input_frames_next() * channels,
-            //     self.resample_buffer.len()
-            // );
-            // for _ in 0..min(
-            //     resampler.input_frames_next() * channels,
-            //     self.resample_buffer.len(),
-            // ) {
-            //     samples.push(self.resample_buffer.pop_front().unwrap());
-            // }
-            // let delay = resampler.output_delay();
-
-            // let mut source_index = 0;
-            // // Process most frames
-            // loop {
-            //     let needed_frames = resampler.input_frames_next() * channels; // Comes in interleaved with all channels
-            //     trace!(
-            //         "AudioPlayer: Need {} frames for next resampling step",
-            //         needed_frames
-            //     );
-
-            //     if source_index + needed_frames > samples.len() {
-            //         trace!(
-            //             "AudioPlayer: Not enough samples left (have {}, need {}), breaking",
-            //             samples.len(),
-            //             needed_frames
-            //         );
-            //         break;
-            //     }
-            //     let mut channel_index = 0usize;
-            //     let mut input: Vec<Vec<f32>> = vec![vec![]; channels as usize];
-            //     for i in source_index..source_index + needed_frames {
-            //         input[channel_index].push(samples[i]);
-            //         channel_index = (channel_index + 1) % channels as usize;
-            //     }
-            //     source_index += needed_frames;
-            //     trace!(
-            //         "AudioPlayer: Processing {} input frames at index {}",
-            //         needed_frames,
-            //         source_index
-            //     );
-
-            //     let result = resampler.process(&input, None);
-            //     if let Ok(resulting_samples) = result {
-            //         trace!(
-            //             "AudioPlayer: Successfully resampled {} frames",
-            //             resulting_samples[0].len()
-            //         );
-            //         for i in 0..resampled.len() {
-            //             resampled[i].extend(resulting_samples[i].iter());
-            //         }
-            //     } else {
-            //         error!("AudioPlayer: Error resampling audio {:?}", result);
-            //         return vec![];
-            //     }
-            // }
-
-            // trace!(
-            //     "AudioPlayer: Processing remaining frames starting at index {}",
-            //     source_index
-            // );
-            // // Process remaining frames
-            // let mut input = vec![vec![]; channels];
-            // let mut channel_index = 0usize;
-            // for i in source_index..samples.len() {
-            //     input[channel_index].push(samples[i]);
-            //     channel_index = (channel_index + 1) % channels;
-            // }
-
-            // trace!("AudioPlayer: Processing partial remaining frames");
-            // if let Ok(result) = resampler.process_partial(Some(&input), None) {
-            //     debug!(
-            //         "AudioPlayer: Got {} frames from partial processing",
-            //         result[0].len()
-            //     );
-            //     for i in 0..resampled.len() {
-            //         resampled[i].extend(result[i].iter());
-            //     }
-            // }
-
-            // trace!("AudioPlayer: Filling remaining samples to reach target length");
-            // let new_length: usize = ((samples.len() as f32 / channels as f32) * sample_rate as f32
-            //     / target_sample_rate as f32) as usize;
-            // while resampled[0].len() < new_length + delay {
-            //     if let Ok(result) = resampler.process_partial::<&[f32]>(None, None) {
-            //         debug!("AudioPlayer: Got {} frames from flushing", result[0].len());
-            //         for i in 0..resampled.len() {
-            //             resampled[i].extend(result[i].iter());
-            //         }
-            //     }
-            // }
-
-            // if resampled.is_empty() {
-            //     error!("AudioPlayer: No output after resampling");
-            //     return vec![];
-            // }
-            // debug!(
-            //     "AudioPlayer: Completed resampling with {} frames",
-            //     resampled[0].len()
-            // );
-
-            // for i in delay - 1..delay + new_length - 1 {
-            //     for channel in 0..channels {
-            //         result.push(resampled[channel][i]);
-            //     }
-            // }
         }
 
         result
     }
 
-    pub fn decode_file(&mut self, path: PathBuf) {
-        debug!("DecodeWorker: Decoding file: {:?}", path);
-        let file = match std::fs::File::open(path.clone()) {
+    fn ms_to_samples(&self, milliseconds: u32) -> usize {
+        let sample_rate = self.target_sample_rate.max(1) as u128;
+        let channels = self.target_channels.max(1) as u128;
+        let samples = milliseconds as u128 * sample_rate * channels / 1000;
+        samples.min(usize::MAX as u128) as usize
+    }
+
+    fn decode_requested_samples(&mut self, requested_samples: usize) {
+        if requested_samples == 0 {
+            return;
+        }
+
+        let max_request_samples = self.ms_to_samples(self.decoder_request_chunk_ms.max(1));
+        let target_samples = requested_samples.min(max_request_samples.max(1));
+        let mut emitted_samples = 0usize;
+
+        while emitted_samples < target_samples {
+            if self.active_track.is_none() && !self.start_next_track() {
+                break;
+            }
+
+            let source_sample_rate = self
+                .active_track
+                .as_ref()
+                .map(|track| track.source_sample_rate)
+                .unwrap_or(self.target_sample_rate);
+
+            let chunk_size = self.resampler_input_chunk_size(source_sample_rate);
+            self.fill_resample_buffer(chunk_size);
+
+            if self.resample_buffer.is_empty() {
+                if self.finish_active_track_if_complete() {
+                    continue;
+                }
+                break;
+            }
+
+            let resampled_samples = self.resample_next_frame(source_sample_rate);
+            if resampled_samples.is_empty() {
+                if self.finish_active_track_if_complete() {
+                    continue;
+                }
+                break;
+            }
+
+            emitted_samples += resampled_samples.len();
+            let _ = self
+                .bus_sender
+                .send(Message::Audio(AudioMessage::AudioPacket(
+                    AudioPacket::Samples {
+                        samples: resampled_samples,
+                    },
+                )));
+
+            self.finish_active_track_if_complete();
+        }
+    }
+
+    fn fill_resample_buffer(&mut self, desired_samples: usize) {
+        while self.resample_buffer.len() < desired_samples {
+            if let Some(active) = &self.active_track {
+                if active.input_exhausted {
+                    break;
+                }
+            } else {
+                break;
+            }
+
+            if !self.decode_one_packet_into_buffer() {
+                break;
+            }
+        }
+    }
+
+    fn decode_one_packet_into_buffer(&mut self) -> bool {
+        let mut decoded_samples: Option<Vec<f32>> = None;
+        let mut exhausted_input = false;
+
+        {
+            let active = match self.active_track.as_mut() {
+                Some(track) => track,
+                None => return false,
+            };
+
+            match active.format_reader.next_packet() {
+                Ok(packet) => {
+                    if packet.track_id() != active.source_track_id {
+                        return true;
+                    }
+
+                    match active.decoder.decode(&packet) {
+                        Ok(decoded) => {
+                            active.consecutive_decode_errors = 0;
+                            let spec = decoded.spec();
+                            let duration = decoded.capacity() as u64;
+                            let mut sample_buffer = SampleBuffer::<f32>::new(duration, *spec);
+                            sample_buffer.copy_interleaved_ref(decoded);
+                            decoded_samples = Some(sample_buffer.samples().to_vec());
+                        }
+                        Err(Error::DecodeError(msg)) => {
+                            warn!("Decode error (skipping frame): {}", msg);
+                            active.consecutive_decode_errors += 1;
+                            if active.consecutive_decode_errors > 50 {
+                                error!("Too many consecutive decode errors. Giving up on track.");
+                                exhausted_input = true;
+                            }
+                        }
+                        Err(Error::ResetRequired) => {
+                            debug!("DecodeWorker: Reset required. Re-creating decoder.");
+                            match symphonia::default::get_codecs()
+                                .make(&active.codec_params, &DecoderOptions::default())
+                            {
+                                Ok(decoder) => {
+                                    active.decoder = decoder;
+                                    active.consecutive_decode_errors = 0;
+                                }
+                                Err(e) => {
+                                    error!("Failed to re-create decoder: {}", e);
+                                    exhausted_input = true;
+                                }
+                            }
+                        }
+                        Err(e) => {
+                            error!("Fatal decode error: {}", e);
+                            exhausted_input = true;
+                        }
+                    }
+                }
+                Err(Error::IoError(_)) => {
+                    exhausted_input = true;
+                }
+                Err(e) => {
+                    debug!(
+                        "DecodeWorker: Reached end of stream or failed to read packet: {}",
+                        e
+                    );
+                    exhausted_input = true;
+                }
+            }
+
+            if exhausted_input {
+                active.input_exhausted = true;
+            }
+        }
+
+        if let Some(samples) = decoded_samples {
+            self.resample_buffer.extend(samples);
+            true
+        } else {
+            !exhausted_input
+        }
+    }
+
+    fn finish_active_track_if_complete(&mut self) -> bool {
+        let should_finish = self
+            .active_track
+            .as_ref()
+            .map(|active| active.input_exhausted && self.resample_buffer.is_empty())
+            .unwrap_or(false);
+
+        if !should_finish {
+            return false;
+        }
+
+        let track = self
+            .active_track
+            .take()
+            .expect("track exists when finishing");
+        let _ = self
+            .bus_sender
+            .send(Message::Audio(AudioMessage::AudioPacket(
+                AudioPacket::TrackFooter {
+                    id: track.track_identifier.id.clone(),
+                },
+            )));
+        let _ = self
+            .bus_sender
+            .send(Message::Audio(AudioMessage::TrackCached(
+                track.track_identifier.id.clone(),
+                track.track_identifier.start_offset_ms,
+            )));
+
+        self.resampler = None;
+        true
+    }
+
+    fn start_next_track(&mut self) -> bool {
+        while let Some(next_track) = self.pending_tracks.pop_front() {
+            match self.open_track(next_track) {
+                Some(active_track) => {
+                    self.active_track = Some(active_track);
+                    self.resampler = None;
+                    self.resample_buffer.clear();
+                    return true;
+                }
+                None => {
+                    warn!("DecodeWorker: Failed to initialize track, skipping");
+                }
+            }
+        }
+
+        false
+    }
+
+    fn open_track(&mut self, input_track: TrackIdentifier) -> Option<ActiveDecodeTrack> {
+        let file = match std::fs::File::open(input_track.path.clone()) {
             Ok(file) => file,
             Err(e) => {
                 error!("Failed to open file: {}", e);
-                return;
+                return None;
             }
         };
 
-        // Create the media source stream
         let media_source = MediaSourceStream::new(Box::new(file), Default::default());
-
-        // Create a probe hint using the file extension
         let hint = Hint::new();
-
-        // Probe the media source
-        let format_reader = match symphonia::default::get_probe().format(
+        let mut format_reader = match symphonia::default::get_probe().format(
             &hint,
             media_source,
             &FormatOptions::default(),
             &MetadataOptions::default(),
         ) {
-            Ok(probed) => probed,
+            Ok(probed) => probed.format,
             Err(e) => {
                 error!("Failed to probe media source: {}", e);
-                return;
+                return None;
             }
         };
 
-        // Get the default track
-        let track = match format_reader.format.default_track() {
-            Some(track) => track,
-            None => {
-                error!("No default track found");
-                return;
-            }
+        let (source_track_id, codec_params) = {
+            let track = match format_reader.default_track() {
+                Some(track) => track,
+                None => {
+                    error!("No default track found");
+                    return None;
+                }
+            };
+            (track.id, track.codec_params.clone())
         };
 
-        let track_id = track.id;
-        let sample_rate = track.codec_params.sample_rate.unwrap_or(44100);
-        let channels = track.codec_params.channels.unwrap().count();
-
-        if self.resampler.is_none() {
-            self.resampler = Some(self.create_resampler(sample_rate, 2048));
+        let source_sample_rate = codec_params.sample_rate.unwrap_or(44100);
+        let source_channels = codec_params.channels.map(|c| c.count()).unwrap_or(2);
+        if source_channels == 0 {
+            error!("Unsupported channel count 0 in {:?}", input_track.path);
+            return None;
         }
 
-        let target_sample_rate = 48000;
-        let target_channels = 2;
+        if input_track.start_offset_ms > 0 {
+            debug!("DecodeWorker: Seeking to {}ms", input_track.start_offset_ms);
+            let seconds = input_track.start_offset_ms / 1000;
+            let frac = (input_track.start_offset_ms % 1000) as f64 / 1000.0;
+            if let Err(e) = format_reader.seek(
+                SeekMode::Accurate,
+                SeekTo::Time {
+                    time: symphonia::core::units::Time { seconds, frac },
+                    track_id: Some(source_track_id),
+                },
+            ) {
+                error!("Seek failed: {}", e);
+            }
+        }
 
-        debug!(
-            "Track info: sample_rate={}, channels={}",
-            sample_rate, channels
-        );
-
-        // Create a decoder for the track
-        let mut decoder = match symphonia::default::get_codecs()
-            .make(&track.codec_params, &DecoderOptions::default())
+        let decoder = match symphonia::default::get_codecs()
+            .make(&codec_params, &DecoderOptions::default())
         {
             Ok(decoder) => decoder,
             Err(e) => {
                 error!("Failed to create decoder: {}", e);
-                return;
+                return None;
             }
         };
 
-        // Decode in chunks
-        let mut format_reader = format_reader;
-        let chunk_size = self.resampler.as_ref().unwrap().input_frames_next() * channels;
-        let mut decoded_chunk = Vec::with_capacity(chunk_size);
+        let technical_metadata = self.build_technical_metadata(&input_track.path, &codec_params);
+        debug!(
+            "DecodeWorker: Track ready id={} sr={} channels={} play_immediately={}",
+            input_track.id, source_sample_rate, source_channels, input_track.play_immediately
+        );
 
-        while let Ok(packet) = format_reader.format.next_packet() {
-            if !self.should_continue() {
-                debug!("DecodeWorker: Stopping");
-                return;
-            }
+        let _ = self
+            .bus_sender
+            .send(Message::Audio(AudioMessage::AudioPacket(
+                AudioPacket::TrackHeader {
+                    id: input_track.id.clone(),
+                    play_immediately: input_track.play_immediately,
+                    technical_metadata: technical_metadata.clone(),
+                    start_offset_ms: input_track.start_offset_ms,
+                },
+            )));
 
-            if packet.track_id() != track_id {
-                continue;
-            }
+        Some(ActiveDecodeTrack {
+            track_identifier: input_track,
+            source_track_id,
+            codec_params,
+            format_reader,
+            decoder,
+            source_sample_rate,
+            input_exhausted: false,
+            consecutive_decode_errors: 0,
+        })
+    }
 
-            match decoder.decode(&packet) {
-                Ok(decoded) => {
-                    let spec = decoded.spec();
-                    let duration = decoded.capacity() as u64;
+    fn build_technical_metadata(
+        &self,
+        path: &PathBuf,
+        codec_params: &CodecParameters,
+    ) -> protocol::TechnicalMetadata {
+        let sample_rate = codec_params.sample_rate.unwrap_or(44100);
+        let format_name = path
+            .extension()
+            .and_then(|ext| ext.to_str())
+            .unwrap_or("AUDIO")
+            .to_uppercase();
 
-                    let mut sample_buffer = SampleBuffer::<f32>::new(duration, *spec);
-                    sample_buffer.copy_interleaved_ref(decoded);
+        let n_frames = codec_params.n_frames.unwrap_or(0);
+        let duration_ms = if n_frames > 0 {
+            (n_frames as f64 * 1000.0) / sample_rate as f64
+        } else {
+            0.0
+        };
 
-                    decoded_chunk.extend_from_slice(sample_buffer.samples());
+        let mut bitrate = 0;
+        if let Ok(file_metadata) = std::fs::metadata(path) {
+            let file_size = file_metadata.len();
+            let metadata_size = get_metadata_size(path);
+            let audio_data_size = if file_size > metadata_size {
+                file_size - metadata_size
+            } else {
+                file_size
+            };
 
-                    // Send chunk when we have enough samples
-                    if decoded_chunk.len() >= chunk_size {
-                        trace!(
-                            "Got chunk of size {} samples, expecting {}",
-                            decoded_chunk.len(),
-                            chunk_size
-                        );
-                        self.resample_buffer.extend(decoded_chunk.iter());
-                        if self.resample_buffer.len() >= chunk_size {
-                            let resampled_samples = self.resample_next_frame(sample_rate);
-                            let _ =
-                                self.bus_sender
-                                    .send(Message::Audio(AudioMessage::BufferReady {
-                                        samples: resampled_samples,
-                                        sample_rate,
-                                        channels: channels as u16,
-                                    }));
-                        }
-
-                        decoded_chunk = Vec::with_capacity(chunk_size);
-                    }
-                }
-                Err(e) => {
-                    error!("Decode error: {}", e);
-                    break;
-                }
+            if duration_ms > 0.0 {
+                bitrate = ((audio_data_size as f64 * 8.0) / (duration_ms / 1000.0)) as u32;
             }
         }
 
-        // Send any remaining samples
-        if !decoded_chunk.is_empty() {
-            if !self.should_continue() {
-                debug!("DecodeWorker: Stopping");
-                return;
-            }
-            let resampled_samples = self.resample_next_frame(sample_rate);
-            // debug!("Sending final chunk of {} samples", decoded_chunk.len());
-            let _ = self
-                .bus_sender
-                .send(Message::Audio(AudioMessage::BufferReady {
-                    samples: resampled_samples,
-                    sample_rate,
-                    channels: channels as u16,
-                }));
-        }
-
-        // Flush resampler queue
-        while self.resample_buffer.len() > 0 {
-            if !self.should_continue() {
-                debug!("DecodeWorker: Stopping");
-                return;
-            }
-            self.resample_next_frame(sample_rate);
+        protocol::TechnicalMetadata {
+            format: format_name,
+            bitrate_kbps: (bitrate as f32 / 1000.0).round() as u32,
+            sample_rate_hz: sample_rate,
+            duration_ms: duration_ms as u64,
         }
     }
 }
 
+fn get_metadata_size(path: &PathBuf) -> u64 {
+    let mut total_size = 0;
+    if let Ok(mut file) = std::fs::File::open(path) {
+        let file_size = file.metadata().map(|m| m.len()).unwrap_or(0);
+        if file_size == 0 {
+            return 0;
+        }
+
+        let mut header = [0u8; 10];
+        use std::io::{Read, Seek, SeekFrom};
+        if file.read_exact(&mut header).is_ok() && &header[0..3] == b"ID3" {
+            let size = ((header[6] as u32 & 0x7F) << 21)
+                | ((header[7] as u32 & 0x7F) << 14)
+                | ((header[8] as u32 & 0x7F) << 7)
+                | (header[9] as u32 & 0x7F);
+            total_size += (size + 10) as u64;
+        }
+
+        if file_size > 128 {
+            let _ = file.seek(SeekFrom::End(-128));
+            let mut id3v1 = [0u8; 3];
+            if file.read_exact(&mut id3v1).is_ok() && &id3v1 == b"TAG" {
+                total_size += 128;
+            }
+        }
+    }
+    total_size
+}
+
+/// Bus-facing decoder orchestrator that manages decode generations.
 pub struct AudioDecoder {
     bus_receiver: Receiver<Message>,
     bus_sender: Sender<Message>,
     worker_sender: MpscSender<DecodeWorkItem>,
+    decode_request_inflight: Arc<AtomicBool>,
+    decode_generation: u64,
 }
 
 impl AudioDecoder {
+    /// Creates the decoder and spawns its dedicated decode worker thread.
     pub fn new(bus_receiver: Receiver<Message>, bus_sender: Sender<Message>) -> Self {
-        let (worker_sender, worker_receiver) = mpsc::channel(20);
+        let (worker_sender, worker_receiver) = mpsc::channel(128);
         let mut audio_decoder = Self {
             bus_receiver,
             bus_sender,
-            worker_sender: worker_sender,
+            worker_sender,
+            decode_request_inflight: Arc::new(AtomicBool::new(false)),
+            decode_generation: 0,
         };
         audio_decoder.spawn_decode_worker(worker_receiver);
         audio_decoder
     }
 
+    /// Starts the blocking event loop that translates bus commands into decode work.
     pub fn run(&mut self) {
         loop {
-            while let Ok(message) = self.bus_receiver.blocking_recv() {
-                match message {
+            match self.bus_receiver.blocking_recv() {
+                Ok(message) => match message {
                     Message::Audio(AudioMessage::DecodeTracks(paths)) => {
-                        debug!("AudioDecoder: Loading tracks {:?}", paths);
-                        for path in paths {
-                            self.worker_sender
-                                .blocking_send(DecodeWorkItem::DecodeFile(path))
-                                .unwrap();
+                        debug!("AudioDecoder: Queueing tracks for decode {:?}", paths);
+                        if paths.iter().any(|track| track.play_immediately) {
+                            self.decode_generation = self.decode_generation.saturating_add(1);
                         }
+                        let generation = self.decode_generation;
+                        self.worker_sender
+                            .blocking_send(DecodeWorkItem::DecodeTracks {
+                                tracks: paths,
+                                generation,
+                            })
+                            .unwrap();
                     }
-                    Message::Audio(AudioMessage::ClearCache) => {
-                        debug!("AudioDecoder: Clearing cache");
-                        self.worker_sender.blocking_send(DecodeWorkItem::Stop);
+                    Message::Audio(AudioMessage::RequestDecodeChunk { requested_samples }) => {
+                        self.enqueue_decode_chunk_request(
+                            self.decode_generation,
+                            requested_samples,
+                        );
                     }
-                    _ => {} // Ignore other messages for now
+                    Message::Audio(AudioMessage::StopDecoding) => {
+                        debug!("AudioDecoder: Clearing decode state");
+                        let generation = self.decode_generation;
+                        let _ = self
+                            .worker_sender
+                            .blocking_send(DecodeWorkItem::Stop { generation });
+                    }
+                    Message::Config(ConfigMessage::ConfigChanged(config)) => {
+                        debug!(
+                            "AudioDecoder: Received config changed command: {:?}",
+                            config
+                        );
+                        self.worker_sender
+                            .blocking_send(DecodeWorkItem::ConfigChanged(config))
+                            .unwrap();
+                    }
+                    Message::Config(ConfigMessage::AudioDeviceOpened {
+                        sample_rate,
+                        channels,
+                    }) => {
+                        debug!(
+                            "AudioDecoder: Syncing with actual device config: sr={}, channels={}",
+                            sample_rate, channels
+                        );
+                        let dummy_config = Config {
+                            output: OutputConfig {
+                                output_device_name: String::new(),
+                                output_device_auto: true,
+                                channel_count: channels,
+                                sample_rate_khz: sample_rate,
+                                bits_per_sample: 32,
+                                channel_count_auto: false,
+                                sample_rate_auto: false,
+                                bits_per_sample_auto: false,
+                            },
+                            ui: UiConfig::default(),
+                            buffering: BufferingConfig::default(),
+                        };
+                        self.worker_sender
+                            .blocking_send(DecodeWorkItem::ConfigChanged(dummy_config))
+                            .unwrap();
+                    }
+                    _ => {}
+                },
+                Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {}
+                Err(tokio::sync::broadcast::error::RecvError::Closed) => {
+                    error!("AudioDecoder: bus closed");
+                    break;
                 }
             }
-            error!("AudioDecoder: receiver error, restarting loop");
+        }
+    }
+
+    fn enqueue_decode_chunk_request(&self, generation: u64, requested_samples: usize) {
+        if requested_samples == 0 {
+            return;
+        }
+        if self
+            .decode_request_inflight
+            .compare_exchange(false, true, Ordering::Relaxed, Ordering::Relaxed)
+            .is_err()
+        {
+            return;
+        }
+        match self
+            .worker_sender
+            .try_send(DecodeWorkItem::RequestDecodeChunk {
+                requested_samples,
+                generation,
+            }) {
+            Ok(()) => {}
+            Err(TrySendError::Full(_)) => {
+                self.decode_request_inflight.store(false, Ordering::Relaxed);
+                // Decode chunk requests are advisory; if a request is already queued, let it drain.
+                debug!("AudioDecoder: dropping decode request because worker queue is full");
+            }
+            Err(TrySendError::Closed(_)) => {
+                self.decode_request_inflight.store(false, Ordering::Relaxed);
+                error!("AudioDecoder: decode worker channel is closed");
+            }
         }
     }
 
     fn spawn_decode_worker(&mut self, worker_receiver: MpscReceiver<DecodeWorkItem>) {
         let bus_sender = self.bus_sender.clone();
+        let decode_request_inflight = self.decode_request_inflight.clone();
         thread::spawn(move || {
-            let mut worker = DecodeWorker::new(bus_sender.clone(), worker_receiver);
+            let mut worker =
+                DecodeWorker::new(bus_sender.clone(), worker_receiver, decode_request_inflight);
             worker.run();
         });
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{AudioDecoder, DecodeWorkItem, DecodeWorker};
+    use crate::protocol::TrackIdentifier;
+    use std::path::PathBuf;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::Arc;
+    use tokio::sync::broadcast;
+    use tokio::sync::mpsc;
+
+    #[test]
+    fn test_enqueue_decode_chunk_request_drops_when_worker_queue_full() {
+        let (bus_sender, _) = broadcast::channel(8);
+        let (_worker_tx, mut worker_rx) = mpsc::channel(1);
+        let decoder = AudioDecoder {
+            bus_receiver: bus_sender.subscribe(),
+            bus_sender: bus_sender.clone(),
+            worker_sender: _worker_tx,
+            decode_request_inflight: Arc::new(AtomicBool::new(false)),
+            decode_generation: 0,
+        };
+
+        decoder
+            .worker_sender
+            .try_send(DecodeWorkItem::Stop { generation: 0 })
+            .expect("seed worker queue");
+        decoder.enqueue_decode_chunk_request(0, 10_000);
+
+        let queued = worker_rx.try_recv().expect("expected first queued item");
+        assert!(matches!(queued, DecodeWorkItem::Stop { generation: 0 }));
+        assert!(
+            worker_rx.try_recv().is_err(),
+            "decode request should have been dropped while queue was full"
+        );
+    }
+
+    fn make_track(id: &str, play_immediately: bool) -> TrackIdentifier {
+        TrackIdentifier {
+            id: id.to_string(),
+            path: PathBuf::from(format!("/tmp/{}.flac", id)),
+            play_immediately,
+            start_offset_ms: 0,
+        }
+    }
+
+    #[test]
+    fn test_should_bootstrap_decode_detects_immediate_track() {
+        let tracks = vec![
+            TrackIdentifier {
+                id: "a".to_string(),
+                path: PathBuf::from("/tmp/a.flac"),
+                play_immediately: false,
+                start_offset_ms: 0,
+            },
+            TrackIdentifier {
+                id: "b".to_string(),
+                path: PathBuf::from("/tmp/b.flac"),
+                play_immediately: true,
+                start_offset_ms: 0,
+            },
+        ];
+        assert!(DecodeWorker::should_bootstrap_decode(&tracks));
+    }
+
+    #[test]
+    fn test_should_bootstrap_decode_false_when_no_immediate_track() {
+        let tracks = vec![TrackIdentifier {
+            id: "a".to_string(),
+            path: PathBuf::from("/tmp/a.flac"),
+            play_immediately: false,
+            start_offset_ms: 0,
+        }];
+        assert!(!DecodeWorker::should_bootstrap_decode(&tracks));
+    }
+
+    #[test]
+    fn test_stale_stop_does_not_clear_active_generation_queue() {
+        let (bus_sender, _) = broadcast::channel(8);
+        let (_worker_tx, worker_rx) = mpsc::channel(8);
+        let mut worker = DecodeWorker::new(bus_sender, worker_rx, Arc::new(AtomicBool::new(false)));
+
+        worker.handle_work_item(DecodeWorkItem::DecodeTracks {
+            tracks: vec![make_track("g2", false)],
+            generation: 2,
+        });
+        assert_eq!(worker.decode_generation, 2);
+        assert_eq!(worker.pending_tracks.len(), 1);
+
+        worker.handle_work_item(DecodeWorkItem::Stop { generation: 1 });
+        assert_eq!(worker.decode_generation, 2);
+        assert_eq!(worker.pending_tracks.len(), 1);
+    }
+
+    #[test]
+    fn test_stale_decode_request_is_ignored() {
+        let (bus_sender, _) = broadcast::channel(8);
+        let (_worker_tx, worker_rx) = mpsc::channel(8);
+        let mut worker = DecodeWorker::new(bus_sender, worker_rx, Arc::new(AtomicBool::new(false)));
+
+        worker.handle_work_item(DecodeWorkItem::DecodeTracks {
+            tracks: vec![make_track("g3", false)],
+            generation: 3,
+        });
+        assert_eq!(worker.decode_generation, 3);
+        assert_eq!(worker.pending_tracks.len(), 1);
+
+        worker.handle_work_item(DecodeWorkItem::RequestDecodeChunk {
+            requested_samples: 10_000,
+            generation: 2,
+        });
+        assert_eq!(worker.pending_tracks.len(), 1);
+    }
+
+    #[test]
+    fn test_new_generation_replaces_previous_pending_tracks() {
+        let (bus_sender, _) = broadcast::channel(8);
+        let (_worker_tx, worker_rx) = mpsc::channel(8);
+        let mut worker = DecodeWorker::new(bus_sender, worker_rx, Arc::new(AtomicBool::new(false)));
+
+        worker.handle_work_item(DecodeWorkItem::DecodeTracks {
+            tracks: vec![make_track("old", false)],
+            generation: 1,
+        });
+        assert_eq!(worker.pending_tracks.len(), 1);
+
+        worker.handle_work_item(DecodeWorkItem::DecodeTracks {
+            tracks: vec![make_track("new", false)],
+            generation: 2,
+        });
+        assert_eq!(worker.decode_generation, 2);
+        assert_eq!(worker.pending_tracks.len(), 1);
+        assert_eq!(
+            worker.pending_tracks.front().map(|track| track.id.as_str()),
+            Some("new")
+        );
+    }
+
+    #[test]
+    fn test_stop_clears_current_generation_state() {
+        let (bus_sender, _) = broadcast::channel(8);
+        let (_worker_tx, worker_rx) = mpsc::channel(8);
+        let mut worker = DecodeWorker::new(bus_sender, worker_rx, Arc::new(AtomicBool::new(false)));
+
+        worker.handle_work_item(DecodeWorkItem::DecodeTracks {
+            tracks: vec![make_track("active", false)],
+            generation: 4,
+        });
+        assert_eq!(worker.pending_tracks.len(), 1);
+
+        worker.handle_work_item(DecodeWorkItem::Stop { generation: 4 });
+        assert_eq!(worker.decode_generation, 4);
+        assert!(worker.pending_tracks.is_empty());
+        assert!(worker.active_track.is_none());
+    }
+
+    #[test]
+    fn test_enqueue_decode_chunk_request_coalesces_while_inflight() {
+        let (bus_sender, _) = broadcast::channel(8);
+        let (worker_tx, mut worker_rx) = mpsc::channel(8);
+        let inflight = Arc::new(AtomicBool::new(false));
+        let decoder = AudioDecoder {
+            bus_receiver: bus_sender.subscribe(),
+            bus_sender: bus_sender.clone(),
+            worker_sender: worker_tx,
+            decode_request_inflight: inflight.clone(),
+            decode_generation: 0,
+        };
+
+        decoder.enqueue_decode_chunk_request(0, 10_000);
+        decoder.enqueue_decode_chunk_request(0, 20_000);
+
+        let queued = worker_rx
+            .try_recv()
+            .expect("expected queued decode request");
+        assert!(matches!(
+            queued,
+            DecodeWorkItem::RequestDecodeChunk {
+                requested_samples: 10_000,
+                generation: 0
+            }
+        ));
+        assert!(
+            worker_rx.try_recv().is_err(),
+            "second request should be coalesced while inflight"
+        );
+        assert!(inflight.load(Ordering::Relaxed));
+    }
+
+    #[test]
+    fn test_worker_clears_inflight_flag_when_handling_decode_request() {
+        let (bus_sender, _) = broadcast::channel(8);
+        let (_worker_tx, worker_rx) = mpsc::channel(8);
+        let inflight = Arc::new(AtomicBool::new(true));
+        let mut worker = DecodeWorker::new(bus_sender, worker_rx, inflight.clone());
+        worker.decode_generation = 2;
+
+        worker.handle_work_item(DecodeWorkItem::RequestDecodeChunk {
+            requested_samples: 5_000,
+            generation: 1,
+        });
+
+        assert!(
+            !inflight.load(Ordering::Relaxed),
+            "worker should clear inflight even for stale requests"
+        );
     }
 }
