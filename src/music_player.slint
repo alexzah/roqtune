@@ -1,4 +1,4 @@
-import { Button, ComboBox, VerticalBox, StandardTableView, ScrollView, LineEdit, ListView } from "std-widgets.slint";
+import { Button, ComboBox, VerticalBox, StandardTableView, ScrollView, LineEdit, ListView, Switch } from "std-widgets.slint";
 
 struct TrackRowData {
     status: string,
@@ -963,6 +963,10 @@ export component AppWindow inherits Window {
                 root.show_import_menu = false;
                 return accept;
             }
+            if (event.text == Key.Escape && root.show_settings_menu) {
+                root.show_settings_menu = false;
+                return accept;
+            }
             if (event.text == Key.Escape && root.layout_edit_mode) {
                 root.show_layout_editor_dialog = false;
                 root.show_layout_leaf_context_menu = false;
@@ -1036,6 +1040,9 @@ export component AppWindow inherits Window {
     in-out property <bool> show_import_menu: false;
     property <length> import_menu_x: 0px;
     property <length> import_menu_y: 0px;
+    in-out property <bool> show_settings_menu: false;
+    property <length> settings_menu_x: 0px;
+    property <length> settings_menu_y: 0px;
     in-out property <bool> show_control_cluster_menu: false;
     in-out property <string> control_cluster_menu_target_leaf_id: "";
     in-out property <[int]> control_cluster_menu_actions: [];
@@ -1252,10 +1259,10 @@ export component AppWindow inherits Window {
                 width: root.layout-region-width(i);
                 height: root.layout-region-height(i);
                 visible: root.layout-region-is-visible(i) && root.layout-region-panel-kind(i) == 10;
-                background: #252525;
+                background: root.layout_edit_mode ? #252525 : #202020;
                 border-width: root.layout_edit_mode ? 1px : 0px;
                 border-color: #3a3a3a;
-                Text {
+                if root.layout_edit_mode : Text {
                     text: "Spacer";
                     color: #666;
                     horizontal-alignment: center;
@@ -1283,6 +1290,7 @@ export component AppWindow inherits Window {
                         layout-edit-mode: root.layout_edit_mode;
                         action-invoked(action-id) => {
                             if (action-id == 1) {
+                                root.show_settings_menu = false;
                                 root.show_import_menu = true;
                                 root.import_menu_x = min(root.width - 168px, max(8px, cluster-panel.x_px * 1px + 8px));
                                 root.import_menu_y = min(
@@ -1302,7 +1310,15 @@ export component AppWindow inherits Window {
                             }
                             if (action-id == 8) { root.toggle_repeat(); }
                             if (action-id == 9) { root.open_layout_editor(); }
-                            if (action-id == 10) { root.open_settings(); }
+                            if (action-id == 10) {
+                                root.show_import_menu = false;
+                                root.show_settings_menu = true;
+                                root.settings_menu_x = min(root.width - 220px, max(8px, cluster-panel.x_px * 1px + 8px));
+                                root.settings_menu_y = min(
+                                    root.height - 120px,
+                                    max(8px, cluster-panel.y_px * 1px + cluster-panel.height_px * 1px + 4px)
+                                );
+                            }
                         }
                         request-add-menu(cluster-leaf-id) => {
                             root.open_control_cluster_menu_for_leaf(
@@ -2476,8 +2492,90 @@ export component AppWindow inherits Window {
         }
     }
 
-    if root.show_import_menu : Rectangle {
+    if root.show_settings_menu : Rectangle {
         z: 147;
+        background: transparent;
+        TouchArea {
+            clicked => {
+                root.show_settings_menu = false;
+            }
+        }
+    }
+
+    if root.show_settings_menu : Rectangle {
+        z: 148;
+        x: root.settings_menu_x;
+        y: root.settings_menu_y;
+        width: 210px;
+        height: 70px;
+        border-radius: 6px;
+        background: #262626;
+        border-width: 1px;
+        border-color: #3d3d3d;
+
+        VerticalLayout {
+            padding: 4px;
+            spacing: 2px;
+
+            Rectangle {
+                height: 28px;
+                border-radius: 4px;
+                background: layout-edit-toggle-ta.has-hover ? #363636 : transparent;
+                HorizontalLayout {
+                    padding-left: 10px;
+                    padding-right: 10px;
+                    spacing: 6px;
+                    Text {
+                        text: "Layout Editing Mode";
+                        color: #ddd;
+                        font-size: 12px;
+                        vertical-alignment: center;
+                        horizontal-stretch: 1;
+                        overflow: elide;
+                    }
+                    quick-layout-toggle := Switch {
+                        width: 18px;
+                        text: "";
+                        checked: root.layout_edit_mode;
+                        toggled => {
+                            root.show_settings_menu = false;
+                            root.open_layout_editor();
+                        }
+                    }
+                }
+                layout-edit-toggle-ta := TouchArea {
+                    clicked => {
+                        quick-layout-toggle.checked = !quick-layout-toggle.checked;
+                        root.show_settings_menu = false;
+                        root.open_layout_editor();
+                    }
+                }
+            }
+
+            Rectangle {
+                height: 28px;
+                border-radius: 4px;
+                background: open-settings-ta.has-hover ? #363636 : transparent;
+                Text {
+                    x: 10px;
+                    width: parent.width - 20px;
+                    text: "Settings";
+                    color: #ddd;
+                    font-size: 12px;
+                    vertical-alignment: center;
+                }
+                open-settings-ta := TouchArea {
+                    clicked => {
+                        root.show_settings_menu = false;
+                        root.open_settings();
+                    }
+                }
+            }
+        }
+    }
+
+    if root.show_import_menu : Rectangle {
+        z: 149;
         background: transparent;
         TouchArea {
             clicked => {
@@ -2487,7 +2585,7 @@ export component AppWindow inherits Window {
     }
 
     if root.show_import_menu : Rectangle {
-        z: 148;
+        z: 150;
         x: root.import_menu_x;
         y: root.import_menu_y;
         width: 160px;
@@ -2858,6 +2956,44 @@ export component AppWindow inherits Window {
                         custom_placeholder: "Enter bit depth";
                     }
 
+                    Rectangle {
+                        height: 34px;
+                        background: settings-layout-intro-toggle-ta.has-hover ? #2d2d2d : transparent;
+                        border-radius: 4px;
+                        HorizontalLayout {
+                            spacing: 12px;
+                            padding-left: 0px;
+                            padding-right: 0px;
+
+                            Text {
+                                text: "Show layout editing mode tutorial";
+                                color: #ddd;
+                                font-size: 12px;
+                                width: 220px;
+                                vertical-alignment: center;
+                                horizontal-alignment: left;
+                            }
+
+                            Rectangle {
+                                horizontal-stretch: 1;
+                                height: parent.height;
+                                background: transparent;
+                                settings-layout-intro-toggle := Switch {
+                                    x: parent.width - self.width - 8px;
+                                    y: (parent.height - self.height) / 2;
+                                    width: 18px;
+                                    text: "";
+                                    checked <=> root.settings_show_layout_edit_tutorial;
+                                }
+                            }
+                        }
+                        settings-layout-intro-toggle-ta := TouchArea {
+                            clicked => {
+                                settings-layout-intro-toggle.checked = !settings-layout-intro-toggle.checked;
+                            }
+                        }
+                    }
+
                 }
 
                 Rectangle { height: 1px; background: #343434; }
@@ -2883,7 +3019,8 @@ export component AppWindow inherits Window {
                                 root.settings_output_device_custom_value,
                                 root.settings_channel_custom_value,
                                 root.settings_sample_rate_custom_value,
-                                root.settings_bits_per_sample_custom_value
+                                root.settings_bits_per_sample_custom_value,
+                                root.settings_show_layout_edit_tutorial
                             );
                             root.show_settings_dialog = false;
                         }
@@ -2946,6 +3083,7 @@ export component AppWindow inherits Window {
     in-out property <string> settings_channel_custom_value: "";
     in-out property <string> settings_sample_rate_custom_value: "";
     in-out property <string> settings_bits_per_sample_custom_value: "";
+    in-out property <bool> settings_show_layout_edit_tutorial: true;
     
     // Computed time display strings (derived from integer ms values)
     // These are computed in Slint to avoid Rust string allocations
@@ -3023,5 +3161,5 @@ export component AppWindow inherits Window {
     callback layout_undo_last_action();
     callback reset_layout_default();
     callback open_settings();
-    callback apply_settings(int, int, int, int, string, string, string, string);
+    callback apply_settings(int, int, int, int, string, string, string, string, bool);
 }

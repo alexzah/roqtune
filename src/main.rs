@@ -88,7 +88,7 @@ impl OutputRuntimeSignature {
 
 const IMPORT_CLUSTER_PRESET: [i32; 1] = [1];
 const TRANSPORT_CLUSTER_PRESET: [i32; 5] = [2, 3, 4, 5, 6];
-const UTILITY_CLUSTER_PRESET: [i32; 4] = [7, 8, 9, 10];
+const UTILITY_CLUSTER_PRESET: [i32; 3] = [7, 8, 10];
 const SUPPORTED_AUDIO_EXTENSIONS: [&str; 7] = ["mp3", "wav", "ogg", "flac", "aac", "m4a", "mp4"];
 
 fn is_supported_audio_file(path: &Path) -> bool {
@@ -1292,6 +1292,7 @@ fn apply_config_to_ui(
     ui.set_settings_channel_index(channel_index as i32);
     ui.set_settings_sample_rate_index(sample_rate_index as i32);
     ui.set_settings_bits_per_sample_index(bits_index as i32);
+    ui.set_settings_show_layout_edit_tutorial(config.ui.show_layout_edit_intro);
     ui.set_settings_output_device_custom_value(config.output.output_device_name.to_string().into());
     ui.set_settings_channel_custom_value(config.output.channel_count.to_string().into());
     ui.set_settings_sample_rate_custom_value(config.output.sample_rate_khz.to_string().into());
@@ -2417,7 +2418,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
               output_device_custom_value,
               channel_custom_value,
               sample_rate_custom_value,
-              bits_custom_value| {
+              bits_custom_value,
+              show_layout_edit_tutorial| {
             let previous_config = {
                 let state = config_state_clone
                     .lock()
@@ -2506,7 +2508,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 },
                 ui: UiConfig {
                     show_album_art: true,
-                    show_layout_edit_intro: previous_config.ui.show_layout_edit_intro,
+                    show_layout_edit_intro: show_layout_edit_tutorial,
                     layout: previous_config.ui.layout.clone(),
                     button_cluster_instances: previous_config.ui.button_cluster_instances.clone(),
                     playlist_columns: previous_config.ui.playlist_columns.clone(),
@@ -3227,7 +3229,8 @@ mod tests {
 
     use super::{
         apply_column_order_keys, choose_preferred_u16, choose_preferred_u32,
-        clamp_width_for_visible_column, collect_audio_files_from_folder, is_supported_audio_file,
+        clamp_width_for_visible_column, collect_audio_files_from_folder,
+        default_button_cluster_actions_by_index, is_supported_audio_file,
         playlist_column_key_at_visible_index, playlist_column_width_bounds,
         reorder_visible_playlist_columns, resolve_playlist_header_column_from_x,
         resolve_playlist_header_divider_from_x, resolve_playlist_header_gap_from_x,
@@ -3263,6 +3266,71 @@ mod tests {
         assert!(
             slint_ui.contains("callback open_folder();"),
             "App window should expose folder-import callback"
+        );
+    }
+
+    #[test]
+    fn test_settings_menu_exposes_layout_edit_toggle_and_settings_entry() {
+        let slint_ui = include_str!("music_player.slint");
+        assert!(
+            slint_ui.contains("in-out property <bool> show_settings_menu: false;"),
+            "App window should expose settings action menu state"
+        );
+        assert!(
+            slint_ui.contains("if (action-id == 10) {") && slint_ui.contains("root.show_settings_menu = true;"),
+            "Settings action should open the settings action menu instead of the full settings dialog directly"
+        );
+        assert!(
+            slint_ui.contains("text: \"Layout Editing Mode\"")
+                && slint_ui.contains("root.open_layout_editor();"),
+            "Settings action menu should expose layout editing mode toggle"
+        );
+        assert!(
+            slint_ui.contains("quick-layout-toggle := Switch {")
+                && slint_ui.contains("checked: root.layout_edit_mode;")
+                && slint_ui.contains("width: 18px;"),
+            "Settings action menu layout mode control should use compact switch control"
+        );
+        assert!(
+            slint_ui.contains("text: \"Settings\"") && slint_ui.contains("root.open_settings();"),
+            "Settings action menu should still expose normal settings dialog entry"
+        );
+    }
+
+    #[test]
+    fn test_settings_dialog_exposes_layout_tutorial_visibility_toggle() {
+        let slint_ui = include_str!("music_player.slint");
+        assert!(
+            slint_ui.contains("in-out property <bool> settings_show_layout_edit_tutorial: true;"),
+            "Settings dialog should expose tutorial visibility state"
+        );
+        assert!(
+            slint_ui.contains("text: \"Show layout editing mode tutorial\""),
+            "Settings dialog should provide tutorial visibility toggle row"
+        );
+        assert!(
+            slint_ui.contains("width: 220px;")
+                && slint_ui.contains("settings-layout-intro-toggle := Switch {")
+                && slint_ui.contains("x: parent.width - self.width - 8px;")
+                && slint_ui.contains("checked <=> root.settings_show_layout_edit_tutorial;"),
+            "Settings dialog tutorial row should keep left-aligned label and right-aligned compact switch"
+        );
+        assert!(
+            slint_ui.contains("root.settings_show_layout_edit_tutorial"),
+            "Settings apply flow should submit tutorial visibility flag"
+        );
+        assert!(
+            slint_ui.contains("callback apply_settings(int, int, int, int, string, string, string, string, bool);"),
+            "Apply settings callback should include tutorial visibility flag"
+        );
+    }
+
+    #[test]
+    fn test_default_utility_button_cluster_preset_excludes_layout_editor_action() {
+        assert_eq!(
+            default_button_cluster_actions_by_index(2),
+            vec![7, 8, 10],
+            "Utility preset should not include layout editor by default"
         );
     }
 
@@ -3517,6 +3585,12 @@ mod tests {
             slint_ui.contains("root.show_layout_editor_dialog = false;")
                 && slint_ui.contains("text: \"Start Editing\""),
             "Layout intro dialog should expose proceed action"
+        );
+        assert!(
+            slint_ui.contains("background: root.layout_edit_mode ? #252525 : #202020;")
+                && slint_ui.contains("if root.layout_edit_mode : Text {")
+                && slint_ui.contains("text: \"Spacer\""),
+            "Spacer panels should stay visually invisible outside layout edit mode"
         );
     }
 
