@@ -525,6 +525,7 @@ export component AppWindow inherits Window {
     in-out property <string> custom_column_name: "";
     in-out property <string> custom_column_format: "";
     in-out property <[int]> playlist_column_widths_px: [];
+    in-out property <[int]> playlist_column_gap_positions_px: [];
     in-out property <int> playlist_columns_content_width_px: 0;
     in-out property <int> playlist_columns_available_width_px: 0;
 
@@ -1117,36 +1118,40 @@ export component AppWindow inherits Window {
                                 : self.max-drag-width;
                             height: parent.height;
                             property <int> visible_column_count: root.playlist_visible_column_headers.length;
-                            property <length> cell_width: visible_column_count > 0 ? self.width / visible_column_count : 0px;
-                            property <float> slot_position: self.cell_width > 0px ? self.mouse-x / self.cell_width : 0;
-                            property <int> base_column: floor(self.slot_position);
-                            property <float> slot_fraction: self.slot_position - floor(self.slot_position);
-                            property <int> hovered_column: visible_column_count > 0 && self.cell_width > 0px
-                                && self.mouse-x >= 0px && self.mouse-x < self.width
-                                ? max(0, min(visible_column_count - 1, self.base_column))
-                                : -1;
-                            property <int> hovered_gap: visible_column_count > 0 && self.cell_width > 0px
-                                && self.mouse-x >= 0px && self.mouse-x < self.width
-                                ? max(0, min(visible_column_count, self.base_column + (self.slot_fraction >= 0.5 ? 1 : 0)))
-                                : -1;
                             pointer-event(event) => {
                                 if (event.button == PointerEventButton.right && event.kind == PointerEventKind.down) {
                                     root.column-menu-x = self.x + self.mouse-x;
                                     root.column-menu-y = self.y + self.mouse-y;
                                     column-header-menu.show();
                                 } else if (event.kind == PointerEventKind.down && event.button == PointerEventButton.left) {
-                                    if (self.hovered_column != -1) {
-                                        root.column_drag_from = self.hovered_column;
-                                        root.column_drop_gap = self.hovered_gap;
+                                    let hovered_column = visible_column_count > 0
+                                        && self.mouse-x >= 0px && self.mouse-x < self.width
+                                        ? root.playlist_header_column_at(floor(self.mouse-x / 1px))
+                                        : -1;
+                                    let hovered_gap = visible_column_count > 0
+                                        && self.mouse-x >= 0px && self.mouse-x < self.width
+                                        ? root.playlist_header_gap_at(floor(self.mouse-x / 1px))
+                                        : -1;
+                                    if (hovered_column != -1) {
+                                        root.column_drag_from = hovered_column;
+                                        root.column_drop_gap = hovered_gap;
                                     }
                                 } else if (event.kind == PointerEventKind.move) {
-                                    if (root.column_drag_from != -1 && self.hovered_gap != -1) {
-                                        root.column_drop_gap = self.hovered_gap;
+                                    let hovered_gap = visible_column_count > 0
+                                        && self.mouse-x >= 0px && self.mouse-x < self.width
+                                        ? root.playlist_header_gap_at(floor(self.mouse-x / 1px))
+                                        : -1;
+                                    if (root.column_drag_from != -1 && hovered_gap != -1) {
+                                        root.column_drop_gap = hovered_gap;
                                     }
                                 } else if (event.kind == PointerEventKind.up) {
                                     if (root.column_drag_from != -1) {
-                                        let final_gap = self.hovered_gap != -1
-                                            ? self.hovered_gap
+                                        let hovered_gap = visible_column_count > 0
+                                            && self.mouse-x >= 0px && self.mouse-x < self.width
+                                            ? root.playlist_header_gap_at(floor(self.mouse-x / 1px))
+                                            : -1;
+                                        let final_gap = hovered_gap != -1
+                                            ? hovered_gap
                                             : root.column_drop_gap;
                                         let final_drop_index = final_gap <= root.column_drag_from
                                             ? final_gap
@@ -1167,9 +1172,9 @@ export component AppWindow inherits Window {
                         if root.column_drag_from != -1
                                 && root.column_drop_gap != -1
                                 && column-header-drag-ta.visible_column_count > 0
-                                && column-header-drag-ta.cell_width > 0px : Rectangle {
+                                && root.column_drop_gap < root.playlist_column_gap_positions_px.length : Rectangle {
                             x: column-header-drag-ta.x
-                                + column-header-drag-ta.cell_width * root.column_drop_gap - 1px;
+                                + root.playlist_column_gap_positions_px[root.column_drop_gap] * 1px - 1px;
                             y: 3px;
                             width: 2px;
                             height: parent.height - 6px;
@@ -1717,6 +1722,8 @@ export component AppWindow inherits Window {
     callback add_custom_playlist_column(string, string);
     callback delete_custom_playlist_column(int);
     callback reorder_playlist_columns(int, int);
+    callback playlist_header_column_at(int) -> int;
+    callback playlist_header_gap_at(int) -> int;
     callback playlist_columns_viewport_resized(int);
     callback open_settings();
     callback apply_settings(int, int, int, int, bool, string, string, string, string);

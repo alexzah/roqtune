@@ -513,6 +513,66 @@ fn apply_column_order_keys(
     reordered
 }
 
+fn playlist_column_widths_from_model(widths_model: ModelRc<i32>) -> Vec<i32> {
+    (0..widths_model.row_count())
+        .filter_map(|index| widths_model.row_data(index))
+        .collect()
+}
+
+fn resolve_playlist_header_column_from_x(mouse_x_px: i32, widths_px: &[i32]) -> i32 {
+    if mouse_x_px < 0 {
+        return -1;
+    }
+    let mut start_px: i32 = 0;
+    for (index, width_px) in widths_px.iter().enumerate() {
+        let column_width = (*width_px).max(0);
+        let end_px = start_px.saturating_add(column_width);
+        if mouse_x_px >= start_px && mouse_x_px < end_px {
+            return index as i32;
+        }
+        let next_start = end_px.saturating_add(10);
+        if mouse_x_px < next_start {
+            return -1;
+        }
+        start_px = next_start;
+    }
+    -1
+}
+
+fn resolve_playlist_header_gap_from_x(mouse_x_px: i32, widths_px: &[i32]) -> i32 {
+    if widths_px.is_empty() {
+        return -1;
+    }
+    if mouse_x_px < 0 {
+        return 0;
+    }
+
+    let mut start_px: i32 = 0;
+    for (index, width_px) in widths_px.iter().enumerate() {
+        let column_width = (*width_px).max(0);
+        let end_px = start_px.saturating_add(column_width);
+        let midpoint_px = start_px.saturating_add(column_width / 2);
+
+        if mouse_x_px < start_px {
+            return index as i32;
+        }
+        if mouse_x_px < end_px {
+            return if mouse_x_px < midpoint_px {
+                index as i32
+            } else {
+                index as i32 + 1
+            };
+        }
+
+        let next_start = end_px.saturating_add(10);
+        if mouse_x_px < next_start {
+            return index as i32 + 1;
+        }
+        start_px = next_start;
+    }
+    widths_px.len() as i32
+}
+
 fn apply_playlist_columns_to_ui(ui: &AppWindow, config: &Config) {
     let visible_headers: Vec<slint::SharedString> = config
         .ui
@@ -880,6 +940,32 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let _ = bus_sender_clone.send(Message::Playlist(
             PlaylistMessage::PlaylistViewportWidthChanged(clamped_width),
         ));
+    });
+
+    let ui_handle_clone = ui.as_weak().clone();
+    ui.on_playlist_header_column_at(move |mouse_x_px| {
+        ui_handle_clone
+            .upgrade()
+            .map(|ui| {
+                resolve_playlist_header_column_from_x(
+                    mouse_x_px,
+                    &playlist_column_widths_from_model(ui.get_playlist_column_widths_px()),
+                )
+            })
+            .unwrap_or(-1)
+    });
+
+    let ui_handle_clone = ui.as_weak().clone();
+    ui.on_playlist_header_gap_at(move |mouse_x_px| {
+        ui_handle_clone
+            .upgrade()
+            .map(|ui| {
+                resolve_playlist_header_gap_from_x(
+                    mouse_x_px,
+                    &playlist_column_widths_from_model(ui.get_playlist_column_widths_px()),
+                )
+            })
+            .unwrap_or(-1)
     });
 
     // Wire up sequence selector
@@ -1684,7 +1770,8 @@ mod tests {
 
     use super::{
         apply_column_order_keys, choose_preferred_u16, choose_preferred_u32,
-        reorder_visible_playlist_columns, resolve_runtime_config, sanitize_playlist_columns,
+        reorder_visible_playlist_columns, resolve_playlist_header_column_from_x,
+        resolve_playlist_header_gap_from_x, resolve_runtime_config, sanitize_playlist_columns,
         select_output_option_index_u16, select_output_option_index_u32,
         should_apply_custom_column_delete, OutputSettingsOptions,
     };
@@ -1781,6 +1868,36 @@ mod tests {
             slint_ui.contains("callback playlist_columns_viewport_resized(int);"),
             "App window should expose viewport resize callback for adaptive playlist columns"
         );
+        assert!(
+            slint_ui.contains("callback playlist_header_column_at(int) -> int;"),
+            "App window should expose column hit test callback"
+        );
+        assert!(
+            slint_ui.contains("callback playlist_header_gap_at(int) -> int;"),
+            "App window should expose gap hit test callback"
+        );
+    }
+
+    #[test]
+    fn test_resolve_playlist_header_column_from_x_uses_variable_widths() {
+        let widths = vec![70, 200, 180];
+        assert_eq!(resolve_playlist_header_column_from_x(10, &widths), 0);
+        assert_eq!(resolve_playlist_header_column_from_x(75, &widths), -1);
+        assert_eq!(resolve_playlist_header_column_from_x(120, &widths), 1);
+        assert_eq!(resolve_playlist_header_column_from_x(285, &widths), -1);
+        assert_eq!(resolve_playlist_header_column_from_x(330, &widths), 2);
+    }
+
+    #[test]
+    fn test_resolve_playlist_header_gap_from_x_tracks_real_column_edges() {
+        let widths = vec![70, 200, 180];
+        assert_eq!(resolve_playlist_header_gap_from_x(0, &widths), 0);
+        assert_eq!(resolve_playlist_header_gap_from_x(69, &widths), 1);
+        assert_eq!(resolve_playlist_header_gap_from_x(75, &widths), 1);
+        assert_eq!(resolve_playlist_header_gap_from_x(90, &widths), 1);
+        assert_eq!(resolve_playlist_header_gap_from_x(279, &widths), 2);
+        assert_eq!(resolve_playlist_header_gap_from_x(285, &widths), 2);
+        assert_eq!(resolve_playlist_header_gap_from_x(460, &widths), 3);
     }
 
     #[test]

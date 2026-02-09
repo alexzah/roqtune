@@ -668,9 +668,22 @@ impl UiManager {
             .into_iter()
             .map(|width| width.min(i32::MAX as u32) as i32)
             .collect();
+        let mut gap_positions: Vec<i32> = Vec::with_capacity(widths_i32.len() + 1);
+        let mut cursor_px: i32 = 0;
+        gap_positions.push(0);
+        for (index, width_px) in widths_i32.iter().enumerate() {
+            cursor_px = cursor_px.saturating_add((*width_px).max(0));
+            if index + 1 < widths_i32.len() {
+                cursor_px = cursor_px.saturating_add(10);
+            }
+            gap_positions.push(cursor_px);
+        }
         let content_width_i32 = content_width.min(i32::MAX as u32) as i32;
         let _ = self.ui.upgrade_in_event_loop(move |ui| {
             ui.set_playlist_column_widths_px(ModelRc::from(Rc::new(VecModel::from(widths_i32))));
+            ui.set_playlist_column_gap_positions_px(ModelRc::from(Rc::new(VecModel::from(
+                gap_positions,
+            ))));
             ui.set_playlist_columns_content_width_px(content_width_i32);
         });
     }
