@@ -8,7 +8,7 @@ mod protocol;
 mod ui_manager;
 
 use std::{
-    collections::{BTreeSet, HashMap},
+    collections::{BTreeSet, HashMap, HashSet},
     rc::Rc,
     sync::{Arc, Mutex},
     thread,
@@ -377,8 +377,17 @@ fn normalize_column_format(format: &str) -> String {
 
 fn sanitize_playlist_columns(columns: &[PlaylistColumnConfig]) -> Vec<PlaylistColumnConfig> {
     let default_columns = config::default_playlist_columns();
-    let mut builtin_overrides: HashMap<String, PlaylistColumnConfig> = HashMap::new();
-    let mut custom_columns: Vec<PlaylistColumnConfig> = Vec::new();
+    let mut seen_builtin_keys: HashSet<String> = HashSet::new();
+    let mut seen_custom_keys: HashSet<String> = HashSet::new();
+    let mut merged_columns: Vec<PlaylistColumnConfig> = Vec::new();
+
+    let mut default_name_by_key: HashMap<String, String> = HashMap::new();
+    for default_column in &default_columns {
+        default_name_by_key.insert(
+            normalize_column_format(&default_column.format),
+            default_column.name.clone(),
+        );
+    }
 
     for column in columns {
         let trimmed_name = column.name.trim();
@@ -387,34 +396,39 @@ fn sanitize_playlist_columns(columns: &[PlaylistColumnConfig]) -> Vec<PlaylistCo
             continue;
         }
 
-        let mut sanitized = PlaylistColumnConfig {
-            name: trimmed_name.to_string(),
-            format: trimmed_format.to_string(),
-            enabled: column.enabled,
-            custom: column.custom,
-        };
-
-        if sanitized.custom {
-            custom_columns.push(sanitized);
+        if column.custom {
+            let custom_key = format!("{}|{}", trimmed_name, trimmed_format);
+            if seen_custom_keys.insert(custom_key) {
+                merged_columns.push(PlaylistColumnConfig {
+                    name: trimmed_name.to_string(),
+                    format: trimmed_format.to_string(),
+                    enabled: column.enabled,
+                    custom: true,
+                });
+            }
         } else {
-            sanitized.custom = false;
-            builtin_overrides.insert(normalize_column_format(&sanitized.format), sanitized);
+            let builtin_key = normalize_column_format(trimmed_format);
+            if default_name_by_key.contains_key(&builtin_key)
+                && seen_builtin_keys.insert(builtin_key.clone())
+            {
+                let builtin_name = default_name_by_key
+                    .get(&builtin_key)
+                    .cloned()
+                    .unwrap_or_else(|| trimmed_name.to_string());
+                merged_columns.push(PlaylistColumnConfig {
+                    name: builtin_name,
+                    format: trimmed_format.to_string(),
+                    enabled: column.enabled,
+                    custom: false,
+                });
+            }
         }
     }
 
-    let mut merged_columns: Vec<PlaylistColumnConfig> = default_columns
-        .into_iter()
-        .map(|default_column| {
-            let key = normalize_column_format(&default_column.format);
-            builtin_overrides.remove(&key).unwrap_or(default_column)
-        })
-        .collect();
-
-    for custom in custom_columns {
-        if !merged_columns.iter().any(|existing| {
-            existing.custom && existing.name == custom.name && existing.format == custom.format
-        }) {
-            merged_columns.push(custom);
+    for default_column in default_columns {
+        let key = normalize_column_format(&default_column.format);
+        if !seen_builtin_keys.contains(&key) {
+            merged_columns.push(default_column);
         }
     }
 
@@ -425,6 +439,78 @@ fn sanitize_playlist_columns(columns: &[PlaylistColumnConfig]) -> Vec<PlaylistCo
     }
 
     merged_columns
+}
+
+fn playlist_column_key(column: &PlaylistColumnConfig) -> String {
+    if column.custom {
+        format!("custom:{}|{}", column.name.trim(), column.format.trim())
+    } else {
+        normalize_column_format(&column.format)
+    }
+}
+
+fn playlist_column_order_keys(columns: &[PlaylistColumnConfig]) -> Vec<String> {
+    columns.iter().map(playlist_column_key).collect()
+}
+
+fn reorder_visible_playlist_columns(
+    columns: &[PlaylistColumnConfig],
+    from_visible_index: usize,
+    to_visible_index: usize,
+) -> Vec<PlaylistColumnConfig> {
+    let visible_count = columns.iter().filter(|column| column.enabled).count();
+    if visible_count < 2
+        || from_visible_index >= visible_count
+        || to_visible_index >= visible_count
+        || from_visible_index == to_visible_index
+    {
+        return columns.to_vec();
+    }
+
+    let mut visible_columns: Vec<PlaylistColumnConfig> = columns
+        .iter()
+        .filter(|column| column.enabled)
+        .cloned()
+        .collect();
+    let moved_column = visible_columns.remove(from_visible_index);
+    visible_columns.insert(to_visible_index, moved_column);
+
+    let mut visible_iter = visible_columns.into_iter();
+    let mut reordered = Vec::with_capacity(columns.len());
+    for column in columns {
+        if column.enabled {
+            if let Some(next_visible) = visible_iter.next() {
+                reordered.push(next_visible);
+            }
+        } else {
+            reordered.push(column.clone());
+        }
+    }
+    reordered
+}
+
+fn apply_column_order_keys(
+    columns: &[PlaylistColumnConfig],
+    column_order_keys: &[String],
+) -> Vec<PlaylistColumnConfig> {
+    if column_order_keys.is_empty() {
+        return columns.to_vec();
+    }
+
+    let mut remaining: Vec<PlaylistColumnConfig> = columns.to_vec();
+    let mut reordered: Vec<PlaylistColumnConfig> = Vec::with_capacity(columns.len());
+
+    for key in column_order_keys {
+        if let Some(index) = remaining
+            .iter()
+            .position(|column| playlist_column_key(column) == *key)
+        {
+            reordered.push(remaining.remove(index));
+        }
+    }
+
+    reordered.extend(remaining);
+    reordered
 }
 
 fn apply_playlist_columns_to_ui(ui: &AppWindow, config: &Config) {
@@ -1087,6 +1173,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let _ = bus_sender_clone.send(Message::Config(ConfigMessage::ConfigChanged(
             runtime_config,
         )));
+        let _ = bus_sender_clone.send(Message::Playlist(
+            PlaylistMessage::SetActivePlaylistColumnOrder(playlist_column_order_keys(
+                &next_config.ui.playlist_columns,
+            )),
+        ));
     });
 
     let bus_sender_clone = bus_sender.clone();
@@ -1174,6 +1265,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let _ = bus_sender_clone.send(Message::Config(ConfigMessage::ConfigChanged(
             runtime_config,
         )));
+        let _ = bus_sender_clone.send(Message::Playlist(
+            PlaylistMessage::SetActivePlaylistColumnOrder(playlist_column_order_keys(
+                &next_config.ui.playlist_columns,
+            )),
+        ));
     });
 
     let bus_sender_clone = bus_sender.clone();
@@ -1263,6 +1359,99 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let _ = bus_sender_clone.send(Message::Config(ConfigMessage::ConfigChanged(
             runtime_config,
         )));
+        let _ = bus_sender_clone.send(Message::Playlist(
+            PlaylistMessage::SetActivePlaylistColumnOrder(playlist_column_order_keys(
+                &next_config.ui.playlist_columns,
+            )),
+        ));
+    });
+
+    let bus_sender_clone = bus_sender.clone();
+    let config_state_clone = Arc::clone(&config_state);
+    let output_options_clone = Arc::clone(&output_options);
+    let last_runtime_signature_clone = Arc::clone(&last_runtime_signature);
+    let config_file_clone = config_file.clone();
+    let ui_handle_clone = ui.as_weak().clone();
+    ui.on_reorder_playlist_columns(move |from_visible_index, to_visible_index| {
+        let from_visible_index = from_visible_index.max(0) as usize;
+        let to_visible_index = to_visible_index.max(0) as usize;
+        debug!(
+            "Reorder playlist columns requested: from_visible_index={} to_visible_index={}",
+            from_visible_index, to_visible_index
+        );
+        let previous_config = {
+            let state = config_state_clone
+                .lock()
+                .expect("config state lock poisoned");
+            state.clone()
+        };
+
+        let updated_columns = reorder_visible_playlist_columns(
+            &previous_config.ui.playlist_columns,
+            from_visible_index,
+            to_visible_index,
+        );
+        if updated_columns == previous_config.ui.playlist_columns {
+            debug!("Reorder playlist columns: no effective change");
+            return;
+        }
+
+        let next_config = sanitize_config(Config {
+            output: previous_config.output.clone(),
+            ui: UiConfig {
+                show_album_art: previous_config.ui.show_album_art,
+                playlist_columns: updated_columns,
+            },
+            buffering: previous_config.buffering.clone(),
+        });
+
+        if let Some(ui) = ui_handle_clone.upgrade() {
+            apply_playlist_columns_to_ui(&ui, &next_config);
+        }
+
+        {
+            let mut state = config_state_clone
+                .lock()
+                .expect("config state lock poisoned");
+            *state = next_config.clone();
+        }
+
+        match toml::to_string(&next_config) {
+            Ok(config_text) => {
+                if let Err(err) = std::fs::write(&config_file_clone, config_text) {
+                    log::error!(
+                        "Failed to persist config to {}: {}",
+                        config_file_clone.display(),
+                        err
+                    );
+                }
+            }
+            Err(err) => {
+                log::error!("Failed to serialize config: {}", err);
+            }
+        }
+
+        let options_snapshot = {
+            let options = output_options_clone
+                .lock()
+                .expect("output options lock poisoned");
+            options.clone()
+        };
+        let runtime_config = resolve_runtime_config(&next_config, &options_snapshot);
+        {
+            let mut last_runtime = last_runtime_signature_clone
+                .lock()
+                .expect("runtime signature lock poisoned");
+            *last_runtime = OutputRuntimeSignature::from_output(&runtime_config.output);
+        }
+        let _ = bus_sender_clone.send(Message::Config(ConfigMessage::ConfigChanged(
+            runtime_config,
+        )));
+        let _ = bus_sender_clone.send(Message::Playlist(
+            PlaylistMessage::SetActivePlaylistColumnOrder(playlist_column_order_keys(
+                &next_config.ui.playlist_columns,
+            )),
+        ));
     });
 
     // Wire up playlist management
@@ -1402,11 +1591,71 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     }
                 });
             }
+            Ok(Message::Playlist(PlaylistMessage::ActivePlaylistColumnOrder(
+                column_order_keys,
+            ))) => {
+                let Some(column_order_keys) = column_order_keys else {
+                    continue;
+                };
+
+                let next_config = {
+                    let mut state = config_state_clone
+                        .lock()
+                        .expect("config state lock poisoned");
+                    let reordered_columns =
+                        apply_column_order_keys(&state.ui.playlist_columns, &column_order_keys);
+                    if reordered_columns == state.ui.playlist_columns {
+                        continue;
+                    }
+                    let updated = sanitize_config(Config {
+                        output: state.output.clone(),
+                        ui: UiConfig {
+                            show_album_art: state.ui.show_album_art,
+                            playlist_columns: reordered_columns,
+                        },
+                        buffering: state.buffering.clone(),
+                    });
+                    *state = updated.clone();
+                    updated
+                };
+
+                let options_snapshot = {
+                    let options = output_options_clone
+                        .lock()
+                        .expect("output options lock poisoned");
+                    options.clone()
+                };
+
+                let runtime = resolve_runtime_config(&next_config, &options_snapshot);
+                let runtime_signature = OutputRuntimeSignature::from_output(&runtime.output);
+                {
+                    let mut last_signature = last_runtime_signature_clone
+                        .lock()
+                        .expect("runtime signature lock poisoned");
+                    *last_signature = runtime_signature;
+                }
+                let _ =
+                    bus_sender_clone.send(Message::Config(ConfigMessage::ConfigChanged(runtime)));
+
+                let ui_weak = ui_handle_clone.clone();
+                let config_for_ui = next_config;
+                let options_for_ui = options_snapshot;
+                let _ = slint::invoke_from_event_loop(move || {
+                    if let Some(ui) = ui_weak.upgrade() {
+                        apply_config_to_ui(&ui, &config_for_ui, &options_for_ui);
+                    }
+                });
+            }
             Ok(_) => {}
             Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {}
             Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
         }
     });
+
+    let bus_sender_clone = bus_sender.clone();
+    let _ = bus_sender_clone.send(Message::Playlist(
+        PlaylistMessage::RequestActivePlaylistColumnOrder,
+    ));
 
     let bus_sender_clone = bus_sender.clone();
     let _ = bus_sender_clone.send(Message::Config(ConfigMessage::ConfigChanged(
@@ -1426,8 +1675,9 @@ mod tests {
     use crate::config::{BufferingConfig, Config, OutputConfig, PlaylistColumnConfig, UiConfig};
 
     use super::{
-        choose_preferred_u16, choose_preferred_u32, resolve_runtime_config,
-        sanitize_playlist_columns, select_output_option_index_u16, select_output_option_index_u32,
+        apply_column_order_keys, choose_preferred_u16, choose_preferred_u32,
+        reorder_visible_playlist_columns, resolve_runtime_config, sanitize_playlist_columns,
+        select_output_option_index_u16, select_output_option_index_u32,
         should_apply_custom_column_delete, OutputSettingsOptions,
     };
 
@@ -1506,6 +1756,89 @@ mod tests {
         assert!(!should_apply_custom_column_delete(true, -1, 0));
         assert!(!should_apply_custom_column_delete(true, 1, 0));
         assert!(should_apply_custom_column_delete(true, 2, 2));
+    }
+
+    #[test]
+    fn test_playlist_header_exposes_drag_reorder_wiring() {
+        let slint_ui = include_str!("music_player.slint");
+        assert!(
+            slint_ui.contains("column-header-drag-ta := TouchArea"),
+            "Header should include drag TouchArea for column reordering"
+        );
+        assert!(
+            slint_ui.contains("callback reorder_playlist_columns(int, int);"),
+            "App window should expose reorder callback"
+        );
+    }
+
+    #[test]
+    fn test_reorder_visible_playlist_columns_preserves_hidden_slot_layout() {
+        let columns = vec![
+            PlaylistColumnConfig {
+                name: "Title".to_string(),
+                format: "{title}".to_string(),
+                enabled: true,
+                custom: false,
+            },
+            PlaylistColumnConfig {
+                name: "Hidden".to_string(),
+                format: "{genre}".to_string(),
+                enabled: false,
+                custom: false,
+            },
+            PlaylistColumnConfig {
+                name: "Artist".to_string(),
+                format: "{artist}".to_string(),
+                enabled: true,
+                custom: false,
+            },
+            PlaylistColumnConfig {
+                name: "Album".to_string(),
+                format: "{album}".to_string(),
+                enabled: true,
+                custom: false,
+            },
+        ];
+
+        let reordered = reorder_visible_playlist_columns(&columns, 0, 2);
+        let formats: Vec<String> = reordered.into_iter().map(|column| column.format).collect();
+        assert_eq!(
+            formats,
+            vec!["{artist}", "{genre}", "{album}", "{title}"],
+            "Visible columns should reorder while hidden slot remains in place"
+        );
+    }
+
+    #[test]
+    fn test_apply_column_order_keys_prioritizes_saved_order_and_appends_unknowns() {
+        let columns = vec![
+            PlaylistColumnConfig {
+                name: "Title".to_string(),
+                format: "{title}".to_string(),
+                enabled: true,
+                custom: false,
+            },
+            PlaylistColumnConfig {
+                name: "Artist".to_string(),
+                format: "{artist}".to_string(),
+                enabled: true,
+                custom: false,
+            },
+            PlaylistColumnConfig {
+                name: "Album & Year".to_string(),
+                format: "{album} ({year})".to_string(),
+                enabled: true,
+                custom: true,
+            },
+        ];
+
+        let saved_order = vec![
+            "custom:Album & Year|{album} ({year})".to_string(),
+            "{artist}".to_string(),
+        ];
+        let reordered = apply_column_order_keys(&columns, &saved_order);
+        let names: Vec<String> = reordered.into_iter().map(|column| column.name).collect();
+        assert_eq!(names, vec!["Album & Year", "Artist", "Title"]);
     }
 
     #[test]
@@ -1604,5 +1937,51 @@ mod tests {
         assert!(sanitized.iter().any(|column| column.format == "{artist}"));
         assert!(sanitized.iter().any(|column| column == &custom));
         assert!(sanitized.iter().any(|column| column.enabled));
+    }
+
+    #[test]
+    fn test_sanitize_playlist_columns_preserves_existing_builtin_order() {
+        let input_columns = vec![
+            PlaylistColumnConfig {
+                name: "Track #".to_string(),
+                format: "{track_number}".to_string(),
+                enabled: true,
+                custom: false,
+            },
+            PlaylistColumnConfig {
+                name: "Title".to_string(),
+                format: "{title}".to_string(),
+                enabled: true,
+                custom: false,
+            },
+            PlaylistColumnConfig {
+                name: "Artist".to_string(),
+                format: "{artist}".to_string(),
+                enabled: true,
+                custom: false,
+            },
+            PlaylistColumnConfig {
+                name: "Album".to_string(),
+                format: "{album}".to_string(),
+                enabled: true,
+                custom: false,
+            },
+        ];
+
+        let sanitized = sanitize_playlist_columns(&input_columns);
+        let visible_order: Vec<String> = sanitized
+            .iter()
+            .filter(|column| column.enabled)
+            .map(|column| column.format.clone())
+            .collect();
+        assert_eq!(
+            visible_order,
+            vec![
+                "{track_number}".to_string(),
+                "{title}".to_string(),
+                "{artist}".to_string(),
+                "{album}".to_string(),
+            ]
+        );
     }
 }

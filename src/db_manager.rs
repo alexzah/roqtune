@@ -1,5 +1,5 @@
 use crate::protocol::{PlaylistInfo, RestoredTrack};
-use rusqlite::{params, Connection};
+use rusqlite::{params, Connection, OptionalExtension};
 use std::path::PathBuf;
 use uuid::Uuid;
 
@@ -39,7 +39,8 @@ impl DbManager {
         self.conn.execute(
             "CREATE TABLE IF NOT EXISTS playlists (
                 id TEXT PRIMARY KEY,
-                name TEXT NOT NULL
+                name TEXT NOT NULL,
+                column_order TEXT
             )",
             [],
         )?;
@@ -91,6 +92,20 @@ impl DbManager {
                 "UPDATE tracks SET playlist_id = ?1 WHERE playlist_id IS NULL",
                 params![default_id],
             )?;
+        }
+
+        let mut playlist_stmt = self.conn.prepare("PRAGMA table_info(playlists)")?;
+        let playlist_columns = playlist_stmt.query_map([], |row| row.get::<_, String>(1))?;
+        let mut has_column_order = false;
+        for col in playlist_columns {
+            if col? == "column_order" {
+                has_column_order = true;
+                break;
+            }
+        }
+        if !has_column_order {
+            self.conn
+                .execute("ALTER TABLE playlists ADD COLUMN column_order TEXT", [])?;
         }
 
         // Ensure at least one playlist exists
@@ -198,5 +213,73 @@ impl DbManager {
             stmt.execute(params![i as i64, id])?;
         }
         Ok(())
+    }
+
+    pub fn set_playlist_column_order(
+        &self,
+        playlist_id: &str,
+        column_order: &[String],
+    ) -> Result<(), rusqlite::Error> {
+        let serialized_order = serde_json::to_string(column_order)
+            .map_err(|err| rusqlite::Error::ToSqlConversionFailure(Box::new(err)))?;
+        self.conn.execute(
+            "UPDATE playlists SET column_order = ?1 WHERE id = ?2",
+            params![serialized_order, playlist_id],
+        )?;
+        Ok(())
+    }
+
+    pub fn get_playlist_column_order(
+        &self,
+        playlist_id: &str,
+    ) -> Result<Option<Vec<String>>, rusqlite::Error> {
+        let raw: Option<String> = self
+            .conn
+            .query_row(
+                "SELECT column_order FROM playlists WHERE id = ?1",
+                params![playlist_id],
+                |row| row.get(0),
+            )
+            .optional()?
+            .flatten();
+
+        if let Some(raw) = raw {
+            if raw.trim().is_empty() {
+                return Ok(None);
+            }
+            if let Ok(parsed) = serde_json::from_str::<Vec<String>>(&raw) {
+                return Ok(Some(parsed));
+            }
+        }
+        Ok(None)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::DbManager;
+
+    #[test]
+    fn test_set_and_get_playlist_column_order_round_trip() {
+        let db = DbManager::new_in_memory().expect("in-memory db should initialize");
+        let playlists = db
+            .get_all_playlists()
+            .expect("playlists should be queryable after init");
+        let playlist = playlists
+            .first()
+            .expect("default playlist should exist after init");
+
+        let saved_order = vec![
+            "{artist}".to_string(),
+            "{title}".to_string(),
+            "custom:Album & Year|{album} ({year})".to_string(),
+        ];
+        db.set_playlist_column_order(&playlist.id, &saved_order)
+            .expect("column order should persist");
+
+        let loaded_order = db
+            .get_playlist_column_order(&playlist.id)
+            .expect("column order query should succeed");
+        assert_eq!(loaded_order, Some(saved_order));
     }
 }

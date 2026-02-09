@@ -83,6 +83,9 @@ pub enum PlaylistMessage {
     SwitchPlaylistByIndex(usize),
     PlaylistsRestored(Vec<PlaylistInfo>),
     ActivePlaylistChanged(String),
+    ActivePlaylistColumnOrder(Option<Vec<String>>),
+    SetActivePlaylistColumnOrder(Vec<String>),
+    RequestActivePlaylistColumnOrder,
     TrackFinished,
     TrackStarted {
         index: usize,
