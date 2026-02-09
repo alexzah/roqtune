@@ -1643,52 +1643,6 @@ export component AppWindow inherits Window {
                         custom_placeholder: "Enter bit depth";
                     }
 
-                    Rectangle {
-                        height: 40px;
-                        border-radius: 3px;
-                        background: #202020;
-                        border-width: 1px;
-                        border-color: #333;
-
-                        HorizontalLayout {
-                            padding-left: 12px;
-                            padding-right: 12px;
-                            spacing: 10px;
-
-                            Text {
-                                text: "Show Album Art";
-                                color: #ddd;
-                                font-size: 12px;
-                                width: 220px;
-                                vertical-alignment: center;
-                                horizontal-alignment: left;
-                            }
-
-                            Rectangle { horizontal-stretch: 1; }
-
-                            Rectangle {
-                                width: 42px;
-                                height: 22px;
-                                border-radius: 11px;
-                                background: root.settings_show_album_art ? #2a6def : #444;
-                                animate background { duration: 120ms; }
-                                Rectangle {
-                                    width: 18px;
-                                    height: 18px;
-                                    y: 2px;
-                                    x: root.settings_show_album_art ? 22px : 2px;
-                                    border-radius: 9px;
-                                    background: #f4f4f4;
-                                    animate x { duration: 120ms; easing: ease-out; }
-                                }
-                                TouchArea {
-                                    clicked => {
-                                        root.settings_show_album_art = !root.settings_show_album_art;
-                                    }
-                                }
-                            }
-                        }
-                    }
                 }
 
                 Rectangle { height: 1px; background: #343434; }
@@ -1711,7 +1665,6 @@ export component AppWindow inherits Window {
                                 root.settings_channel_index,
                                 root.settings_sample_rate_index,
                                 root.settings_bits_per_sample_index,
-                                root.settings_show_album_art,
                                 root.settings_output_device_custom_value,
                                 root.settings_channel_custom_value,
                                 root.settings_sample_rate_custom_value,
@@ -1778,7 +1731,6 @@ export component AppWindow inherits Window {
     in-out property <string> settings_channel_custom_value: "";
     in-out property <string> settings_sample_rate_custom_value: "";
     in-out property <string> settings_bits_per_sample_custom_value: "";
-    in-out property <bool> settings_show_album_art: true;
     
     // Computed time display strings (derived from integer ms values)
     // These are computed in Slint to avoid Rust string allocations
@@ -1839,5 +1791,5 @@ export component AppWindow inherits Window {
     callback playlist_columns_viewport_resized(int);
     callback window_resized(int, int);
     callback open_settings();
-    callback apply_settings(int, int, int, int, bool, string, string, string, string);
+    callback apply_settings(int, int, int, int, string, string, string, string);
 }

@@ -362,7 +362,7 @@ fn sanitize_config(config: Config) -> Config {
             bits_per_sample_auto: config.output.bits_per_sample_auto,
         },
         ui: UiConfig {
-            show_album_art: config.ui.show_album_art,
+            show_album_art: true,
             playlist_columns: sanitized_playlist_columns,
             window_width: clamped_window_width,
             window_height: clamped_window_height,
@@ -773,7 +773,7 @@ fn should_apply_custom_column_delete(
 }
 
 fn apply_config_to_ui(ui: &AppWindow, config: &Config, output_options: &OutputSettingsOptions) {
-    ui.set_show_album_art(config.ui.show_album_art);
+    ui.set_show_album_art(true);
     ui.set_volume_level(config.ui.volume);
     ui.set_sidebar_width_px(sidebar_width_from_window(config.ui.window_width));
 
@@ -873,7 +873,6 @@ fn apply_config_to_ui(ui: &AppWindow, config: &Config, output_options: &OutputSe
     ui.set_settings_channel_custom_value(config.output.channel_count.to_string().into());
     ui.set_settings_sample_rate_custom_value(config.output.sample_rate_khz.to_string().into());
     ui.set_settings_bits_per_sample_custom_value(config.output.bits_per_sample.to_string().into());
-    ui.set_settings_show_album_art(config.ui.show_album_art);
     apply_playlist_columns_to_ui(ui, config);
 }
 
@@ -1352,7 +1351,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
               channel_index,
               sample_rate_index,
               bits_per_sample_index,
-              show_album_art,
               output_device_custom_value,
               channel_custom_value,
               sample_rate_custom_value,
@@ -1444,7 +1442,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     bits_per_sample_auto,
                 },
                 ui: UiConfig {
-                    show_album_art,
+                    show_album_art: true,
                     playlist_columns: previous_config.ui.playlist_columns.clone(),
                     window_width: previous_config.ui.window_width,
                     window_height: previous_config.ui.window_height,
