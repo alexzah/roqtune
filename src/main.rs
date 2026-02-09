@@ -10,6 +10,7 @@ mod ui_manager;
 
 use std::{
     collections::{BTreeSet, HashMap, HashSet},
+    path::{Path, PathBuf},
     rc::Rc,
     sync::{Arc, Mutex},
     thread,
@@ -88,6 +89,68 @@ impl OutputRuntimeSignature {
 const IMPORT_CLUSTER_PRESET: [i32; 1] = [1];
 const TRANSPORT_CLUSTER_PRESET: [i32; 5] = [2, 3, 4, 5, 6];
 const UTILITY_CLUSTER_PRESET: [i32; 4] = [7, 8, 9, 10];
+const SUPPORTED_AUDIO_EXTENSIONS: [&str; 7] = ["mp3", "wav", "ogg", "flac", "aac", "m4a", "mp4"];
+
+fn is_supported_audio_file(path: &Path) -> bool {
+    path.extension()
+        .and_then(|ext| ext.to_str())
+        .map(|ext| {
+            SUPPORTED_AUDIO_EXTENSIONS
+                .iter()
+                .any(|supported| ext.eq_ignore_ascii_case(supported))
+        })
+        .unwrap_or(false)
+}
+
+fn collect_audio_files_from_folder(folder_path: &Path) -> Vec<PathBuf> {
+    let mut pending_directories = vec![folder_path.to_path_buf()];
+    let mut tracks = Vec::new();
+
+    while let Some(directory) = pending_directories.pop() {
+        let entries = match std::fs::read_dir(&directory) {
+            Ok(entries) => entries,
+            Err(err) => {
+                debug!("Failed to read directory {}: {}", directory.display(), err);
+                continue;
+            }
+        };
+
+        for entry in entries {
+            let entry = match entry {
+                Ok(entry) => entry,
+                Err(err) => {
+                    debug!(
+                        "Failed to read a directory entry in {}: {}",
+                        directory.display(),
+                        err
+                    );
+                    continue;
+                }
+            };
+
+            let path = entry.path();
+            let file_type = match entry.file_type() {
+                Ok(file_type) => file_type,
+                Err(err) => {
+                    debug!("Failed to inspect {}: {}", path.display(), err);
+                    continue;
+                }
+            };
+
+            if file_type.is_dir() {
+                pending_directories.push(path);
+                continue;
+            }
+
+            if file_type.is_file() && is_supported_audio_file(&path) {
+                tracks.push(path);
+            }
+        }
+    }
+
+    tracks.sort_unstable();
+    tracks
+}
 
 fn filter_common_u16(detected: &BTreeSet<u16>, common_values: &[u16], fallback: u16) -> Vec<u16> {
     let mut filtered: Vec<u16> = common_values
@@ -1323,19 +1386,51 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let bus_sender_clone = bus_sender.clone();
 
-    // Setup file dialog
+    // Setup import dialogs
     ui.on_open_file(move || {
         debug!("Opening file dialog");
         if let Some(paths) = rfd::FileDialog::new()
-            .add_filter("Audio Files", &["mp3", "wav", "ogg", "flac"])
+            .add_filter("Audio Files", &SUPPORTED_AUDIO_EXTENSIONS)
             .pick_files()
         {
+            let mut import_count = 0usize;
             for path in paths {
+                if !is_supported_audio_file(&path) {
+                    debug!(
+                        "Skipping unsupported file from import dialog: {}",
+                        path.display()
+                    );
+                    continue;
+                }
                 debug!("Sending load track message for {:?}", path);
                 let _ = bus_sender_clone.send(protocol::Message::Playlist(
                     protocol::PlaylistMessage::LoadTrack(path),
                 ));
+                import_count += 1;
             }
+            debug!("Queued {} track(s) from Add files", import_count);
+        }
+    });
+
+    let bus_sender_clone = bus_sender.clone();
+    ui.on_open_folder(move || {
+        debug!("Opening folder dialog");
+        if let Some(folder_path) = rfd::FileDialog::new().pick_folder() {
+            let bus_sender_for_scan = bus_sender_clone.clone();
+            thread::spawn(move || {
+                let tracks = collect_audio_files_from_folder(&folder_path);
+                debug!(
+                    "Found {} track(s) in folder import {}",
+                    tracks.len(),
+                    folder_path.display()
+                );
+                for path in tracks {
+                    debug!("Sending load track message for {:?}", path);
+                    let _ = bus_sender_for_scan.send(protocol::Message::Playlist(
+                        protocol::PlaylistMessage::LoadTrack(path),
+                    ));
+                }
+            });
         }
     });
 
@@ -3121,20 +3216,87 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 #[cfg(test)]
 mod tests {
-    use std::collections::BTreeSet;
+    use std::{
+        collections::BTreeSet,
+        path::{Path, PathBuf},
+        time::{SystemTime, UNIX_EPOCH},
+    };
 
     use crate::config::{BufferingConfig, Config, OutputConfig, PlaylistColumnConfig, UiConfig};
     use crate::layout::LayoutConfig;
 
     use super::{
         apply_column_order_keys, choose_preferred_u16, choose_preferred_u32,
-        clamp_width_for_visible_column, playlist_column_key_at_visible_index,
-        playlist_column_width_bounds, reorder_visible_playlist_columns,
-        resolve_playlist_header_column_from_x, resolve_playlist_header_divider_from_x,
-        resolve_playlist_header_gap_from_x, resolve_runtime_config, sanitize_playlist_columns,
-        select_output_option_index_u16, select_output_option_index_u32,
-        should_apply_custom_column_delete, sidebar_width_from_window, OutputSettingsOptions,
+        clamp_width_for_visible_column, collect_audio_files_from_folder, is_supported_audio_file,
+        playlist_column_key_at_visible_index, playlist_column_width_bounds,
+        reorder_visible_playlist_columns, resolve_playlist_header_column_from_x,
+        resolve_playlist_header_divider_from_x, resolve_playlist_header_gap_from_x,
+        resolve_runtime_config, sanitize_playlist_columns, select_output_option_index_u16,
+        select_output_option_index_u32, should_apply_custom_column_delete,
+        sidebar_width_from_window, OutputSettingsOptions,
     };
+
+    fn unique_temp_directory(test_name: &str) -> PathBuf {
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system clock should be after UNIX_EPOCH")
+            .as_nanos();
+        std::env::temp_dir().join(format!(
+            "music_player_{}_{}_{}",
+            test_name,
+            std::process::id(),
+            nanos
+        ))
+    }
+
+    #[test]
+    fn test_import_menu_exposes_add_files_and_add_folder_options() {
+        let slint_ui = include_str!("music_player.slint");
+        assert!(
+            slint_ui.contains("in-out property <bool> show_import_menu: false;"),
+            "App window should expose import menu state"
+        );
+        assert!(
+            slint_ui.contains("text: \"Add files\"") && slint_ui.contains("text: \"Add folder\""),
+            "Import menu should expose both Add files and Add folder actions"
+        );
+        assert!(
+            slint_ui.contains("callback open_folder();"),
+            "App window should expose folder-import callback"
+        );
+    }
+
+    #[test]
+    fn test_is_supported_audio_file_checks_known_extensions_case_insensitively() {
+        assert!(is_supported_audio_file(Path::new("/tmp/track.mp3")));
+        assert!(is_supported_audio_file(Path::new("/tmp/track.FLAC")));
+        assert!(is_supported_audio_file(Path::new("/tmp/track.m4a")));
+        assert!(!is_supported_audio_file(Path::new("/tmp/track.txt")));
+        assert!(!is_supported_audio_file(Path::new("/tmp/track")));
+    }
+
+    #[test]
+    fn test_collect_audio_files_from_folder_recurses_and_filters_non_audio_files() {
+        let base = unique_temp_directory("import_scan");
+        let nested = base.join("nested");
+        let deep = nested.join("deep");
+        std::fs::create_dir_all(&deep).expect("test directories should be created");
+        std::fs::write(base.join("song_b.flac"), b"").expect("should write flac fixture");
+        std::fs::write(base.join("ignore.txt"), b"").expect("should write text fixture");
+        std::fs::write(nested.join("song_a.MP3"), b"").expect("should write mp3 fixture");
+        std::fs::write(deep.join("song_c.wav"), b"").expect("should write wav fixture");
+
+        let imported = collect_audio_files_from_folder(&base);
+        let mut expected = vec![
+            nested.join("song_a.MP3"),
+            base.join("song_b.flac"),
+            deep.join("song_c.wav"),
+        ];
+        expected.sort_unstable();
+        assert_eq!(imported, expected);
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
 
     #[test]
     fn test_focus_touch_areas_are_not_full_pane_overlays() {

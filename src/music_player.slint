@@ -959,6 +959,10 @@ export component AppWindow inherits Window {
                 root.open_layout_editor();
                 return accept;
             }
+            if (event.text == Key.Escape && root.show_import_menu) {
+                root.show_import_menu = false;
+                return accept;
+            }
             if (event.text == Key.Escape && root.layout_edit_mode) {
                 root.show_layout_editor_dialog = false;
                 root.show_layout_leaf_context_menu = false;
@@ -1029,6 +1033,9 @@ export component AppWindow inherits Window {
     in-out property <int> playlist_columns_content_width_px: 0;
     in-out property <int> playlist_columns_available_width_px: 0;
     in-out property <[LayoutButtonClusterPanelModel]> layout_button_cluster_panels: [];
+    in-out property <bool> show_import_menu: false;
+    property <length> import_menu_x: 0px;
+    property <length> import_menu_y: 0px;
     in-out property <bool> show_control_cluster_menu: false;
     in-out property <string> control_cluster_menu_target_leaf_id: "";
     in-out property <[int]> control_cluster_menu_actions: [];
@@ -1275,7 +1282,14 @@ export component AppWindow inherits Window {
                         repeat-mode: root.repeat_mode;
                         layout-edit-mode: root.layout_edit_mode;
                         action-invoked(action-id) => {
-                            if (action-id == 1) { root.open_file(); }
+                            if (action-id == 1) {
+                                root.show_import_menu = true;
+                                root.import_menu_x = min(root.width - 168px, max(8px, cluster-panel.x_px * 1px + 8px));
+                                root.import_menu_y = min(
+                                    root.height - 96px,
+                                    max(8px, cluster-panel.y_px * 1px + cluster-panel.height_px * 1px + 4px)
+                                );
+                            }
                             if (action-id == 2) { root.previous(); }
                             if (action-id == 3) { root.play(); }
                             if (action-id == 4) { root.pause(); }
@@ -2462,6 +2476,73 @@ export component AppWindow inherits Window {
         }
     }
 
+    if root.show_import_menu : Rectangle {
+        z: 147;
+        background: transparent;
+        TouchArea {
+            clicked => {
+                root.show_import_menu = false;
+            }
+        }
+    }
+
+    if root.show_import_menu : Rectangle {
+        z: 148;
+        x: root.import_menu_x;
+        y: root.import_menu_y;
+        width: 160px;
+        height: 70px;
+        border-radius: 6px;
+        background: #262626;
+        border-width: 1px;
+        border-color: #3d3d3d;
+
+        VerticalLayout {
+            padding: 4px;
+            spacing: 2px;
+
+            Rectangle {
+                height: 28px;
+                border-radius: 4px;
+                background: add-files-ta.has-hover ? #363636 : transparent;
+                Text {
+                    x: 10px;
+                    width: parent.width - 20px;
+                    text: "Add files";
+                    color: #ddd;
+                    font-size: 12px;
+                    vertical-alignment: center;
+                }
+                add-files-ta := TouchArea {
+                    clicked => {
+                        root.show_import_menu = false;
+                        root.open_file();
+                    }
+                }
+            }
+
+            Rectangle {
+                height: 28px;
+                border-radius: 4px;
+                background: add-folder-ta.has-hover ? #363636 : transparent;
+                Text {
+                    x: 10px;
+                    width: parent.width - 20px;
+                    text: "Add folder";
+                    color: #ddd;
+                    font-size: 12px;
+                    vertical-alignment: center;
+                }
+                add-folder-ta := TouchArea {
+                    clicked => {
+                        root.show_import_menu = false;
+                        root.open_folder();
+                    }
+                }
+            }
+        }
+    }
+
     if root.show_control_cluster_menu : Rectangle {
         z: 146;
         x: root.control_cluster_menu_x;
@@ -2888,6 +2969,7 @@ export component AppWindow inherits Window {
 
     // Callback declarations
     callback open_file();
+    callback open_folder();
     callback play();
     callback pause();
     callback stop();
