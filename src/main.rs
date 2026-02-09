@@ -3421,8 +3421,15 @@ mod tests {
             "Column header menu should expose delete callback"
         );
         assert!(
-            slint_ui.contains("background: delete-column-ta.has-hover ? #db3f3f : #b93636;"),
-            "Custom columns should render a red delete icon"
+            slint_ui.contains("column-toggle := Switch {")
+                && slint_ui.contains("width: 18px;")
+                && slint_ui.contains("font-size: 12px;"),
+            "Column header menu should use compact switch controls with consistent label sizing"
+        );
+        assert!(
+            slint_ui.contains("text: \"X\";")
+                && slint_ui.contains("color: delete-column-ta.has-hover ? #ff5c5c : #db3f3f;"),
+            "Custom columns should render a red glyph-only delete icon"
         );
         assert!(
             slint_ui.contains("show_delete_custom_column_confirm"),

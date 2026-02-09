@@ -109,32 +109,43 @@ component ColumnHeaderMenu inherits PopupWindow {
                 height: 22px;
                 border-radius: 2px;
                 background: column-item-ta.has-hover ? #3d3d3d : transparent;
+                column-toggle := Switch {
+                    x: 6px;
+                    y: (parent.height - self.height) / 2;
+                    width: 18px;
+                    text: "";
+                    checked: i < root.checked.length ? root.checked[i] : false;
+                    toggled => {
+                        root.toggle-column(i);
+                    }
+                }
                 Text {
-                    text: (root.checked[i] ? "☑ " : "☐ ") + label;
+                    text: label;
                     color: #ddd;
                     font-size: 12px;
                     vertical-alignment: center;
                     horizontal-alignment: left;
-                    x: 6px;
-                    width: parent.width - (parent.is-custom ? 28px : 0px);
+                    x: 30px;
+                    width: parent.width - (parent.is-custom ? 58px : 36px);
+                    overflow: elide;
                 }
                 column-item-ta := TouchArea {
-                    width: parent.width - (parent.is-custom ? 24px : 0px);
+                    x: 30px;
+                    width: parent.width - (parent.is-custom ? 54px : 30px);
                     clicked => {
                         root.toggle-column(i);
                     }
                 }
                 if self.is-custom : Rectangle {
-                    width: 14px;
-                    height: 14px;
+                    width: 18px;
+                    height: 18px;
                     x: parent.width - self.width - 6px;
                     y: (parent.height - self.height) / 2;
-                    border-radius: self.width / 2;
-                    background: delete-column-ta.has-hover ? #db3f3f : #b93636;
+                    background: transparent;
                     Text {
-                        text: "x";
-                        color: #f7f7f7;
-                        font-size: 9px;
+                        text: "X";
+                        color: delete-column-ta.has-hover ? #ff5c5c : #db3f3f;
+                        font-size: 12px;
                         horizontal-alignment: center;
                         vertical-alignment: center;
                     }
@@ -1547,8 +1558,11 @@ export component AppWindow inherits Window {
                             mouse-cursor: (root.column_resize_active || root.column_hover_divider != -1) ? col-resize : default;
                             pointer-event(event) => {
                                 if (event.button == PointerEventButton.right && event.kind == PointerEventKind.down) {
-                                    root.column-menu-x = self.x + self.mouse-x;
-                                    root.column-menu-y = self.y + self.mouse-y;
+                                    let click-x = root.layout-region-x(i) + parent.x + self.x + self.mouse-x;
+                                    let click-y = root.layout-region-y(i) + parent.y + self.y + self.mouse-y;
+                                    let menu-height = 16px + root.playlist_column_menu_labels.length * 24px + 32px;
+                                    root.column-menu-x = min(root.width - 220px, max(8px, click-x));
+                                    root.column-menu-y = min(root.height - menu-height, max(8px, click-y));
                                     column-header-menu.show();
                                 } else if (event.kind == PointerEventKind.down && event.button == PointerEventButton.left) {
                                     let hovered_divider = visible_column_count > 0
