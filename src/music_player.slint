@@ -2044,7 +2044,7 @@ export component AppWindow inherits Window {
                 }
                 split-vertical-ta := TouchArea {
                     clicked => {
-                        root.layout_split_selected_leaf(1, 0);
+                        root.layout_split_selected_leaf(1, root.layout_editor_split_panel_kind);
                         root.show_layout_leaf_replace_submenu = false;
                         root.layout_leaf_replace_submenu_hover = false;
                         root.show_layout_leaf_context_menu = false;
@@ -2065,7 +2065,7 @@ export component AppWindow inherits Window {
                 }
                 split-horizontal-ta := TouchArea {
                     clicked => {
-                        root.layout_split_selected_leaf(0, 0);
+                        root.layout_split_selected_leaf(0, root.layout_editor_split_panel_kind);
                         root.show_layout_leaf_replace_submenu = false;
                         root.layout_leaf_replace_submenu_hover = false;
                         root.show_layout_leaf_context_menu = false;
@@ -2133,8 +2133,8 @@ export component AppWindow inherits Window {
             z: 141;
             x: (root.layout_leaf_context_menu_x + parent.width + 4px + self.width <= root.width - 8px) ? parent.width + 4px : -self.width - 4px;
             y: 6px;
-            width: 196px;
-            height: min(300px, root.layout_panel_options.length * 24px + 12px);
+            width: 240px;
+            height: min(220px, root.layout_panel_options.length * 24px + 12px);
             border-radius: 6px;
             background: #262626;
             border-width: 1px;
@@ -2149,26 +2149,35 @@ export component AppWindow inherits Window {
             VerticalLayout {
                 padding: 6px;
                 spacing: 2px;
-
-                for option[index] in root.layout_panel_options : Rectangle {
-                    height: 24px;
-                    border-radius: 3px;
-                    background: replace-option-ta.has-hover ? #363636 : transparent;
-                    Text {
-                        text: option;
-                        color: #ddd;
-                        font-size: 12px;
-                        x: 8px;
-                        vertical-alignment: center;
-                    }
-                    replace-option-ta := TouchArea {
-                        clicked => {
-                            root.layout_editor_replace_panel_kind = index;
-                            root.layout_replace_selected_leaf(index);
-                            root.show_layout_leaf_replace_submenu = false;
-                            root.layout_leaf_replace_submenu_hover = false;
-                            root.show_layout_leaf_context_menu = false;
+                ScrollView {
+                    vertical-stretch: 1;
+                    HorizontalLayout {
+                        Rectangle { width: 1px; }
+                        VerticalLayout {
+                            spacing: 2px;
+                            for option[index] in root.layout_panel_options : Rectangle {
+                                height: 24px;
+                                border-radius: 3px;
+                                background: replace-option-ta.has-hover ? #363636 : transparent;
+                                Text {
+                                    text: option;
+                                    color: #ddd;
+                                    font-size: 12px;
+                                    x: 8px;
+                                    vertical-alignment: center;
+                                }
+                                replace-option-ta := TouchArea {
+                                    clicked => {
+                                        root.layout_editor_replace_panel_kind = index;
+                                        root.layout_replace_selected_leaf(index);
+                                        root.show_layout_leaf_replace_submenu = false;
+                                        root.layout_leaf_replace_submenu_hover = false;
+                                        root.show_layout_leaf_context_menu = false;
+                                    }
+                                }
+                            }
                         }
+                        Rectangle { width: 1px; }
                     }
                 }
             }
