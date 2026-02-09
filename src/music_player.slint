@@ -1041,6 +1041,8 @@ export component AppWindow inherits Window {
     in-out property <bool> show_layout_leaf_context_menu: false;
     in-out property <bool> show_layout_leaf_replace_submenu: false;
     in-out property <bool> layout_leaf_replace_submenu_hover: false;
+    in-out property <bool> show_layout_leaf_panels_submenu: false;
+    in-out property <bool> layout_leaf_panels_submenu_hover: false;
     in-out property <bool> show_layout_leaf_presets_submenu: false;
     in-out property <bool> layout_leaf_presets_submenu_hover: false;
     in-out property <bool> show_layout_splitter_context_menu: false;
@@ -1063,8 +1065,7 @@ export component AppWindow inherits Window {
     in-out property <[int]> layout_region_width_px: [];
     in-out property <[int]> layout_region_height_px: [];
     in-out property <[bool]> layout_region_visible: [];
-    property <[string]> layout_replace_panel_labels: [
-        "None",
+    property <[string]> layout_panel_submenu_labels: [
         "Button Cluster",
         "Volume Slider",
         "Seek Bar",
@@ -1072,10 +1073,9 @@ export component AppWindow inherits Window {
         "Track List",
         "Metadata Viewer",
         "Album Art Viewer",
-        "Spacer",
         "Status Bar"
     ];
-    property <[int]> layout_replace_panel_codes: [0, 1, 4, 5, 6, 7, 8, 9, 10, 11];
+    property <[int]> layout_panel_submenu_codes: [1, 4, 5, 6, 7, 8, 9, 11];
     property <[string]> layout_replace_preset_labels: [
         "Import Button Cluster",
         "Transport Button Cluster",
@@ -1774,6 +1774,8 @@ export component AppWindow inherits Window {
                             root.layout_leaf_context_menu_y = min(root.height - 280px, max(8px, parent.y + self.mouse-y + 6px));
                             root.show_layout_leaf_replace_submenu = false;
                             root.layout_leaf_replace_submenu_hover = false;
+                            root.show_layout_leaf_panels_submenu = false;
+                            root.layout_leaf_panels_submenu_hover = false;
                             root.show_layout_leaf_presets_submenu = false;
                             root.layout_leaf_presets_submenu_hover = false;
                             root.show_layout_leaf_context_menu = true;
@@ -1781,6 +1783,8 @@ export component AppWindow inherits Window {
                             root.layout_select_leaf(leaf-id);
                             root.show_layout_leaf_replace_submenu = false;
                             root.layout_leaf_replace_submenu_hover = false;
+                            root.show_layout_leaf_panels_submenu = false;
+                            root.layout_leaf_panels_submenu_hover = false;
                             root.show_layout_leaf_presets_submenu = false;
                             root.layout_leaf_presets_submenu_hover = false;
                             root.show_layout_leaf_context_menu = false;
@@ -1810,6 +1814,8 @@ export component AppWindow inherits Window {
                             root.layout_context_splitter_id = splitter.id;
                             root.show_layout_leaf_replace_submenu = false;
                             root.layout_leaf_replace_submenu_hover = false;
+                            root.show_layout_leaf_panels_submenu = false;
+                            root.layout_leaf_panels_submenu_hover = false;
                             root.show_layout_leaf_presets_submenu = false;
                             root.layout_leaf_presets_submenu_hover = false;
                             root.show_layout_leaf_context_menu = false;
@@ -1819,6 +1825,8 @@ export component AppWindow inherits Window {
                         } else if (event.kind == PointerEventKind.down && event.button == PointerEventButton.left) {
                             root.show_layout_leaf_replace_submenu = false;
                             root.layout_leaf_replace_submenu_hover = false;
+                            root.show_layout_leaf_panels_submenu = false;
+                            root.layout_leaf_panels_submenu_hover = false;
                             root.show_layout_leaf_presets_submenu = false;
                             root.layout_leaf_presets_submenu_hover = false;
                             root.show_layout_leaf_context_menu = false;
@@ -1896,6 +1904,8 @@ export component AppWindow inherits Window {
             clicked => {
                 root.show_layout_leaf_replace_submenu = false;
                 root.layout_leaf_replace_submenu_hover = false;
+                root.show_layout_leaf_panels_submenu = false;
+                root.layout_leaf_panels_submenu_hover = false;
                 root.show_layout_leaf_presets_submenu = false;
                 root.layout_leaf_presets_submenu_hover = false;
                 root.show_layout_leaf_context_menu = false;
@@ -2065,6 +2075,8 @@ export component AppWindow inherits Window {
                         root.layout_split_selected_leaf(1, root.layout_editor_split_panel_kind);
                         root.show_layout_leaf_replace_submenu = false;
                         root.layout_leaf_replace_submenu_hover = false;
+                        root.show_layout_leaf_panels_submenu = false;
+                        root.layout_leaf_panels_submenu_hover = false;
                         root.show_layout_leaf_presets_submenu = false;
                         root.layout_leaf_presets_submenu_hover = false;
                         root.show_layout_leaf_context_menu = false;
@@ -2088,6 +2100,8 @@ export component AppWindow inherits Window {
                         root.layout_split_selected_leaf(0, root.layout_editor_split_panel_kind);
                         root.show_layout_leaf_replace_submenu = false;
                         root.layout_leaf_replace_submenu_hover = false;
+                        root.show_layout_leaf_panels_submenu = false;
+                        root.layout_leaf_panels_submenu_hover = false;
                         root.show_layout_leaf_presets_submenu = false;
                         root.layout_leaf_presets_submenu_hover = false;
                         root.show_layout_leaf_context_menu = false;
@@ -2118,6 +2132,8 @@ export component AppWindow inherits Window {
                         }
                         root.show_layout_leaf_replace_submenu = false;
                         root.layout_leaf_replace_submenu_hover = false;
+                        root.show_layout_leaf_panels_submenu = false;
+                        root.layout_leaf_panels_submenu_hover = false;
                         root.show_layout_leaf_presets_submenu = false;
                         root.layout_leaf_presets_submenu_hover = false;
                         root.show_layout_leaf_context_menu = false;
@@ -2146,6 +2162,8 @@ export component AppWindow inherits Window {
                         root.layout_delete_selected_leaf();
                         root.show_layout_leaf_replace_submenu = false;
                         root.layout_leaf_replace_submenu_hover = false;
+                        root.show_layout_leaf_panels_submenu = false;
+                        root.layout_leaf_panels_submenu_hover = false;
                         root.show_layout_leaf_presets_submenu = false;
                         root.layout_leaf_presets_submenu_hover = false;
                         root.show_layout_leaf_context_menu = false;
@@ -2160,7 +2178,7 @@ export component AppWindow inherits Window {
             x: (root.layout_leaf_context_menu_x + parent.width + 4px + self.width <= root.width - 8px) ? parent.width + 4px : -self.width - 4px;
             y: 6px;
             width: 268px;
-            height: min(300px, root.layout_replace_panel_labels.length * 26px + 44px);
+            height: 92px;
             border-radius: 6px;
             background: #262626;
             border-width: 1px;
@@ -2175,43 +2193,65 @@ export component AppWindow inherits Window {
             VerticalLayout {
                 padding: 6px;
                 spacing: 2px;
-                ScrollView {
-                    vertical-stretch: 1;
-                    Rectangle {
-                        x: 4px;
-                        width: max(0px, parent.width - 8px);
-                        height: max(28px, root.layout_replace_panel_labels.length * 26px + 4px);
-                        background: transparent;
-                        for option[index] in root.layout_replace_panel_labels : Rectangle {
-                            x: 0px;
-                            y: 2px + index * 26px;
-                            width: parent.width;
-                            height: 26px;
-                            border-radius: 3px;
-                            background: replace-option-ta.has-hover ? #363636 : transparent;
-                            Text {
-                                text: option;
-                                color: #ddd;
-                                font-size: 12px;
-                                x: 10px;
-                                width: max(0px, parent.width - 20px);
-                                height: parent.height;
-                                overflow: elide;
-                                vertical-alignment: center;
-                                horizontal-alignment: left;
+                Rectangle {
+                    height: 24px;
+                    border-radius: 3px;
+                    background: spacer-action-ta.has-hover ? #363636 : transparent;
+                    Text {
+                        text: "Spacer";
+                        color: #ddd;
+                        font-size: 12px;
+                        x: 8px;
+                        vertical-alignment: center;
+                    }
+                    spacer-action-ta := TouchArea {
+                        clicked => {
+                            root.layout_editor_replace_panel_kind = 10;
+                            root.layout_replace_selected_leaf(10);
+                            root.show_layout_leaf_replace_submenu = false;
+                            root.layout_leaf_replace_submenu_hover = false;
+                            root.show_layout_leaf_panels_submenu = false;
+                            root.layout_leaf_panels_submenu_hover = false;
+                            root.show_layout_leaf_presets_submenu = false;
+                            root.layout_leaf_presets_submenu_hover = false;
+                            root.show_layout_leaf_context_menu = false;
+                        }
+                    }
+                }
+
+                Rectangle {
+                    height: 24px;
+                    border-radius: 3px;
+                    background: panels-action-ta.has-hover || root.show_layout_leaf_panels_submenu ? #363636 : transparent;
+                    Text {
+                        text: "Panels";
+                        color: #ddd;
+                        font-size: 12px;
+                        x: 8px;
+                        vertical-alignment: center;
+                    }
+                    Text {
+                        text: "▸";
+                        color: #888;
+                        font-size: 12px;
+                        width: parent.width - 8px;
+                        horizontal-alignment: right;
+                        vertical-alignment: center;
+                    }
+                    panels-action-ta := TouchArea {
+                        changed has-hover => {
+                            if (self.has-hover) {
+                                root.show_layout_leaf_panels_submenu = true;
+                                root.show_layout_leaf_presets_submenu = false;
                             }
-                            replace-option-ta := TouchArea {
-                                clicked => {
-                                    let panel-code = root.layout_replace_panel_codes[index];
-                                    root.layout_editor_replace_panel_kind = panel-code;
-                                    root.layout_replace_selected_leaf(panel-code);
-                                    root.show_layout_leaf_replace_submenu = false;
-                                    root.layout_leaf_replace_submenu_hover = false;
-                                    root.show_layout_leaf_presets_submenu = false;
-                                    root.layout_leaf_presets_submenu_hover = false;
-                                    root.show_layout_leaf_context_menu = false;
-                                }
-                            }
+                        }
+                        moved => {
+                            root.show_layout_leaf_panels_submenu = true;
+                            root.show_layout_leaf_presets_submenu = false;
+                        }
+                        clicked => {
+                            root.show_layout_leaf_panels_submenu = true;
+                            root.show_layout_leaf_presets_submenu = false;
                         }
                     }
                 }
@@ -2239,13 +2279,81 @@ export component AppWindow inherits Window {
                         changed has-hover => {
                             if (self.has-hover) {
                                 root.show_layout_leaf_presets_submenu = true;
+                                root.show_layout_leaf_panels_submenu = false;
                             }
                         }
                         moved => {
                             root.show_layout_leaf_presets_submenu = true;
+                            root.show_layout_leaf_panels_submenu = false;
                         }
                         clicked => {
                             root.show_layout_leaf_presets_submenu = true;
+                            root.show_layout_leaf_panels_submenu = false;
+                        }
+                    }
+                }
+            }
+
+            if root.show_layout_leaf_panels_submenu : Rectangle {
+                z: 142;
+                x: (root.layout_leaf_context_menu_x + parent.x + parent.width + 4px + self.width <= root.width - 8px) ? parent.width + 4px : -self.width - 4px;
+                y: 32px;
+                width: 252px;
+                height: min(220px, root.layout_panel_submenu_labels.length * 24px + 12px);
+                border-radius: 6px;
+                background: #262626;
+                border-width: 1px;
+                border-color: #3d3d3d;
+
+                panels-submenu-hover-ta := TouchArea {
+                    changed has-hover => {
+                        root.layout_leaf_panels_submenu_hover = self.has-hover;
+                    }
+                }
+
+                VerticalLayout {
+                    padding: 6px;
+                    spacing: 0px;
+                    ScrollView {
+                        vertical-stretch: 1;
+                        Rectangle {
+                            x: 4px;
+                            width: max(0px, parent.width - 8px);
+                            height: max(24px, root.layout_panel_submenu_labels.length * 24px);
+                            background: transparent;
+                            for panel-option[index] in root.layout_panel_submenu_labels : Rectangle {
+                                x: 0px;
+                                y: index * 24px;
+                                width: parent.width;
+                                height: 24px;
+                                border-radius: 3px;
+                                background: panel-option-ta.has-hover ? #363636 : transparent;
+                                Text {
+                                    text: panel-option;
+                                    color: #ddd;
+                                    font-size: 12px;
+                                    x: 10px;
+                                    width: max(0px, parent.width - 20px);
+                                    height: parent.height;
+                                    overflow: elide;
+                                    vertical-alignment: center;
+                                    horizontal-alignment: left;
+                                }
+                                panel-option-ta := TouchArea {
+                                    clicked => {
+                                        let panel-code = root.layout_panel_submenu_codes[index];
+                                        root.layout_editor_replace_panel_kind = panel-code;
+                                        root.layout_replace_selected_leaf(panel-code);
+                                        root.show_layout_leaf_replace_submenu = false;
+                                        root.layout_leaf_replace_submenu_hover = false;
+                                        root.show_layout_leaf_panels_submenu = false;
+                                        root.layout_leaf_panels_submenu_hover = false;
+                                        root.show_layout_leaf_presets_submenu = false;
+                                        root.layout_leaf_presets_submenu_hover = false;
+                                        root.show_layout_leaf_context_menu = false;
+                                    }
+                                }
+                            }
                         }
                     }
                 }
@@ -2254,7 +2362,7 @@ export component AppWindow inherits Window {
             if root.show_layout_leaf_presets_submenu : Rectangle {
                 z: 142;
                 x: (root.layout_leaf_context_menu_x + parent.x + parent.width + 4px + self.width <= root.width - 8px) ? parent.width + 4px : -self.width - 4px;
-                y: parent.height - 30px;
+                y: 58px;
                 width: 252px;
                 height: min(140px, root.layout_replace_preset_labels.length * 24px + 12px);
                 border-radius: 6px;
@@ -2291,6 +2399,8 @@ export component AppWindow inherits Window {
                                 root.layout_replace_selected_leaf(panel-code);
                                 root.show_layout_leaf_presets_submenu = false;
                                 root.layout_leaf_presets_submenu_hover = false;
+                                root.show_layout_leaf_panels_submenu = false;
+                                root.layout_leaf_panels_submenu_hover = false;
                                 root.show_layout_leaf_replace_submenu = false;
                                 root.layout_leaf_replace_submenu_hover = false;
                                 root.show_layout_leaf_context_menu = false;
