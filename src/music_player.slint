@@ -1041,6 +1041,8 @@ export component AppWindow inherits Window {
     in-out property <bool> show_layout_leaf_context_menu: false;
     in-out property <bool> show_layout_leaf_replace_submenu: false;
     in-out property <bool> layout_leaf_replace_submenu_hover: false;
+    in-out property <bool> show_layout_leaf_presets_submenu: false;
+    in-out property <bool> layout_leaf_presets_submenu_hover: false;
     in-out property <bool> show_layout_splitter_context_menu: false;
     in-out property <bool> layout_intro_dont_show_again: false;
     in-out property <string> layout_context_splitter_id: "";
@@ -1061,6 +1063,25 @@ export component AppWindow inherits Window {
     in-out property <[int]> layout_region_width_px: [];
     in-out property <[int]> layout_region_height_px: [];
     in-out property <[bool]> layout_region_visible: [];
+    property <[string]> layout_replace_panel_labels: [
+        "None",
+        "Button Cluster",
+        "Volume Slider",
+        "Seek Bar",
+        "Playlist Switcher",
+        "Track List",
+        "Metadata Viewer",
+        "Album Art Viewer",
+        "Spacer",
+        "Status Bar"
+    ];
+    property <[int]> layout_replace_panel_codes: [0, 1, 4, 5, 6, 7, 8, 9, 10, 11];
+    property <[string]> layout_replace_preset_labels: [
+        "Import Button Cluster",
+        "Transport Button Cluster",
+        "Utility Button Cluster"
+    ];
+    property <[int]> layout_replace_preset_codes: [12, 2, 3];
     in-out property <[LayoutSplitterModel]> layout_splitters: [];
     in-out property <int> layout_active_splitter_index: -1;
     property <length> layout_splitter_drag_start_mouse_x: 0px;
@@ -1731,11 +1752,14 @@ export component AppWindow inherits Window {
                 border-color: i == root.layout_selected_leaf_index ? #4b84c9 : #3a3a3a;
                 z: 100;
                 Text {
+                    visible: leaf-select-ta.has-hover || i == root.layout_selected_leaf_index;
                     text: root.layout-panel-label(parent.panel-kind);
                     color: i == root.layout_selected_leaf_index ? #9fc3ff : #777;
                     font-size: 11px;
                     x: 6px;
                     y: 4px;
+                    width: max(0px, parent.width - 12px);
+                    overflow: elide;
                 }
                 leaf-select-ta := TouchArea {
                     x: 0px;
@@ -1750,11 +1774,15 @@ export component AppWindow inherits Window {
                             root.layout_leaf_context_menu_y = min(root.height - 280px, max(8px, parent.y + self.mouse-y + 6px));
                             root.show_layout_leaf_replace_submenu = false;
                             root.layout_leaf_replace_submenu_hover = false;
+                            root.show_layout_leaf_presets_submenu = false;
+                            root.layout_leaf_presets_submenu_hover = false;
                             root.show_layout_leaf_context_menu = true;
                         } else if (event.kind == PointerEventKind.down && event.button == PointerEventButton.left) {
                             root.layout_select_leaf(leaf-id);
                             root.show_layout_leaf_replace_submenu = false;
                             root.layout_leaf_replace_submenu_hover = false;
+                            root.show_layout_leaf_presets_submenu = false;
+                            root.layout_leaf_presets_submenu_hover = false;
                             root.show_layout_leaf_context_menu = false;
                             root.show_layout_splitter_context_menu = false;
                         }
@@ -1782,6 +1810,8 @@ export component AppWindow inherits Window {
                             root.layout_context_splitter_id = splitter.id;
                             root.show_layout_leaf_replace_submenu = false;
                             root.layout_leaf_replace_submenu_hover = false;
+                            root.show_layout_leaf_presets_submenu = false;
+                            root.layout_leaf_presets_submenu_hover = false;
                             root.show_layout_leaf_context_menu = false;
                             root.layout_splitter_context_menu_x = min(root.width - 220px, max(8px, parent.x + self.mouse-x + 6px));
                             root.layout_splitter_context_menu_y = min(root.height - 120px, max(8px, parent.y + self.mouse-y + 6px));
@@ -1789,6 +1819,8 @@ export component AppWindow inherits Window {
                         } else if (event.kind == PointerEventKind.down && event.button == PointerEventButton.left) {
                             root.show_layout_leaf_replace_submenu = false;
                             root.layout_leaf_replace_submenu_hover = false;
+                            root.show_layout_leaf_presets_submenu = false;
+                            root.layout_leaf_presets_submenu_hover = false;
                             root.show_layout_leaf_context_menu = false;
                             root.show_layout_splitter_context_menu = false;
                             root.layout_active_splitter_index = i;
@@ -1880,6 +1912,8 @@ export component AppWindow inherits Window {
             clicked => {
                 root.show_layout_leaf_replace_submenu = false;
                 root.layout_leaf_replace_submenu_hover = false;
+                root.show_layout_leaf_presets_submenu = false;
+                root.layout_leaf_presets_submenu_hover = false;
                 root.show_layout_leaf_context_menu = false;
                 root.show_layout_splitter_context_menu = false;
             }
@@ -2047,6 +2081,8 @@ export component AppWindow inherits Window {
                         root.layout_split_selected_leaf(1, root.layout_editor_split_panel_kind);
                         root.show_layout_leaf_replace_submenu = false;
                         root.layout_leaf_replace_submenu_hover = false;
+                        root.show_layout_leaf_presets_submenu = false;
+                        root.layout_leaf_presets_submenu_hover = false;
                         root.show_layout_leaf_context_menu = false;
                     }
                 }
@@ -2068,6 +2104,8 @@ export component AppWindow inherits Window {
                         root.layout_split_selected_leaf(0, root.layout_editor_split_panel_kind);
                         root.show_layout_leaf_replace_submenu = false;
                         root.layout_leaf_replace_submenu_hover = false;
+                        root.show_layout_leaf_presets_submenu = false;
+                        root.layout_leaf_presets_submenu_hover = false;
                         root.show_layout_leaf_context_menu = false;
                     }
                 }
@@ -2096,6 +2134,8 @@ export component AppWindow inherits Window {
                         }
                         root.show_layout_leaf_replace_submenu = false;
                         root.layout_leaf_replace_submenu_hover = false;
+                        root.show_layout_leaf_presets_submenu = false;
+                        root.layout_leaf_presets_submenu_hover = false;
                         root.show_layout_leaf_context_menu = false;
                     }
                 }
@@ -2122,6 +2162,8 @@ export component AppWindow inherits Window {
                         root.layout_delete_selected_leaf();
                         root.show_layout_leaf_replace_submenu = false;
                         root.layout_leaf_replace_submenu_hover = false;
+                        root.show_layout_leaf_presets_submenu = false;
+                        root.layout_leaf_presets_submenu_hover = false;
                         root.show_layout_leaf_context_menu = false;
                     }
                 }
@@ -2133,8 +2175,8 @@ export component AppWindow inherits Window {
             z: 141;
             x: (root.layout_leaf_context_menu_x + parent.width + 4px + self.width <= root.width - 8px) ? parent.width + 4px : -self.width - 4px;
             y: 6px;
-            width: 240px;
-            height: min(220px, root.layout_panel_options.length * 24px + 12px);
+            width: 268px;
+            height: min(300px, root.layout_replace_panel_labels.length * 26px + 44px);
             border-radius: 6px;
             background: #262626;
             border-width: 1px;
@@ -2151,33 +2193,125 @@ export component AppWindow inherits Window {
                 spacing: 2px;
                 ScrollView {
                     vertical-stretch: 1;
-                    HorizontalLayout {
-                        Rectangle { width: 1px; }
-                        VerticalLayout {
-                            spacing: 2px;
-                            for option[index] in root.layout_panel_options : Rectangle {
-                                height: 24px;
-                                border-radius: 3px;
-                                background: replace-option-ta.has-hover ? #363636 : transparent;
-                                Text {
-                                    text: option;
-                                    color: #ddd;
-                                    font-size: 12px;
-                                    x: 8px;
-                                    vertical-alignment: center;
-                                }
-                                replace-option-ta := TouchArea {
-                                    clicked => {
-                                        root.layout_editor_replace_panel_kind = index;
-                                        root.layout_replace_selected_leaf(index);
-                                        root.show_layout_leaf_replace_submenu = false;
-                                        root.layout_leaf_replace_submenu_hover = false;
-                                        root.show_layout_leaf_context_menu = false;
-                                    }
+                    Rectangle {
+                        x: 4px;
+                        width: max(0px, parent.width - 8px);
+                        height: max(28px, root.layout_replace_panel_labels.length * 26px + 4px);
+                        background: transparent;
+                        for option[index] in root.layout_replace_panel_labels : Rectangle {
+                            x: 0px;
+                            y: 2px + index * 26px;
+                            width: parent.width;
+                            height: 26px;
+                            border-radius: 3px;
+                            background: replace-option-ta.has-hover ? #363636 : transparent;
+                            Text {
+                                text: option;
+                                color: #ddd;
+                                font-size: 12px;
+                                x: 10px;
+                                width: max(0px, parent.width - 20px);
+                                height: parent.height;
+                                overflow: elide;
+                                vertical-alignment: center;
+                                horizontal-alignment: left;
+                            }
+                            replace-option-ta := TouchArea {
+                                clicked => {
+                                    let panel-code = root.layout_replace_panel_codes[index];
+                                    root.layout_editor_replace_panel_kind = panel-code;
+                                    root.layout_replace_selected_leaf(panel-code);
+                                    root.show_layout_leaf_replace_submenu = false;
+                                    root.layout_leaf_replace_submenu_hover = false;
+                                    root.show_layout_leaf_presets_submenu = false;
+                                    root.layout_leaf_presets_submenu_hover = false;
+                                    root.show_layout_leaf_context_menu = false;
                                 }
                             }
                         }
-                        Rectangle { width: 1px; }
+                    }
+                }
+
+                Rectangle {
+                    height: 24px;
+                    border-radius: 3px;
+                    background: presets-action-ta.has-hover || root.show_layout_leaf_presets_submenu ? #363636 : transparent;
+                    Text {
+                        text: "Presets";
+                        color: #ddd;
+                        font-size: 12px;
+                        x: 8px;
+                        vertical-alignment: center;
+                    }
+                    Text {
+                        text: "▸";
+                        color: #888;
+                        font-size: 12px;
+                        width: parent.width - 8px;
+                        horizontal-alignment: right;
+                        vertical-alignment: center;
+                    }
+                    presets-action-ta := TouchArea {
+                        changed has-hover => {
+                            if (self.has-hover) {
+                                root.show_layout_leaf_presets_submenu = true;
+                            }
+                        }
+                        moved => {
+                            root.show_layout_leaf_presets_submenu = true;
+                        }
+                        clicked => {
+                            root.show_layout_leaf_presets_submenu = true;
+                        }
+                    }
+                }
+            }
+
+            if root.show_layout_leaf_presets_submenu : Rectangle {
+                z: 142;
+                x: (root.layout_leaf_context_menu_x + parent.x + parent.width + 4px + self.width <= root.width - 8px) ? parent.width + 4px : -self.width - 4px;
+                y: parent.height - 30px;
+                width: 252px;
+                height: min(140px, root.layout_replace_preset_labels.length * 24px + 12px);
+                border-radius: 6px;
+                background: #262626;
+                border-width: 1px;
+                border-color: #3d3d3d;
+
+                presets-submenu-hover-ta := TouchArea {
+                    changed has-hover => {
+                        root.layout_leaf_presets_submenu_hover = self.has-hover;
+                    }
+                }
+
+                VerticalLayout {
+                    padding: 6px;
+                    spacing: 0px;
+                    for preset-option[index] in root.layout_replace_preset_labels : Rectangle {
+                        height: 24px;
+                        border-radius: 3px;
+                        background: preset-option-ta.has-hover ? #363636 : transparent;
+                        Text {
+                            text: preset-option;
+                            color: #ddd;
+                            font-size: 12px;
+                            x: 10px;
+                            width: max(0px, parent.width - 20px);
+                            overflow: elide;
+                            vertical-alignment: center;
+                        }
+                        preset-option-ta := TouchArea {
+                            clicked => {
+                                let panel-code = root.layout_replace_preset_codes[index];
+                                root.layout_editor_replace_panel_kind = panel-code;
+                                root.layout_replace_selected_leaf(panel-code);
+                                root.show_layout_leaf_presets_submenu = false;
+                                root.layout_leaf_presets_submenu_hover = false;
+                                root.show_layout_leaf_replace_submenu = false;
+                                root.layout_leaf_replace_submenu_hover = false;
+                                root.show_layout_leaf_context_menu = false;
+                            }
+                        }
                     }
                 }
             }
