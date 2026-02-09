@@ -49,6 +49,10 @@ pub struct UiManager {
     current_playing_track_path: Option<PathBuf>,
     current_playing_track_metadata: Option<protocol::DetailedMetadata>,
     playlist_columns: Vec<PlaylistColumnConfig>,
+    playlist_column_content_targets_px: Vec<u32>,
+    playlist_column_widths_px: Vec<u32>,
+    playlist_columns_available_width_px: u32,
+    playlist_columns_content_width_px: u32,
     playback_active: bool,
     processed_message_count: u64,
     lagged_message_count: u64,
@@ -69,9 +73,63 @@ struct TrackMetadata {
     track_number: String,
 }
 
+#[derive(Clone, Copy, Debug)]
+struct ColumnWidthProfile {
+    min_px: u32,
+    preferred_px: u32,
+    max_px: u32,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct CoverArtLookupRequest {
     track_path: Option<PathBuf>,
+}
+
+fn fit_column_widths_to_available_space(
+    widths: &mut [u32],
+    min_widths: &[u32],
+    _max_widths: &[u32],
+    available_width_px: u32,
+) {
+    let mut used_width: u32 = widths.iter().copied().sum();
+    if used_width > available_width_px {
+        let mut deficit = used_width - available_width_px;
+        while deficit > 0 {
+            let adjustable_indices: Vec<usize> = widths
+                .iter()
+                .enumerate()
+                .filter_map(|(index, width)| (*width > min_widths[index]).then_some(index))
+                .collect();
+            if adjustable_indices.is_empty() {
+                break;
+            }
+            let step = (deficit / adjustable_indices.len() as u32).max(1);
+            let mut reduced_this_round = 0u32;
+            for index in adjustable_indices {
+                let shrink_capacity = widths[index] - min_widths[index];
+                if shrink_capacity == 0 {
+                    continue;
+                }
+                let shrink_by = shrink_capacity.min(step).min(deficit);
+                widths[index] -= shrink_by;
+                deficit -= shrink_by;
+                reduced_this_round += shrink_by;
+                if deficit == 0 {
+                    break;
+                }
+            }
+            if reduced_this_round == 0 {
+                break;
+            }
+        }
+    }
+    used_width = widths.iter().copied().sum();
+    debug!(
+        "Playlist column sizing fitted: available={} used={} columns={} (shrink-only)",
+        available_width_px,
+        used_width,
+        widths.len()
+    );
 }
 
 impl UiManager {
@@ -129,6 +187,10 @@ impl UiManager {
             current_playing_track_path: None,
             current_playing_track_metadata: None,
             playlist_columns: config::default_playlist_columns(),
+            playlist_column_content_targets_px: Vec::new(),
+            playlist_column_widths_px: Vec::new(),
+            playlist_columns_available_width_px: 0,
+            playlist_columns_content_width_px: 0,
             playback_active: false,
             processed_message_count: 0,
             lagged_message_count: 0,
@@ -374,6 +436,243 @@ impl UiManager {
             .filter(|column| column.enabled)
             .map(|column| Self::render_column_value(track_metadata, &column.format))
             .collect()
+    }
+
+    fn visible_playlist_columns(&self) -> Vec<&PlaylistColumnConfig> {
+        self.playlist_columns
+            .iter()
+            .filter(|column| column.enabled)
+            .collect()
+    }
+
+    fn column_width_profile(column: &PlaylistColumnConfig) -> ColumnWidthProfile {
+        let normalized_format = column.format.trim().to_ascii_lowercase();
+        let normalized_name = column.name.trim().to_ascii_lowercase();
+
+        if normalized_format == "{track}"
+            || normalized_format == "{track_number}"
+            || normalized_format == "{tracknumber}"
+            || normalized_name == "track #"
+            || normalized_name == "track"
+        {
+            return ColumnWidthProfile {
+                min_px: 52,
+                preferred_px: 68,
+                max_px: 90,
+            };
+        }
+
+        if normalized_format == "{disc}" || normalized_format == "{disc_number}" {
+            return ColumnWidthProfile {
+                min_px: 50,
+                preferred_px: 64,
+                max_px: 84,
+            };
+        }
+
+        if normalized_format == "{year}"
+            || normalized_format == "{date}"
+            || normalized_name == "year"
+        {
+            return ColumnWidthProfile {
+                min_px: 64,
+                preferred_px: 78,
+                max_px: 104,
+            };
+        }
+
+        if normalized_format == "{title}" || normalized_name == "title" {
+            return ColumnWidthProfile {
+                min_px: 140,
+                preferred_px: 230,
+                max_px: 440,
+            };
+        }
+
+        if normalized_format == "{artist}"
+            || normalized_format == "{album_artist}"
+            || normalized_format == "{albumartist}"
+            || normalized_name == "artist"
+            || normalized_name == "album artist"
+        {
+            return ColumnWidthProfile {
+                min_px: 120,
+                preferred_px: 190,
+                max_px: 320,
+            };
+        }
+
+        if normalized_format == "{album}" || normalized_name == "album" {
+            return ColumnWidthProfile {
+                min_px: 140,
+                preferred_px: 220,
+                max_px: 360,
+            };
+        }
+
+        if normalized_format == "{genre}" || normalized_name == "genre" {
+            return ColumnWidthProfile {
+                min_px: 100,
+                preferred_px: 140,
+                max_px: 210,
+            };
+        }
+
+        if normalized_name == "duration"
+            || normalized_name == "time"
+            || normalized_format == "{duration}"
+        {
+            return ColumnWidthProfile {
+                min_px: 78,
+                preferred_px: 92,
+                max_px: 120,
+            };
+        }
+
+        if column.custom {
+            return ColumnWidthProfile {
+                min_px: 110,
+                preferred_px: 180,
+                max_px: 340,
+            };
+        }
+
+        ColumnWidthProfile {
+            min_px: 100,
+            preferred_px: 170,
+            max_px: 300,
+        }
+    }
+
+    fn refresh_playlist_column_content_targets(&mut self) {
+        const SAMPLE_LIMIT: usize = 256;
+        const MAX_MEASURED_CHARS: usize = 80;
+        const CHAR_WIDTH_PX: u32 = 7;
+        const CONTENT_PADDING_PX: u32 = 24;
+
+        let visible_columns = self.visible_playlist_columns();
+        let total_rows = self.track_metadata.len();
+        let stride = if total_rows > SAMPLE_LIMIT {
+            ((total_rows as f32) / (SAMPLE_LIMIT as f32)).ceil() as usize
+        } else {
+            1
+        };
+
+        let mut targets = Vec::with_capacity(visible_columns.len());
+        for column in visible_columns {
+            let profile = Self::column_width_profile(column);
+            let mut char_width_samples = Vec::new();
+
+            let header_chars = column.name.chars().take(MAX_MEASURED_CHARS).count() as u32;
+            char_width_samples.push(header_chars);
+
+            if total_rows > 0 {
+                for metadata in self
+                    .track_metadata
+                    .iter()
+                    .step_by(stride)
+                    .take(SAMPLE_LIMIT)
+                {
+                    let rendered_value = Self::render_column_value(metadata, &column.format);
+                    let measured_chars =
+                        rendered_value.chars().take(MAX_MEASURED_CHARS).count() as u32;
+                    char_width_samples.push(measured_chars);
+                }
+            }
+
+            char_width_samples.sort_unstable();
+            let percentile_index = ((char_width_samples.len() - 1) * 9) / 10;
+            let percentile_chars = char_width_samples
+                .get(percentile_index)
+                .copied()
+                .unwrap_or(0);
+            let measured_width_px = percentile_chars
+                .saturating_mul(CHAR_WIDTH_PX)
+                .saturating_add(CONTENT_PADDING_PX);
+            let preferred = if total_rows == 0 {
+                profile.preferred_px
+            } else {
+                measured_width_px.max(profile.min_px)
+            };
+            targets.push(preferred.clamp(profile.min_px, profile.max_px));
+        }
+
+        self.playlist_column_content_targets_px = targets;
+    }
+
+    fn compute_playlist_column_widths(&self, available_width_px: u32) -> Vec<u32> {
+        const COLUMN_SPACING_PX: u32 = 10;
+        let visible_columns = self.visible_playlist_columns();
+        if visible_columns.is_empty() {
+            return Vec::new();
+        }
+
+        let mut min_widths = Vec::with_capacity(visible_columns.len());
+        let mut max_widths = Vec::with_capacity(visible_columns.len());
+        let mut widths = Vec::with_capacity(visible_columns.len());
+
+        for (index, column) in visible_columns.iter().enumerate() {
+            let profile = Self::column_width_profile(column);
+            let target = self
+                .playlist_column_content_targets_px
+                .get(index)
+                .copied()
+                .unwrap_or(profile.preferred_px)
+                .clamp(profile.min_px, profile.max_px);
+            min_widths.push(profile.min_px);
+            max_widths.push(profile.max_px);
+            widths.push(target);
+        }
+
+        let spacing_total =
+            COLUMN_SPACING_PX.saturating_mul((widths.len().saturating_sub(1)) as u32);
+        let preferred_total: u32 = widths.iter().copied().sum();
+        let available_for_columns = if available_width_px == 0 {
+            preferred_total
+        } else {
+            available_width_px.saturating_sub(spacing_total)
+        };
+
+        fit_column_widths_to_available_space(
+            &mut widths,
+            &min_widths,
+            &max_widths,
+            available_for_columns,
+        );
+
+        widths
+    }
+
+    fn apply_playlist_column_layout(&mut self) {
+        if self.playlist_column_content_targets_px.len() != self.visible_playlist_columns().len() {
+            self.refresh_playlist_column_content_targets();
+        }
+
+        let widths = self.compute_playlist_column_widths(self.playlist_columns_available_width_px);
+        let content_width = widths
+            .iter()
+            .copied()
+            .sum::<u32>()
+            .saturating_add(10u32.saturating_mul((widths.len().saturating_sub(1)) as u32));
+
+        if widths == self.playlist_column_widths_px
+            && content_width == self.playlist_columns_content_width_px
+        {
+            return;
+        }
+
+        self.playlist_column_widths_px = widths.clone();
+        self.playlist_columns_content_width_px = content_width;
+
+        let widths_i32: Vec<i32> = widths
+            .into_iter()
+            .map(|width| width.min(i32::MAX as u32) as i32)
+            .collect();
+        let content_width_i32 = content_width.min(i32::MAX as u32) as i32;
+        let _ = self.ui.upgrade_in_event_loop(move |ui| {
+            ui.set_playlist_column_widths_px(ModelRc::from(Rc::new(VecModel::from(widths_i32))));
+            ui.set_playlist_columns_content_width_px(content_width_i32);
+        });
     }
 
     fn status_text_from_track_metadata(track_metadata: &TrackMetadata) -> slint::SharedString {
@@ -747,6 +1046,8 @@ impl UiManager {
                                 );
                                 track_row_values.push(row_values);
                             }
+                            self.refresh_playlist_column_content_targets();
+                            self.apply_playlist_column_layout();
 
                             let _ = self.ui.upgrade_in_event_loop(move |ui| {
                                 let track_model_strong = ui.get_track_model();
@@ -778,6 +1079,8 @@ impl UiManager {
                             self.track_paths.push(path.clone());
                             let tags = self.read_track_metadata(&path);
                             self.track_metadata.push(tags.clone());
+                            self.refresh_playlist_column_content_targets();
+                            self.apply_playlist_column_layout();
 
                             let row_values =
                                 Self::build_playlist_row_values(&tags, &self.playlist_columns);
@@ -813,6 +1116,8 @@ impl UiManager {
                                     self.track_metadata.remove(index);
                                 }
                             }
+                            self.refresh_playlist_column_content_targets();
+                            self.apply_playlist_column_layout();
 
                             let _ = self.ui.upgrade_in_event_loop(move |ui| {
                                 let track_model_strong = ui.get_track_model();
@@ -1340,6 +1645,8 @@ impl UiManager {
                             config,
                         )) => {
                             self.playlist_columns = config.ui.playlist_columns.clone();
+                            self.refresh_playlist_column_content_targets();
+                            self.apply_playlist_column_layout();
                             let playlist_columns = self.playlist_columns.clone();
                             let track_metadata = self.track_metadata.clone();
 
@@ -1399,6 +1706,14 @@ impl UiManager {
                             });
                         }
                         protocol::Message::Playlist(
+                            protocol::PlaylistMessage::PlaylistViewportWidthChanged(width_px),
+                        ) => {
+                            if self.playlist_columns_available_width_px != width_px {
+                                self.playlist_columns_available_width_px = width_px;
+                                self.apply_playlist_column_layout();
+                            }
+                        }
+                        protocol::Message::Playlist(
                             protocol::PlaylistMessage::RepeatModeChanged(repeat_mode),
                         ) => {
                             debug!("UiManager: Repeat mode changed: {:?}", repeat_mode);
@@ -1425,7 +1740,9 @@ impl UiManager {
 
 #[cfg(test)]
 mod tests {
-    use super::{CoverArtLookupRequest, TrackMetadata, UiManager};
+    use super::{
+        fit_column_widths_to_available_space, CoverArtLookupRequest, TrackMetadata, UiManager,
+    };
     use std::path::PathBuf;
     use std::sync::mpsc;
 
@@ -1568,6 +1885,42 @@ mod tests {
         let metadata = make_meta("Song");
         let rendered = UiManager::render_column_value(&metadata, "{{{unknown}}} - {artist}");
         assert_eq!(rendered, "{} - Song-artist");
+    }
+
+    #[test]
+    fn test_fit_column_widths_shrinks_to_available_width() {
+        let mut widths = vec![220u32, 180u32, 200u32];
+        let mins = vec![100u32, 120u32, 130u32];
+        let maxs = vec![400u32, 360u32, 380u32];
+
+        fit_column_widths_to_available_space(&mut widths, &mins, &maxs, 420);
+
+        assert_eq!(widths.iter().copied().sum::<u32>(), 420);
+        assert!(widths[0] >= mins[0] && widths[0] <= maxs[0]);
+        assert!(widths[1] >= mins[1] && widths[1] <= maxs[1]);
+        assert!(widths[2] >= mins[2] && widths[2] <= maxs[2]);
+    }
+
+    #[test]
+    fn test_fit_column_widths_keeps_targets_when_space_is_available() {
+        let mut widths = vec![120u32, 140u32, 160u32];
+        let mins = vec![90u32, 100u32, 120u32];
+        let maxs = vec![260u32, 280u32, 300u32];
+
+        fit_column_widths_to_available_space(&mut widths, &mins, &maxs, 640);
+
+        assert_eq!(widths, vec![120u32, 140u32, 160u32]);
+    }
+
+    #[test]
+    fn test_fit_column_widths_stops_at_minimums_when_viewport_too_small() {
+        let mut widths = vec![150u32, 170u32, 190u32];
+        let mins = vec![100u32, 120u32, 140u32];
+        let maxs = vec![260u32, 280u32, 300u32];
+
+        fit_column_widths_to_available_space(&mut widths, &mins, &maxs, 120);
+
+        assert_eq!(widths, mins);
     }
 
     fn apply_reorder(paths: &mut Vec<String>, indices: &[usize], gap: usize) -> Vec<usize> {

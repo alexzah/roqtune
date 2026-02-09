@@ -874,6 +874,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }));
     });
 
+    let bus_sender_clone = bus_sender.clone();
+    ui.on_playlist_columns_viewport_resized(move |width_px| {
+        let clamped_width = width_px.max(0) as u32;
+        let _ = bus_sender_clone.send(Message::Playlist(
+            PlaylistMessage::PlaylistViewportWidthChanged(clamped_width),
+        ));
+    });
+
     // Wire up sequence selector
     let bus_sender_clone = bus_sender.clone();
     ui.on_playback_order_changed(move |index| {
@@ -1768,6 +1776,10 @@ mod tests {
         assert!(
             slint_ui.contains("callback reorder_playlist_columns(int, int);"),
             "App window should expose reorder callback"
+        );
+        assert!(
+            slint_ui.contains("callback playlist_columns_viewport_resized(int);"),
+            "App window should expose viewport resize callback for adaptive playlist columns"
         );
     }
 
