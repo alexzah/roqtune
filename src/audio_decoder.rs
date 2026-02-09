@@ -1,6 +1,5 @@
-use crate::protocol::{
-    self, AudioMessage, AudioPacket, Config, ConfigMessage, Message, TrackIdentifier,
-};
+use crate::config::{BufferingConfig, Config, OutputConfig, UiConfig};
+use crate::protocol::{self, AudioMessage, AudioPacket, ConfigMessage, Message, TrackIdentifier};
 use log::{debug, error, warn};
 use rubato::{
     Resampler, SincFixedIn, SincInterpolationParameters, SincInterpolationType, WindowFunction,
@@ -84,7 +83,7 @@ impl DecodeWorker {
             target_sample_rate: 44100,
             target_channels: 2,
             target_bits_per_sample: 16,
-            decoder_request_chunk_ms: protocol::BufferingConfig::default().decoder_request_chunk_ms,
+            decoder_request_chunk_ms: BufferingConfig::default().decoder_request_chunk_ms,
             decode_generation: 0,
         }
     }
@@ -709,14 +708,14 @@ impl AudioDecoder {
                             "AudioDecoder: Syncing with actual device config: sr={}, channels={}",
                             sample_rate, channels
                         );
-                        let dummy_config = protocol::Config {
-                            output: protocol::OutputConfig {
+                        let dummy_config = Config {
+                            output: OutputConfig {
                                 channel_count: channels,
                                 sample_rate_khz: sample_rate,
                                 bits_per_sample: 32,
                             },
-                            ui: protocol::UiConfig::default(),
-                            buffering: protocol::BufferingConfig::default(),
+                            ui: UiConfig::default(),
+                            buffering: BufferingConfig::default(),
                         };
                         self.worker_sender
                             .blocking_send(DecodeWorkItem::ConfigChanged(dummy_config))

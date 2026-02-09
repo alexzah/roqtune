@@ -1,4 +1,4 @@
-import { Button, VerticalBox, StandardTableView, ScrollView, LineEdit, ListView } from "std-widgets.slint";
+import { Button, ComboBox, VerticalBox, StandardTableView, ScrollView, LineEdit, ListView } from "std-widgets.slint";
 
 struct TrackRowData {
     status: string,
@@ -106,6 +106,56 @@ component ConfirmationDialog inherits Rectangle {
                     text: "Delete";
                     primary: true;
                     clicked => { root.confirmed(); }
+                }
+            }
+        }
+    }
+}
+
+component InfoDialog inherits Rectangle {
+    callback dismissed();
+    in property <string> message: "";
+    in property <bool> is-visible: false;
+
+    visible: is-visible;
+    background: #00000080;
+
+    TouchArea {}
+
+    Rectangle {
+        width: 430px;
+        height: 180px;
+        background: #282828;
+        border-width: 1px;
+        border-color: #444;
+        border-radius: 4px;
+
+        VerticalLayout {
+            padding: 16px;
+            spacing: 14px;
+
+            Text {
+                text: "Restart Required";
+                color: #eee;
+                font-size: 16px;
+                font-weight: 700;
+                horizontal-alignment: left;
+            }
+
+            Text {
+                text: root.message;
+                color: #ddd;
+                font-size: 13px;
+                wrap: word-wrap;
+                vertical-stretch: 1;
+            }
+
+            HorizontalLayout {
+                Rectangle { horizontal-stretch: 1; }
+                Button {
+                    text: "OK";
+                    primary: true;
+                    clicked => { root.dismissed(); }
                 }
             }
         }
@@ -275,6 +325,61 @@ component PlayerButton inherits Rectangle {
         clicked => {
             if (root.enabled) {
                 root.clicked();
+            }
+        }
+    }
+}
+
+component SettingsDropdownControl inherits Rectangle {
+    in property <string> label;
+    in property <[string]> options;
+    in-out property <int> selected_index;
+    in-out property <string> custom_value;
+    in property <string> custom_placeholder;
+
+    property <bool> use_custom: root.options.length > 0 && root.selected_index == root.options.length - 1;
+    height: root.use_custom ? 76px : 40px;
+
+    VerticalLayout {
+        spacing: 4px;
+
+        HorizontalLayout {
+            spacing: 12px;
+
+            Text {
+                text: root.label;
+                color: #ddd;
+                font-size: 12px;
+                width: 220px;
+                vertical-alignment: center;
+                horizontal-alignment: left;
+            }
+
+            Rectangle {
+                horizontal-stretch: 1;
+                height: 34px;
+                background: transparent;
+                ComboBox {
+                    width: parent.width;
+                    height: parent.height;
+                    model: root.options;
+                    current-index <=> root.selected_index;
+                }
+            }
+        }
+
+        if root.use_custom : HorizontalLayout {
+            spacing: 12px;
+            Rectangle {
+                width: 220px;
+            }
+            LineEdit {
+                horizontal-stretch: 1;
+                text <=> root.custom_value;
+                placeholder-text: root.custom_placeholder;
+            }
+            Rectangle {
+                width: 32px;
             }
         }
     }
@@ -480,6 +585,14 @@ export component AppWindow inherits Window {
                                 horizontal-alignment: center;
                                 vertical-alignment: center;
                             }
+                        }
+                    }
+
+                    PlayerButton {
+                        icon-text: "⚙";
+                        font-size: 18px;
+                        clicked => {
+                            root.open_settings();
                         }
                     }
 
@@ -1010,6 +1123,163 @@ export component AppWindow inherits Window {
         }
     }
 
+    restart_notice_overlay := InfoDialog {
+        is-visible: root.show_settings_restart_notice;
+        message: root.settings_restart_notice_message;
+        dismissed => {
+            root.show_settings_restart_notice = false;
+            root.refocus_main();
+        }
+    }
+
+    if root.show_settings_dialog : Rectangle {
+        background: #00000088;
+        z: 100;
+
+        TouchArea {}
+
+        Rectangle {
+            width: min(root.width - 40px, 620px);
+            height: min(root.height - 40px, 320px);
+            x: (parent.width - self.width) / 2;
+            y: (parent.height - self.height) / 2;
+            border-radius: 6px;
+            background: #242424;
+            border-width: 1px;
+            border-color: #3b3b3b;
+
+            VerticalLayout {
+                padding: 16px;
+                spacing: 12px;
+
+                HorizontalLayout {
+                    Text {
+                        text: "Settings";
+                        color: #eee;
+                        font-size: 16px;
+                        font-weight: 700;
+                        vertical-alignment: center;
+                    }
+                    Rectangle { horizontal-stretch: 1; }
+                    PlayerButton {
+                        icon-text: "✕";
+                        font-size: 14px;
+                        clicked => {
+                            root.show_settings_dialog = false;
+                        }
+                    }
+                }
+
+                Rectangle { height: 1px; background: #343434; }
+
+                VerticalLayout {
+                    vertical-stretch: 1;
+                    spacing: 8px;
+
+                    SettingsDropdownControl {
+                        label: "Output Channels";
+                        options: root.settings_channel_options;
+                        selected_index <=> root.settings_channel_index;
+                        custom_value <=> root.settings_channel_custom_value;
+                        custom_placeholder: "Enter channel count";
+                    }
+
+                    SettingsDropdownControl {
+                        label: "Output Sample Rate";
+                        options: root.settings_sample_rate_options;
+                        selected_index <=> root.settings_sample_rate_index;
+                        custom_value <=> root.settings_sample_rate_custom_value;
+                        custom_placeholder: "Enter sample rate in Hz";
+                    }
+
+                    SettingsDropdownControl {
+                        label: "Output Bits Per Sample";
+                        options: root.settings_bits_per_sample_options;
+                        selected_index <=> root.settings_bits_per_sample_index;
+                        custom_value <=> root.settings_bits_per_sample_custom_value;
+                        custom_placeholder: "Enter bit depth";
+                    }
+
+                    Rectangle {
+                        height: 40px;
+                        border-radius: 3px;
+                        background: #202020;
+                        border-width: 1px;
+                        border-color: #333;
+
+                        HorizontalLayout {
+                            padding-left: 12px;
+                            padding-right: 12px;
+                            spacing: 10px;
+
+                            Text {
+                                text: "Show Album Art";
+                                color: #ddd;
+                                font-size: 12px;
+                                width: 220px;
+                                vertical-alignment: center;
+                                horizontal-alignment: left;
+                            }
+
+                            Rectangle { horizontal-stretch: 1; }
+
+                            Rectangle {
+                                width: 42px;
+                                height: 22px;
+                                border-radius: 11px;
+                                background: root.settings_show_album_art ? #2a6def : #444;
+                                animate background { duration: 120ms; }
+                                Rectangle {
+                                    width: 18px;
+                                    height: 18px;
+                                    y: 2px;
+                                    x: root.settings_show_album_art ? 22px : 2px;
+                                    border-radius: 9px;
+                                    background: #f4f4f4;
+                                    animate x { duration: 120ms; easing: ease-out; }
+                                }
+                                TouchArea {
+                                    clicked => {
+                                        root.settings_show_album_art = !root.settings_show_album_art;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+
+                Rectangle { height: 1px; background: #343434; }
+
+                HorizontalLayout {
+                    spacing: 10px;
+                    Rectangle { horizontal-stretch: 1; }
+                    Button {
+                        text: "Cancel";
+                        clicked => {
+                            root.show_settings_dialog = false;
+                        }
+                    }
+                    Button {
+                        text: "Apply";
+                        primary: true;
+                        clicked => {
+                            root.apply_settings(
+                                root.settings_channel_index,
+                                root.settings_sample_rate_index,
+                                root.settings_bits_per_sample_index,
+                                root.settings_show_album_art,
+                                root.settings_channel_custom_value,
+                                root.settings_sample_rate_custom_value,
+                                root.settings_bits_per_sample_custom_value
+                            );
+                            root.show_settings_dialog = false;
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     // Properties to communicate with Rust
     in-out property <[StandardListViewItem]> playlists: [];
     in-out property <int> active_playlist_index: 0;
@@ -1044,6 +1314,19 @@ export component AppWindow inherits Window {
     in-out property <float> position-percentage: 0.0; // between 0.0 and 1.0
     in-out property <float> volume-level: 1.0; // between 0.0 and 1.0
     in-out property <string> technical-info: "";
+    in-out property <bool> show_settings_dialog: false;
+    in-out property <bool> show_settings_restart_notice: false;
+    in-out property <string> settings_restart_notice_message: "";
+    in-out property <[string]> settings_channel_options: [];
+    in-out property <[string]> settings_sample_rate_options: [];
+    in-out property <[string]> settings_bits_per_sample_options: [];
+    in-out property <int> settings_channel_index: 0;
+    in-out property <int> settings_sample_rate_index: 0;
+    in-out property <int> settings_bits_per_sample_index: 0;
+    in-out property <string> settings_channel_custom_value: "";
+    in-out property <string> settings_sample_rate_custom_value: "";
+    in-out property <string> settings_bits_per_sample_custom_value: "";
+    in-out property <bool> settings_show_album_art: true;
     
     // Computed time display strings (derived from integer ms values)
     // These are computed in Slint to avoid Rust string allocations
@@ -1089,4 +1372,6 @@ export component AppWindow inherits Window {
     callback switch_playlist(int);
     callback rename_playlist(int, string);
     callback delete_playlist(int);
+    callback open_settings();
+    callback apply_settings(int, int, int, bool, string, string, string);
 }
