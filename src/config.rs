@@ -1,5 +1,7 @@
 //! Persistent application configuration model and defaults.
 
+use crate::layout::LayoutConfig;
+
 /// Root configuration persisted to `music_player.toml`.
 #[derive(Debug, Clone, Default, serde::Deserialize, serde::Serialize)]
 pub struct Config {
@@ -36,6 +38,8 @@ pub struct OutputConfig {
 pub struct UiConfig {
     #[serde(default = "default_true")]
     pub show_album_art: bool,
+    #[serde(default)]
+    pub layout: LayoutConfig,
     #[serde(default = "default_playlist_columns")]
     pub playlist_columns: Vec<PlaylistColumnConfig>,
     #[serde(default = "default_window_width")]
@@ -91,6 +95,7 @@ impl Default for UiConfig {
     fn default() -> Self {
         Self {
             show_album_art: true,
+            layout: LayoutConfig::default(),
             playlist_columns: default_playlist_columns(),
             window_width: default_window_width(),
             window_height: default_window_height(),
@@ -192,7 +197,7 @@ pub fn default_playlist_columns() -> Vec<PlaylistColumnConfig> {
 
 #[cfg(test)]
 mod tests {
-    use super::{default_playlist_columns, BufferingConfig, Config};
+    use super::{default_playlist_columns, BufferingConfig, Config, LayoutConfig};
 
     #[test]
     fn test_default_config_has_expected_values_and_auto_output_modes() {
@@ -208,6 +213,7 @@ mod tests {
         assert!(config.output.bits_per_sample_auto);
 
         assert!(config.ui.show_album_art);
+        assert_eq!(config.ui.layout, LayoutConfig::default());
         assert_eq!(config.ui.playlist_columns, default_playlist_columns());
         assert_eq!(config.ui.window_width, 900);
         assert_eq!(config.ui.window_height, 650);
@@ -242,6 +248,7 @@ decoder_request_chunk_ms = 1500
         assert!(parsed.output.channel_count_auto);
         assert!(parsed.output.sample_rate_auto);
         assert!(parsed.output.bits_per_sample_auto);
+        assert_eq!(parsed.ui.layout, LayoutConfig::default());
         assert_eq!(parsed.ui.playlist_columns, default_playlist_columns());
         assert_eq!(parsed.ui.window_width, 900);
         assert_eq!(parsed.ui.window_height, 650);

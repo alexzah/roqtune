@@ -2,6 +2,7 @@ mod audio_decoder;
 mod audio_player;
 mod config;
 mod db_manager;
+mod layout;
 mod playlist;
 mod playlist_manager;
 mod protocol;
@@ -19,6 +20,10 @@ use audio_player::AudioPlayer;
 use config::{BufferingConfig, Config, OutputConfig, PlaylistColumnConfig, UiConfig};
 use cpal::traits::{DeviceTrait, HostTrait};
 use db_manager::DbManager;
+use layout::{
+    compute_layout_metrics, sanitize_layout_config, LayoutConfig, LayoutPanelKind, REGION_BOTTOM,
+    REGION_CENTER, REGION_COUNT, REGION_LEFT, REGION_RIGHT, REGION_TOP,
+};
 use log::{debug, info};
 use playlist::Playlist;
 use playlist_manager::PlaylistManager;
@@ -342,6 +347,11 @@ fn sanitize_config(config: Config) -> Config {
     let clamped_bits = config.output.bits_per_sample.clamp(8, 32);
     let clamped_window_width = config.ui.window_width.clamp(600, 10_000);
     let clamped_window_height = config.ui.window_height.clamp(400, 10_000);
+    let sanitized_layout = sanitize_layout_config(
+        &config.ui.layout,
+        clamped_window_width,
+        clamped_window_height,
+    );
     let clamped_volume = config.ui.volume.clamp(0.0, 1.0);
     let clamped_low_watermark = config.buffering.player_low_watermark_ms.max(500);
     let clamped_target = config
@@ -365,6 +375,7 @@ fn sanitize_config(config: Config) -> Config {
         },
         ui: UiConfig {
             show_album_art: true,
+            layout: sanitized_layout,
             playlist_columns: sanitized_playlist_columns,
             window_width: clamped_window_width,
             window_height: clamped_window_height,
@@ -731,6 +742,150 @@ fn sidebar_width_from_window(window_width_px: u32) -> i32 {
     proportional.clamp(180, 300) as i32
 }
 
+fn workspace_size_snapshot(workspace_size: &Arc<Mutex<(u32, u32)>>) -> (u32, u32) {
+    let (width, height) = *workspace_size
+        .lock()
+        .expect("layout workspace size lock poisoned");
+    (width.max(1), height.max(1))
+}
+
+fn layout_panel_options() -> Vec<slint::SharedString> {
+    vec![
+        "None".into(),
+        "Control Bar".into(),
+        "Playlist Switcher".into(),
+        "Track List".into(),
+        "Album Art Pane".into(),
+        "Spacer".into(),
+        "Status Bar".into(),
+    ]
+}
+
+fn layout_region_codes(layout: &LayoutConfig) -> Vec<i32> {
+    layout
+        .region_panels
+        .iter()
+        .map(|panel| panel.to_code())
+        .collect()
+}
+
+fn layout_config_with_region_codes(
+    previous: &LayoutConfig,
+    region_codes: [i32; REGION_COUNT],
+) -> LayoutConfig {
+    LayoutConfig {
+        region_panels: [
+            LayoutPanelKind::from_code(region_codes[REGION_TOP]),
+            LayoutPanelKind::from_code(region_codes[REGION_LEFT]),
+            LayoutPanelKind::from_code(region_codes[REGION_CENTER]),
+            LayoutPanelKind::from_code(region_codes[REGION_RIGHT]),
+            LayoutPanelKind::from_code(region_codes[REGION_BOTTOM]),
+        ],
+        top_size_px: previous.top_size_px,
+        left_size_px: previous.left_size_px,
+        right_size_px: previous.right_size_px,
+        bottom_size_px: previous.bottom_size_px,
+    }
+}
+
+fn with_layout_region_size(previous: &LayoutConfig, region: i32, size_px: i32) -> LayoutConfig {
+    let clamped_size = size_px.max(8) as u32;
+    let mut updated = previous.clone();
+    match region {
+        x if x == REGION_TOP as i32 => updated.top_size_px = clamped_size,
+        x if x == REGION_LEFT as i32 => updated.left_size_px = clamped_size,
+        x if x == REGION_RIGHT as i32 => updated.right_size_px = clamped_size,
+        x if x == REGION_BOTTOM as i32 => updated.bottom_size_px = clamped_size,
+        _ => {}
+    }
+    updated
+}
+
+fn persist_config_file(config: &Config, path: &std::path::Path) {
+    match toml::to_string(config) {
+        Ok(config_text) => {
+            if let Err(err) = std::fs::write(path, config_text) {
+                log::error!("Failed to persist config to {}: {}", path.display(), err);
+            }
+        }
+        Err(err) => {
+            log::error!("Failed to serialize config: {}", err);
+        }
+    }
+}
+
+fn apply_layout_to_ui(
+    ui: &AppWindow,
+    config: &Config,
+    workspace_width_px: u32,
+    workspace_height_px: u32,
+) {
+    let sanitized_layout =
+        sanitize_layout_config(&config.ui.layout, workspace_width_px, workspace_height_px);
+    let metrics =
+        compute_layout_metrics(&sanitized_layout, workspace_width_px, workspace_height_px);
+
+    ui.set_layout_region_panel_kinds(ModelRc::from(Rc::new(VecModel::from(layout_region_codes(
+        &sanitized_layout,
+    )))));
+    ui.set_layout_editor_top_panel_kind(sanitized_layout.region_panels[REGION_TOP].to_code());
+    ui.set_layout_editor_left_panel_kind(sanitized_layout.region_panels[REGION_LEFT].to_code());
+    ui.set_layout_editor_center_panel_kind(sanitized_layout.region_panels[REGION_CENTER].to_code());
+    ui.set_layout_editor_right_panel_kind(sanitized_layout.region_panels[REGION_RIGHT].to_code());
+    ui.set_layout_editor_bottom_panel_kind(sanitized_layout.region_panels[REGION_BOTTOM].to_code());
+
+    ui.set_layout_control_bar_region(metrics.panel_regions.control_bar);
+    ui.set_layout_playlist_switcher_region(metrics.panel_regions.playlist_switcher);
+    ui.set_layout_track_list_region(metrics.panel_regions.track_list);
+    ui.set_layout_album_art_region(metrics.panel_regions.album_art);
+    ui.set_layout_status_bar_region(metrics.panel_regions.status_bar);
+
+    ui.set_layout_region_x_px(ModelRc::from(Rc::new(VecModel::from(
+        metrics.region_x_px.to_vec(),
+    ))));
+    ui.set_layout_region_y_px(ModelRc::from(Rc::new(VecModel::from(
+        metrics.region_y_px.to_vec(),
+    ))));
+    ui.set_layout_region_width_px(ModelRc::from(Rc::new(VecModel::from(
+        metrics.region_width_px.to_vec(),
+    ))));
+    ui.set_layout_region_height_px(ModelRc::from(Rc::new(VecModel::from(
+        metrics.region_height_px.to_vec(),
+    ))));
+    ui.set_layout_region_visible(ModelRc::from(Rc::new(VecModel::from(
+        metrics.region_visible.to_vec(),
+    ))));
+
+    ui.set_layout_top_size_px(sanitized_layout.top_size_px as i32);
+    ui.set_layout_left_size_px(sanitized_layout.left_size_px as i32);
+    ui.set_layout_right_size_px(sanitized_layout.right_size_px as i32);
+    ui.set_layout_bottom_size_px(sanitized_layout.bottom_size_px as i32);
+
+    ui.set_layout_splitter_top_visible(metrics.splitter_top.visible);
+    ui.set_layout_splitter_top_x_px(metrics.splitter_top.x);
+    ui.set_layout_splitter_top_y_px(metrics.splitter_top.y);
+    ui.set_layout_splitter_top_width_px(metrics.splitter_top.width);
+    ui.set_layout_splitter_top_height_px(metrics.splitter_top.height);
+
+    ui.set_layout_splitter_left_visible(metrics.splitter_left.visible);
+    ui.set_layout_splitter_left_x_px(metrics.splitter_left.x);
+    ui.set_layout_splitter_left_y_px(metrics.splitter_left.y);
+    ui.set_layout_splitter_left_width_px(metrics.splitter_left.width);
+    ui.set_layout_splitter_left_height_px(metrics.splitter_left.height);
+
+    ui.set_layout_splitter_right_visible(metrics.splitter_right.visible);
+    ui.set_layout_splitter_right_x_px(metrics.splitter_right.x);
+    ui.set_layout_splitter_right_y_px(metrics.splitter_right.y);
+    ui.set_layout_splitter_right_width_px(metrics.splitter_right.width);
+    ui.set_layout_splitter_right_height_px(metrics.splitter_right.height);
+
+    ui.set_layout_splitter_bottom_visible(metrics.splitter_bottom.visible);
+    ui.set_layout_splitter_bottom_x_px(metrics.splitter_bottom.x);
+    ui.set_layout_splitter_bottom_y_px(metrics.splitter_bottom.y);
+    ui.set_layout_splitter_bottom_width_px(metrics.splitter_bottom.width);
+    ui.set_layout_splitter_bottom_height_px(metrics.splitter_bottom.height);
+}
+
 fn apply_playlist_columns_to_ui(ui: &AppWindow, config: &Config) {
     let visible_headers: Vec<slint::SharedString> = config
         .ui
@@ -775,10 +930,19 @@ fn should_apply_custom_column_delete(
     pending_index >= 0 && pending_index as usize == requested_index
 }
 
-fn apply_config_to_ui(ui: &AppWindow, config: &Config, output_options: &OutputSettingsOptions) {
+fn apply_config_to_ui(
+    ui: &AppWindow,
+    config: &Config,
+    output_options: &OutputSettingsOptions,
+    workspace_width_px: u32,
+    workspace_height_px: u32,
+) {
     ui.set_show_album_art(true);
     ui.set_volume_level(config.ui.volume);
     ui.set_sidebar_width_px(sidebar_width_from_window(config.ui.window_width));
+    ui.set_layout_panel_options(ModelRc::from(Rc::new(VecModel::from(
+        layout_panel_options(),
+    ))));
 
     let auto_device_label = if output_options.auto_device_name.is_empty() {
         "Unavailable".to_string()
@@ -877,6 +1041,7 @@ fn apply_config_to_ui(ui: &AppWindow, config: &Config, output_options: &OutputSe
     ui.set_settings_sample_rate_custom_value(config.output.sample_rate_khz.to_string().into());
     ui.set_settings_bits_per_sample_custom_value(config.output.bits_per_sample.to_string().into());
     apply_playlist_columns_to_ui(ui, config);
+    apply_layout_to_ui(ui, config, workspace_width_px, workspace_height_px);
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -938,11 +1103,23 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         config.ui.window_height as f32,
     ));
     ui.set_sidebar_width_px(sidebar_width_from_window(config.ui.window_width));
+    let initial_workspace_width_px = config.ui.window_width.max(1);
+    let initial_workspace_height_px = config.ui.window_height.max(1);
 
     setup_app_state_associations(&ui, &ui_state);
-    apply_config_to_ui(&ui, &config, &initial_output_options);
+    apply_config_to_ui(
+        &ui,
+        &config,
+        &initial_output_options,
+        initial_workspace_width_px,
+        initial_workspace_height_px,
+    );
     let config_state = Arc::new(Mutex::new(config.clone()));
     let output_options = Arc::new(Mutex::new(initial_output_options.clone()));
+    let layout_workspace_size = Arc::new(Mutex::new((
+        initial_workspace_width_px,
+        initial_workspace_height_px,
+    )));
     let last_runtime_signature = Arc::new(Mutex::new(OutputRuntimeSignature::from_output(
         &runtime_config.output,
     )));
@@ -1303,25 +1480,227 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     });
 
     let config_state_clone = Arc::clone(&config_state);
+    let layout_workspace_size_clone = Arc::clone(&layout_workspace_size);
     let ui_handle_clone = ui.as_weak().clone();
     ui.on_window_resized(move |width_px, height_px| {
         let width = (width_px.max(600) as u32).min(10_000);
         let height = (height_px.max(400) as u32).min(10_000);
+        let workspace_width_px = width.max(1);
+        let workspace_height_px = height.max(1);
+        {
+            let mut workspace_size = layout_workspace_size_clone
+                .lock()
+                .expect("layout workspace size lock poisoned");
+            *workspace_size = (workspace_width_px, workspace_height_px);
+        }
+        let config_snapshot = {
+            let mut state = config_state_clone
+                .lock()
+                .expect("config state lock poisoned");
+            if state.ui.window_width != width || state.ui.window_height != height {
+                state.ui.window_width = width;
+                state.ui.window_height = height;
+            }
+            state.clone()
+        };
         if let Some(ui) = ui_handle_clone.upgrade() {
             ui.set_sidebar_width_px(sidebar_width_from_window(width));
+            apply_layout_to_ui(
+                &ui,
+                &config_snapshot,
+                workspace_width_px,
+                workspace_height_px,
+            );
         }
-        let mut state = config_state_clone
-            .lock()
-            .expect("config state lock poisoned");
-        if state.ui.window_width != width || state.ui.window_height != height {
-            state.ui.window_width = width;
-            state.ui.window_height = height;
+    });
+
+    let config_state_clone = Arc::clone(&config_state);
+    let layout_workspace_size_clone = Arc::clone(&layout_workspace_size);
+    let ui_handle_clone = ui.as_weak().clone();
+    ui.on_layout_workspace_resized(move |width_px, height_px| {
+        let workspace_width_px = width_px.max(1) as u32;
+        let workspace_height_px = height_px.max(1) as u32;
+        {
+            let mut workspace_size = layout_workspace_size_clone
+                .lock()
+                .expect("layout workspace size lock poisoned");
+            *workspace_size = (workspace_width_px, workspace_height_px);
+        }
+        let config_snapshot = {
+            let state = config_state_clone
+                .lock()
+                .expect("config state lock poisoned");
+            state.clone()
+        };
+        if let Some(ui) = ui_handle_clone.upgrade() {
+            apply_layout_to_ui(
+                &ui,
+                &config_snapshot,
+                workspace_width_px,
+                workspace_height_px,
+            );
+        }
+    });
+
+    let config_state_clone = Arc::clone(&config_state);
+    let ui_handle_clone = ui.as_weak().clone();
+    ui.on_open_layout_editor(move || {
+        let config_snapshot = {
+            let state = config_state_clone
+                .lock()
+                .expect("config state lock poisoned");
+            state.clone()
+        };
+        if let Some(ui) = ui_handle_clone.upgrade() {
+            ui.set_layout_editor_top_panel_kind(
+                config_snapshot.ui.layout.region_panels[REGION_TOP].to_code(),
+            );
+            ui.set_layout_editor_left_panel_kind(
+                config_snapshot.ui.layout.region_panels[REGION_LEFT].to_code(),
+            );
+            ui.set_layout_editor_center_panel_kind(
+                config_snapshot.ui.layout.region_panels[REGION_CENTER].to_code(),
+            );
+            ui.set_layout_editor_right_panel_kind(
+                config_snapshot.ui.layout.region_panels[REGION_RIGHT].to_code(),
+            );
+            ui.set_layout_editor_bottom_panel_kind(
+                config_snapshot.ui.layout.region_panels[REGION_BOTTOM].to_code(),
+            );
+            ui.set_layout_edit_mode(true);
+            ui.set_show_layout_editor_dialog(true);
+        }
+    });
+
+    let config_state_clone = Arc::clone(&config_state);
+    let config_file_clone = config_file.clone();
+    let layout_workspace_size_clone = Arc::clone(&layout_workspace_size);
+    let ui_handle_clone = ui.as_weak().clone();
+    ui.on_apply_layout_editor(move |top, left, center, right, bottom| {
+        let previous = {
+            let state = config_state_clone
+                .lock()
+                .expect("config state lock poisoned");
+            state.clone()
+        };
+        let updated_layout = layout_config_with_region_codes(
+            &previous.ui.layout,
+            [top, left, center, right, bottom],
+        );
+        let next = sanitize_config(Config {
+            output: previous.output.clone(),
+            ui: UiConfig {
+                show_album_art: previous.ui.show_album_art,
+                layout: updated_layout,
+                playlist_columns: previous.ui.playlist_columns.clone(),
+                window_width: previous.ui.window_width,
+                window_height: previous.ui.window_height,
+                volume: previous.ui.volume,
+            },
+            buffering: previous.buffering.clone(),
+        });
+        {
+            let mut state = config_state_clone
+                .lock()
+                .expect("config state lock poisoned");
+            *state = next.clone();
+        }
+        persist_config_file(&next, &config_file_clone);
+        let (workspace_width_px, workspace_height_px) =
+            workspace_size_snapshot(&layout_workspace_size_clone);
+        if let Some(ui) = ui_handle_clone.upgrade() {
+            apply_layout_to_ui(&ui, &next, workspace_width_px, workspace_height_px);
+        }
+    });
+
+    let config_state_clone = Arc::clone(&config_state);
+    let layout_workspace_size_clone = Arc::clone(&layout_workspace_size);
+    let ui_handle_clone = ui.as_weak().clone();
+    ui.on_preview_layout_region_size(move |region, size_px| {
+        let next = {
+            let state = config_state_clone
+                .lock()
+                .expect("config state lock poisoned");
+            let updated_layout = with_layout_region_size(&state.ui.layout, region, size_px);
+            sanitize_config(Config {
+                output: state.output.clone(),
+                ui: UiConfig {
+                    show_album_art: state.ui.show_album_art,
+                    layout: updated_layout,
+                    playlist_columns: state.ui.playlist_columns.clone(),
+                    window_width: state.ui.window_width,
+                    window_height: state.ui.window_height,
+                    volume: state.ui.volume,
+                },
+                buffering: state.buffering.clone(),
+            })
+        };
+        {
+            let mut state = config_state_clone
+                .lock()
+                .expect("config state lock poisoned");
+            state.ui.layout = next.ui.layout.clone();
+        }
+        let (workspace_width_px, workspace_height_px) =
+            workspace_size_snapshot(&layout_workspace_size_clone);
+        if let Some(ui) = ui_handle_clone.upgrade() {
+            apply_layout_to_ui(&ui, &next, workspace_width_px, workspace_height_px);
+        }
+    });
+
+    let config_state_clone = Arc::clone(&config_state);
+    let config_file_clone = config_file.clone();
+    ui.on_commit_layout_region_size(move |_region, _size_px| {
+        let snapshot = {
+            let state = config_state_clone
+                .lock()
+                .expect("config state lock poisoned");
+            state.clone()
+        };
+        persist_config_file(&snapshot, &config_file_clone);
+    });
+
+    let config_state_clone = Arc::clone(&config_state);
+    let config_file_clone = config_file.clone();
+    let layout_workspace_size_clone = Arc::clone(&layout_workspace_size);
+    let ui_handle_clone = ui.as_weak().clone();
+    ui.on_reset_layout_default(move || {
+        let previous = {
+            let state = config_state_clone
+                .lock()
+                .expect("config state lock poisoned");
+            state.clone()
+        };
+        let next = sanitize_config(Config {
+            output: previous.output.clone(),
+            ui: UiConfig {
+                show_album_art: previous.ui.show_album_art,
+                layout: LayoutConfig::default(),
+                playlist_columns: previous.ui.playlist_columns.clone(),
+                window_width: previous.ui.window_width,
+                window_height: previous.ui.window_height,
+                volume: previous.ui.volume,
+            },
+            buffering: previous.buffering.clone(),
+        });
+        {
+            let mut state = config_state_clone
+                .lock()
+                .expect("config state lock poisoned");
+            *state = next.clone();
+        }
+        persist_config_file(&next, &config_file_clone);
+        let (workspace_width_px, workspace_height_px) =
+            workspace_size_snapshot(&layout_workspace_size_clone);
+        if let Some(ui) = ui_handle_clone.upgrade() {
+            apply_layout_to_ui(&ui, &next, workspace_width_px, workspace_height_px);
         }
     });
 
     // Wire up settings open handler
     let config_state_clone = Arc::clone(&config_state);
     let output_options_clone = Arc::clone(&output_options);
+    let layout_workspace_size_clone = Arc::clone(&layout_workspace_size);
     let ui_handle_clone = ui.as_weak().clone();
     ui.on_open_settings(move || {
         let current_config = {
@@ -1336,8 +1715,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 .expect("output options lock poisoned");
             options.clone()
         };
+        let (workspace_width_px, workspace_height_px) =
+            workspace_size_snapshot(&layout_workspace_size_clone);
         if let Some(ui) = ui_handle_clone.upgrade() {
-            apply_config_to_ui(&ui, &current_config, &options_snapshot);
+            apply_config_to_ui(
+                &ui,
+                &current_config,
+                &options_snapshot,
+                workspace_width_px,
+                workspace_height_px,
+            );
             ui.set_show_settings_dialog(true);
         }
     });
@@ -1348,6 +1735,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let output_options_clone = Arc::clone(&output_options);
     let last_runtime_signature_clone = Arc::clone(&last_runtime_signature);
     let config_file_clone = config_file.clone();
+    let layout_workspace_size_clone = Arc::clone(&layout_workspace_size);
     let ui_handle_clone = ui.as_weak().clone();
     ui.on_apply_settings(
         move |output_device_index,
@@ -1446,6 +1834,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 },
                 ui: UiConfig {
                     show_album_art: true,
+                    layout: previous_config.ui.layout.clone(),
                     playlist_columns: previous_config.ui.playlist_columns.clone(),
                     window_width: previous_config.ui.window_width,
                     window_height: previous_config.ui.window_height,
@@ -1454,8 +1843,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 buffering: previous_config.buffering.clone(),
             });
 
+            let (workspace_width_px, workspace_height_px) =
+                workspace_size_snapshot(&layout_workspace_size_clone);
             if let Some(ui) = ui_handle_clone.upgrade() {
-                apply_config_to_ui(&ui, &next_config, &options_snapshot);
+                apply_config_to_ui(
+                    &ui,
+                    &next_config,
+                    &options_snapshot,
+                    workspace_width_px,
+                    workspace_height_px,
+                );
             }
 
             {
@@ -1525,6 +1922,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             output: previous_config.output.clone(),
             ui: UiConfig {
                 show_album_art: previous_config.ui.show_album_art,
+                layout: previous_config.ui.layout.clone(),
                 playlist_columns: updated_columns,
                 window_width: previous_config.ui.window_width,
                 window_height: previous_config.ui.window_height,
@@ -1620,6 +2018,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             output: previous_config.output.clone(),
             ui: UiConfig {
                 show_album_art: previous_config.ui.show_album_art,
+                layout: previous_config.ui.layout.clone(),
                 playlist_columns: updated_columns,
                 window_width: previous_config.ui.window_width,
                 window_height: previous_config.ui.window_height,
@@ -1717,6 +2116,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             output: previous_config.output.clone(),
             ui: UiConfig {
                 show_album_art: previous_config.ui.show_album_art,
+                layout: previous_config.ui.layout.clone(),
                 playlist_columns: updated_columns,
                 window_width: previous_config.ui.window_width,
                 window_height: previous_config.ui.window_height,
@@ -1808,6 +2208,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             output: previous_config.output.clone(),
             ui: UiConfig {
                 show_album_art: previous_config.ui.show_album_art,
+                layout: previous_config.ui.layout.clone(),
                 playlist_columns: updated_columns,
                 window_width: previous_config.ui.window_width,
                 window_height: previous_config.ui.window_height,
@@ -1957,6 +2358,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let config_state_clone = Arc::clone(&config_state);
     let output_options_clone = Arc::clone(&output_options);
     let ui_handle_clone = ui.as_weak().clone();
+    let layout_workspace_size_clone = Arc::clone(&layout_workspace_size);
     let last_runtime_signature_clone = Arc::clone(&last_runtime_signature);
     thread::spawn(move || loop {
         match device_event_receiver.blocking_recv() {
@@ -1996,9 +2398,17 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 let ui_weak = ui_handle_clone.clone();
                 let config_for_ui = persisted_config.clone();
                 let options_for_ui = detected_options.clone();
+                let (workspace_width_px, workspace_height_px) =
+                    workspace_size_snapshot(&layout_workspace_size_clone);
                 let _ = slint::invoke_from_event_loop(move || {
                     if let Some(ui) = ui_weak.upgrade() {
-                        apply_config_to_ui(&ui, &config_for_ui, &options_for_ui);
+                        apply_config_to_ui(
+                            &ui,
+                            &config_for_ui,
+                            &options_for_ui,
+                            workspace_width_px,
+                            workspace_height_px,
+                        );
                     }
                 });
             }
@@ -2022,6 +2432,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         output: state.output.clone(),
                         ui: UiConfig {
                             show_album_art: state.ui.show_album_art,
+                            layout: state.ui.layout.clone(),
                             playlist_columns: reordered_columns,
                             window_width: state.ui.window_width,
                             window_height: state.ui.window_height,
@@ -2054,9 +2465,17 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 let ui_weak = ui_handle_clone.clone();
                 let config_for_ui = next_config;
                 let options_for_ui = options_snapshot;
+                let (workspace_width_px, workspace_height_px) =
+                    workspace_size_snapshot(&layout_workspace_size_clone);
                 let _ = slint::invoke_from_event_loop(move || {
                     if let Some(ui) = ui_weak.upgrade() {
-                        apply_config_to_ui(&ui, &config_for_ui, &options_for_ui);
+                        apply_config_to_ui(
+                            &ui,
+                            &config_for_ui,
+                            &options_for_ui,
+                            workspace_width_px,
+                            workspace_height_px,
+                        );
                     }
                 });
             }
@@ -2116,6 +2535,7 @@ mod tests {
     use std::collections::BTreeSet;
 
     use crate::config::{BufferingConfig, Config, OutputConfig, PlaylistColumnConfig, UiConfig};
+    use crate::layout::LayoutConfig;
 
     use super::{
         apply_column_order_keys, choose_preferred_u16, choose_preferred_u32,
@@ -2260,8 +2680,60 @@ mod tests {
             "Sidebar width should be controllable by viewport-driven logic"
         );
         assert!(
-            slint_ui.contains("min-width: 0px;"),
-            "Playlist pane should allow internal clipping instead of forcing sidebar shrink"
+            slint_ui.contains("track-list-panel := Rectangle"),
+            "Track list should be rendered as a movable docking panel"
+        );
+    }
+
+    #[test]
+    fn test_layout_editor_and_splitter_callbacks_are_wired_in_slint() {
+        let slint_ui = include_str!("music_player.slint");
+        assert!(
+            slint_ui.contains("callback open_layout_editor();"),
+            "Layout editor open callback should be declared"
+        );
+        assert!(
+            slint_ui.contains("callback apply_layout_editor(int, int, int, int, int);"),
+            "Layout editor apply callback should be declared"
+        );
+        assert!(
+            slint_ui.contains("callback preview_layout_region_size(int, int);"),
+            "Splitter preview callback should be declared"
+        );
+        assert!(
+            slint_ui.contains("callback commit_layout_region_size(int, int);"),
+            "Splitter commit callback should be declared"
+        );
+        assert!(
+            slint_ui.contains("callback layout_workspace_resized(int, int);"),
+            "Workspace resize callback should be declared"
+        );
+        assert!(
+            slint_ui.contains("in-out property <[int]> layout_region_panel_kinds:"),
+            "Layout region assignment property should exist"
+        );
+        assert!(
+            slint_ui.contains("component StatusBar inherits Rectangle"),
+            "Status bar should be extracted into a reusable component"
+        );
+        assert!(
+            slint_ui.contains("layout_editor_bottom_panel_kind: 6"),
+            "Bottom region should default to the status bar panel kind"
+        );
+        assert!(
+            slint_ui.contains("event.text == Key.F6")
+                && slint_ui.contains("event.modifiers.control")
+                && slint_ui.contains("root.open_layout_editor();"),
+            "Layout editor should be reachable via keyboard shortcut"
+        );
+        assert!(
+            slint_ui.contains("event.text == Key.Escape && root.layout_edit_mode"),
+            "Escape should exit layout edit mode quickly"
+        );
+        assert!(
+            slint_ui.contains("root.show_layout_editor_dialog = false;")
+                && slint_ui.contains("text: \"Close\""),
+            "Layout dialog should be closable without forcing edit-mode exit"
         );
     }
 
@@ -2512,6 +2984,7 @@ mod tests {
             },
             ui: UiConfig {
                 show_album_art: true,
+                layout: LayoutConfig::default(),
                 playlist_columns: crate::config::default_playlist_columns(),
                 window_width: 900,
                 window_height: 650,
