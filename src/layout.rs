@@ -12,6 +12,7 @@ pub const SPLITTER_THICKNESS_PX: i32 = 2;
 #[serde(rename_all = "snake_case")]
 pub enum LayoutPanelKind {
     None,
+    ButtonCluster,
     ImportButtonCluster,
     TransportButtonCluster,
     UtilityButtonCluster,
@@ -32,7 +33,7 @@ impl LayoutPanelKind {
     pub fn to_code(self) -> i32 {
         match self {
             Self::None => 0,
-            Self::ImportButtonCluster => 1,
+            Self::ButtonCluster => 1,
             Self::TransportButtonCluster => 2,
             Self::UtilityButtonCluster => 3,
             Self::VolumeSlider => 4,
@@ -43,6 +44,7 @@ impl LayoutPanelKind {
             Self::AlbumArtViewer => 9,
             Self::Spacer => 10,
             Self::StatusBar => 11,
+            Self::ImportButtonCluster => 12,
             Self::ControlBar => 2,
             Self::AlbumArtPane => 9,
         }
@@ -51,7 +53,7 @@ impl LayoutPanelKind {
     /// Builds a panel kind from a Slint integer code.
     pub fn from_code(code: i32) -> Self {
         match code {
-            1 => Self::ImportButtonCluster,
+            1 => Self::ButtonCluster,
             2 => Self::TransportButtonCluster,
             3 => Self::UtilityButtonCluster,
             4 => Self::VolumeSlider,
@@ -62,12 +64,14 @@ impl LayoutPanelKind {
             9 => Self::AlbumArtViewer,
             10 => Self::Spacer,
             11 => Self::StatusBar,
+            12 => Self::ImportButtonCluster,
             _ => Self::None,
         }
     }
 
     fn min_size_px(self) -> (u32, u32) {
         match self {
+            Self::ButtonCluster => (32, 32),
             Self::ImportButtonCluster => (32, 32),
             Self::TransportButtonCluster => (180, 32),
             Self::UtilityButtonCluster => (150, 32),
@@ -268,15 +272,15 @@ fn default_region_panels() -> [LayoutPanelKind; 5] {
 fn default_control_stack_subtree(next: &mut dyn FnMut() -> String) -> LayoutNode {
     let left_import = LayoutNode::Leaf {
         id: next(),
-        panel: LayoutPanelKind::ImportButtonCluster,
+        panel: LayoutPanelKind::ButtonCluster,
     };
     let center_transport = LayoutNode::Leaf {
         id: next(),
-        panel: LayoutPanelKind::TransportButtonCluster,
+        panel: LayoutPanelKind::ButtonCluster,
     };
     let right_utility = LayoutNode::Leaf {
         id: next(),
-        panel: LayoutPanelKind::UtilityButtonCluster,
+        panel: LayoutPanelKind::ButtonCluster,
     };
     let right_volume = LayoutNode::Leaf {
         id: next(),
@@ -630,6 +634,9 @@ fn normalize_node(
                     let mut next = || id_gen.next_id("l");
                     return normalize_node(default_album_subtree(&mut next), id_gen, valid_ids);
                 }
+                LayoutPanelKind::ImportButtonCluster
+                | LayoutPanelKind::TransportButtonCluster
+                | LayoutPanelKind::UtilityButtonCluster => LayoutPanelKind::ButtonCluster,
                 other => other,
             };
             if mapped_panel == LayoutPanelKind::None {
@@ -1177,9 +1184,8 @@ mod tests {
     #[test]
     fn replace_leaf_allows_duplicate_functional_panels() {
         let config = LayoutConfig::default();
-        let transport_leaf =
-            leaf_id_for_panel(&config.root, LayoutPanelKind::TransportButtonCluster)
-                .expect("transport cluster leaf should exist");
+        let transport_leaf = leaf_id_for_panel(&config.root, LayoutPanelKind::ButtonCluster)
+            .expect("button cluster leaf should exist");
         let updated = replace_leaf_panel(&config, &transport_leaf, LayoutPanelKind::TrackList)
             .expect("replace should allow duplicate functional panels");
         let metrics = compute_tree_layout_metrics(&updated, 900, 650, SPLITTER_THICKNESS_PX);

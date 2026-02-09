@@ -42,6 +42,8 @@ pub struct UiConfig {
     pub show_layout_edit_intro: bool,
     #[serde(default)]
     pub layout: LayoutConfig,
+    #[serde(default)]
+    pub button_cluster_instances: Vec<ButtonClusterInstanceConfig>,
     #[serde(default = "default_playlist_columns")]
     pub playlist_columns: Vec<PlaylistColumnConfig>,
     #[serde(default = "default_window_width")]
@@ -63,6 +65,15 @@ pub struct PlaylistColumnConfig {
     pub enabled: bool,
     #[serde(default)]
     pub custom: bool,
+}
+
+/// Per-leaf button cluster configuration persisted with layout preferences.
+#[derive(Debug, Clone, serde::Deserialize, serde::Serialize, PartialEq, Eq)]
+pub struct ButtonClusterInstanceConfig {
+    /// Layout leaf identifier that owns this cluster instance.
+    pub leaf_id: String,
+    /// Ordered action ids rendered in the cluster.
+    pub actions: Vec<i32>,
 }
 
 /// Tuning knobs for decode/playback buffering.
@@ -99,6 +110,7 @@ impl Default for UiConfig {
             show_album_art: true,
             show_layout_edit_intro: true,
             layout: LayoutConfig::default(),
+            button_cluster_instances: Vec::new(),
             playlist_columns: default_playlist_columns(),
             window_width: default_window_width(),
             window_height: default_window_height(),
@@ -218,6 +230,7 @@ mod tests {
         assert!(config.ui.show_album_art);
         assert!(config.ui.show_layout_edit_intro);
         assert_eq!(config.ui.layout, LayoutConfig::default());
+        assert!(config.ui.button_cluster_instances.is_empty());
         assert_eq!(config.ui.playlist_columns, default_playlist_columns());
         assert_eq!(config.ui.window_width, 900);
         assert_eq!(config.ui.window_height, 650);
@@ -253,6 +266,7 @@ decoder_request_chunk_ms = 1500
         assert!(parsed.output.sample_rate_auto);
         assert!(parsed.output.bits_per_sample_auto);
         assert_eq!(parsed.ui.layout, LayoutConfig::default());
+        assert!(parsed.ui.button_cluster_instances.is_empty());
         assert!(parsed.ui.show_layout_edit_intro);
         assert_eq!(parsed.ui.playlist_columns, default_playlist_columns());
         assert_eq!(parsed.ui.window_width, 900);

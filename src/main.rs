@@ -17,13 +17,16 @@ use std::{
 
 use audio_decoder::AudioDecoder;
 use audio_player::AudioPlayer;
-use config::{BufferingConfig, Config, OutputConfig, PlaylistColumnConfig, UiConfig};
+use config::{
+    BufferingConfig, ButtonClusterInstanceConfig, Config, OutputConfig, PlaylistColumnConfig,
+    UiConfig,
+};
 use cpal::traits::{DeviceTrait, HostTrait};
 use db_manager::DbManager;
 use layout::{
     add_root_leaf_if_empty, compute_tree_layout_metrics, delete_leaf, first_leaf_id,
     replace_leaf_panel, sanitize_layout_config, set_split_ratio, split_leaf, LayoutConfig,
-    LayoutPanelKind, SplitAxis, SPLITTER_THICKNESS_PX,
+    LayoutNode, LayoutPanelKind, SplitAxis, SPLITTER_THICKNESS_PX,
 };
 use log::{debug, info};
 use playlist::Playlist;
@@ -82,22 +85,9 @@ impl OutputRuntimeSignature {
     }
 }
 
-#[derive(Debug, Clone)]
-struct ControlBarClusters {
-    import: Vec<i32>,
-    transport: Vec<i32>,
-    utility: Vec<i32>,
-}
-
-impl Default for ControlBarClusters {
-    fn default() -> Self {
-        Self {
-            import: vec![1],
-            transport: vec![2, 3, 4, 5, 6],
-            utility: vec![7, 8, 9, 10],
-        }
-    }
-}
+const IMPORT_CLUSTER_PRESET: [i32; 1] = [1];
+const TRANSPORT_CLUSTER_PRESET: [i32; 5] = [2, 3, 4, 5, 6];
+const UTILITY_CLUSTER_PRESET: [i32; 4] = [7, 8, 9, 10];
 
 fn filter_common_u16(detected: &BTreeSet<u16>, common_values: &[u16], fallback: u16) -> Vec<u16> {
     let mut filtered: Vec<u16> = common_values
@@ -370,6 +360,8 @@ fn sanitize_config(config: Config) -> Config {
         clamped_window_width,
         clamped_window_height,
     );
+    let sanitized_button_cluster_instances =
+        sanitize_button_cluster_instances(&sanitized_layout, &config.ui.button_cluster_instances);
     let clamped_volume = config.ui.volume.clamp(0.0, 1.0);
     let clamped_low_watermark = config.buffering.player_low_watermark_ms.max(500);
     let clamped_target = config
@@ -395,6 +387,7 @@ fn sanitize_config(config: Config) -> Config {
             show_album_art: true,
             show_layout_edit_intro: config.ui.show_layout_edit_intro,
             layout: sanitized_layout,
+            button_cluster_instances: sanitized_button_cluster_instances,
             playlist_columns: sanitized_playlist_columns,
             window_width: clamped_window_width,
             window_height: clamped_window_height,
@@ -407,6 +400,103 @@ fn sanitize_config(config: Config) -> Config {
             decoder_request_chunk_ms: clamped_decoder_chunk,
         },
     }
+}
+
+fn collect_button_cluster_leaf_ids(node: &LayoutNode, out: &mut Vec<String>) {
+    match node {
+        LayoutNode::Leaf { id, panel } => {
+            if *panel == LayoutPanelKind::ButtonCluster {
+                out.push(id.clone());
+            }
+        }
+        LayoutNode::Split { first, second, .. } => {
+            collect_button_cluster_leaf_ids(first, out);
+            collect_button_cluster_leaf_ids(second, out);
+        }
+        LayoutNode::Empty => {}
+    }
+}
+
+fn button_cluster_leaf_ids(layout: &LayoutConfig) -> Vec<String> {
+    let mut ids = Vec::new();
+    collect_button_cluster_leaf_ids(&layout.root, &mut ids);
+    ids
+}
+
+fn collect_all_leaf_ids(node: &LayoutNode, out: &mut Vec<String>) {
+    match node {
+        LayoutNode::Leaf { id, .. } => out.push(id.clone()),
+        LayoutNode::Split { first, second, .. } => {
+            collect_all_leaf_ids(first, out);
+            collect_all_leaf_ids(second, out);
+        }
+        LayoutNode::Empty => {}
+    }
+}
+
+fn layout_leaf_ids(layout: &LayoutConfig) -> Vec<String> {
+    let mut ids = Vec::new();
+    collect_all_leaf_ids(&layout.root, &mut ids);
+    ids
+}
+
+fn newly_added_leaf_ids(previous_layout: &LayoutConfig, next_layout: &LayoutConfig) -> Vec<String> {
+    let previous_ids: HashSet<String> = layout_leaf_ids(previous_layout).into_iter().collect();
+    layout_leaf_ids(next_layout)
+        .into_iter()
+        .filter(|id| !previous_ids.contains(id))
+        .collect()
+}
+
+fn sanitize_button_actions(actions: &[i32]) -> Vec<i32> {
+    actions
+        .iter()
+        .copied()
+        .filter(|action| (1..=10).contains(action))
+        .collect()
+}
+
+fn default_button_cluster_actions_by_index(index: usize) -> Vec<i32> {
+    match index {
+        0 => IMPORT_CLUSTER_PRESET.to_vec(),
+        1 => TRANSPORT_CLUSTER_PRESET.to_vec(),
+        2 => UTILITY_CLUSTER_PRESET.to_vec(),
+        _ => Vec::new(),
+    }
+}
+
+fn sanitize_button_cluster_instances(
+    layout: &LayoutConfig,
+    instances: &[ButtonClusterInstanceConfig],
+) -> Vec<ButtonClusterInstanceConfig> {
+    let leaf_ids = button_cluster_leaf_ids(layout);
+    let had_existing_instances = !instances.is_empty();
+    let mut actions_by_leaf: HashMap<&str, Vec<i32>> = HashMap::new();
+    for instance in instances {
+        let leaf_id = instance.leaf_id.trim();
+        if leaf_id.is_empty() {
+            continue;
+        }
+        actions_by_leaf.insert(leaf_id, sanitize_button_actions(&instance.actions));
+    }
+
+    leaf_ids
+        .iter()
+        .enumerate()
+        .map(|(index, leaf_id)| ButtonClusterInstanceConfig {
+            leaf_id: leaf_id.clone(),
+            actions: actions_by_leaf
+                .get(leaf_id.as_str())
+                .cloned()
+                .unwrap_or_else(|| {
+                    if had_existing_instances {
+                        Vec::new()
+                    } else {
+                        default_button_cluster_actions_by_index(index)
+                    }
+                }),
+        })
+        .collect()
 }
 
 fn normalize_column_format(format: &str) -> String {
@@ -771,9 +861,9 @@ fn workspace_size_snapshot(workspace_size: &Arc<Mutex<(u32, u32)>>) -> (u32, u32
 fn layout_panel_options() -> Vec<slint::SharedString> {
     vec![
         "None".into(),
-        "Import Cluster".into(),
-        "Transport Cluster".into(),
-        "Utility Cluster".into(),
+        "Button Cluster".into(),
+        "Transport Button Cluster".into(),
+        "Utility Button Cluster".into(),
         "Volume Slider".into(),
         "Seek Bar".into(),
         "Playlist Switcher".into(),
@@ -782,19 +872,92 @@ fn layout_panel_options() -> Vec<slint::SharedString> {
         "Album Art Viewer".into(),
         "Spacer".into(),
         "Status Bar".into(),
+        "Import Button Cluster".into(),
     ]
 }
 
-fn apply_control_bar_clusters_to_ui(ui: &AppWindow, clusters: &ControlBarClusters) {
-    ui.set_control_cluster_import_buttons(ModelRc::from(Rc::new(VecModel::from(
-        clusters.import.clone(),
-    ))));
-    ui.set_control_cluster_transport_buttons(ModelRc::from(Rc::new(VecModel::from(
-        clusters.transport.clone(),
-    ))));
-    ui.set_control_cluster_utility_buttons(ModelRc::from(Rc::new(VecModel::from(
-        clusters.utility.clone(),
-    ))));
+fn resolve_layout_panel_selection(panel_code: i32) -> (LayoutPanelKind, Option<Vec<i32>>) {
+    match panel_code {
+        2 => (
+            LayoutPanelKind::ButtonCluster,
+            Some(TRANSPORT_CLUSTER_PRESET.to_vec()),
+        ),
+        3 => (
+            LayoutPanelKind::ButtonCluster,
+            Some(UTILITY_CLUSTER_PRESET.to_vec()),
+        ),
+        12 => (
+            LayoutPanelKind::ButtonCluster,
+            Some(IMPORT_CLUSTER_PRESET.to_vec()),
+        ),
+        _ => (LayoutPanelKind::from_code(panel_code), None),
+    }
+}
+
+fn button_cluster_actions_for_leaf(
+    instances: &[ButtonClusterInstanceConfig],
+    leaf_id: &str,
+) -> Vec<i32> {
+    instances
+        .iter()
+        .find(|instance| instance.leaf_id == leaf_id)
+        .map(|instance| instance.actions.clone())
+        .unwrap_or_default()
+}
+
+fn upsert_button_cluster_actions_for_leaf(
+    instances: &mut Vec<ButtonClusterInstanceConfig>,
+    leaf_id: &str,
+    actions: Vec<i32>,
+) {
+    if let Some(existing) = instances
+        .iter_mut()
+        .find(|instance| instance.leaf_id == leaf_id)
+    {
+        existing.actions = sanitize_button_actions(&actions);
+        return;
+    }
+    instances.push(ButtonClusterInstanceConfig {
+        leaf_id: leaf_id.to_string(),
+        actions: sanitize_button_actions(&actions),
+    });
+}
+
+fn remove_button_cluster_instance_for_leaf(
+    instances: &mut Vec<ButtonClusterInstanceConfig>,
+    leaf_id: &str,
+) {
+    instances.retain(|instance| instance.leaf_id != leaf_id);
+}
+
+fn apply_control_cluster_menu_actions_for_leaf(ui: &AppWindow, config: &Config, leaf_id: &str) {
+    let actions = button_cluster_actions_for_leaf(&config.ui.button_cluster_instances, leaf_id);
+    ui.set_control_cluster_menu_actions(ModelRc::from(Rc::new(VecModel::from(actions))));
+}
+
+fn apply_button_cluster_views_to_ui(
+    ui: &AppWindow,
+    metrics: &layout::TreeLayoutMetrics,
+    config: &Config,
+) {
+    let views: Vec<LayoutButtonClusterPanelModel> = metrics
+        .leaves
+        .iter()
+        .filter(|leaf| leaf.panel == LayoutPanelKind::ButtonCluster)
+        .map(|leaf| LayoutButtonClusterPanelModel {
+            leaf_id: leaf.id.clone().into(),
+            x_px: leaf.x,
+            y_px: leaf.y,
+            width_px: leaf.width,
+            height_px: leaf.height,
+            visible: true,
+            actions: ModelRc::from(Rc::new(VecModel::from(button_cluster_actions_for_leaf(
+                &config.ui.button_cluster_instances,
+                &leaf.id,
+            )))),
+        })
+        .collect();
+    ui.set_layout_button_cluster_panels(ModelRc::from(Rc::new(VecModel::from(views))));
 }
 
 fn persist_config_file(config: &Config, path: &std::path::Path) {
@@ -817,6 +980,7 @@ fn with_updated_layout(previous: &Config, layout: LayoutConfig) -> Config {
             show_album_art: previous.ui.show_album_art,
             show_layout_edit_intro: previous.ui.show_layout_edit_intro,
             layout,
+            button_cluster_instances: previous.ui.button_cluster_instances.clone(),
             playlist_columns: previous.ui.playlist_columns.clone(),
             window_width: previous.ui.window_width,
             window_height: previous.ui.window_height,
@@ -912,6 +1076,7 @@ fn apply_layout_to_ui(
     ui.set_layout_region_visible(ModelRc::from(Rc::new(VecModel::from(region_visible))));
     ui.set_layout_splitters(ModelRc::from(Rc::new(VecModel::from(splitter_model))));
     ui.set_layout_selected_leaf_index(selected_leaf_index);
+    apply_button_cluster_views_to_ui(ui, &metrics, config);
 }
 
 fn apply_playlist_columns_to_ui(ui: &AppWindow, config: &Config) {
@@ -1135,13 +1300,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let initial_workspace_height_px = config.ui.window_height.max(1);
 
     setup_app_state_associations(&ui, &ui_state);
-    let control_bar_clusters = Arc::new(Mutex::new(ControlBarClusters::default()));
-    {
-        let clusters = control_bar_clusters
-            .lock()
-            .expect("control bar clusters lock poisoned");
-        apply_control_bar_clusters_to_ui(&ui, &clusters);
-    }
     apply_config_to_ui(
         &ui,
         &config,
@@ -1515,27 +1673,100 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let _ = bus_sender_clone.send(Message::Playback(PlaybackMessage::SetVolume(clamped)));
     });
 
-    let control_bar_clusters_clone = Arc::clone(&control_bar_clusters);
+    let config_state_clone = Arc::clone(&config_state);
     let ui_handle_clone = ui.as_weak().clone();
-    ui.on_add_control_cluster_button(move |cluster_id, action_id| {
-        if !(1..=10).contains(&action_id) {
+    ui.on_open_control_cluster_menu_for_leaf(move |leaf_id, x_px, y_px| {
+        if leaf_id.trim().is_empty() {
             return;
         }
-        let updated = {
-            let mut clusters = control_bar_clusters_clone
+        let config_snapshot = {
+            let state = config_state_clone
                 .lock()
-                .expect("control bar clusters lock poisoned");
-            let target = match cluster_id {
-                0 => &mut clusters.import,
-                1 => &mut clusters.transport,
-                2 => &mut clusters.utility,
-                _ => return,
-            };
-            target.push(action_id);
-            clusters.clone()
+                .expect("config state lock poisoned");
+            state.clone()
         };
         if let Some(ui) = ui_handle_clone.upgrade() {
-            apply_control_bar_clusters_to_ui(&ui, &updated);
+            ui.set_control_cluster_menu_target_leaf_id(leaf_id.clone());
+            ui.set_control_cluster_menu_x(x_px.max(8) as f32);
+            ui.set_control_cluster_menu_y(y_px.max(8) as f32);
+            apply_control_cluster_menu_actions_for_leaf(&ui, &config_snapshot, &leaf_id);
+            ui.set_show_control_cluster_menu(true);
+        }
+    });
+
+    let config_state_clone = Arc::clone(&config_state);
+    let layout_workspace_size_clone = Arc::clone(&layout_workspace_size);
+    let config_file_clone = config_file.clone();
+    let ui_handle_clone = ui.as_weak().clone();
+    ui.on_add_control_cluster_button(move |leaf_id, action_id| {
+        if leaf_id.trim().is_empty() || !(1..=10).contains(&action_id) {
+            return;
+        }
+        let (next_config, workspace_width_px, workspace_height_px) = {
+            let mut state = config_state_clone
+                .lock()
+                .expect("config state lock poisoned");
+            let mut next_config = state.clone();
+            let mut actions =
+                button_cluster_actions_for_leaf(&next_config.ui.button_cluster_instances, &leaf_id);
+            actions.push(action_id);
+            upsert_button_cluster_actions_for_leaf(
+                &mut next_config.ui.button_cluster_instances,
+                &leaf_id,
+                actions,
+            );
+            next_config = sanitize_config(next_config);
+            *state = next_config.clone();
+            let (workspace_width_px, workspace_height_px) =
+                workspace_size_snapshot(&layout_workspace_size_clone);
+            (next_config, workspace_width_px, workspace_height_px)
+        };
+        persist_config_file(&next_config, &config_file_clone);
+        if let Some(ui) = ui_handle_clone.upgrade() {
+            apply_layout_to_ui(&ui, &next_config, workspace_width_px, workspace_height_px);
+            ui.set_control_cluster_menu_target_leaf_id(leaf_id.clone());
+            apply_control_cluster_menu_actions_for_leaf(&ui, &next_config, &leaf_id);
+            ui.set_show_control_cluster_menu(true);
+        }
+    });
+
+    let config_state_clone = Arc::clone(&config_state);
+    let layout_workspace_size_clone = Arc::clone(&layout_workspace_size);
+    let config_file_clone = config_file.clone();
+    let ui_handle_clone = ui.as_weak().clone();
+    ui.on_remove_control_cluster_button(move |leaf_id, button_index| {
+        if leaf_id.trim().is_empty() || button_index < 0 {
+            return;
+        }
+        let index = button_index as usize;
+        let (next_config, workspace_width_px, workspace_height_px) = {
+            let mut state = config_state_clone
+                .lock()
+                .expect("config state lock poisoned");
+            let mut next_config = state.clone();
+            let mut actions =
+                button_cluster_actions_for_leaf(&next_config.ui.button_cluster_instances, &leaf_id);
+            if index >= actions.len() {
+                return;
+            }
+            actions.remove(index);
+            upsert_button_cluster_actions_for_leaf(
+                &mut next_config.ui.button_cluster_instances,
+                &leaf_id,
+                actions,
+            );
+            next_config = sanitize_config(next_config);
+            *state = next_config.clone();
+            let (workspace_width_px, workspace_height_px) =
+                workspace_size_snapshot(&layout_workspace_size_clone);
+            (next_config, workspace_width_px, workspace_height_px)
+        };
+        persist_config_file(&next_config, &config_file_clone);
+        if let Some(ui) = ui_handle_clone.upgrade() {
+            apply_layout_to_ui(&ui, &next_config, workspace_width_px, workspace_height_px);
+            ui.set_control_cluster_menu_target_leaf_id(leaf_id.clone());
+            apply_control_cluster_menu_actions_for_leaf(&ui, &next_config, &leaf_id);
+            ui.set_show_control_cluster_menu(true);
         }
     });
 
@@ -1747,7 +1978,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let Some(selected_leaf_id) = selected_leaf_id else {
             return;
         };
-        let panel = LayoutPanelKind::from_code(panel_code);
+        let (panel, preset_actions) = resolve_layout_panel_selection(panel_code);
         let Some(mut updated_layout) =
             replace_leaf_panel(&previous.ui.layout, &selected_leaf_id, panel)
         else {
@@ -1756,9 +1987,24 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         updated_layout.selected_leaf_id = if panel == LayoutPanelKind::None {
             first_leaf_id(&updated_layout.root)
         } else {
-            Some(selected_leaf_id)
+            Some(selected_leaf_id.clone())
         };
-        let next = with_updated_layout(&previous, updated_layout);
+        let mut next = with_updated_layout(&previous, updated_layout);
+        if panel == LayoutPanelKind::ButtonCluster {
+            if let Some(actions) = preset_actions {
+                upsert_button_cluster_actions_for_leaf(
+                    &mut next.ui.button_cluster_instances,
+                    &selected_leaf_id,
+                    actions,
+                );
+            }
+        } else {
+            remove_button_cluster_instance_for_leaf(
+                &mut next.ui.button_cluster_instances,
+                &selected_leaf_id,
+            );
+        }
+        next = sanitize_config(next);
         push_layout_undo_snapshot(&layout_undo_stack_clone, &previous.ui.layout);
         {
             let mut state = config_state_clone
@@ -1794,18 +2040,32 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         } else {
             SplitAxis::Vertical
         };
-        let panel = LayoutPanelKind::from_code(panel_code);
+        let (panel, preset_actions) = resolve_layout_panel_selection(panel_code);
         let Some(mut updated_layout) =
             split_leaf(&previous.ui.layout, &selected_leaf_id, axis, panel)
         else {
             return;
         };
+        let added_leaf_ids = newly_added_leaf_ids(&previous.ui.layout, &updated_layout);
+        let added_leaf_id = added_leaf_ids.first().cloned();
         updated_layout.selected_leaf_id = if panel == LayoutPanelKind::None {
-            Some(selected_leaf_id)
+            Some(selected_leaf_id.clone())
         } else {
-            first_leaf_id(&updated_layout.root)
+            added_leaf_id
+                .clone()
+                .or_else(|| first_leaf_id(&updated_layout.root))
         };
-        let next = with_updated_layout(&previous, updated_layout);
+        let mut next = with_updated_layout(&previous, updated_layout);
+        if panel == LayoutPanelKind::ButtonCluster {
+            if let (Some(new_leaf_id), Some(actions)) = (added_leaf_id, preset_actions) {
+                upsert_button_cluster_actions_for_leaf(
+                    &mut next.ui.button_cluster_instances,
+                    &new_leaf_id,
+                    actions,
+                );
+            }
+        }
+        next = sanitize_config(next);
         push_layout_undo_snapshot(&layout_undo_stack_clone, &previous.ui.layout);
         {
             let mut state = config_state_clone
@@ -1860,7 +2120,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let layout_workspace_size_clone = Arc::clone(&layout_workspace_size);
     let ui_handle_clone = ui.as_weak().clone();
     ui.on_layout_add_root_leaf(move |panel_code| {
-        let panel = LayoutPanelKind::from_code(panel_code);
+        let (panel, preset_actions) = resolve_layout_panel_selection(panel_code);
         let (workspace_width_px, workspace_height_px) =
             workspace_size_snapshot(&layout_workspace_size_clone);
         let previous = {
@@ -1870,8 +2130,20 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             state.clone()
         };
         let mut updated_layout = add_root_leaf_if_empty(&previous.ui.layout, panel);
+        let added_leaf_ids = newly_added_leaf_ids(&previous.ui.layout, &updated_layout);
+        let added_leaf_id = added_leaf_ids.first().cloned();
         updated_layout.selected_leaf_id = first_leaf_id(&updated_layout.root);
-        let next = with_updated_layout(&previous, updated_layout);
+        let mut next = with_updated_layout(&previous, updated_layout);
+        if panel == LayoutPanelKind::ButtonCluster {
+            if let (Some(new_leaf_id), Some(actions)) = (added_leaf_id, preset_actions) {
+                upsert_button_cluster_actions_for_leaf(
+                    &mut next.ui.button_cluster_instances,
+                    &new_leaf_id,
+                    actions,
+                );
+            }
+        }
+        next = sanitize_config(next);
         push_layout_undo_snapshot(&layout_undo_stack_clone, &previous.ui.layout);
         {
             let mut state = config_state_clone
@@ -2141,6 +2413,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     show_album_art: true,
                     show_layout_edit_intro: previous_config.ui.show_layout_edit_intro,
                     layout: previous_config.ui.layout.clone(),
+                    button_cluster_instances: previous_config.ui.button_cluster_instances.clone(),
                     playlist_columns: previous_config.ui.playlist_columns.clone(),
                     window_width: previous_config.ui.window_width,
                     window_height: previous_config.ui.window_height,
@@ -2230,6 +2503,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 show_album_art: previous_config.ui.show_album_art,
                 show_layout_edit_intro: previous_config.ui.show_layout_edit_intro,
                 layout: previous_config.ui.layout.clone(),
+                button_cluster_instances: previous_config.ui.button_cluster_instances.clone(),
                 playlist_columns: updated_columns,
                 window_width: previous_config.ui.window_width,
                 window_height: previous_config.ui.window_height,
@@ -2327,6 +2601,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 show_album_art: previous_config.ui.show_album_art,
                 show_layout_edit_intro: previous_config.ui.show_layout_edit_intro,
                 layout: previous_config.ui.layout.clone(),
+                button_cluster_instances: previous_config.ui.button_cluster_instances.clone(),
                 playlist_columns: updated_columns,
                 window_width: previous_config.ui.window_width,
                 window_height: previous_config.ui.window_height,
@@ -2426,6 +2701,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 show_album_art: previous_config.ui.show_album_art,
                 show_layout_edit_intro: previous_config.ui.show_layout_edit_intro,
                 layout: previous_config.ui.layout.clone(),
+                button_cluster_instances: previous_config.ui.button_cluster_instances.clone(),
                 playlist_columns: updated_columns,
                 window_width: previous_config.ui.window_width,
                 window_height: previous_config.ui.window_height,
@@ -2519,6 +2795,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 show_album_art: previous_config.ui.show_album_art,
                 show_layout_edit_intro: previous_config.ui.show_layout_edit_intro,
                 layout: previous_config.ui.layout.clone(),
+                button_cluster_instances: previous_config.ui.button_cluster_instances.clone(),
                 playlist_columns: updated_columns,
                 window_width: previous_config.ui.window_width,
                 window_height: previous_config.ui.window_height,
@@ -2744,6 +3021,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             show_album_art: state.ui.show_album_art,
                             show_layout_edit_intro: state.ui.show_layout_edit_intro,
                             layout: state.ui.layout.clone(),
+                            button_cluster_instances: state.ui.button_cluster_instances.clone(),
                             playlist_columns: reordered_columns,
                             window_width: state.ui.window_width,
                             window_height: state.ui.window_height,
@@ -3052,8 +3330,16 @@ mod tests {
             "Album art panel should be split into viewer and metadata components"
         );
         assert!(
-            slint_ui.contains("callback add_control_cluster_button(int, int);"),
+            slint_ui.contains("callback open_control_cluster_menu_for_leaf(string, int, int);"),
+            "Control cluster menu open callback should be declared"
+        );
+        assert!(
+            slint_ui.contains("callback add_control_cluster_button(string, int);"),
             "Control cluster add callback should be declared"
+        );
+        assert!(
+            slint_ui.contains("callback remove_control_cluster_button(string, int);"),
+            "Control cluster remove callback should be declared"
         );
         assert!(
             slint_ui.contains("event.text == Key.F6")
@@ -3321,6 +3607,7 @@ mod tests {
                 show_album_art: true,
                 show_layout_edit_intro: true,
                 layout: LayoutConfig::default(),
+                button_cluster_instances: Vec::new(),
                 playlist_columns: crate::config::default_playlist_columns(),
                 window_width: 900,
                 window_height: 650,

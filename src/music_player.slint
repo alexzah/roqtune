@@ -20,6 +20,16 @@ struct LayoutSplitterModel {
     track_length_px: int,
 }
 
+struct LayoutButtonClusterPanelModel {
+    leaf_id: string,
+    x_px: int,
+    y_px: int,
+    width_px: int,
+    height_px: int,
+    visible: bool,
+    actions: [int],
+}
+
 component ContextMenu inherits PopupWindow {
     callback rename();
     callback delete();
@@ -433,12 +443,12 @@ component PlayerButton inherits Rectangle {
 
 component ControlActionButton inherits Rectangle {
     in property <int> action-id: 0;
-    in property <int> cluster-id: 0;
+    in property <string> cluster-leaf-id: "";
     in property <int> playback-order-index: 0;
     in property <int> repeat-mode: 0;
     in property <bool> layout-edit-mode: false;
     callback invoked(int);
-    callback open-add-menu(int);
+    callback open-add-menu(string);
 
     pure function icon-for-action(action: int) -> string {
         if action == 1 { return "+"; }
@@ -481,7 +491,7 @@ component ControlActionButton inherits Rectangle {
         clicked => { root.invoked(root.action-id); }
         right-clicked => {
             if (root.layout-edit-mode) {
-                root.open-add-menu(root.cluster-id);
+                root.open-add-menu(root.cluster-leaf-id);
             }
         }
     }
@@ -522,13 +532,13 @@ component ControlActionButton inherits Rectangle {
 }
 
 component ButtonCluster inherits Rectangle {
-    in property <int> cluster-id: 0;
+    in property <string> cluster-leaf-id: "";
     in property <[int]> button-actions: [];
     in property <int> playback-order-index: 0;
     in property <int> repeat-mode: 0;
     in property <bool> layout-edit-mode: false;
     callback action-invoked(int);
-    callback request-add-menu(int);
+    callback request-add-menu(string);
 
     width: max(32px, button-actions.length * 32px + max(0, button-actions.length - 1) * 8px);
     height: 32px;
@@ -552,7 +562,7 @@ component ButtonCluster inherits Rectangle {
                 if (root.layout-edit-mode
                     && event.button == PointerEventButton.right
                     && event.kind == PointerEventKind.down) {
-                    root.request-add-menu(root.cluster-id);
+                    root.request-add-menu(root.cluster-leaf-id);
                 }
             }
         }
@@ -562,12 +572,12 @@ component ButtonCluster inherits Rectangle {
         spacing: 8px;
         for action in root.button-actions : ControlActionButton {
             action-id: action;
-            cluster-id: root.cluster-id;
+            cluster-leaf-id: root.cluster-leaf-id;
             playback-order-index: root.playback-order-index;
             repeat-mode: root.repeat-mode;
             layout-edit-mode: root.layout-edit-mode;
             invoked(action-id) => { root.action-invoked(action-id); }
-            open-add-menu(cluster-id) => { root.request-add-menu(cluster-id); }
+            open-add-menu(cluster-leaf-id) => { root.request-add-menu(cluster-leaf-id); }
         }
     }
 }
@@ -1018,13 +1028,13 @@ export component AppWindow inherits Window {
     in-out property <[int]> playlist_column_gap_positions_px: [];
     in-out property <int> playlist_columns_content_width_px: 0;
     in-out property <int> playlist_columns_available_width_px: 0;
-    in-out property <[int]> control_cluster_import_buttons: [1];
-    in-out property <[int]> control_cluster_transport_buttons: [2, 3, 4, 5, 6];
-    in-out property <[int]> control_cluster_utility_buttons: [7, 8, 9, 10];
+    in-out property <[LayoutButtonClusterPanelModel]> layout_button_cluster_panels: [];
     in-out property <bool> show_control_cluster_menu: false;
-    in-out property <int> control_cluster_menu_target: -1;
-    property <length> control_cluster_menu_x: 0px;
-    property <length> control_cluster_menu_y: 0px;
+    in-out property <string> control_cluster_menu_target_leaf_id: "";
+    in-out property <[int]> control_cluster_menu_actions: [];
+    in-out property <int> control_cluster_add_option_index: 0;
+    in-out property <length> control_cluster_menu_x: 0px;
+    in-out property <length> control_cluster_menu_y: 0px;
     in-out property <int> sidebar_width_px: 220;
     in-out property <bool> layout_edit_mode: false;
     in-out property <bool> show_layout_editor_dialog: false;
@@ -1120,13 +1130,13 @@ export component AppWindow inherits Window {
 
     pure function layout-panel-label(panel-kind: int) -> string {
         if panel-kind == 1 {
-            return "Import Cluster";
+            return "Button Cluster";
         }
         if panel-kind == 2 {
-            return "Transport Cluster";
+            return "Transport Preset";
         }
         if panel-kind == 3 {
-            return "Utility Cluster";
+            return "Utility Preset";
         }
         if panel-kind == 4 {
             return "Volume Slider";
@@ -1165,21 +1175,25 @@ export component AppWindow inherits Window {
 
     pure function layout-selected-panel-has-settings() -> bool {
         let panel-kind = root.layout-selected-panel-kind();
-        return panel-kind == 1 || panel-kind == 2 || panel-kind == 3;
+        return panel-kind == 1;
     }
 
-    pure function layout-selected-panel-settings-target() -> int {
-        let panel-kind = root.layout-selected-panel-kind();
-        if panel-kind == 1 {
-            return 0;
-        }
-        if panel-kind == 2 {
-            return 1;
-        }
-        if panel-kind == 3 {
-            return 2;
-        }
-        return -1;
+    pure function control-action-label(action-id: int) -> string {
+        if action-id == 1 { return "Import (+)"; }
+        if action-id == 2 { return "Back"; }
+        if action-id == 3 { return "Play"; }
+        if action-id == 4 { return "Pause"; }
+        if action-id == 5 { return "Stop"; }
+        if action-id == 6 { return "Next"; }
+        if action-id == 7 { return "Shuffle"; }
+        if action-id == 8 { return "Repeat"; }
+        if action-id == 9 { return "Layout Editor"; }
+        if action-id == 10 { return "Settings"; }
+        return "Unknown";
+    }
+
+    pure function control-cluster-label() -> string {
+        return "Button Cluster";
     }
 
     changed width => {
@@ -1221,21 +1235,21 @@ export component AppWindow inherits Window {
                 }
             }
 
-            for leaf-id[i] in root.layout_leaf_ids : Rectangle {
-                x: root.layout-region-x(i);
-                y: root.layout-region-y(i);
-                width: root.layout-region-width(i);
-                height: root.layout-region-height(i);
-                visible: root.layout-region-is-visible(i) && root.layout-region-panel-kind(i) == 1;
+            for cluster-panel in root.layout_button_cluster_panels : Rectangle {
+                x: cluster-panel.x_px * 1px;
+                y: cluster-panel.y_px * 1px;
+                width: cluster-panel.width_px * 1px;
+                height: cluster-panel.height_px * 1px;
+                visible: cluster-panel.visible;
                 clip: true;
                 background: #202020;
                 HorizontalLayout {
                     padding-left: 8px;
                     padding-right: 8px;
                     alignment: center;
-                    import-cluster := ButtonCluster {
-                        cluster-id: 0;
-                        button-actions: root.control_cluster_import_buttons;
+                    dynamic-cluster := ButtonCluster {
+                        cluster-leaf-id: cluster-panel.leaf_id;
+                        button-actions: cluster-panel.actions;
                         playback-order-index: root.playback_order_index;
                         repeat-mode: root.repeat_mode;
                         layout-edit-mode: root.layout_edit_mode;
@@ -1255,99 +1269,12 @@ export component AppWindow inherits Window {
                             if (action-id == 9) { root.open_layout_editor(); }
                             if (action-id == 10) { root.open_settings(); }
                         }
-                        request-add-menu(cluster-id) => {
-                            root.control_cluster_menu_target = cluster-id;
-                            root.control_cluster_menu_x = min(root.width - 230px, max(8px, root.layout-region-x(i) + 8px));
-                            root.control_cluster_menu_y = min(root.height - 280px, max(8px, root.layout-region-y(i) + root.layout-region-height(i) + 4px));
-                            root.show_control_cluster_menu = true;
-                        }
-                    }
-                }
-            }
-
-            for leaf-id[i] in root.layout_leaf_ids : Rectangle {
-                x: root.layout-region-x(i);
-                y: root.layout-region-y(i);
-                width: root.layout-region-width(i);
-                height: root.layout-region-height(i);
-                visible: root.layout-region-is-visible(i) && root.layout-region-panel-kind(i) == 2;
-                clip: true;
-                background: #202020;
-                HorizontalLayout {
-                    padding-left: 8px;
-                    padding-right: 8px;
-                    alignment: center;
-                    transport-cluster := ButtonCluster {
-                        cluster-id: 1;
-                        button-actions: root.control_cluster_transport_buttons;
-                        playback-order-index: root.playback_order_index;
-                        repeat-mode: root.repeat_mode;
-                        layout-edit-mode: root.layout_edit_mode;
-                        action-invoked(action-id) => {
-                            if (action-id == 1) { root.open_file(); }
-                            if (action-id == 2) { root.previous(); }
-                            if (action-id == 3) { root.play(); }
-                            if (action-id == 4) { root.pause(); }
-                            if (action-id == 5) { root.stop(); }
-                            if (action-id == 6) { root.next(); }
-                            if (action-id == 7) {
-                                let next-order = root.playback_order_index == 0 ? 1 : root.playback_order_index == 1 ? 2 : 0;
-                                root.playback_order_index = next-order;
-                                root.playback_order_changed(next-order);
-                            }
-                            if (action-id == 8) { root.toggle_repeat(); }
-                            if (action-id == 9) { root.open_layout_editor(); }
-                            if (action-id == 10) { root.open_settings(); }
-                        }
-                        request-add-menu(cluster-id) => {
-                            root.control_cluster_menu_target = cluster-id;
-                            root.control_cluster_menu_x = min(root.width - 230px, max(8px, root.layout-region-x(i) + 8px));
-                            root.control_cluster_menu_y = min(root.height - 280px, max(8px, root.layout-region-y(i) + root.layout-region-height(i) + 4px));
-                            root.show_control_cluster_menu = true;
-                        }
-                    }
-                }
-            }
-
-            for leaf-id[i] in root.layout_leaf_ids : Rectangle {
-                x: root.layout-region-x(i);
-                y: root.layout-region-y(i);
-                width: root.layout-region-width(i);
-                height: root.layout-region-height(i);
-                visible: root.layout-region-is-visible(i) && root.layout-region-panel-kind(i) == 3;
-                clip: true;
-                background: #202020;
-                HorizontalLayout {
-                    padding-left: 8px;
-                    padding-right: 8px;
-                    alignment: center;
-                    utility-cluster := ButtonCluster {
-                        cluster-id: 2;
-                        button-actions: root.control_cluster_utility_buttons;
-                        playback-order-index: root.playback_order_index;
-                        repeat-mode: root.repeat_mode;
-                        layout-edit-mode: root.layout_edit_mode;
-                        action-invoked(action-id) => {
-                            if (action-id == 1) { root.open_file(); }
-                            if (action-id == 2) { root.previous(); }
-                            if (action-id == 3) { root.play(); }
-                            if (action-id == 4) { root.pause(); }
-                            if (action-id == 5) { root.stop(); }
-                            if (action-id == 6) { root.next(); }
-                            if (action-id == 7) {
-                                let next-order = root.playback_order_index == 0 ? 1 : root.playback_order_index == 1 ? 2 : 0;
-                                root.playback_order_index = next-order;
-                                root.playback_order_changed(next-order);
-                            }
-                            if (action-id == 8) { root.toggle_repeat(); }
-                            if (action-id == 9) { root.open_layout_editor(); }
-                            if (action-id == 10) { root.open_settings(); }
-                        }
-                        request-add-menu(cluster-id) => {
-                            root.control_cluster_menu_target = cluster-id;
-                            root.control_cluster_menu_x = min(root.width - 230px, max(8px, root.layout-region-x(i) + 8px));
-                            root.control_cluster_menu_y = min(root.height - 280px, max(8px, root.layout-region-y(i) + root.layout-region-height(i) + 4px));
-                            root.show_control_cluster_menu = true;
+                        request-add-menu(cluster-leaf-id) => {
+                            root.open_control_cluster_menu_for_leaf(
+                                cluster-leaf-id,
+                                max(8, cluster-panel.x_px + 8),
+                                max(8, cluster-panel.y_px + cluster-panel.height_px + 4)
+                            );
                         }
                     }
                 }
@@ -1814,7 +1741,7 @@ export component AppWindow inherits Window {
                     x: 0px;
                     y: 0px;
                     width: parent.width;
-                    height: parent.panel-kind == 3 ? min(parent.height, 22px) : parent.height;
+                    height: parent.panel-kind == 1 ? min(parent.height, 22px) : parent.height;
                     pointer-event(event) => {
                         if (event.kind == PointerEventKind.down && event.button == PointerEventButton.right) {
                             root.layout_select_leaf(leaf-id);
@@ -2159,12 +2086,13 @@ export component AppWindow inherits Window {
                 }
                 panel-settings-ta := TouchArea {
                     clicked => {
-                        let target = root.layout-selected-panel-settings-target();
-                        if target != -1 {
-                            root.control_cluster_menu_target = target;
-                            root.control_cluster_menu_x = min(root.width - 230px, max(8px, root.layout_leaf_context_menu_x + parent.width + 6px));
-                            root.control_cluster_menu_y = min(root.height - 280px, max(8px, root.layout_leaf_context_menu_y + 6px));
-                            root.show_control_cluster_menu = true;
+                        if root.layout_selected_leaf_index >= 0
+                                && root.layout_selected_leaf_index < root.layout_leaf_ids.length {
+                            root.open_control_cluster_menu_for_leaf(
+                                root.layout_leaf_ids[root.layout_selected_leaf_index],
+                                max(8, floor((root.layout_leaf_context_menu_x + parent.width + 6px) / 1px)),
+                                max(8, floor((root.layout_leaf_context_menu_y + 6px) / 1px))
+                            );
                         }
                         root.show_layout_leaf_replace_submenu = false;
                         root.layout_leaf_replace_submenu_hover = false;
@@ -2301,8 +2229,8 @@ export component AppWindow inherits Window {
         z: 146;
         x: root.control_cluster_menu_x;
         y: root.control_cluster_menu_y;
-        width: 220px;
-        height: 280px;
+        width: 300px;
+        height: 340px;
         border-radius: 6px;
         background: #262626;
         border-width: 1px;
@@ -2310,10 +2238,10 @@ export component AppWindow inherits Window {
 
         VerticalLayout {
             padding: 10px;
-            spacing: 4px;
+            spacing: 8px;
 
             Text {
-                text: "Add Button";
+                text: root.control-cluster-label() + " Buttons";
                 color: #eee;
                 font-size: 13px;
                 font-weight: 700;
@@ -2321,33 +2249,102 @@ export component AppWindow inherits Window {
 
             Rectangle { height: 1px; background: #3a3a3a; }
 
-            for option[index] in [
-                "Import (+)",
-                "Back",
-                "Play",
-                "Pause",
-                "Stop",
-                "Next",
-                "Shuffle",
-                "Repeat",
-                "Layout Editor",
-                "Settings"
-            ] : Rectangle {
-                property <int> option-id: index + 1;
-                height: 22px;
-                border-radius: 2px;
-                background: add-option-ta.has-hover ? #363636 : transparent;
-                Text {
-                    text: option;
-                    color: #ddd;
-                    font-size: 12px;
-                    x: 6px;
-                    vertical-alignment: center;
+            ScrollView {
+                vertical-stretch: 1;
+                HorizontalLayout {
+                    Rectangle {
+                        width: 1px;
+                    }
+                    VerticalLayout {
+                        spacing: 2px;
+
+                        Rectangle {
+                            height: max(22px, root.control_cluster_menu_actions.length * 24px);
+                            background: transparent;
+                            VerticalLayout {
+                                spacing: 2px;
+                                for action-id[index] in root.control_cluster_menu_actions : Rectangle {
+                                    height: 22px;
+                                    border-radius: 2px;
+                                    background: transparent;
+                                    HorizontalLayout {
+                                        padding-left: 6px;
+                                        padding-right: 4px;
+                                        spacing: 8px;
+                                        Text {
+                                            text: root.control-action-label(action-id);
+                                            color: #ddd;
+                                            font-size: 12px;
+                                            vertical-alignment: center;
+                                            horizontal-stretch: 1;
+                                            overflow: elide;
+                                        }
+                                        Rectangle {
+                                            width: 18px;
+                                            height: 18px;
+                                            border-radius: 2px;
+                                            background: delete-action-ta.has-hover ? #4a2a2a : transparent;
+                                            Text {
+                                                text: "✕";
+                                                color: #ffb4b4;
+                                                font-size: 11px;
+                                                horizontal-alignment: center;
+                                                vertical-alignment: center;
+                                            }
+                                            delete-action-ta := TouchArea {
+                                                clicked => {
+                                                    if root.control_cluster_menu_target_leaf_id != "" {
+                                                        root.remove_control_cluster_button(
+                                                            root.control_cluster_menu_target_leaf_id,
+                                                            index
+                                                        );
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    Rectangle {
+                        width: 1px;
+                    }
                 }
-                add-option-ta := TouchArea {
+            }
+
+            Rectangle { height: 1px; background: #3a3a3a; }
+
+            HorizontalLayout {
+                spacing: 8px;
+                Rectangle {
+                    horizontal-stretch: 1;
+                    height: 32px;
+                    ComboBox {
+                        width: parent.width;
+                        height: parent.height;
+                        model: [
+                            "Import (+)",
+                            "Back",
+                            "Play",
+                            "Pause",
+                            "Stop",
+                            "Next",
+                            "Shuffle",
+                            "Repeat",
+                            "Layout Editor",
+                            "Settings"
+                        ];
+                        current-index <=> root.control_cluster_add_option_index;
+                    }
+                }
+                Button {
+                    text: "Add";
                     clicked => {
-                        root.add_control_cluster_button(root.control_cluster_menu_target, parent.option-id);
-                        root.show_control_cluster_menu = false;
+                        root.add_control_cluster_button(
+                            root.control_cluster_menu_target_leaf_id,
+                            root.control_cluster_add_option_index + 1
+                        );
                     }
                 }
             }
@@ -2689,7 +2686,9 @@ export component AppWindow inherits Window {
     callback commit_playlist_column_width(int, int);
     callback reset_playlist_column_width(int);
     callback playlist_columns_viewport_resized(int);
-    callback add_control_cluster_button(int, int);
+    callback open_control_cluster_menu_for_leaf(string, int, int);
+    callback add_control_cluster_button(string, int);
+    callback remove_control_cluster_button(string, int);
     callback window_resized(int, int);
     callback layout_workspace_resized(int, int);
     callback open_layout_editor();
