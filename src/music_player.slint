@@ -1046,16 +1046,6 @@ export component AppWindow inherits Window {
     in-out property <[string]> layout_leaf_ids: [];
     in-out property <int> layout_selected_leaf_index: -1;
     in-out property <[int]> layout_region_panel_kinds: [];
-    in-out property <int> layout_import_cluster_region: -1;
-    in-out property <int> layout_transport_cluster_region: -1;
-    in-out property <int> layout_utility_cluster_region: -1;
-    in-out property <int> layout_volume_slider_region: -1;
-    in-out property <int> layout_seek_bar_region: -1;
-    in-out property <int> layout_playlist_switcher_region: -1;
-    in-out property <int> layout_track_list_region: -1;
-    in-out property <int> layout_metadata_viewer_region: -1;
-    in-out property <int> layout_album_art_viewer_region: -1;
-    in-out property <int> layout_status_bar_region: -1;
     in-out property <[int]> layout_region_x_px: [];
     in-out property <[int]> layout_region_y_px: [];
     in-out property <[int]> layout_region_width_px: [];
@@ -1231,12 +1221,12 @@ export component AppWindow inherits Window {
                 }
             }
 
-            import-cluster-panel := Rectangle {
-                x: root.layout-region-x(root.layout_import_cluster_region);
-                y: root.layout-region-y(root.layout_import_cluster_region);
-                width: root.layout-region-width(root.layout_import_cluster_region);
-                height: root.layout-region-height(root.layout_import_cluster_region);
-                visible: root.layout-region-is-visible(root.layout_import_cluster_region);
+            for leaf-id[i] in root.layout_leaf_ids : Rectangle {
+                x: root.layout-region-x(i);
+                y: root.layout-region-y(i);
+                width: root.layout-region-width(i);
+                height: root.layout-region-height(i);
+                visible: root.layout-region-is-visible(i) && root.layout-region-panel-kind(i) == 1;
                 clip: true;
                 background: #202020;
                 HorizontalLayout {
@@ -1267,20 +1257,20 @@ export component AppWindow inherits Window {
                         }
                         request-add-menu(cluster-id) => {
                             root.control_cluster_menu_target = cluster-id;
-                            root.control_cluster_menu_x = min(root.width - 230px, max(8px, import-cluster-panel.x + 8px));
-                            root.control_cluster_menu_y = min(root.height - 280px, max(8px, import-cluster-panel.y + import-cluster-panel.height + 4px));
+                            root.control_cluster_menu_x = min(root.width - 230px, max(8px, root.layout-region-x(i) + 8px));
+                            root.control_cluster_menu_y = min(root.height - 280px, max(8px, root.layout-region-y(i) + root.layout-region-height(i) + 4px));
                             root.show_control_cluster_menu = true;
                         }
                     }
                 }
             }
 
-            transport-cluster-panel := Rectangle {
-                x: root.layout-region-x(root.layout_transport_cluster_region);
-                y: root.layout-region-y(root.layout_transport_cluster_region);
-                width: root.layout-region-width(root.layout_transport_cluster_region);
-                height: root.layout-region-height(root.layout_transport_cluster_region);
-                visible: root.layout-region-is-visible(root.layout_transport_cluster_region);
+            for leaf-id[i] in root.layout_leaf_ids : Rectangle {
+                x: root.layout-region-x(i);
+                y: root.layout-region-y(i);
+                width: root.layout-region-width(i);
+                height: root.layout-region-height(i);
+                visible: root.layout-region-is-visible(i) && root.layout-region-panel-kind(i) == 2;
                 clip: true;
                 background: #202020;
                 HorizontalLayout {
@@ -1311,20 +1301,20 @@ export component AppWindow inherits Window {
                         }
                         request-add-menu(cluster-id) => {
                             root.control_cluster_menu_target = cluster-id;
-                            root.control_cluster_menu_x = min(root.width - 230px, max(8px, transport-cluster-panel.x + 8px));
-                            root.control_cluster_menu_y = min(root.height - 280px, max(8px, transport-cluster-panel.y + transport-cluster-panel.height + 4px));
+                            root.control_cluster_menu_x = min(root.width - 230px, max(8px, root.layout-region-x(i) + 8px));
+                            root.control_cluster_menu_y = min(root.height - 280px, max(8px, root.layout-region-y(i) + root.layout-region-height(i) + 4px));
                             root.show_control_cluster_menu = true;
                         }
                     }
                 }
             }
 
-            utility-cluster-panel := Rectangle {
-                x: root.layout-region-x(root.layout_utility_cluster_region);
-                y: root.layout-region-y(root.layout_utility_cluster_region);
-                width: root.layout-region-width(root.layout_utility_cluster_region);
-                height: root.layout-region-height(root.layout_utility_cluster_region);
-                visible: root.layout-region-is-visible(root.layout_utility_cluster_region);
+            for leaf-id[i] in root.layout_leaf_ids : Rectangle {
+                x: root.layout-region-x(i);
+                y: root.layout-region-y(i);
+                width: root.layout-region-width(i);
+                height: root.layout-region-height(i);
+                visible: root.layout-region-is-visible(i) && root.layout-region-panel-kind(i) == 3;
                 clip: true;
                 background: #202020;
                 HorizontalLayout {
@@ -1355,20 +1345,20 @@ export component AppWindow inherits Window {
                         }
                         request-add-menu(cluster-id) => {
                             root.control_cluster_menu_target = cluster-id;
-                            root.control_cluster_menu_x = min(root.width - 230px, max(8px, utility-cluster-panel.x + 8px));
-                            root.control_cluster_menu_y = min(root.height - 280px, max(8px, utility-cluster-panel.y + utility-cluster-panel.height + 4px));
+                            root.control_cluster_menu_x = min(root.width - 230px, max(8px, root.layout-region-x(i) + 8px));
+                            root.control_cluster_menu_y = min(root.height - 280px, max(8px, root.layout-region-y(i) + root.layout-region-height(i) + 4px));
                             root.show_control_cluster_menu = true;
                         }
                     }
                 }
             }
 
-            volume-slider-panel := Rectangle {
-                x: root.layout-region-x(root.layout_volume_slider_region);
-                y: root.layout-region-y(root.layout_volume_slider_region);
-                width: root.layout-region-width(root.layout_volume_slider_region);
-                height: root.layout-region-height(root.layout_volume_slider_region);
-                visible: root.layout-region-is-visible(root.layout_volume_slider_region);
+            for leaf-id[i] in root.layout_leaf_ids : Rectangle {
+                x: root.layout-region-x(i);
+                y: root.layout-region-y(i);
+                width: root.layout-region-width(i);
+                height: root.layout-region-height(i);
+                visible: root.layout-region-is-visible(i) && root.layout-region-panel-kind(i) == 4;
                 clip: true;
                 background: #202020;
                 VolumeSliderControl {
@@ -1381,12 +1371,12 @@ export component AppWindow inherits Window {
                 }
             }
 
-            seek-bar-panel := Rectangle {
-                x: root.layout-region-x(root.layout_seek_bar_region);
-                y: root.layout-region-y(root.layout_seek_bar_region);
-                width: root.layout-region-width(root.layout_seek_bar_region);
-                height: root.layout-region-height(root.layout_seek_bar_region);
-                visible: root.layout-region-is-visible(root.layout_seek_bar_region);
+            for leaf-id[i] in root.layout_leaf_ids : Rectangle {
+                x: root.layout-region-x(i);
+                y: root.layout-region-y(i);
+                width: root.layout-region-width(i);
+                height: root.layout-region-height(i);
+                visible: root.layout-region-is-visible(i) && root.layout-region-panel-kind(i) == 5;
                 clip: true;
                 SeekBarControl {
                     width: parent.width;
@@ -1398,12 +1388,12 @@ export component AppWindow inherits Window {
                 }
             }
 
-            playlist-switcher-panel := Rectangle {
-                x: root.layout-region-x(root.layout_playlist_switcher_region);
-                y: root.layout-region-y(root.layout_playlist_switcher_region);
-                width: root.layout-region-width(root.layout_playlist_switcher_region);
-                height: root.layout-region-height(root.layout_playlist_switcher_region);
-                visible: root.layout-region-is-visible(root.layout_playlist_switcher_region);
+            for leaf-id[i] in root.layout_leaf_ids : Rectangle {
+                x: root.layout-region-x(i);
+                y: root.layout-region-y(i);
+                width: root.layout-region-width(i);
+                height: root.layout-region-height(i);
+                visible: root.layout-region-is-visible(i) && root.layout-region-panel-kind(i) == 6;
                 clip: true;
                 background: #202020;
                 VerticalLayout {
@@ -1461,12 +1451,12 @@ export component AppWindow inherits Window {
                 }
             }
 
-            metadata-viewer-panel := Rectangle {
-                x: root.layout-region-x(root.layout_metadata_viewer_region);
-                y: root.layout-region-y(root.layout_metadata_viewer_region);
-                width: root.layout-region-width(root.layout_metadata_viewer_region);
-                height: root.layout-region-height(root.layout_metadata_viewer_region);
-                visible: root.layout-region-is-visible(root.layout_metadata_viewer_region);
+            for leaf-id[i] in root.layout_leaf_ids : Rectangle {
+                x: root.layout-region-x(i);
+                y: root.layout-region-y(i);
+                width: root.layout-region-width(i);
+                height: root.layout-region-height(i);
+                visible: root.layout-region-is-visible(i) && root.layout-region-panel-kind(i) == 8;
                 clip: true;
                 background: #202020;
                 MetadataViewer {
@@ -1482,12 +1472,12 @@ export component AppWindow inherits Window {
                 }
             }
 
-            album-art-viewer-panel := Rectangle {
-                x: root.layout-region-x(root.layout_album_art_viewer_region);
-                y: root.layout-region-y(root.layout_album_art_viewer_region);
-                width: root.layout-region-width(root.layout_album_art_viewer_region);
-                height: root.layout-region-height(root.layout_album_art_viewer_region);
-                visible: root.layout-region-is-visible(root.layout_album_art_viewer_region);
+            for leaf-id[i] in root.layout_leaf_ids : Rectangle {
+                x: root.layout-region-x(i);
+                y: root.layout-region-y(i);
+                width: root.layout-region-width(i);
+                height: root.layout-region-height(i);
+                visible: root.layout-region-is-visible(i) && root.layout-region-panel-kind(i) == 9;
                 clip: true;
                 background: #202020;
                 AlbumArtViewer {
@@ -1499,12 +1489,12 @@ export component AppWindow inherits Window {
                 }
             }
 
-            track-list-panel := Rectangle {
-                x: root.layout-region-x(root.layout_track_list_region);
-                y: root.layout-region-y(root.layout_track_list_region);
-                width: root.layout-region-width(root.layout_track_list_region);
-                height: root.layout-region-height(root.layout_track_list_region);
-                visible: root.layout-region-is-visible(root.layout_track_list_region);
+            for leaf-id[i] in root.layout_leaf_ids : Rectangle {
+                x: root.layout-region-x(i);
+                y: root.layout-region-y(i);
+                width: root.layout-region-width(i);
+                height: root.layout-region-height(i);
+                visible: root.layout-region-is-visible(i) && root.layout-region-panel-kind(i) == 7;
                 clip: true;
                 background: #282828;
 
@@ -1701,33 +1691,6 @@ export component AppWindow inherits Window {
                             background: #5da8ff;
                         }
 
-                        column-header-menu := ColumnHeaderMenu {
-                            x: root.column-menu-x;
-                            y: root.column-menu-y;
-                            labels: root.playlist_column_menu_labels;
-                            checked: root.playlist_column_menu_checked;
-                            custom: root.playlist_column_menu_is_custom;
-                            toggle-column(index) => {
-                                root.toggle_playlist_column(index);
-                                column-header-menu.close();
-                            }
-                            delete-column(index) => {
-                                if (index >= 0 && index < root.playlist_column_menu_labels.length
-                                        && index < root.playlist_column_menu_is_custom.length
-                                        && root.playlist_column_menu_is_custom[index]) {
-                                    root.delete_custom_column_index = index;
-                                    root.delete_custom_column_message = "Delete custom column '" + root.playlist_column_menu_labels[index] + "'?";
-                                    root.show_delete_custom_column_confirm = true;
-                                    column-header-menu.close();
-                                }
-                            }
-                            add-custom() => {
-                                root.show_custom_column_dialog = true;
-                                root.custom_column_name = "";
-                                root.custom_column_format = "";
-                                column-header-menu.close();
-                            }
-                        }
                     }
 
                     track-list-container := Rectangle {
@@ -1816,12 +1779,12 @@ export component AppWindow inherits Window {
                 }
             }
 
-            status-bar-panel := StatusBar {
-                x: root.layout-region-x(root.layout_status_bar_region);
-                y: root.layout-region-y(root.layout_status_bar_region);
-                width: root.layout-region-width(root.layout_status_bar_region);
-                height: root.layout-region-height(root.layout_status_bar_region);
-                visible: root.layout-region-is-visible(root.layout_status_bar_region);
+            for leaf-id[i] in root.layout_leaf_ids : StatusBar {
+                x: root.layout-region-x(i);
+                y: root.layout-region-y(i);
+                width: root.layout-region-width(i);
+                height: root.layout-region-height(i);
+                visible: root.layout-region-is-visible(i) && root.layout-region-panel-kind(i) == 11;
                 status-text: root.status-text;
                 technical-info: root.technical-info;
                 time-range: root.format-time-range(root.elapsed-ms, root.total-ms);
@@ -1953,6 +1916,34 @@ export component AppWindow inherits Window {
             }
         }
 
+    }
+
+    column-header-menu := ColumnHeaderMenu {
+        x: root.column-menu-x;
+        y: root.column-menu-y;
+        labels: root.playlist_column_menu_labels;
+        checked: root.playlist_column_menu_checked;
+        custom: root.playlist_column_menu_is_custom;
+        toggle-column(index) => {
+            root.toggle_playlist_column(index);
+            column-header-menu.close();
+        }
+        delete-column(index) => {
+            if (index >= 0 && index < root.playlist_column_menu_labels.length
+                    && index < root.playlist_column_menu_is_custom.length
+                    && root.playlist_column_menu_is_custom[index]) {
+                root.delete_custom_column_index = index;
+                root.delete_custom_column_message = "Delete custom column '" + root.playlist_column_menu_labels[index] + "'?";
+                root.show_delete_custom_column_confirm = true;
+                column-header-menu.close();
+            }
+        }
+        add-custom() => {
+            root.show_custom_column_dialog = true;
+            root.custom_column_name = "";
+            root.custom_column_format = "";
+            column-header-menu.close();
+        }
     }
 
     if root.layout_edit_mode && (root.show_layout_leaf_context_menu || root.show_layout_splitter_context_menu) : Rectangle {

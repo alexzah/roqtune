@@ -1,6 +1,6 @@
 //! Split-tree layout data model, migration, actions, and geometry.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 
 /// Current persisted layout schema version.
 pub const LAYOUT_VERSION: u32 = 2;
@@ -1110,30 +1110,6 @@ pub fn compute_tree_layout_metrics(
         &mut out,
     );
     out
-}
-
-/// Finds panel-to-leaf index mapping for functional panels.
-/// If duplicates are present, the first leaf in traversal order wins.
-pub fn panel_leaf_indices(leaves: &[LayoutLeafItem]) -> HashMap<LayoutPanelKind, i32> {
-    let mut map = HashMap::new();
-    for (index, leaf) in leaves.iter().enumerate() {
-        match leaf.panel {
-            LayoutPanelKind::ImportButtonCluster
-            | LayoutPanelKind::TransportButtonCluster
-            | LayoutPanelKind::UtilityButtonCluster
-            | LayoutPanelKind::VolumeSlider
-            | LayoutPanelKind::SeekBar
-            | LayoutPanelKind::PlaylistSwitcher
-            | LayoutPanelKind::TrackList
-            | LayoutPanelKind::MetadataViewer
-            | LayoutPanelKind::AlbumArtViewer
-            | LayoutPanelKind::StatusBar => {
-                map.entry(leaf.panel).or_insert(index as i32);
-            }
-            _ => {}
-        }
-    }
-    map
 }
 
 #[cfg(test)]

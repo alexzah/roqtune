@@ -22,8 +22,8 @@ use cpal::traits::{DeviceTrait, HostTrait};
 use db_manager::DbManager;
 use layout::{
     add_root_leaf_if_empty, compute_tree_layout_metrics, delete_leaf, first_leaf_id,
-    panel_leaf_indices, replace_leaf_panel, sanitize_layout_config, set_split_ratio, split_leaf,
-    LayoutConfig, LayoutPanelKind, SplitAxis, SPLITTER_THICKNESS_PX,
+    replace_leaf_panel, sanitize_layout_config, set_split_ratio, split_leaf, LayoutConfig,
+    LayoutPanelKind, SplitAxis, SPLITTER_THICKNESS_PX,
 };
 use log::{debug, info};
 use playlist::Playlist;
@@ -861,7 +861,6 @@ fn apply_layout_to_ui(
         workspace_height_px,
         splitter_thickness_px,
     );
-    let panel_regions = panel_leaf_indices(&metrics.leaves);
 
     let leaf_ids: Vec<slint::SharedString> = metrics
         .leaves
@@ -913,67 +912,6 @@ fn apply_layout_to_ui(
     ui.set_layout_region_visible(ModelRc::from(Rc::new(VecModel::from(region_visible))));
     ui.set_layout_splitters(ModelRc::from(Rc::new(VecModel::from(splitter_model))));
     ui.set_layout_selected_leaf_index(selected_leaf_index);
-
-    ui.set_layout_import_cluster_region(
-        panel_regions
-            .get(&LayoutPanelKind::ImportButtonCluster)
-            .copied()
-            .unwrap_or(-1),
-    );
-    ui.set_layout_transport_cluster_region(
-        panel_regions
-            .get(&LayoutPanelKind::TransportButtonCluster)
-            .copied()
-            .unwrap_or(-1),
-    );
-    ui.set_layout_utility_cluster_region(
-        panel_regions
-            .get(&LayoutPanelKind::UtilityButtonCluster)
-            .copied()
-            .unwrap_or(-1),
-    );
-    ui.set_layout_volume_slider_region(
-        panel_regions
-            .get(&LayoutPanelKind::VolumeSlider)
-            .copied()
-            .unwrap_or(-1),
-    );
-    ui.set_layout_seek_bar_region(
-        panel_regions
-            .get(&LayoutPanelKind::SeekBar)
-            .copied()
-            .unwrap_or(-1),
-    );
-    ui.set_layout_playlist_switcher_region(
-        panel_regions
-            .get(&LayoutPanelKind::PlaylistSwitcher)
-            .copied()
-            .unwrap_or(-1),
-    );
-    ui.set_layout_track_list_region(
-        panel_regions
-            .get(&LayoutPanelKind::TrackList)
-            .copied()
-            .unwrap_or(-1),
-    );
-    ui.set_layout_metadata_viewer_region(
-        panel_regions
-            .get(&LayoutPanelKind::MetadataViewer)
-            .copied()
-            .unwrap_or(-1),
-    );
-    ui.set_layout_album_art_viewer_region(
-        panel_regions
-            .get(&LayoutPanelKind::AlbumArtViewer)
-            .copied()
-            .unwrap_or(-1),
-    );
-    ui.set_layout_status_bar_region(
-        panel_regions
-            .get(&LayoutPanelKind::StatusBar)
-            .copied()
-            .unwrap_or(-1),
-    );
 }
 
 fn apply_playlist_columns_to_ui(ui: &AppWindow, config: &Config) {
@@ -3053,8 +2991,9 @@ mod tests {
             "Sidebar width should be controllable by viewport-driven logic"
         );
         assert!(
-            slint_ui.contains("track-list-panel := Rectangle"),
-            "Track list should be rendered as a movable docking panel"
+            slint_ui.contains("for leaf-id[i] in root.layout_leaf_ids : Rectangle {")
+                && slint_ui.contains("root.layout-region-panel-kind(i) == 7"),
+            "Track list should be rendered as a movable docking panel that supports duplicate instances"
         );
     }
 
