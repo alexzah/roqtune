@@ -17,7 +17,7 @@ version = 2
 node_type = "split"
 id = "n17"
 axis = "horizontal"
-ratio = 0.16
+ratio = 0.09322033822536469
 min_first_px = 64
 min_second_px = 120
 
@@ -25,7 +25,7 @@ min_second_px = 120
 node_type = "split"
 id = "n16"
 axis = "horizontal"
-ratio = 0.62
+ratio = 0.28828829526901245
 min_first_px = 32
 min_second_px = 28
 
@@ -33,7 +33,7 @@ min_second_px = 28
 node_type = "split"
 id = "n15"
 axis = "vertical"
-ratio = 0.08
+ratio = 0.07999999821186066
 min_first_px = 32
 min_second_px = 240
 
@@ -46,7 +46,7 @@ panel = "button_cluster"
 node_type = "split"
 id = "n14"
 axis = "vertical"
-ratio = 0.62
+ratio = 0.6200000047683716
 min_first_px = 180
 min_second_px = 110
 
@@ -59,7 +59,7 @@ panel = "button_cluster"
 node_type = "split"
 id = "n13"
 axis = "vertical"
-ratio = 0.70
+ratio = 0.699999988079071
 min_first_px = 120
 min_second_px = 90
 
@@ -82,7 +82,7 @@ panel = "seek_bar"
 node_type = "split"
 id = "n18"
 axis = "horizontal"
-ratio = 0.96
+ratio = 0.949999988079071
 min_first_px = 120
 min_second_px = 20
 
@@ -90,47 +90,48 @@ min_second_px = 20
 node_type = "split"
 id = "n4"
 axis = "vertical"
-ratio = 0.28
+ratio = 0.2800000011920929
 min_first_px = 140
 min_second_px = 220
 
 [root.second.first.first]
+node_type = "split"
+id = "s2"
+axis = "horizontal"
+ratio = 0.37614890933036804
+min_first_px = 24
+min_second_px = 24
+
+[root.second.first.first.first]
 node_type = "leaf"
 id = "n5"
 panel = "playlist_switcher"
 
-[root.second.first.second]
+[root.second.first.first.second]
 node_type = "split"
-id = "n6"
-axis = "vertical"
-ratio = 0.68
-min_first_px = 220
-min_second_px = 140
+id = "s3"
+axis = "horizontal"
+ratio = 0.29165545105934143
+min_first_px = 24
+min_second_px = 24
 
-[root.second.first.second.first]
+[root.second.first.first.second.first]
+node_type = "leaf"
+id = "l1"
+panel = "metadata_viewer"
+
+[root.second.first.first.second.second]
+node_type = "leaf"
+id = "l2"
+panel = "album_art_viewer"
+
+[root.second.first.second]
 node_type = "leaf"
 id = "n7"
 panel = "track_list"
-
-[root.second.first.second.second]
-node_type = "split"
-id = "n1"
-axis = "horizontal"
-ratio = 0.32
-min_first_px = 72
-min_second_px = 120
-
-[root.second.first.second.second.first]
-node_type = "leaf"
-id = "n2"
-panel = "metadata_viewer"
-
-[root.second.first.second.second.second]
-node_type = "leaf"
-id = "n3"
-panel = "album_art_viewer"
 
 [root.second.second]
 node_type = "leaf"
 id = "n19"
 panel = "status_bar"
+
