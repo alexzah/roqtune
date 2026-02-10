@@ -1,6 +1,8 @@
 # roqtune
+<img src="images/logo.png" width="50%">
 
-Internal working name for the desktop Rust + Slint music player.
+Roqtune: A highly configurable desktop media player
+
 
 ## Build
 
