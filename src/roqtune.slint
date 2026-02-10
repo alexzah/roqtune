@@ -1003,6 +1003,11 @@ export component AppWindow inherits Window {
 
                             moved => {
                                 if (root.playlist_filter_active) {
+                                    if (self.pressed && root.pressed-index != -1 && abs(self.mouse-y - root.press-y) > 5px) {
+                                        root.playlist_modification_blocked();
+                                        // Disarm until next press so a single drag attempt pulses once.
+                                        root.pressed-index = -1;
+                                    }
                                     root.is-dragging = false;
                                     root.drop-index = -1;
                                     return;
@@ -2452,6 +2457,7 @@ export component AppWindow inherits Window {
     callback clear_playlist_filter_view();
     callback cycle_playlist_sort_by_column(int);
     callback apply_filter_view_to_playlist();
+    callback playlist_modification_blocked();
     callback open_control_cluster_menu_for_leaf(string, int, int);
     callback add_control_cluster_button(string, int);
     callback remove_control_cluster_button(string, int);

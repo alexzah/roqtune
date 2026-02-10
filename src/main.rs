@@ -1641,6 +1641,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let _ = bus_sender_clone.send(Message::Playlist(PlaylistMessage::RequestApplyFilterView));
     });
 
+    let ui_handle_clone = ui.as_weak().clone();
+    ui.on_playlist_modification_blocked(move || {
+        flash_read_only_view_indicator(ui_handle_clone.clone());
+    });
+
     let bus_sender_clone = bus_sender.clone();
     ui.on_playlist_columns_viewport_resized(move |width_px| {
         let clamped_width = width_px.max(0) as u32;
