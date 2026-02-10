@@ -2366,7 +2366,6 @@ impl UiManager {
                                 .map(|column| column.custom)
                                 .collect();
                             let _ = self.ui.upgrade_in_event_loop(move |ui| {
-                                ui.set_show_album_art(true);
                                 ui.set_playlist_visible_column_headers(ModelRc::from(Rc::new(
                                     VecModel::from(visible_headers),
                                 )));

@@ -23,9 +23,6 @@ sample_rate_auto = true
 bits_per_sample_auto = true
 
 [ui]
-# Show the album-art panel in the main UI.
-show_album_art = true
-
 # Show the layout editor intro dialog the next time it is opened.
 show_layout_edit_intro = true
 

@@ -37,8 +37,6 @@ pub struct OutputConfig {
 #[derive(Debug, Clone, serde::Deserialize, serde::Serialize)]
 pub struct UiConfig {
     #[serde(default = "default_true")]
-    pub show_album_art: bool,
-    #[serde(default = "default_true")]
     pub show_layout_edit_intro: bool,
     #[serde(default = "default_playlist_album_art_column_min_width_px")]
     pub playlist_album_art_column_min_width_px: u32,
@@ -111,7 +109,6 @@ impl Default for OutputConfig {
 impl Default for UiConfig {
     fn default() -> Self {
         Self {
-            show_album_art: true,
             show_layout_edit_intro: true,
             playlist_album_art_column_min_width_px: default_playlist_album_art_column_min_width_px(
             ),
@@ -249,7 +246,6 @@ mod tests {
         assert!(config.output.sample_rate_auto);
         assert!(config.output.bits_per_sample_auto);
 
-        assert!(config.ui.show_album_art);
         assert!(config.ui.show_layout_edit_intro);
         assert_eq!(config.ui.playlist_album_art_column_min_width_px, 16);
         assert_eq!(config.ui.playlist_album_art_column_max_width_px, 480);
@@ -272,9 +268,6 @@ mod tests {
 channel_count = 2
 sample_rate_khz = 44100
 bits_per_sample = 24
-
-[ui]
-show_album_art = true
 
 [buffering]
 player_low_watermark_ms = 12000
@@ -353,7 +346,6 @@ decoder_request_chunk_ms = 1500
             defaults.output.bits_per_sample_auto
         );
 
-        assert_eq!(parsed.ui.show_album_art, defaults.ui.show_album_art);
         assert_eq!(
             parsed.ui.show_layout_edit_intro,
             defaults.ui.show_layout_edit_intro

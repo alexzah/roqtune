@@ -477,7 +477,6 @@ fn sanitize_config(config: Config) -> Config {
             bits_per_sample_auto: config.output.bits_per_sample_auto,
         },
         ui: UiConfig {
-            show_album_art: true,
             show_layout_edit_intro: config.ui.show_layout_edit_intro,
             playlist_album_art_column_min_width_px: clamped_album_art_column_min_width_px,
             playlist_album_art_column_max_width_px: clamped_album_art_column_max_width_px,
@@ -1121,7 +1120,6 @@ fn with_updated_layout(previous: &Config, layout: LayoutConfig) -> Config {
     sanitize_config(Config {
         output: previous.output.clone(),
         ui: UiConfig {
-            show_album_art: previous.ui.show_album_art,
             show_layout_edit_intro: previous.ui.show_layout_edit_intro,
             playlist_album_art_column_min_width_px: previous
                 .ui
@@ -1340,7 +1338,6 @@ fn apply_config_to_ui(
     workspace_width_px: u32,
     workspace_height_px: u32,
 ) {
-    ui.set_show_album_art(true);
     ui.set_volume_level(config.ui.volume);
     ui.set_sidebar_width_px(sidebar_width_from_window(config.ui.window_width));
     ui.set_layout_panel_options(ModelRc::from(Rc::new(VecModel::from(
@@ -2852,7 +2849,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     bits_per_sample_auto,
                 },
                 ui: UiConfig {
-                    show_album_art: true,
                     show_layout_edit_intro: show_layout_edit_tutorial,
                     playlist_album_art_column_min_width_px: previous_config
                         .ui
@@ -2948,7 +2944,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let next_config = sanitize_config(Config {
             output: previous_config.output.clone(),
             ui: UiConfig {
-                show_album_art: previous_config.ui.show_album_art,
                 show_layout_edit_intro: previous_config.ui.show_layout_edit_intro,
                 playlist_album_art_column_min_width_px: previous_config
                     .ui
@@ -3052,7 +3047,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let next_config = sanitize_config(Config {
             output: previous_config.output.clone(),
             ui: UiConfig {
-                show_album_art: previous_config.ui.show_album_art,
                 show_layout_edit_intro: previous_config.ui.show_layout_edit_intro,
                 playlist_album_art_column_min_width_px: previous_config
                     .ui
@@ -3158,7 +3152,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let next_config = sanitize_config(Config {
             output: previous_config.output.clone(),
             ui: UiConfig {
-                show_album_art: previous_config.ui.show_album_art,
                 show_layout_edit_intro: previous_config.ui.show_layout_edit_intro,
                 playlist_album_art_column_min_width_px: previous_config
                     .ui
@@ -3258,7 +3251,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let next_config = sanitize_config(Config {
             output: previous_config.output.clone(),
             ui: UiConfig {
-                show_album_art: previous_config.ui.show_album_art,
                 show_layout_edit_intro: previous_config.ui.show_layout_edit_intro,
                 playlist_album_art_column_min_width_px: previous_config
                     .ui
@@ -3490,7 +3482,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     let updated = sanitize_config(Config {
                         output: state.output.clone(),
                         ui: UiConfig {
-                            show_album_art: state.ui.show_album_art,
                             show_layout_edit_intro: state.ui.show_layout_edit_intro,
                             playlist_album_art_column_min_width_px: state
                                 .ui
@@ -4447,7 +4438,6 @@ mod tests {
                 bits_per_sample_auto: true,
             },
             ui: UiConfig {
-                show_album_art: true,
                 show_layout_edit_intro: true,
                 playlist_album_art_column_min_width_px: 16,
                 playlist_album_art_column_max_width_px: 480,
