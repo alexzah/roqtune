@@ -6,7 +6,7 @@ use rand::{rngs::StdRng, Rng, SeedableRng};
 use std::{collections::HashSet, path::PathBuf};
 
 /// One playlist entry containing source path and stable id.
-#[derive(Clone)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Track {
     /// Source file path.
     pub path: PathBuf,
