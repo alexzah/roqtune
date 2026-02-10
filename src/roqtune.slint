@@ -24,6 +24,10 @@ export component AppWindow inherits Window {
                 root.open_layout_editor();
                 return accept;
             }
+            if ((event.text == "f" || event.text == "F") && event.modifiers.control) {
+                root.open_playlist_search();
+                return accept;
+            }
             if (event.text == Key.Escape && root.show_import_menu) {
                 root.show_import_menu = false;
                 return accept;
@@ -39,8 +43,20 @@ export component AppWindow inherits Window {
                 root.open_layout_editor();
                 return accept;
             }
+            if (event.text == Key.Escape && root.playlist_filter_active) {
+                root.clear_playlist_filter_view();
+                key-handler.focus();
+                return accept;
+            }
+            if (event.text == Key.Escape && root.playlist_search_visible) {
+                root.close_playlist_search();
+                key-handler.focus();
+                return accept;
+            }
             if (event.text == Key.Delete) {
-                if (root.editing_playlist_index != -1 || root.show_confirm_dialog) {
+                if (root.editing_playlist_index != -1
+                        || root.show_confirm_dialog
+                        || root.show_apply_filter_view_confirm) {
                     return reject;
                 }
                 if (root.sidebar_has_focus) {
@@ -74,9 +90,18 @@ export component AppWindow inherits Window {
         }
     }
 
+    public function confirm_apply_filter_view() {
+        if (root.playlist_filter_active) {
+            root.apply_filter_view_confirm_message = "Save read-only view into playlist? This will overwrite the playlist contents.";
+            root.show_apply_filter_view_confirm = true;
+        }
+    }
+
     property <int> delete_target_index: -1;
     property <string> delete_confirm_message: "";
     in-out property <bool> show_confirm_dialog: false;
+    in-out property <bool> show_apply_filter_view_confirm: false;
+    in-out property <string> apply_filter_view_confirm_message: "";
     in-out property <int> delete_custom_column_index: -1;
     in-out property <string> delete_custom_column_message: "";
     in-out property <bool> show_delete_custom_column_confirm: false;
@@ -93,7 +118,10 @@ export component AppWindow inherits Window {
     in-out property <int> column_resize_min_width_px: 48;
     in-out property <int> column_resize_max_width_px: 1024;
     in-out property <int> column_resize_preview_width_px: 0;
+    in-out property <int> column_click_candidate: -1;
+    in-out property <bool> column_drag_moved: false;
     property <length> column_resize_start_mouse_x: 0px;
+    property <length> column_click_start_x: 0px;
     in-out property <bool> show_custom_column_dialog: false;
     in-out property <string> custom_column_name: "";
     in-out property <string> custom_column_format: "";
@@ -569,14 +597,17 @@ export component AppWindow inherits Window {
                             for column-header[i] in root.playlist_visible_column_headers : Rectangle {
                                 property <bool> is-drag-source: root.column_drag_from == i;
                                 property <bool> is-resize-target: root.column_resize_active && root.column_resize_index == i;
+                                property <int> sort-state: i < root.playlist_column_sort_states.length ? root.playlist_column_sort_states[i] : 0;
                                 width: root.playlist-column-width(i);
                                 border-radius: 2px;
-                                background: self.is-drag-source ? #2f3b4d : self.is-resize-target ? #243247 : transparent;
+                                background: self.is-drag-source ? #2f3b4d : self.is-resize-target ? #243247 : self.sort-state != 0 ? #263546 : transparent;
                                 border-width: (self.is-drag-source || self.is-resize-target) ? 1px : 0px;
                                 border-color: #496180;
                                 Text {
-                                    text: column-header;
-                                    color: (parent.is-drag-source || parent.is-resize-target) ? #afc4de : #888;
+                                    text: parent.sort-state == 1 ? column-header + " ▲"
+                                        : parent.sort-state == 2 ? column-header + " ▼"
+                                        : column-header;
+                                    color: (parent.is-drag-source || parent.is-resize-target || parent.sort-state != 0) ? #afc4de : #888;
                                     font-size: 12px;
                                     x: 0px;
                                     width: parent.width;
@@ -642,9 +673,14 @@ export component AppWindow inherits Window {
                                         root.column_resize_start_mouse_x = self.mouse-x;
                                         root.column_drag_from = -1;
                                         root.column_drop_gap = -1;
+                                        root.column_click_candidate = -1;
+                                        root.column_drag_moved = false;
                                     } else if (hovered_column != -1) {
                                         root.column_drag_from = hovered_column;
                                         root.column_drop_gap = hovered_gap;
+                                        root.column_click_candidate = hovered_column;
+                                        root.column_click_start_x = self.mouse-x;
+                                        root.column_drag_moved = false;
                                     }
                                 } else if (event.kind == PointerEventKind.move) {
                                     let hovered_divider = visible_column_count > 0
@@ -664,11 +700,19 @@ export component AppWindow inherits Window {
                                             && self.mouse-x >= 0px && self.mouse-x < self.width
                                             ? root.playlist_header_gap_at(floor(self.mouse-x / 1px))
                                             : -1;
+                                        if (root.column_click_candidate != -1 && abs(self.mouse-x - root.column_click_start_x) > 4px) {
+                                            root.column_click_candidate = -1;
+                                            root.column_drag_moved = true;
+                                        }
                                         if (root.column_drag_from != -1 && hovered_gap != -1) {
                                             root.column_drop_gap = hovered_gap;
                                         }
                                     }
                                 } else if (event.kind == PointerEventKind.up) {
+                                    let hovered_column = visible_column_count > 0
+                                        && self.mouse-x >= 0px && self.mouse-x < self.width
+                                        ? root.playlist_header_column_at(floor(self.mouse-x / 1px))
+                                        : -1;
                                     if (root.column_resize_active && root.column_resize_index != -1) {
                                         let new_width_px = root.column_resize_preview_width_px;
                                         root.commit_playlist_column_width(root.column_resize_index, new_width_px);
@@ -686,8 +730,16 @@ export component AppWindow inherits Window {
                                             root.reorder_playlist_columns(root.column_drag_from, final_drop_index);
                                         }
                                     }
+                                    if (!root.column_resize_active
+                                            && !root.column_drag_moved
+                                            && root.column_click_candidate != -1
+                                            && hovered_column == root.column_click_candidate) {
+                                        root.cycle_playlist_sort_by_column(root.column_click_candidate);
+                                    }
                                     root.column_drag_from = -1;
                                     root.column_drop_gap = -1;
+                                    root.column_click_candidate = -1;
+                                    root.column_drag_moved = false;
                                 } else if (event.kind == PointerEventKind.cancel) {
                                     if (root.column_resize_active && root.column_resize_index != -1) {
                                         root.preview_playlist_column_width(root.column_resize_index, root.column_resize_start_width_px);
@@ -698,6 +750,8 @@ export component AppWindow inherits Window {
                                     root.column_drag_from = -1;
                                     root.column_drop_gap = -1;
                                     root.column_hover_divider = -1;
+                                    root.column_click_candidate = -1;
+                                    root.column_drag_moved = false;
                                 }
                             }
 
@@ -741,7 +795,89 @@ export component AppWindow inherits Window {
 
                     track-list-container := Rectangle {
                         clip: true;
+                        property <length> popup-stack-height: (root.playlist_filter_active ? 34px : 0px)
+                            + (root.playlist_search_visible ? 36px : 0px);
+
+                        if root.playlist_filter_active : Rectangle {
+                            x: max(8px, parent.width - self.width - 8px);
+                            y: 6px;
+                            width: 174px;
+                            height: 26px;
+                            border-radius: 4px;
+                            background: #1f2f3fe6;
+                            border-width: 1px;
+                            border-color: #4a6684;
+                            z: 6;
+
+                            HorizontalLayout {
+                                spacing: 6px;
+                                padding-left: 8px;
+                                padding-right: 6px;
+                                Text {
+                                    text: "Read only view";
+                                    color: #d6e4f5;
+                                    font-size: 11px;
+                                    vertical-alignment: center;
+                                    horizontal-alignment: left;
+                                    width: 94px;
+                                }
+                                PlayerButton {
+                                    icon-text: "💾";
+                                    font-size: 12px;
+                                    clicked => {
+                                        root.confirm_apply_filter_view();
+                                    }
+                                }
+                                PlayerButton {
+                                    icon-text: "✕";
+                                    font-size: 12px;
+                                    clicked => {
+                                        root.clear_playlist_filter_view();
+                                        root.refocus_main();
+                                    }
+                                }
+                            }
+                        }
+
+                        if root.playlist_search_visible : Rectangle {
+                            x: max(8px, parent.width - self.width - 8px);
+                            y: root.playlist_filter_active ? 38px : 6px;
+                            width: 320px;
+                            height: 30px;
+                            border-radius: 4px;
+                            background: #1c1c1cec;
+                            border-width: 1px;
+                            border-color: #3f3f3f;
+                            z: 6;
+
+                            HorizontalLayout {
+                                spacing: 6px;
+                                padding-left: 8px;
+                                padding-right: 6px;
+
+                                LineEdit {
+                                    text <=> root.playlist_search_query;
+                                    placeholder-text: "Search tracks...";
+                                    horizontal-stretch: 1;
+                                    edited => {
+                                        root.set_playlist_search_query(self.text);
+                                    }
+                                }
+
+                                PlayerButton {
+                                    icon-text: "✕";
+                                    font-size: 12px;
+                                    clicked => {
+                                        root.close_playlist_search();
+                                        root.refocus_main();
+                                    }
+                                }
+                            }
+                        }
+
                         track-list := ListView {
+                            y: parent.popup-stack-height;
+                            height: max(0px, parent.height - parent.popup-stack-height);
                             property <length> row-height: 30px;
                             property <length> header-height: 28px;
                             for track[i] in root.track_model : TrackRow {
@@ -756,9 +892,9 @@ export component AppWindow inherits Window {
 
                         track-list-overlay := TouchArea {
                             x: 0;
-                            y: 0;
+                            y: parent.popup-stack-height;
                             width: parent.width;
-                            height: parent.height;
+                            height: max(0px, parent.height - parent.popup-stack-height);
                             property <length> row-height: 30px;
                             property <length> header-height: 28px;
                             property <length> content-y: self.mouse-y - track-list.viewport-y;
@@ -785,7 +921,7 @@ export component AppWindow inherits Window {
                                         key-handler.focus();
                                         root.on_pointer_down(self.hovered-row, event.modifiers.control, event.modifiers.shift);
                                     } else if (event.kind == PointerEventKind.up) {
-                                        if (root.pressed-index != -1) {
+                                        if (root.pressed-index != -1 && !root.playlist_filter_active) {
                                             root.on_drag_end(self.drop-gap);
                                         }
                                         root.hover-index = -1;
@@ -794,6 +930,11 @@ export component AppWindow inherits Window {
                             }
 
                             moved => {
+                                if (root.playlist_filter_active) {
+                                    root.is-dragging = false;
+                                    root.drop-index = -1;
+                                    return;
+                                }
                                 if (!self.pressed) {
                                     root.hover-index = (self.is-in-rows && !self.in-null-column) ? self.hovered-row : -1;
                                 } else {
@@ -816,7 +957,7 @@ export component AppWindow inherits Window {
 
                         if (root.is-dragging && root.drop-index != -1) : Rectangle {
                             x: 0;
-                            y: max(0 , track-list.header-height + (root.drop-index - 1) * 30px) + track-list.viewport-y;
+                            y: track-list.y + max(0 , track-list.header-height + (root.drop-index - 1) * 30px) + track-list.viewport-y;
                             width: 100%;
                             height: 2px;
                             background: #2a6def;
@@ -1850,6 +1991,20 @@ export component AppWindow inherits Window {
         }
     }
 
+    apply_filter_view_overlay := ConfirmationDialog {
+        is-visible: root.show_apply_filter_view_confirm;
+        message: root.apply_filter_view_confirm_message;
+        confirmed => {
+            root.apply_filter_view_to_playlist();
+            root.show_apply_filter_view_confirm = false;
+            root.refocus_main();
+        }
+        cancelled => {
+            root.show_apply_filter_view_confirm = false;
+            root.refocus_main();
+        }
+    }
+
     custom_column_delete_overlay := ConfirmationDialog {
         is-visible: root.show_delete_custom_column_confirm;
         message: root.delete_custom_column_message;
@@ -2107,6 +2262,11 @@ export component AppWindow inherits Window {
     in-out property <int> repeat_mode: 0; // 0: Off, 1: Playlist, 2: Track
     in-out property <int> selected_track_index: -1;
     in-out property <int> playing_track_index: -1;
+    in-out property <bool> playlist_filter_active: false;
+    in-out property <bool> playlist_search_visible: false;
+    in-out property <string> playlist_search_query: "";
+    in-out property <string> playlist_filter_summary: "";
+    in-out property <[int]> playlist_column_sort_states: [];
 
     // Album art properties
     in-out property <bool> show_album_art: true;
@@ -2211,6 +2371,12 @@ export component AppWindow inherits Window {
     callback commit_playlist_column_width(int, int);
     callback reset_playlist_column_width(int);
     callback playlist_columns_viewport_resized(int);
+    callback open_playlist_search();
+    callback close_playlist_search();
+    callback set_playlist_search_query(string);
+    callback clear_playlist_filter_view();
+    callback cycle_playlist_sort_by_column(int);
+    callback apply_filter_view_to_playlist();
     callback open_control_cluster_menu_for_leaf(string, int, int);
     callback add_control_cluster_button(string, int);
     callback remove_control_cluster_button(string, int);

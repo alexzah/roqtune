@@ -553,6 +553,56 @@ impl PlaylistManager {
                         // Re-cache to ensure next tracks are correct
                         self.cache_tracks(false);
                     }
+                    protocol::Message::Playlist(
+                        protocol::PlaylistMessage::ApplyFilterViewSnapshot(source_indices),
+                    ) => {
+                        debug!(
+                            "PlaylistManager: Applying filter view snapshot with {} entries",
+                            source_indices.len()
+                        );
+                        let old_ids: Vec<String> = (0..self.editing_playlist.num_tracks())
+                            .map(|index| self.editing_playlist.get_track_id(index))
+                            .collect();
+                        let was_playing_active_playlist = Some(&self.active_playlist_id)
+                            == self.playback_playlist_id.as_ref()
+                            && self.playback_playlist.is_playing();
+
+                        self.editing_playlist
+                            .apply_filter_view_snapshot(source_indices.clone());
+                        if Some(&self.active_playlist_id) == self.playback_playlist_id.as_ref() {
+                            self.playback_playlist
+                                .apply_filter_view_snapshot(source_indices);
+                        }
+
+                        let new_ids: Vec<String> = (0..self.editing_playlist.num_tracks())
+                            .map(|index| self.editing_playlist.get_track_id(index))
+                            .collect();
+                        let new_id_set: HashSet<String> = new_ids.iter().cloned().collect();
+                        for removed_id in old_ids
+                            .into_iter()
+                            .filter(|old_id| !new_id_set.contains(old_id))
+                        {
+                            if let Err(err) = self.db_manager.delete_track(&removed_id) {
+                                error!("Failed to delete track from database: {}", err);
+                            }
+                        }
+                        if let Err(err) = self.db_manager.update_positions(new_ids) {
+                            error!("Failed to update positions in database: {}", err);
+                        }
+
+                        if was_playing_active_playlist && !self.playback_playlist.is_playing() {
+                            let _ = self
+                                .bus_producer
+                                .send(protocol::Message::Playback(protocol::PlaybackMessage::Stop));
+                        } else if Some(&self.active_playlist_id)
+                            == self.playback_playlist_id.as_ref()
+                        {
+                            self.cache_tracks(false);
+                        }
+
+                        self.broadcast_playlist_changed();
+                        self.broadcast_selection_changed();
+                    }
                     protocol::Message::Playlist(protocol::PlaylistMessage::CreatePlaylist {
                         name,
                     }) => {
