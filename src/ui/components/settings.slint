@@ -1,0 +1,56 @@
+import { ComboBox, LineEdit } from "std-widgets.slint";
+
+export component SettingsDropdownControl inherits Rectangle {
+    in property <string> label;
+    in property <[string]> options;
+    in-out property <int> selected_index;
+    in-out property <string> custom_value;
+    in property <string> custom_placeholder;
+
+    property <bool> use_custom: root.options.length > 0 && root.selected_index == root.options.length - 1;
+    height: root.use_custom ? 76px : 40px;
+
+    VerticalLayout {
+        spacing: 4px;
+
+        HorizontalLayout {
+            spacing: 12px;
+
+            Text {
+                text: root.label;
+                color: #ddd;
+                font-size: 12px;
+                width: 220px;
+                vertical-alignment: center;
+                horizontal-alignment: left;
+            }
+
+            Rectangle {
+                horizontal-stretch: 1;
+                height: 34px;
+                background: transparent;
+                ComboBox {
+                    width: parent.width;
+                    height: parent.height;
+                    model: root.options;
+                    current-index <=> root.selected_index;
+                }
+            }
+        }
+
+        if root.use_custom : HorizontalLayout {
+            spacing: 12px;
+            Rectangle {
+                width: 220px;
+            }
+            LineEdit {
+                horizontal-stretch: 1;
+                text <=> root.custom_value;
+                placeholder-text: root.custom_placeholder;
+            }
+            Rectangle {
+                width: 32px;
+            }
+        }
+    }
+}

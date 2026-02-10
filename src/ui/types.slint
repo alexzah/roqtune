@@ -1,0 +1,29 @@
+export struct TrackRowData {
+    status: string,
+    values: [string],
+    selected: bool,
+}
+
+export struct LayoutSplitterModel {
+    id: string,
+    axis: int,
+    x_px: int,
+    y_px: int,
+    width_px: int,
+    height_px: int,
+    ratio: float,
+    min_ratio: float,
+    max_ratio: float,
+    track_start_px: int,
+    track_length_px: int,
+}
+
+export struct LayoutButtonClusterPanelModel {
+    leaf_id: string,
+    x_px: int,
+    y_px: int,
+    width_px: int,
+    height_px: int,
+    visible: bool,
+    actions: [int],
+}

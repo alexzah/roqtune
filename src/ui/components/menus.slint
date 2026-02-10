@@ -1,0 +1,256 @@
+import { Button, Switch } from "std-widgets.slint";
+
+export component ContextMenu inherits PopupWindow {
+    callback rename();
+    callback delete();
+    in property <bool> is-playlist: false;
+    width: 120px;
+    height: is-playlist ? 56px : 32px;
+
+    Rectangle {
+        background: #333;
+        border-width: 1px;
+        border-color: #444;
+
+        VerticalLayout {
+            padding: 4px;
+            spacing: 4px;
+            Rectangle {
+                height: 24px;
+                background: item-ta-rename.has-hover ? #444 : transparent;
+                border-radius: 2px;
+                Text {
+                    x: 8px;
+                    text: "Rename";
+                    color: #eee;
+                    font-size: 13px;
+                    vertical-alignment: center;
+                }
+                item-ta-rename := TouchArea {
+                    clicked => {
+                        root.rename();
+                    }
+                }
+            }
+            if is-playlist : Rectangle {
+                height: 24px;
+                background: item-ta-delete.has-hover ? #444 : transparent;
+                border-radius: 2px;
+                Text {
+                    x: 8px;
+                    text: "Delete";
+                    color: #ff5555;
+                    font-size: 13px;
+                    vertical-alignment: center;
+                }
+                item-ta-delete := TouchArea {
+                    clicked => {
+                        root.delete();
+                    }
+                }
+            }
+        }
+    }
+}
+
+export component ColumnHeaderMenu inherits PopupWindow {
+    in property <[string]> labels: [];
+    in property <[bool]> checked: [];
+    in property <[bool]> custom: [];
+    callback toggle-column(int);
+    callback delete-column(int);
+    callback add-custom();
+
+    width: 220px;
+    height: 16px + labels.length * 24px + 32px;
+
+    Rectangle {
+        background: #2f2f2f;
+        border-width: 1px;
+        border-color: #454545;
+        border-radius: 4px;
+
+        VerticalLayout {
+            padding: 4px;
+            spacing: 2px;
+
+            for label[i] in root.labels : Rectangle {
+                property <bool> is-custom: i < root.custom.length && root.custom[i];
+                height: 22px;
+                border-radius: 2px;
+                background: column-item-ta.has-hover ? #3d3d3d : transparent;
+                column-toggle := Switch {
+                    x: 6px;
+                    y: (parent.height - self.height) / 2;
+                    width: 18px;
+                    text: "";
+                    checked: i < root.checked.length ? root.checked[i] : false;
+                    toggled => {
+                        root.toggle-column(i);
+                    }
+                }
+                Text {
+                    text: label;
+                    color: #ddd;
+                    font-size: 12px;
+                    vertical-alignment: center;
+                    horizontal-alignment: left;
+                    x: 30px;
+                    width: parent.width - (parent.is-custom ? 58px : 36px);
+                    overflow: elide;
+                }
+                column-item-ta := TouchArea {
+                    x: 30px;
+                    width: parent.width - (parent.is-custom ? 54px : 30px);
+                    clicked => {
+                        root.toggle-column(i);
+                    }
+                }
+                if self.is-custom : Rectangle {
+                    width: 18px;
+                    height: 18px;
+                    x: parent.width - self.width - 6px;
+                    y: (parent.height - self.height) / 2;
+                    background: transparent;
+                    Text {
+                        text: "X";
+                        color: delete-column-ta.has-hover ? #ff5c5c : #db3f3f;
+                        font-size: 12px;
+                        horizontal-alignment: center;
+                        vertical-alignment: center;
+                    }
+                    delete-column-ta := TouchArea {
+                        clicked => {
+                            root.delete-column(i);
+                        }
+                    }
+                }
+            }
+
+            Rectangle {
+                height: 1px;
+                background: #3c3c3c;
+            }
+
+            Rectangle {
+                height: 22px;
+                border-radius: 2px;
+                background: custom-item-ta.has-hover ? #3d3d3d : transparent;
+                Text {
+                    text: "Custom...";
+                    color: #ddd;
+                    font-size: 12px;
+                    vertical-alignment: center;
+                    horizontal-alignment: left;
+                    x: 6px;
+                }
+                custom-item-ta := TouchArea {
+                    clicked => {
+                        root.add-custom();
+                    }
+                }
+            }
+        }
+    }
+}
+
+export component ConfirmationDialog inherits Rectangle {
+    callback confirmed();
+    callback cancelled();
+    in property <string> message: "Are you sure?";
+    in property <bool> is-visible: false;
+
+    visible: is-visible;
+    background: #00000080;
+
+    // Prevent clicks from passing through
+    TouchArea {}
+
+    Rectangle {
+        width: 350px;
+        height: 150px;
+        background: #282828;
+        border-width: 1px;
+        border-color: #444;
+        border-radius: 4px;
+
+        VerticalLayout {
+            padding: 20px;
+            spacing: 20px;
+
+            Text {
+                text: root.message;
+                color: #eee;
+                font-size: 14px;
+                horizontal-alignment: center;
+                wrap: word-wrap;
+            }
+
+            HorizontalLayout {
+                spacing: 15px;
+                alignment: center;
+
+                Button {
+                    text: "Cancel";
+                    clicked => { root.cancelled(); }
+                }
+
+                Button {
+                    text: "Delete";
+                    primary: true;
+                    clicked => { root.confirmed(); }
+                }
+            }
+        }
+    }
+}
+
+export component InfoDialog inherits Rectangle {
+    callback dismissed();
+    in property <string> message: "";
+    in property <bool> is-visible: false;
+
+    visible: is-visible;
+    background: #00000080;
+
+    TouchArea {}
+
+    Rectangle {
+        width: 430px;
+        height: 180px;
+        background: #282828;
+        border-width: 1px;
+        border-color: #444;
+        border-radius: 4px;
+
+        VerticalLayout {
+            padding: 16px;
+            spacing: 14px;
+
+            Text {
+                text: "Restart Required";
+                color: #eee;
+                font-size: 16px;
+                font-weight: 700;
+                horizontal-alignment: left;
+            }
+
+            Text {
+                text: root.message;
+                color: #ddd;
+                font-size: 13px;
+                wrap: word-wrap;
+                vertical-stretch: 1;
+            }
+
+            HorizontalLayout {
+                Rectangle { horizontal-stretch: 1; }
+                Button {
+                    text: "OK";
+                    primary: true;
+                    clicked => { root.dismissed(); }
+                }
+            }
+        }
+    }
+}
