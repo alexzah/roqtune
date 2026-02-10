@@ -1544,6 +1544,35 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }));
     });
 
+    let bus_sender_clone = bus_sender.clone();
+    ui.on_copy_selected_tracks(move || {
+        let _ = bus_sender_clone.send(Message::Playlist(PlaylistMessage::CopySelectedTracks));
+    });
+
+    let bus_sender_clone = bus_sender.clone();
+    let ui_handle_clone = ui.as_weak().clone();
+    ui.on_cut_selected_tracks(move || {
+        if let Some(ui) = ui_handle_clone.upgrade() {
+            if ui.get_playlist_filter_active() {
+                flash_read_only_view_indicator(ui_handle_clone.clone());
+                return;
+            }
+        }
+        let _ = bus_sender_clone.send(Message::Playlist(PlaylistMessage::CutSelectedTracks));
+    });
+
+    let bus_sender_clone = bus_sender.clone();
+    let ui_handle_clone = ui.as_weak().clone();
+    ui.on_paste_copied_tracks(move || {
+        if let Some(ui) = ui_handle_clone.upgrade() {
+            if ui.get_playlist_filter_active() {
+                flash_read_only_view_indicator(ui_handle_clone.clone());
+                return;
+            }
+        }
+        let _ = bus_sender_clone.send(Message::Playlist(PlaylistMessage::PasteCopiedTracks));
+    });
+
     // Wire up pointer down handler
     let bus_sender_clone = bus_sender.clone();
     ui.on_on_pointer_down(move |index, ctrl, shift| {
@@ -3473,12 +3502,13 @@ mod tests {
             "App window should define a null column width"
         );
         assert!(
-            slint_ui.contains("property <bool> in-null-column: self.mouse-x >= (self.width - root.null-column-width);"),
+            slint_ui.contains("property <bool> in-null-column: self.in-viewport")
+                && slint_ui.contains("track-list.viewport-width - root.null-column-width"),
             "Track overlay should detect clicks in null column"
         );
         assert!(
             slint_ui.contains(
-                "property <bool> is-in-rows: raw-row >= 0 && raw-row < root.track_model.length;"
+                "property <bool> is-in-rows: self.in-viewport && raw-row >= 0 && raw-row < root.track_model.length;"
             ),
             "Track overlay should detect when click is outside rows"
         );
@@ -3677,6 +3707,21 @@ mod tests {
             slint_ui.contains("(event.text == \"f\" || event.text == \"F\")")
                 && slint_ui.contains("root.open_playlist_search();"),
             "Playlist search should be reachable via Ctrl+F"
+        );
+        assert!(
+            slint_ui.contains("(event.text == \"c\" || event.text == \"C\")")
+                && slint_ui.contains("root.copy_selected_tracks();")
+                && slint_ui.contains("(event.text == \"x\" || event.text == \"X\")")
+                && slint_ui.contains("root.cut_selected_tracks();")
+                && slint_ui.contains("(event.text == \"v\" || event.text == \"V\")")
+                && slint_ui.contains("root.paste_copied_tracks();"),
+            "Playlist rows should support Ctrl+C/Ctrl+X/Ctrl+V shortcuts"
+        );
+        assert!(
+            slint_ui.contains("callback copy_selected_tracks();")
+                && slint_ui.contains("callback cut_selected_tracks();")
+                && slint_ui.contains("callback paste_copied_tracks();"),
+            "App window should expose copy/cut/paste callbacks for track list"
         );
         assert!(
             slint_ui.contains("event.text == Key.Escape && root.layout_edit_mode"),

@@ -28,6 +28,18 @@ export component AppWindow inherits Window {
                 root.open_playlist_search();
                 return accept;
             }
+            if ((event.text == "c" || event.text == "C") && event.modifiers.control) {
+                root.copy_selected_tracks();
+                return accept;
+            }
+            if ((event.text == "x" || event.text == "X") && event.modifiers.control) {
+                root.cut_selected_tracks();
+                return accept;
+            }
+            if ((event.text == "v" || event.text == "V") && event.modifiers.control) {
+                root.paste_copied_tracks();
+                return accept;
+            }
             if (event.text == Key.Escape && root.show_import_menu) {
                 root.show_import_menu = false;
                 return accept;
@@ -2433,6 +2445,9 @@ export component AppWindow inherits Window {
     callback volume-changed(float); // Volume between 0.0 and 1.0
     callback delete_selected_tracks();
     callback reorder_tracks([int], int); // indices, to
+    callback copy_selected_tracks();
+    callback cut_selected_tracks();
+    callback paste_copied_tracks();
     callback deselect_all();
     callback create_playlist();
     callback switch_playlist(int);

@@ -71,6 +71,14 @@ pub enum PlaylistMessage {
     OnDragEnd {
         drop_gap: usize,
     },
+    CopySelectedTracks,
+    CutSelectedTracks,
+    PasteCopiedTracks,
+    PasteTracks(Vec<PathBuf>),
+    TracksInserted {
+        tracks: Vec<RestoredTrack>,
+        insert_at: usize,
+    },
     OpenPlaylistSearch,
     ClosePlaylistSearch,
     SetPlaylistSearchQuery(String),

@@ -47,6 +47,7 @@ pub struct UiManager {
     track_metadata: Vec<TrackMetadata>,
     view_indices: Vec<usize>,
     selected_indices: Vec<usize>,
+    copied_track_paths: Vec<PathBuf>,
     active_playing_index: Option<usize>,
     drag_indices: Vec<usize>,
     is_dragging: bool,
@@ -202,6 +203,7 @@ impl UiManager {
             track_metadata: Vec::new(),
             view_indices: Vec::new(),
             selected_indices: Vec::new(),
+            copied_track_paths: Vec::new(),
             active_playing_index: None,
             drag_indices: Vec::new(),
             is_dragging: false,
@@ -1165,6 +1167,50 @@ impl UiManager {
         self.rebuild_track_model();
     }
 
+    fn build_copied_track_paths(
+        track_paths: &[PathBuf],
+        selected_indices: &[usize],
+    ) -> Vec<PathBuf> {
+        let mut normalized = selected_indices.to_vec();
+        normalized.sort_unstable();
+        normalized.dedup();
+        normalized
+            .into_iter()
+            .filter_map(|index| track_paths.get(index).cloned())
+            .collect()
+    }
+
+    fn copy_selected_tracks(&mut self) {
+        if self.selected_indices.is_empty() {
+            return;
+        }
+        self.copied_track_paths =
+            Self::build_copied_track_paths(&self.track_paths, &self.selected_indices);
+        debug!(
+            "UiManager: copied {} track(s) from selection",
+            self.copied_track_paths.len()
+        );
+    }
+
+    fn paste_copied_tracks(&mut self) {
+        if self.copied_track_paths.is_empty() {
+            return;
+        }
+        let _ = self.bus_sender.send(protocol::Message::Playlist(
+            protocol::PlaylistMessage::PasteTracks(self.copied_track_paths.clone()),
+        ));
+    }
+
+    fn cut_selected_tracks(&mut self) {
+        if self.is_filter_view_active() || self.selected_indices.is_empty() {
+            return;
+        }
+        self.copy_selected_tracks();
+        let _ = self.bus_sender.send(protocol::Message::Playlist(
+            protocol::PlaylistMessage::DeleteTracks(self.selected_indices.clone()),
+        ));
+    }
+
     fn read_track_metadata(&self, path: &PathBuf) -> TrackMetadata {
         debug!("Reading metadata for: {}", path.display());
 
@@ -1551,6 +1597,39 @@ impl UiManager {
                             let _ = self.bus_sender.send(protocol::Message::Playlist(
                                 protocol::PlaylistMessage::DeleteTracks(indices),
                             ));
+                        }
+                        protocol::Message::Playlist(
+                            protocol::PlaylistMessage::CopySelectedTracks,
+                        ) => {
+                            self.copy_selected_tracks();
+                        }
+                        protocol::Message::Playlist(
+                            protocol::PlaylistMessage::CutSelectedTracks,
+                        ) => {
+                            self.cut_selected_tracks();
+                        }
+                        protocol::Message::Playlist(
+                            protocol::PlaylistMessage::PasteCopiedTracks,
+                        ) => {
+                            if self.is_filter_view_active() {
+                                continue;
+                            }
+                            self.paste_copied_tracks();
+                        }
+                        protocol::Message::Playlist(
+                            protocol::PlaylistMessage::TracksInserted { tracks, insert_at },
+                        ) => {
+                            let mut insert_cursor = insert_at.min(self.track_ids.len());
+                            for track in tracks {
+                                let metadata = self.read_track_metadata(&track.path);
+                                self.track_ids.insert(insert_cursor, track.id);
+                                self.track_paths.insert(insert_cursor, track.path);
+                                self.track_metadata.insert(insert_cursor, metadata);
+                                insert_cursor += 1;
+                            }
+                            self.refresh_playlist_column_content_targets();
+                            self.apply_playlist_column_layout();
+                            self.rebuild_track_model();
                         }
                         protocol::Message::Playlist(
                             protocol::PlaylistMessage::PlayTrackByViewIndex(view_index),
@@ -2089,6 +2168,28 @@ mod tests {
         let first = rx.recv().expect("expected first request");
         let latest = UiManager::coalesce_cover_art_requests(first, &rx);
         assert_eq!(latest.track_path, None);
+    }
+
+    #[test]
+    fn test_build_copied_track_paths_preserves_playlist_order() {
+        let track_paths = vec![
+            PathBuf::from("a.mp3"),
+            PathBuf::from("b.mp3"),
+            PathBuf::from("c.mp3"),
+            PathBuf::from("d.mp3"),
+        ];
+        let selected_indices = vec![3usize, 1, 3, 0];
+
+        let copied = UiManager::build_copied_track_paths(&track_paths, &selected_indices);
+
+        assert_eq!(
+            copied,
+            vec![
+                PathBuf::from("a.mp3"),
+                PathBuf::from("b.mp3"),
+                PathBuf::from("d.mp3")
+            ]
+        );
     }
 
     #[test]
