@@ -78,6 +78,10 @@ pub enum PlaylistMessage {
     UndoTrackListEdit,
     RedoTrackListEdit,
     PasteTracks(Vec<PathBuf>),
+    AddTracksToPlaylists {
+        playlist_ids: Vec<String>,
+        paths: Vec<PathBuf>,
+    },
     PlayLibraryQueue {
         tracks: Vec<RestoredTrack>,
         start_index: usize,
@@ -161,8 +165,22 @@ pub enum PlaylistMessage {
 pub enum LibraryMessage {
     SetCollectionMode(i32),
     SelectRootSection(i32),
+    SelectListItem {
+        index: usize,
+        ctrl: bool,
+        shift: bool,
+        context_click: bool,
+    },
     NavigateBack,
     ActivateListItem(usize),
+    PrepareAddToPlaylists,
+    ToggleAddToPlaylist(usize),
+    ConfirmAddToPlaylists,
+    CancelAddToPlaylists,
+    AddSelectionToPlaylists {
+        selections: Vec<LibrarySelectionSpec>,
+        playlist_ids: Vec<String>,
+    },
     RequestScan,
     RequestSongs,
     RequestArtists,
@@ -192,6 +210,19 @@ pub enum LibraryMessage {
         album_artist: String,
         songs: Vec<LibrarySong>,
     },
+    AddToPlaylistsCompleted {
+        playlist_count: usize,
+        track_count: usize,
+    },
+    AddToPlaylistsFailed(String),
+}
+
+/// Selection item used to resolve library items to concrete track paths.
+#[derive(Debug, Clone, serde::Deserialize, serde::Serialize)]
+pub enum LibrarySelectionSpec {
+    Song { path: PathBuf },
+    Artist { artist: String },
+    Album { album: String, album_artist: String },
 }
 
 /// Persisted per-column width override for one playlist.

@@ -43,6 +43,7 @@ pub struct UiManager {
     last_cover_art_lookup_path: Option<PathBuf>,
     active_playlist_id: String,
     playlist_ids: Vec<String>,
+    playlist_names: Vec<String>,
     track_ids: Vec<String>,
     track_paths: Vec<PathBuf>,
     track_cover_art_paths: Vec<Option<PathBuf>>,
@@ -86,9 +87,15 @@ pub struct UiManager {
     collection_mode: i32,
     library_view_stack: Vec<LibraryViewState>,
     library_entries: Vec<LibraryEntry>,
+    library_selected_indices: Vec<usize>,
+    library_selection_anchor: Option<usize>,
+    library_last_primary_click_index: Option<usize>,
+    library_last_primary_click_at: Option<Instant>,
     library_cover_art_paths: HashMap<PathBuf, Option<PathBuf>>,
     library_scan_in_progress: bool,
     library_status_text: String,
+    library_add_to_playlist_checked: Vec<bool>,
+    library_add_to_dialog_visible: bool,
 }
 
 /// Normalized track metadata snapshot used for row rendering and side panel display.
@@ -147,6 +154,7 @@ struct LibraryRowPresentation {
     item_kind: i32,
     cover_art_path: Option<PathBuf>,
     is_playing: bool,
+    selected: bool,
 }
 
 const PLAYLIST_COLUMN_KIND_TEXT: i32 = 0;
@@ -155,6 +163,10 @@ const BASE_ROW_HEIGHT_PX: u32 = 30;
 const ALBUM_ART_ROW_PADDING_PX: u32 = 8;
 const COLLECTION_MODE_PLAYLIST: i32 = 0;
 const COLLECTION_MODE_LIBRARY: i32 = 1;
+const LIBRARY_ITEM_KIND_SONG: i32 = 0;
+const LIBRARY_ITEM_KIND_ARTIST: i32 = 1;
+const LIBRARY_ITEM_KIND_ALBUM: i32 = 2;
+const LIBRARY_DOUBLE_CLICK_THRESHOLD_MS: u64 = 350;
 
 thread_local! {
     static TRACK_ROW_COVER_ART_IMAGE_CACHE: RefCell<HashMap<PathBuf, Image>> =
@@ -251,6 +263,7 @@ impl UiManager {
             last_cover_art_lookup_path: None,
             active_playlist_id: String::new(),
             playlist_ids: Vec::new(),
+            playlist_names: Vec::new(),
             track_ids: Vec::new(),
             track_paths: Vec::new(),
             track_cover_art_paths: Vec::new(),
@@ -294,9 +307,15 @@ impl UiManager {
             collection_mode: COLLECTION_MODE_PLAYLIST,
             library_view_stack: vec![LibraryViewState::SongsRoot],
             library_entries: Vec::new(),
+            library_selected_indices: Vec::new(),
+            library_selection_anchor: None,
+            library_last_primary_click_index: None,
+            library_last_primary_click_at: None,
             library_cover_art_paths: HashMap::new(),
             library_scan_in_progress: false,
             library_status_text: String::new(),
+            library_add_to_playlist_checked: Vec::new(),
+            library_add_to_dialog_visible: false,
         }
     }
 
@@ -1657,17 +1676,258 @@ impl UiManager {
         resolved
     }
 
+    fn reset_library_selection(&mut self) {
+        self.library_selected_indices.clear();
+        self.library_selection_anchor = None;
+    }
+
+    fn reset_library_primary_click_tracking(&mut self) {
+        self.library_last_primary_click_index = None;
+        self.library_last_primary_click_at = None;
+    }
+
+    fn should_activate_library_item_on_click(
+        &mut self,
+        index: usize,
+        ctrl: bool,
+        shift: bool,
+        context_click: bool,
+    ) -> bool {
+        if ctrl || shift || context_click {
+            self.reset_library_primary_click_tracking();
+            return false;
+        }
+
+        let now = Instant::now();
+        let threshold = Duration::from_millis(LIBRARY_DOUBLE_CLICK_THRESHOLD_MS);
+        let is_double_click = self.library_last_primary_click_index == Some(index)
+            && self
+                .library_last_primary_click_at
+                .map(|last| now.saturating_duration_since(last) <= threshold)
+                .unwrap_or(false);
+
+        if is_double_click {
+            self.reset_library_primary_click_tracking();
+            true
+        } else {
+            self.library_last_primary_click_index = Some(index);
+            self.library_last_primary_click_at = Some(now);
+            false
+        }
+    }
+
+    fn sync_library_add_to_playlist_ui(&self) {
+        let labels: Vec<slint::SharedString> = self
+            .playlist_names
+            .iter()
+            .map(|name| name.as_str().into())
+            .collect();
+        let checked = if self.library_add_to_playlist_checked.len() == labels.len() {
+            self.library_add_to_playlist_checked.clone()
+        } else {
+            vec![false; labels.len()]
+        };
+        let selected_count = self.library_selected_indices.len() as i32;
+        let confirm_enabled = selected_count > 0 && checked.iter().any(|value| *value);
+        let dialog_visible = self.library_add_to_dialog_visible;
+
+        let _ = self.ui.upgrade_in_event_loop(move |ui| {
+            ui.set_library_add_to_playlist_labels(ModelRc::from(Rc::new(VecModel::from(labels))));
+            ui.set_library_add_to_playlist_checked(ModelRc::from(Rc::new(VecModel::from(checked))));
+            ui.set_library_add_to_dialog_visible(dialog_visible);
+            ui.set_library_selected_count(selected_count);
+            ui.set_library_add_to_confirm_enabled(confirm_enabled);
+        });
+    }
+
+    fn select_library_list_item(
+        &mut self,
+        index: usize,
+        ctrl: bool,
+        shift: bool,
+        context_click: bool,
+    ) {
+        if index >= self.library_entries.len() {
+            return;
+        }
+        let activate_item =
+            self.should_activate_library_item_on_click(index, ctrl, shift, context_click);
+
+        if context_click {
+            if !self.library_selected_indices.contains(&index) {
+                self.library_selected_indices.clear();
+                self.library_selected_indices.push(index);
+            }
+            self.library_selection_anchor = Some(index);
+        } else if shift {
+            let anchor = self.library_selection_anchor.unwrap_or(index);
+            let start = anchor.min(index);
+            let end = anchor.max(index);
+            let range: Vec<usize> = (start..=end).collect();
+            if ctrl {
+                for selected in range {
+                    if !self.library_selected_indices.contains(&selected) {
+                        self.library_selected_indices.push(selected);
+                    }
+                }
+            } else {
+                self.library_selected_indices = range;
+            }
+        } else if ctrl {
+            if let Some(existing) = self
+                .library_selected_indices
+                .iter()
+                .position(|selected| *selected == index)
+            {
+                self.library_selected_indices.remove(existing);
+            } else {
+                self.library_selected_indices.push(index);
+            }
+            self.library_selection_anchor = Some(index);
+        } else {
+            self.library_selected_indices.clear();
+            self.library_selected_indices.push(index);
+            self.library_selection_anchor = Some(index);
+        }
+
+        self.library_selected_indices.sort_unstable();
+        self.library_selected_indices.dedup();
+        if self.library_selected_indices.is_empty() {
+            self.library_selection_anchor = None;
+        }
+
+        if activate_item {
+            self.sync_library_ui();
+            self.sync_library_add_to_playlist_ui();
+            self.activate_library_item(index);
+            return;
+        }
+
+        self.sync_library_ui();
+        self.sync_library_add_to_playlist_ui();
+    }
+
+    fn build_library_selection_specs(&self) -> Vec<protocol::LibrarySelectionSpec> {
+        let mut specs = Vec::new();
+        let mut seen = HashSet::new();
+        for index in &self.library_selected_indices {
+            let Some(entry) = self.library_entries.get(*index) else {
+                continue;
+            };
+            let (key, spec) = match entry {
+                LibraryEntry::Song(song) => (
+                    format!("song:{}", song.path.to_string_lossy()),
+                    protocol::LibrarySelectionSpec::Song {
+                        path: song.path.clone(),
+                    },
+                ),
+                LibraryEntry::Artist(artist) => (
+                    format!("artist:{}", artist.artist),
+                    protocol::LibrarySelectionSpec::Artist {
+                        artist: artist.artist.clone(),
+                    },
+                ),
+                LibraryEntry::Album(album) => (
+                    format!("album:{}\u{001f}{}", album.album, album.album_artist),
+                    protocol::LibrarySelectionSpec::Album {
+                        album: album.album.clone(),
+                        album_artist: album.album_artist.clone(),
+                    },
+                ),
+            };
+            if seen.insert(key) {
+                specs.push(spec);
+            }
+        }
+        specs
+    }
+
+    fn prepare_library_add_to_playlists(&mut self) {
+        if self.library_selected_indices.is_empty() {
+            self.library_status_text = "Select at least one library item.".to_string();
+            self.sync_library_ui();
+            return;
+        }
+        if self.playlist_ids.is_empty() {
+            self.library_status_text = "No playlists available for Add To.".to_string();
+            self.sync_library_ui();
+            return;
+        }
+        self.library_add_to_playlist_checked = vec![false; self.playlist_ids.len()];
+        self.library_add_to_dialog_visible = true;
+        self.sync_library_add_to_playlist_ui();
+    }
+
+    fn toggle_library_add_to_playlist(&mut self, index: usize) {
+        if index >= self.library_add_to_playlist_checked.len() {
+            return;
+        }
+        self.library_add_to_playlist_checked[index] = !self.library_add_to_playlist_checked[index];
+        self.sync_library_add_to_playlist_ui();
+    }
+
+    fn confirm_library_add_to_playlists(&mut self) {
+        if self.library_selected_indices.is_empty() {
+            self.library_add_to_dialog_visible = false;
+            self.sync_library_add_to_playlist_ui();
+            return;
+        }
+
+        let playlist_ids: Vec<String> = self
+            .library_add_to_playlist_checked
+            .iter()
+            .enumerate()
+            .filter_map(|(index, selected)| {
+                if *selected {
+                    self.playlist_ids.get(index).cloned()
+                } else {
+                    None
+                }
+            })
+            .collect();
+        if playlist_ids.is_empty() {
+            self.library_status_text = "Select at least one target playlist.".to_string();
+            self.sync_library_ui();
+            return;
+        }
+
+        let selections = self.build_library_selection_specs();
+        if selections.is_empty() {
+            self.library_status_text = "No library items selected.".to_string();
+            self.sync_library_ui();
+            self.library_add_to_dialog_visible = false;
+            self.sync_library_add_to_playlist_ui();
+            return;
+        }
+
+        self.library_add_to_dialog_visible = false;
+        self.sync_library_add_to_playlist_ui();
+        let _ = self.bus_sender.send(protocol::Message::Library(
+            protocol::LibraryMessage::AddSelectionToPlaylists {
+                selections,
+                playlist_ids,
+            },
+        ));
+    }
+
+    fn cancel_library_add_to_playlists(&mut self) {
+        self.library_add_to_dialog_visible = false;
+        self.sync_library_add_to_playlist_ui();
+    }
+
     fn library_row_presentation_from_entry(
         &mut self,
         entry: &LibraryEntry,
+        selected: bool,
     ) -> LibraryRowPresentation {
         match entry {
             LibraryEntry::Song(song) => LibraryRowPresentation {
                 primary: song.title.clone(),
                 secondary: format!("{} • {}", song.artist, song.album),
-                item_kind: 0,
+                item_kind: LIBRARY_ITEM_KIND_SONG,
                 cover_art_path: self.resolve_library_cover_art_path(&song.path),
                 is_playing: self.current_playing_track_path.as_ref() == Some(&song.path),
+                selected,
             },
             LibraryEntry::Artist(artist) => LibraryRowPresentation {
                 primary: artist.artist.clone(),
@@ -1675,19 +1935,21 @@ impl UiManager {
                     "{} albums • {} songs",
                     artist.album_count, artist.song_count
                 ),
-                item_kind: 1,
+                item_kind: LIBRARY_ITEM_KIND_ARTIST,
                 cover_art_path: None,
                 is_playing: false,
+                selected,
             },
             LibraryEntry::Album(album) => LibraryRowPresentation {
                 primary: album.album.clone(),
                 secondary: format!("{} • {} songs", album.album_artist, album.song_count),
-                item_kind: 2,
+                item_kind: LIBRARY_ITEM_KIND_ALBUM,
                 cover_art_path: album
                     .representative_track_path
                     .as_ref()
                     .and_then(|track_path| self.resolve_library_cover_art_path(track_path)),
                 is_playing: false,
+                selected,
             },
         }
     }
@@ -1700,9 +1962,13 @@ impl UiManager {
         let scan_in_progress = self.library_scan_in_progress;
         let status_text = self.library_status_text.clone();
         let entries = self.library_entries.clone();
+        let selected_set: HashSet<usize> = self.library_selected_indices.iter().copied().collect();
         let rows: Vec<LibraryRowPresentation> = entries
             .into_iter()
-            .map(|entry| self.library_row_presentation_from_entry(&entry))
+            .enumerate()
+            .map(|(index, entry)| {
+                self.library_row_presentation_from_entry(&entry, selected_set.contains(&index))
+            })
             .collect();
         let collection_mode = self.collection_mode;
 
@@ -1720,6 +1986,7 @@ impl UiManager {
                         album_art,
                         has_album_art,
                         is_playing: entry.is_playing,
+                        selected: entry.selected,
                     }
                 })
                 .collect();
@@ -1746,6 +2013,9 @@ impl UiManager {
         self.collection_mode = normalized_mode;
         if self.collection_mode == COLLECTION_MODE_LIBRARY {
             self.request_library_view_data();
+        } else {
+            self.library_add_to_dialog_visible = false;
+            self.sync_library_add_to_playlist_ui();
         }
         self.sync_library_ui();
     }
@@ -1758,6 +2028,10 @@ impl UiManager {
         };
         self.library_view_stack.clear();
         self.library_view_stack.push(root);
+        self.reset_library_selection();
+        self.reset_library_primary_click_tracking();
+        self.library_add_to_dialog_visible = false;
+        self.sync_library_add_to_playlist_ui();
         self.request_library_view_data();
         self.sync_library_ui();
     }
@@ -1767,6 +2041,10 @@ impl UiManager {
             return;
         }
         self.library_view_stack.pop();
+        self.reset_library_selection();
+        self.reset_library_primary_click_tracking();
+        self.library_add_to_dialog_visible = false;
+        self.sync_library_add_to_playlist_ui();
         self.request_library_view_data();
         self.sync_library_ui();
     }
@@ -1792,6 +2070,10 @@ impl UiManager {
 
     fn set_library_entries(&mut self, entries: Vec<LibraryEntry>) {
         self.library_entries = entries;
+        self.reset_library_selection();
+        self.reset_library_primary_click_tracking();
+        self.library_add_to_dialog_visible = false;
+        self.sync_library_add_to_playlist_ui();
         self.sync_library_ui();
     }
 
@@ -1841,6 +2123,10 @@ impl UiManager {
                     .push(LibraryViewState::ArtistDetail {
                         artist: artist.artist,
                     });
+                self.reset_library_selection();
+                self.reset_library_primary_click_tracking();
+                self.library_add_to_dialog_visible = false;
+                self.sync_library_add_to_playlist_ui();
                 self.request_library_view_data();
                 self.sync_library_ui();
             }
@@ -1849,6 +2135,10 @@ impl UiManager {
                     album: album.album,
                     album_artist: album.album_artist,
                 });
+                self.reset_library_selection();
+                self.reset_library_primary_click_tracking();
+                self.library_add_to_dialog_visible = false;
+                self.sync_library_add_to_playlist_ui();
                 self.request_library_view_data();
                 self.sync_library_ui();
             }
@@ -2158,6 +2448,7 @@ impl UiManager {
     /// Starts the blocking UI event loop that listens for bus messages.
     pub fn run(&mut self) {
         self.sync_library_ui();
+        self.sync_library_add_to_playlist_ui();
         loop {
             match self.bus_receiver.blocking_recv() {
                 Ok(message) => {
@@ -2171,16 +2462,38 @@ impl UiManager {
                                 self.set_collection_mode(COLLECTION_MODE_LIBRARY);
                                 self.set_library_root_section(section);
                             }
+                            protocol::LibraryMessage::SelectListItem {
+                                index,
+                                ctrl,
+                                shift,
+                                context_click,
+                            } => {
+                                self.select_library_list_item(index, ctrl, shift, context_click);
+                            }
                             protocol::LibraryMessage::NavigateBack => {
                                 self.navigate_library_back();
                             }
                             protocol::LibraryMessage::ActivateListItem(index) => {
                                 self.activate_library_item(index);
                             }
+                            protocol::LibraryMessage::PrepareAddToPlaylists => {
+                                self.prepare_library_add_to_playlists();
+                            }
+                            protocol::LibraryMessage::ToggleAddToPlaylist(index) => {
+                                self.toggle_library_add_to_playlist(index);
+                            }
+                            protocol::LibraryMessage::ConfirmAddToPlaylists => {
+                                self.confirm_library_add_to_playlists();
+                            }
+                            protocol::LibraryMessage::CancelAddToPlaylists => {
+                                self.cancel_library_add_to_playlists();
+                            }
                             protocol::LibraryMessage::ScanStarted => {
                                 self.library_scan_in_progress = true;
                                 self.library_status_text = "Scanning library...".to_string();
                                 self.library_cover_art_paths.clear();
+                                self.library_add_to_dialog_visible = false;
+                                self.sync_library_add_to_playlist_ui();
                                 self.sync_library_ui();
                             }
                             protocol::LibraryMessage::ScanCompleted { indexed_tracks } => {
@@ -2262,18 +2575,39 @@ impl UiManager {
                                     }
                                 }
                             }
+                            protocol::LibraryMessage::AddToPlaylistsCompleted {
+                                playlist_count,
+                                track_count,
+                            } => {
+                                self.library_status_text = format!(
+                                    "Added {} track(s) to {} playlist(s)",
+                                    track_count, playlist_count
+                                );
+                                self.sync_library_ui();
+                            }
+                            protocol::LibraryMessage::AddToPlaylistsFailed(error_text) => {
+                                self.library_status_text =
+                                    format!("Failed to add to playlists: {}", error_text);
+                                self.sync_library_ui();
+                            }
                             protocol::LibraryMessage::RequestScan
                             | protocol::LibraryMessage::RequestSongs
                             | protocol::LibraryMessage::RequestArtists
                             | protocol::LibraryMessage::RequestAlbums
                             | protocol::LibraryMessage::RequestArtistDetail { .. }
-                            | protocol::LibraryMessage::RequestAlbumSongs { .. } => {}
+                            | protocol::LibraryMessage::RequestAlbumSongs { .. }
+                            | protocol::LibraryMessage::AddSelectionToPlaylists { .. } => {}
                         },
                         protocol::Message::Playlist(
                             protocol::PlaylistMessage::PlaylistsRestored(playlists),
                         ) => {
                             let old_len = self.playlist_ids.len();
                             self.playlist_ids = playlists.iter().map(|p| p.id.clone()).collect();
+                            self.playlist_names =
+                                playlists.iter().map(|p| p.name.clone()).collect::<Vec<_>>();
+                            self.library_add_to_playlist_checked =
+                                vec![false; self.playlist_ids.len()];
+                            self.sync_library_add_to_playlist_ui();
                             let new_len = self.playlist_ids.len();
                             let mut slint_playlists = Vec::new();
                             for p in playlists {

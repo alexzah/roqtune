@@ -66,6 +66,14 @@ export component AppWindow inherits Window {
                 root.show_settings_menu = false;
                 return accept;
             }
+            if (event.text == Key.Escape && root.show_library_context_menu) {
+                root.show_library_context_menu = false;
+                return accept;
+            }
+            if (event.text == Key.Escape && root.library_add_to_dialog_visible) {
+                root.library_cancel_add_to_playlists();
+                return accept;
+            }
             if (event.text == Key.Escape && root.show_library_first_start_dialog) {
                 root.library_skip_first_start();
                 return accept;
@@ -185,6 +193,14 @@ export component AppWindow inherits Window {
     in-out property <string> library_view_subtitle: "All songs";
     in-out property <string> library_status_text: "";
     in-out property <[LibraryRowData]> library_model: [];
+    in-out property <bool> show_library_context_menu: false;
+    property <length> library_context_menu_x: 0px;
+    property <length> library_context_menu_y: 0px;
+    in-out property <bool> library_add_to_dialog_visible: false;
+    in-out property <[string]> library_add_to_playlist_labels: [];
+    in-out property <[bool]> library_add_to_playlist_checked: [];
+    in-out property <int> library_selected_count: 0;
+    in-out property <bool> library_add_to_confirm_enabled: false;
     in-out property <bool> show_library_first_start_dialog: false;
     in-out property <[string]> settings_library_folders: [];
     in-out property <int> settings_library_selected_folder_index: -1;
@@ -1223,9 +1239,32 @@ export component AppWindow inherits Window {
                                     is-hover: library-list-row-ta.has-hover;
                                 }
                                 library-list-row-ta := TouchArea {
-                                    double-clicked => {
-                                        root.hover-index = -1;
-                                        root.library_item_activated(row);
+                                    pointer-event(event) => {
+                                        if (event.kind == PointerEventKind.down && event.button == PointerEventButton.left) {
+                                            root.show_library_context_menu = false;
+                                            root.sidebar_has_focus = false;
+                                            key-handler.focus();
+                                            root.library_select_list_item(
+                                                row,
+                                                event.modifiers.control,
+                                                event.modifiers.shift,
+                                                false
+                                            );
+                                        } else if (event.kind == PointerEventKind.down && event.button == PointerEventButton.right) {
+                                            root.sidebar_has_focus = false;
+                                            key-handler.focus();
+                                            root.library_select_list_item(
+                                                row,
+                                                event.modifiers.control,
+                                                event.modifiers.shift,
+                                                true
+                                            );
+                                            let click-x = root.layout-region-x(i) + parent.x + self.x + self.mouse-x;
+                                            let click-y = root.layout-region-y(i) + parent.y + self.y + self.mouse-y;
+                                            root.library_context_menu_x = min(root.width - 170px, max(8px, click-x));
+                                            root.library_context_menu_y = min(root.height - 42px, max(8px, click-y));
+                                            root.show_library_context_menu = true;
+                                        }
                                     }
                                 }
                             }
@@ -2124,6 +2163,162 @@ export component AppWindow inherits Window {
         }
     }
 
+    if root.show_library_context_menu : Rectangle {
+        z: 151;
+        background: transparent;
+        TouchArea {
+            clicked => {
+                root.show_library_context_menu = false;
+            }
+        }
+    }
+
+    if root.show_library_context_menu : Rectangle {
+        z: 152;
+        x: root.library_context_menu_x;
+        y: root.library_context_menu_y;
+        width: 160px;
+        height: 34px;
+        border-radius: 6px;
+        background: #262626;
+        border-width: 1px;
+        border-color: #3d3d3d;
+
+        VerticalLayout {
+            padding: 4px;
+            Rectangle {
+                height: 24px;
+                border-radius: 4px;
+                background: add-to-playlists-ta.has-hover ? #363636 : transparent;
+                Text {
+                    x: 10px;
+                    width: parent.width - 20px;
+                    text: "Add to playlists...";
+                    color: #ddd;
+                    font-size: 12px;
+                    vertical-alignment: center;
+                    overflow: elide;
+                }
+                add-to-playlists-ta := TouchArea {
+                    clicked => {
+                        root.show_library_context_menu = false;
+                        root.library_prepare_add_to_playlists();
+                    }
+                }
+            }
+        }
+    }
+
+    if root.library_add_to_dialog_visible : Rectangle {
+        z: 153;
+        background: #00000080;
+        TouchArea {
+            clicked => {
+                root.library_cancel_add_to_playlists();
+            }
+        }
+    }
+
+    if root.library_add_to_dialog_visible : Rectangle {
+        z: 154;
+        width: min(root.width - 24px, 460px);
+        height: min(root.height - 24px, 420px);
+        x: (root.width - self.width) / 2;
+        y: (root.height - self.height) / 2;
+        border-radius: 6px;
+        background: #262626;
+        border-width: 1px;
+        border-color: #3d3d3d;
+
+        VerticalLayout {
+            padding: 14px;
+            spacing: 10px;
+
+            Text {
+                text: "Add To Playlists";
+                color: #eee;
+                font-size: 15px;
+                font-weight: 700;
+            }
+
+            Text {
+                text: root.library_selected_count == 1
+                    ? "1 library item selected"
+                    : root.library_selected_count + " library items selected";
+                color: #a9a9a9;
+                font-size: 11px;
+            }
+
+            Rectangle { height: 1px; background: #3a3a3a; }
+
+            ScrollView {
+                vertical-stretch: 1;
+                VerticalLayout {
+                    alignment: start;
+                    spacing: 2px;
+                    for playlist-label[index] in root.library_add_to_playlist_labels : playlist-option-row := Rectangle {
+                        property <bool> row-checked: index < root.library_add_to_playlist_checked.length
+                            ? root.library_add_to_playlist_checked[index]
+                            : false;
+                        height: 28px;
+                        border-radius: 3px;
+                        background: playlist-option-ta.has-hover ? #343434 : transparent;
+                        HorizontalLayout {
+                            padding-left: 8px;
+                            padding-right: 8px;
+                            spacing: 8px;
+                            playlist-toggle := Switch {
+                                width: 18px;
+                                text: "";
+                                checked: playlist-option-row.row-checked;
+                                toggled => {
+                                    root.library_toggle_add_to_playlist(index);
+                                }
+                            }
+                            Text {
+                                text: playlist-label;
+                                color: #ddd;
+                                font-size: 12px;
+                                vertical-alignment: center;
+                                overflow: elide;
+                                horizontal-stretch: 1;
+                            }
+                        }
+                        playlist-option-ta := TouchArea {
+                            x: 30px;
+                            width: parent.width - 30px;
+                            clicked => {
+                                root.library_toggle_add_to_playlist(index);
+                            }
+                        }
+                    }
+                }
+            }
+
+            Rectangle { height: 1px; background: #3a3a3a; }
+
+            HorizontalLayout {
+                spacing: 10px;
+                Rectangle { horizontal-stretch: 1; }
+                Button {
+                    text: "Cancel";
+                    clicked => {
+                        root.library_cancel_add_to_playlists();
+                    }
+                }
+                Button {
+                    text: "Add";
+                    enabled: root.library_add_to_confirm_enabled;
+                    primary: true;
+                    clicked => {
+                        root.library_add_to_dialog_visible = false;
+                        root.library_confirm_add_to_playlists();
+                    }
+                }
+            }
+        }
+    }
+
     if root.show_control_cluster_menu : Rectangle {
         z: 146;
         x: root.control_cluster_menu_x;
@@ -2743,7 +2938,12 @@ export component AppWindow inherits Window {
     callback switch_collection_mode(int);
     callback library_select_root(int);
     callback library_back();
+    callback library_select_list_item(int, bool, bool, bool);
     callback library_item_activated(int);
+    callback library_prepare_add_to_playlists();
+    callback library_toggle_add_to_playlist(int);
+    callback library_confirm_add_to_playlists();
+    callback library_cancel_add_to_playlists();
     callback library_add_folder();
     callback library_remove_folder(int);
     callback library_rescan();

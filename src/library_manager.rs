@@ -458,6 +458,114 @@ impl LibraryManager {
         }
     }
 
+    fn resolve_selection_paths(
+        &self,
+        selections: Vec<protocol::LibrarySelectionSpec>,
+    ) -> Result<Vec<PathBuf>, String> {
+        let mut resolved_paths = Vec::new();
+        let mut seen_paths = HashSet::new();
+
+        for selection in selections {
+            match selection {
+                protocol::LibrarySelectionSpec::Song { path } => {
+                    let dedupe_key = path.to_string_lossy().to_string();
+                    if seen_paths.insert(dedupe_key) {
+                        resolved_paths.push(path);
+                    }
+                }
+                protocol::LibrarySelectionSpec::Artist { artist } => {
+                    let (_albums, songs) = self
+                        .db_manager
+                        .get_library_artist_detail(&artist)
+                        .map_err(|err| format!("Failed to resolve artist '{}': {}", artist, err))?;
+                    for song in songs {
+                        let dedupe_key = song.path.to_string_lossy().to_string();
+                        if seen_paths.insert(dedupe_key) {
+                            resolved_paths.push(song.path);
+                        }
+                    }
+                }
+                protocol::LibrarySelectionSpec::Album {
+                    album,
+                    album_artist,
+                } => {
+                    let songs = self
+                        .db_manager
+                        .get_library_album_songs(&album, &album_artist)
+                        .map_err(|err| {
+                            format!(
+                                "Failed to resolve album '{} / {}': {}",
+                                album, album_artist, err
+                            )
+                        })?;
+                    for song in songs {
+                        let dedupe_key = song.path.to_string_lossy().to_string();
+                        if seen_paths.insert(dedupe_key) {
+                            resolved_paths.push(song.path);
+                        }
+                    }
+                }
+            }
+        }
+
+        Ok(resolved_paths)
+    }
+
+    fn add_selection_to_playlists(
+        &self,
+        selections: Vec<protocol::LibrarySelectionSpec>,
+        playlist_ids: Vec<String>,
+    ) {
+        if selections.is_empty() {
+            let _ = self
+                .bus_producer
+                .send(Message::Library(LibraryMessage::AddToPlaylistsFailed(
+                    "No library items selected".to_string(),
+                )));
+            return;
+        }
+        if playlist_ids.is_empty() {
+            let _ = self
+                .bus_producer
+                .send(Message::Library(LibraryMessage::AddToPlaylistsFailed(
+                    "No target playlists selected".to_string(),
+                )));
+            return;
+        }
+
+        let paths = match self.resolve_selection_paths(selections) {
+            Ok(paths) => paths,
+            Err(err) => {
+                let _ = self
+                    .bus_producer
+                    .send(Message::Library(LibraryMessage::AddToPlaylistsFailed(err)));
+                return;
+            }
+        };
+
+        if paths.is_empty() {
+            let _ = self
+                .bus_producer
+                .send(Message::Library(LibraryMessage::AddToPlaylistsFailed(
+                    "No tracks matched the selected library items".to_string(),
+                )));
+            return;
+        }
+
+        let _ = self.bus_producer.send(Message::Playlist(
+            protocol::PlaylistMessage::AddTracksToPlaylists {
+                playlist_ids: playlist_ids.clone(),
+                paths: paths.clone(),
+            },
+        ));
+        let _ = self
+            .bus_producer
+            .send(Message::Library(LibraryMessage::AddToPlaylistsCompleted {
+                playlist_count: playlist_ids.len(),
+                track_count: paths.len(),
+            }));
+    }
+
     /// Starts the blocking event loop for library scans and query requests.
     pub fn run(&mut self) {
         loop {
@@ -486,6 +594,12 @@ impl LibraryManager {
                         album_artist,
                     }) => {
                         self.publish_album_songs(album, album_artist);
+                    }
+                    Message::Library(LibraryMessage::AddSelectionToPlaylists {
+                        selections,
+                        playlist_ids,
+                    }) => {
+                        self.add_selection_to_playlists(selections, playlist_ids);
                     }
                     _ => {}
                 },

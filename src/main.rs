@@ -2001,12 +2001,56 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     });
 
     let bus_sender_clone = bus_sender.clone();
+    ui.on_library_select_list_item(move |index, ctrl, shift, context_click| {
+        if index < 0 {
+            return;
+        }
+        let _ = bus_sender_clone.send(Message::Library(protocol::LibraryMessage::SelectListItem {
+            index: index as usize,
+            ctrl,
+            shift,
+            context_click,
+        }));
+    });
+
+    let bus_sender_clone = bus_sender.clone();
     ui.on_library_item_activated(move |index| {
         if index < 0 {
             return;
         }
         let _ = bus_sender_clone.send(Message::Library(
             protocol::LibraryMessage::ActivateListItem(index as usize),
+        ));
+    });
+
+    let bus_sender_clone = bus_sender.clone();
+    ui.on_library_prepare_add_to_playlists(move || {
+        let _ = bus_sender_clone.send(Message::Library(
+            protocol::LibraryMessage::PrepareAddToPlaylists,
+        ));
+    });
+
+    let bus_sender_clone = bus_sender.clone();
+    ui.on_library_toggle_add_to_playlist(move |index| {
+        if index < 0 {
+            return;
+        }
+        let _ = bus_sender_clone.send(Message::Library(
+            protocol::LibraryMessage::ToggleAddToPlaylist(index as usize),
+        ));
+    });
+
+    let bus_sender_clone = bus_sender.clone();
+    ui.on_library_confirm_add_to_playlists(move || {
+        let _ = bus_sender_clone.send(Message::Library(
+            protocol::LibraryMessage::ConfirmAddToPlaylists,
+        ));
+    });
+
+    let bus_sender_clone = bus_sender.clone();
+    ui.on_library_cancel_add_to_playlists(move || {
+        let _ = bus_sender_clone.send(Message::Library(
+            protocol::LibraryMessage::CancelAddToPlaylists,
         ));
     });
 

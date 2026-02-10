@@ -5,7 +5,7 @@ export component LibraryRow inherits Rectangle {
     in property <bool> is-hover;
 
     height: 34px;
-    background: is-hover ? #333 : transparent;
+    background: root.data.selected ? #2f3f56 : is-hover ? #333 : transparent;
     border-radius: 2px;
 
     HorizontalLayout {
