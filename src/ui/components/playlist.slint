@@ -85,6 +85,7 @@ export component TrackRow inherits Rectangle {
     in property <[string]> headers: [];
     in property <[int]> column-kinds: [];
     in property <[int]> column-widths-px: [];
+    in property <length> row-height: 30px;
     in property <length> null-column-width: 120px;
 
     pure function column-width-for-index(index: int) -> length {
@@ -94,7 +95,7 @@ export component TrackRow inherits Rectangle {
         return 140px;
     }
 
-    height: 30px;
+    height: root.row-height;
     background: data.selected ? #3d3d3d : is-hover ? #333 : transparent;
     animate background { duration: 100ms; }
 

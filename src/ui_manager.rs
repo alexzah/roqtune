@@ -69,6 +69,7 @@ pub struct UiManager {
     playlist_column_width_overrides_px: HashMap<String, u32>,
     playlist_columns_available_width_px: u32,
     playlist_columns_content_width_px: u32,
+    playlist_row_height_px: u32,
     filter_sort_column_key: Option<String>,
     filter_sort_direction: Option<PlaylistSortDirection>,
     filter_search_query: String,
@@ -116,6 +117,9 @@ enum PlaylistSortDirection {
 
 const PLAYLIST_COLUMN_KIND_TEXT: i32 = 0;
 const PLAYLIST_COLUMN_KIND_ALBUM_ART: i32 = 1;
+const BASE_ROW_HEIGHT_PX: u32 = 30;
+const ROW_HEIGHT_MAX_PX: u32 = 96;
+const ALBUM_ART_ROW_PADDING_PX: u32 = 8;
 
 thread_local! {
     static TRACK_ROW_COVER_ART_IMAGE_CACHE: RefCell<HashMap<PathBuf, Image>> =
@@ -238,6 +242,7 @@ impl UiManager {
             playlist_column_width_overrides_px: HashMap::new(),
             playlist_columns_available_width_px: 0,
             playlist_columns_content_width_px: 0,
+            playlist_row_height_px: BASE_ROW_HEIGHT_PX,
             filter_sort_column_key: None,
             filter_sort_direction: None,
             filter_search_query: String::new(),
@@ -820,12 +825,40 @@ impl UiManager {
         widths
     }
 
+    fn compute_playlist_row_height_px_for_visible_columns(
+        visible_columns: &[&PlaylistColumnConfig],
+        column_widths_px: &[u32],
+    ) -> u32 {
+        let Some((column_index, column)) = visible_columns
+            .iter()
+            .enumerate()
+            .find(|(_, column)| Self::is_album_art_builtin_column(column))
+        else {
+            return BASE_ROW_HEIGHT_PX;
+        };
+
+        let album_art_width_px = column_widths_px
+            .get(column_index)
+            .copied()
+            .unwrap_or_else(|| Self::column_width_profile(column).preferred_px);
+
+        album_art_width_px
+            .saturating_add(ALBUM_ART_ROW_PADDING_PX)
+            .clamp(BASE_ROW_HEIGHT_PX, ROW_HEIGHT_MAX_PX)
+    }
+
+    fn compute_playlist_row_height_px(&self, column_widths_px: &[u32]) -> u32 {
+        let visible_columns = self.visible_playlist_columns();
+        Self::compute_playlist_row_height_px_for_visible_columns(&visible_columns, column_widths_px)
+    }
+
     fn apply_playlist_column_layout(&mut self) {
         if self.playlist_column_content_targets_px.len() != self.visible_playlist_columns().len() {
             self.refresh_playlist_column_content_targets();
         }
 
         let widths = self.compute_playlist_column_widths(self.playlist_columns_available_width_px);
+        let row_height_px = self.compute_playlist_row_height_px(&widths);
         let content_width = widths
             .iter()
             .copied()
@@ -834,12 +867,14 @@ impl UiManager {
 
         if widths == self.playlist_column_widths_px
             && content_width == self.playlist_columns_content_width_px
+            && row_height_px == self.playlist_row_height_px
         {
             return;
         }
 
         self.playlist_column_widths_px = widths.clone();
         self.playlist_columns_content_width_px = content_width;
+        self.playlist_row_height_px = row_height_px;
 
         let widths_i32: Vec<i32> = widths
             .into_iter()
@@ -856,12 +891,14 @@ impl UiManager {
             gap_positions.push(cursor_px);
         }
         let content_width_i32 = content_width.min(i32::MAX as u32) as i32;
+        let row_height_i32 = row_height_px.min(i32::MAX as u32) as i32;
         let _ = self.ui.upgrade_in_event_loop(move |ui| {
             ui.set_playlist_column_widths_px(ModelRc::from(Rc::new(VecModel::from(widths_i32))));
             ui.set_playlist_column_gap_positions_px(ModelRc::from(Rc::new(VecModel::from(
                 gap_positions,
             ))));
             ui.set_playlist_columns_content_width_px(content_width_i32);
+            ui.set_playlist_row_height_px(row_height_i32);
         });
     }
 
@@ -2661,6 +2698,92 @@ mod tests {
 
         assert!(!UiManager::is_sortable_playlist_column(&album_art));
         assert!(UiManager::is_sortable_playlist_column(&title));
+    }
+
+    #[test]
+    fn test_compute_playlist_row_height_without_album_art_column_uses_base_height() {
+        let columns = [
+            PlaylistColumnConfig {
+                name: "Title".to_string(),
+                format: "{title}".to_string(),
+                enabled: true,
+                custom: false,
+            },
+            PlaylistColumnConfig {
+                name: "Artist".to_string(),
+                format: "{artist}".to_string(),
+                enabled: true,
+                custom: false,
+            },
+        ];
+        let visible_columns: Vec<&PlaylistColumnConfig> = columns.iter().collect();
+
+        assert_eq!(
+            UiManager::compute_playlist_row_height_px_for_visible_columns(
+                &visible_columns,
+                &[140, 180],
+            ),
+            30
+        );
+    }
+
+    #[test]
+    fn test_compute_playlist_row_height_with_album_art_column_scales_with_width() {
+        let columns = [
+            PlaylistColumnConfig {
+                name: "Title".to_string(),
+                format: "{title}".to_string(),
+                enabled: true,
+                custom: false,
+            },
+            PlaylistColumnConfig {
+                name: "Album Art".to_string(),
+                format: "{album_art}".to_string(),
+                enabled: true,
+                custom: false,
+            },
+        ];
+        let visible_columns: Vec<&PlaylistColumnConfig> = columns.iter().collect();
+
+        assert_eq!(
+            UiManager::compute_playlist_row_height_px_for_visible_columns(
+                &visible_columns,
+                &[140, 64],
+            ),
+            72
+        );
+    }
+
+    #[test]
+    fn test_compute_playlist_row_height_with_large_album_art_width_clamps_to_maximum() {
+        let columns = [PlaylistColumnConfig {
+            name: "Album Art".to_string(),
+            format: "{album_art}".to_string(),
+            enabled: true,
+            custom: false,
+        }];
+        let visible_columns: Vec<&PlaylistColumnConfig> = columns.iter().collect();
+
+        assert_eq!(
+            UiManager::compute_playlist_row_height_px_for_visible_columns(&visible_columns, &[160],),
+            96
+        );
+    }
+
+    #[test]
+    fn test_compute_playlist_row_height_ignores_custom_album_art_placeholder_column() {
+        let columns = [PlaylistColumnConfig {
+            name: "Custom Art".to_string(),
+            format: "{album_art}".to_string(),
+            enabled: true,
+            custom: true,
+        }];
+        let visible_columns: Vec<&PlaylistColumnConfig> = columns.iter().collect();
+
+        assert_eq!(
+            UiManager::compute_playlist_row_height_px_for_visible_columns(&visible_columns, &[88],),
+            30
+        );
     }
 
     #[test]
