@@ -1180,7 +1180,7 @@ export component AppWindow inherits Window {
                             root.layout_splitter_drag_start_mouse_x = parent.x + self.x + self.mouse-x;
                             root.layout_splitter_drag_start_mouse_y = parent.y + self.y + self.mouse-y;
                             root.layout_splitter_drag_start_ratio = splitter.ratio;
-                        } else if (event.kind == PointerEventKind.move && root.layout_active_splitter_index == i) {
+                        } else if (event.kind == PointerEventKind.up && event.button == PointerEventButton.left && root.layout_active_splitter_index == i) {
                             let current-mouse-x = parent.x + self.x + self.mouse-x;
                             let current-mouse-y = parent.y + self.y + self.mouse-y;
                             let delta-px = splitter.axis == 1
@@ -1188,23 +1188,26 @@ export component AppWindow inherits Window {
                                 : (current-mouse-y - root.layout_splitter_drag_start_mouse_y) / 1px;
                             let ratio-delta = delta-px / (max(1, splitter.track_length_px) * 1.0);
                             let target-ratio = root.layout_splitter_drag_start_ratio + ratio-delta;
-                            let clamped-ratio = min(splitter.max_ratio, max(splitter.min_ratio, target-ratio));
-                            root.preview_layout_splitter_ratio(splitter.id, clamped-ratio);
-                        } else if (event.kind == PointerEventKind.up && root.layout_active_splitter_index == i) {
-                            let current-mouse-x = parent.x + self.x + self.mouse-x;
-                            let current-mouse-y = parent.y + self.y + self.mouse-y;
-                            let delta-px = splitter.axis == 1
-                                ? (current-mouse-x - root.layout_splitter_drag_start_mouse_x) / 1px
-                                : (current-mouse-y - root.layout_splitter_drag_start_mouse_y) / 1px;
-                            let ratio-delta = delta-px / (max(1, splitter.track_length_px) * 1.0);
-                            let target-ratio = root.layout_splitter_drag_start_ratio + ratio-delta;
-                            let clamped-ratio = min(splitter.max_ratio, max(splitter.min_ratio, target-ratio));
-                            root.preview_layout_splitter_ratio(splitter.id, clamped-ratio);
-                            root.commit_layout_splitter_ratio(splitter.id, clamped-ratio);
+                            let committed-ratio = min(splitter.max_ratio, max(splitter.min_ratio, target-ratio));
+                            root.preview_layout_splitter_ratio(splitter.id, committed-ratio);
+                            root.commit_layout_splitter_ratio(splitter.id, committed-ratio);
                             root.layout_active_splitter_index = -1;
                         } else if (event.kind == PointerEventKind.cancel && root.layout_active_splitter_index == i) {
                             root.preview_layout_splitter_ratio(splitter.id, root.layout_splitter_drag_start_ratio);
                             root.layout_active_splitter_index = -1;
+                        }
+                    }
+                    moved => {
+                        if (root.layout_active_splitter_index == i && self.pressed) {
+                            let current-mouse-x = parent.x + self.x + self.mouse-x;
+                            let current-mouse-y = parent.y + self.y + self.mouse-y;
+                            let delta-px = splitter.axis == 1
+                                ? (current-mouse-x - root.layout_splitter_drag_start_mouse_x) / 1px
+                                : (current-mouse-y - root.layout_splitter_drag_start_mouse_y) / 1px;
+                            let ratio-delta = delta-px / (max(1, splitter.track_length_px) * 1.0);
+                            let target-ratio = root.layout_splitter_drag_start_ratio + ratio-delta;
+                            let clamped-ratio = min(splitter.max_ratio, max(splitter.min_ratio, target-ratio));
+                            root.preview_layout_splitter_ratio(splitter.id, clamped-ratio);
                         }
                     }
                 }
