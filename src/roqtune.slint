@@ -43,13 +43,13 @@ export component AppWindow inherits Window {
                 root.open_layout_editor();
                 return accept;
             }
-            if (event.text == Key.Escape && root.playlist_filter_active) {
-                root.clear_playlist_filter_view();
+            if (event.text == Key.Escape && root.playlist_search_visible) {
+                root.close_playlist_search();
                 key-handler.focus();
                 return accept;
             }
-            if (event.text == Key.Escape && root.playlist_search_visible) {
-                root.close_playlist_search();
+            if (event.text == Key.Escape && root.playlist_filter_active) {
+                root.clear_playlist_filter_view();
                 key-handler.focus();
                 return accept;
             }
@@ -801,7 +801,7 @@ export component AppWindow inherits Window {
                         if root.playlist_filter_active : Rectangle {
                             x: max(8px, parent.width - self.width - 8px);
                             y: 6px;
-                            width: 174px;
+                            width: 156px;
                             height: 26px;
                             border-radius: 4px;
                             background: #1f2f3fe6;
@@ -809,28 +809,76 @@ export component AppWindow inherits Window {
                             border-color: #4a6684;
                             z: 6;
 
-                            HorizontalLayout {
-                                spacing: 6px;
-                                padding-left: 8px;
-                                padding-right: 6px;
-                                Text {
-                                    text: "Read only view";
-                                    color: #d6e4f5;
-                                    font-size: 11px;
-                                    vertical-alignment: center;
-                                    horizontal-alignment: left;
-                                    width: 94px;
+                            Text {
+                                x: 8px;
+                                width: 90px;
+                                height: parent.height;
+                                text: "Read only view";
+                                color: #d6e4f5;
+                                font-size: 11px;
+                                vertical-alignment: center;
+                                horizontal-alignment: left;
+                            }
+
+                            save-view-button := Rectangle {
+                                x: parent.width - 38px;
+                                y: (parent.height - self.height) / 2;
+                                width: 16px;
+                                height: 16px;
+                                border-radius: 2px;
+                                background: save-view-ta.has-hover ? #2f4b67 : #29425b;
+                                border-width: 1px;
+                                border-color: #5d7ea0;
+                                // Draw a simple floppy icon using geometry to avoid font/icon fallback issues.
+                                Rectangle {
+                                    x: 3px;
+                                    y: 2px;
+                                    width: 9px;
+                                    height: 11px;
+                                    background: transparent;
+                                    border-width: 1px;
+                                    border-color: #d9e8f8;
                                 }
-                                PlayerButton {
-                                    icon-text: "💾";
-                                    font-size: 12px;
+                                Rectangle {
+                                    x: 5px;
+                                    y: 3px;
+                                    width: 5px;
+                                    height: 3px;
+                                    background: #d9e8f8;
+                                }
+                                Rectangle {
+                                    x: 5px;
+                                    y: 8px;
+                                    width: 5px;
+                                    height: 4px;
+                                    background: #d9e8f8;
+                                }
+                                save-view-ta := TouchArea {
                                     clicked => {
                                         root.confirm_apply_filter_view();
                                     }
                                 }
-                                PlayerButton {
-                                    icon-text: "✕";
+                            }
+
+                            clear-view-button := Rectangle {
+                                x: parent.width - 18px;
+                                y: (parent.height - self.height) / 2;
+                                width: 16px;
+                                height: 16px;
+                                border-radius: 2px;
+                                background: clear-view-ta.has-hover ? #2f4b67 : #29425b;
+                                border-width: 1px;
+                                border-color: #5d7ea0;
+                                Text {
+                                    text: "×";
+                                    color: #d9e8f8;
                                     font-size: 12px;
+                                    width: parent.width;
+                                    height: parent.height;
+                                    horizontal-alignment: center;
+                                    vertical-alignment: center;
+                                }
+                                clear-view-ta := TouchArea {
                                     clicked => {
                                         root.clear_playlist_filter_view();
                                         root.refocus_main();
@@ -859,9 +907,18 @@ export component AppWindow inherits Window {
                                     text <=> root.playlist_search_query;
                                     placeholder-text: "Search tracks...";
                                     horizontal-stretch: 1;
+                                    init => { self.focus(); }
                                     edited => {
                                         root.set_playlist_search_query(self.text);
                                     }
+                                }
+                                Text {
+                                    text: root.playlist_search_result_text;
+                                    color: #a5a5a5;
+                                    font-size: 11px;
+                                    width: 54px;
+                                    horizontal-alignment: right;
+                                    vertical-alignment: center;
                                 }
 
                                 PlayerButton {
@@ -2265,6 +2322,7 @@ export component AppWindow inherits Window {
     in-out property <bool> playlist_filter_active: false;
     in-out property <bool> playlist_search_visible: false;
     in-out property <string> playlist_search_query: "";
+    in-out property <string> playlist_search_result_text: "0/0";
     in-out property <string> playlist_filter_summary: "";
     in-out property <[int]> playlist_column_sort_states: [];
 

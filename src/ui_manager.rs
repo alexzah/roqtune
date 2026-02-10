@@ -889,17 +889,29 @@ impl UiManager {
         )
     }
 
+    fn search_result_text(&self) -> String {
+        let total = self.track_metadata.len();
+        let found = if self.is_filter_applied() || !self.view_indices.is_empty() {
+            self.view_indices.len()
+        } else {
+            total
+        };
+        format!("{}/{}", found, total)
+    }
+
     fn sync_filter_state_to_ui(&self) {
         let sort_states = self.sort_state_model();
         let filter_active = self.is_filter_view_active();
         let search_visible = self.filter_search_visible;
         let search_query = self.filter_search_query.clone();
+        let search_result_text = self.search_result_text();
         let summary = self.filter_summary_text();
 
         let _ = self.ui.upgrade_in_event_loop(move |ui| {
             ui.set_playlist_filter_active(filter_active);
             ui.set_playlist_search_visible(search_visible);
             ui.set_playlist_search_query(search_query.into());
+            ui.set_playlist_search_result_text(search_result_text.into());
             ui.set_playlist_filter_summary(summary.into());
             ui.set_playlist_column_sort_states(ModelRc::from(Rc::new(VecModel::from(sort_states))));
         });
@@ -1030,7 +1042,12 @@ impl UiManager {
 
     fn close_playlist_search(&mut self) {
         self.filter_search_visible = false;
-        self.sync_filter_state_to_ui();
+        if !self.filter_search_query.is_empty() {
+            self.filter_search_query.clear();
+            self.rebuild_track_model();
+        } else {
+            self.sync_filter_state_to_ui();
+        }
     }
 
     fn set_playlist_search_query(&mut self, query: String) {
