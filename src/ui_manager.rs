@@ -146,6 +146,7 @@ struct LibraryRowPresentation {
     secondary: String,
     item_kind: i32,
     cover_art_path: Option<PathBuf>,
+    is_playing: bool,
 }
 
 const PLAYLIST_COLUMN_KIND_TEXT: i32 = 0;
@@ -1666,6 +1667,7 @@ impl UiManager {
                 secondary: format!("{} • {}", song.artist, song.album),
                 item_kind: 0,
                 cover_art_path: self.resolve_library_cover_art_path(&song.path),
+                is_playing: self.current_playing_track_path.as_ref() == Some(&song.path),
             },
             LibraryEntry::Artist(artist) => LibraryRowPresentation {
                 primary: artist.artist.clone(),
@@ -1675,6 +1677,7 @@ impl UiManager {
                 ),
                 item_kind: 1,
                 cover_art_path: None,
+                is_playing: false,
             },
             LibraryEntry::Album(album) => LibraryRowPresentation {
                 primary: album.album.clone(),
@@ -1684,6 +1687,7 @@ impl UiManager {
                     .representative_track_path
                     .as_ref()
                     .and_then(|track_path| self.resolve_library_cover_art_path(track_path)),
+                is_playing: false,
             },
         }
     }
@@ -1715,6 +1719,7 @@ impl UiManager {
                         item_kind: entry.item_kind,
                         album_art,
                         has_album_art,
+                        is_playing: entry.is_playing,
                     }
                 })
                 .collect();
@@ -2538,6 +2543,7 @@ impl UiManager {
                             self.playback_active = false;
                             self.active_playing_index = None;
                             self.last_progress_at = None;
+                            let had_playing_track = self.current_playing_track_path.is_some();
                             self.current_playing_track_path = None;
                             self.current_playing_track_metadata = None;
                             let selected_indices = self.selected_indices.clone();
@@ -2554,6 +2560,9 @@ impl UiManager {
                                 ui.set_elapsed_ms(0);
                                 ui.set_total_ms(0);
                             });
+                            if had_playing_track {
+                                self.sync_library_ui();
+                            }
                             self.rebuild_track_model();
                         }
                         protocol::Message::Playlist(protocol::PlaylistMessage::TrackStarted {
@@ -2604,6 +2613,8 @@ impl UiManager {
                                 None
                             };
 
+                            let previous_playing_track_path =
+                                self.current_playing_track_path.clone();
                             self.current_playing_track_path = playing_track_path.clone();
                             self.current_playing_track_metadata = playing_track_metadata.clone();
                             self.update_display_for_selection(
@@ -2611,6 +2622,9 @@ impl UiManager {
                                 playing_track_path.as_ref(),
                                 playing_track_metadata.as_ref(),
                             );
+                            if previous_playing_track_path != self.current_playing_track_path {
+                                self.sync_library_ui();
+                            }
 
                             let _ = self.ui.upgrade_in_event_loop(move |ui| {
                                 let repeat_int = match repeat_mode {

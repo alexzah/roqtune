@@ -51,13 +51,25 @@ export component LibraryRow inherits Rectangle {
         VerticalLayout {
             spacing: 0px;
             vertical-stretch: 1;
-            Text {
-                text: root.data.primary;
-                color: #ddd;
-                font-size: 12px;
-                overflow: elide;
-                horizontal-alignment: left;
-                vertical-alignment: center;
+            HorizontalLayout {
+                spacing: 4px;
+
+                if root.data.item_kind == 0 && root.data.is_playing : Text {
+                    text: "▶";
+                    color: #8fb8ff;
+                    font-size: 10px;
+                    vertical-alignment: center;
+                }
+
+                Text {
+                    text: root.data.primary;
+                    color: #ddd;
+                    font-size: 12px;
+                    overflow: elide;
+                    horizontal-alignment: left;
+                    vertical-alignment: center;
+                    horizontal-stretch: 1;
+                }
             }
             Text {
                 text: root.data.secondary;
