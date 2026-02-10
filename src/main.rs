@@ -36,6 +36,7 @@ use playlist_manager::PlaylistManager;
 use protocol::{ConfigMessage, Message, PlaybackMessage, PlaylistMessage};
 use slint::{ComponentHandle, LogicalSize, Model, ModelRc, VecModel};
 use tokio::sync::broadcast;
+use toml_edit::{value, Array, ArrayOfTables, DocumentMut, Item, Table};
 use ui_manager::{UiManager, UiState};
 
 slint::include_modules!();
@@ -1103,16 +1104,278 @@ fn apply_button_cluster_views_to_ui(
     ui.set_layout_button_cluster_panels(ModelRc::from(Rc::new(VecModel::from(views))));
 }
 
+fn set_table_value_preserving_decor(table: &mut Table, key: &str, item: Item) {
+    let replacing_scalar_with_aot = item.is_array_of_tables()
+        && table
+            .get(key)
+            .is_some_and(|current| !current.is_array_of_tables());
+    if replacing_scalar_with_aot {
+        table.remove(key);
+        table[key] = item;
+        return;
+    }
+
+    let existing_value_decor = table
+        .get(key)
+        .and_then(|current| current.as_value().map(|value| value.decor().clone()));
+    table[key] = item;
+    if let Some(existing_value_decor) = existing_value_decor {
+        if let Some(next_value) = table[key].as_value_mut() {
+            *next_value.decor_mut() = existing_value_decor;
+        }
+    }
+}
+
+fn set_table_scalar_if_changed<T, F>(
+    table: &mut Table,
+    key: &str,
+    previous_value: T,
+    next_value: T,
+    to_item: F,
+) where
+    T: PartialEq + Copy,
+    F: FnOnce(T) -> Item,
+{
+    if table.contains_key(key) && previous_value == next_value {
+        return;
+    }
+    set_table_value_preserving_decor(table, key, to_item(next_value));
+}
+
+fn write_config_to_document(document: &mut DocumentMut, previous: &Config, config: &Config) {
+    if !document["output"].is_table() {
+        document["output"] = Item::Table(Table::new());
+    }
+    if !document["ui"].is_table() {
+        document["ui"] = Item::Table(Table::new());
+    }
+    if !document["buffering"].is_table() {
+        document["buffering"] = Item::Table(Table::new());
+    }
+
+    {
+        let output = document["output"]
+            .as_table_mut()
+            .expect("output should be a table");
+        if !output.contains_key("output_device_name")
+            || previous.output.output_device_name != config.output.output_device_name
+        {
+            set_table_value_preserving_decor(
+                output,
+                "output_device_name",
+                value(config.output.output_device_name.clone()),
+            );
+        }
+        set_table_scalar_if_changed(
+            output,
+            "output_device_auto",
+            previous.output.output_device_auto,
+            config.output.output_device_auto,
+            value,
+        );
+        set_table_scalar_if_changed(
+            output,
+            "channel_count",
+            i64::from(previous.output.channel_count),
+            i64::from(config.output.channel_count),
+            value,
+        );
+        set_table_scalar_if_changed(
+            output,
+            "sample_rate_khz",
+            i64::from(previous.output.sample_rate_khz),
+            i64::from(config.output.sample_rate_khz),
+            value,
+        );
+        set_table_scalar_if_changed(
+            output,
+            "bits_per_sample",
+            i64::from(previous.output.bits_per_sample),
+            i64::from(config.output.bits_per_sample),
+            value,
+        );
+        set_table_scalar_if_changed(
+            output,
+            "channel_count_auto",
+            previous.output.channel_count_auto,
+            config.output.channel_count_auto,
+            value,
+        );
+        set_table_scalar_if_changed(
+            output,
+            "sample_rate_auto",
+            previous.output.sample_rate_auto,
+            config.output.sample_rate_auto,
+            value,
+        );
+        set_table_scalar_if_changed(
+            output,
+            "bits_per_sample_auto",
+            previous.output.bits_per_sample_auto,
+            config.output.bits_per_sample_auto,
+            value,
+        );
+    }
+
+    {
+        let ui = document["ui"].as_table_mut().expect("ui should be a table");
+        set_table_scalar_if_changed(
+            ui,
+            "show_layout_edit_intro",
+            previous.ui.show_layout_edit_intro,
+            config.ui.show_layout_edit_intro,
+            value,
+        );
+        set_table_scalar_if_changed(
+            ui,
+            "playlist_album_art_column_min_width_px",
+            i64::from(previous.ui.playlist_album_art_column_min_width_px),
+            i64::from(config.ui.playlist_album_art_column_min_width_px),
+            value,
+        );
+        set_table_scalar_if_changed(
+            ui,
+            "playlist_album_art_column_max_width_px",
+            i64::from(previous.ui.playlist_album_art_column_max_width_px),
+            i64::from(config.ui.playlist_album_art_column_max_width_px),
+            value,
+        );
+        set_table_scalar_if_changed(
+            ui,
+            "window_width",
+            i64::from(previous.ui.window_width),
+            i64::from(config.ui.window_width),
+            value,
+        );
+        set_table_scalar_if_changed(
+            ui,
+            "window_height",
+            i64::from(previous.ui.window_height),
+            i64::from(config.ui.window_height),
+            value,
+        );
+        set_table_scalar_if_changed(
+            ui,
+            "volume",
+            f64::from(previous.ui.volume),
+            f64::from(config.ui.volume),
+            value,
+        );
+
+        if !ui.contains_key("button_cluster_instances")
+            || previous.ui.button_cluster_instances != config.ui.button_cluster_instances
+        {
+            let mut button_instances = ArrayOfTables::new();
+            for instance in &config.ui.button_cluster_instances {
+                let mut instance_table = Table::new();
+                instance_table["leaf_id"] = value(instance.leaf_id.clone());
+                let mut actions = Array::new();
+                for action in &instance.actions {
+                    actions.push(i64::from(*action));
+                }
+                instance_table["actions"] = value(actions);
+                button_instances.push(instance_table);
+            }
+            set_table_value_preserving_decor(
+                ui,
+                "button_cluster_instances",
+                Item::ArrayOfTables(button_instances),
+            );
+        }
+
+        if !ui.contains_key("playlist_columns")
+            || previous.ui.playlist_columns != config.ui.playlist_columns
+        {
+            let mut playlist_columns = ArrayOfTables::new();
+            for column in &config.ui.playlist_columns {
+                let mut column_table = Table::new();
+                column_table["name"] = value(column.name.clone());
+                column_table["format"] = value(column.format.clone());
+                column_table["enabled"] = value(column.enabled);
+                column_table["custom"] = value(column.custom);
+                playlist_columns.push(column_table);
+            }
+            set_table_value_preserving_decor(
+                ui,
+                "playlist_columns",
+                Item::ArrayOfTables(playlist_columns),
+            );
+        }
+    }
+
+    {
+        let buffering = document["buffering"]
+            .as_table_mut()
+            .expect("buffering should be a table");
+        set_table_scalar_if_changed(
+            buffering,
+            "player_low_watermark_ms",
+            i64::from(previous.buffering.player_low_watermark_ms),
+            i64::from(config.buffering.player_low_watermark_ms),
+            value,
+        );
+        set_table_scalar_if_changed(
+            buffering,
+            "player_target_buffer_ms",
+            i64::from(previous.buffering.player_target_buffer_ms),
+            i64::from(config.buffering.player_target_buffer_ms),
+            value,
+        );
+        set_table_scalar_if_changed(
+            buffering,
+            "player_request_interval_ms",
+            i64::from(previous.buffering.player_request_interval_ms),
+            i64::from(config.buffering.player_request_interval_ms),
+            value,
+        );
+        set_table_scalar_if_changed(
+            buffering,
+            "decoder_request_chunk_ms",
+            i64::from(previous.buffering.decoder_request_chunk_ms),
+            i64::from(config.buffering.decoder_request_chunk_ms),
+            value,
+        );
+    }
+}
+
+fn serialize_config_with_preserved_comments(
+    existing_text: &str,
+    config: &Config,
+) -> Result<String, String> {
+    let previous = toml::from_str::<Config>(existing_text)
+        .map_err(|err| format!("failed to parse existing config as Config: {}", err))?;
+    let mut document = existing_text
+        .parse::<DocumentMut>()
+        .map_err(|err| format!("failed to parse existing config as TOML document: {}", err))?;
+    write_config_to_document(&mut document, &previous, config);
+    Ok(document.to_string())
+}
+
 fn persist_config_file(config: &Config, path: &std::path::Path) {
-    match toml::to_string(config) {
-        Ok(config_text) => {
-            if let Err(err) = std::fs::write(path, config_text) {
-                log::error!("Failed to persist config to {}: {}", path.display(), err);
+    let existing_text = std::fs::read_to_string(path).ok();
+    let config_text = if let Some(existing_text) = existing_text {
+        match serialize_config_with_preserved_comments(&existing_text, config) {
+            Ok(updated_text) => Some(updated_text),
+            Err(err) => {
+                warn!(
+                    "Failed to preserve config comments for {} ({}). Falling back to plain serialization.",
+                    path.display(),
+                    err
+                );
+                toml::to_string(config).ok()
             }
         }
-        Err(err) => {
-            log::error!("Failed to serialize config: {}", err);
-        }
+    } else {
+        toml::to_string(config).ok()
+    };
+
+    let Some(config_text) = config_text else {
+        log::error!("Failed to serialize config for {}", path.display());
+        return;
+    };
+
+    if let Err(err) = std::fs::write(path, config_text) {
+        log::error!("Failed to persist config to {}: {}", path.display(), err);
     }
 }
 
@@ -3602,8 +3865,9 @@ mod tests {
         resolve_playlist_header_divider_from_x, resolve_playlist_header_gap_from_x,
         resolve_runtime_config, sanitize_config, sanitize_playlist_columns,
         select_output_option_index_u16, select_output_option_index_u32,
-        should_apply_custom_column_delete, sidebar_width_from_window, update_or_replace_vec_model,
-        visible_playlist_column_kinds, OutputSettingsOptions,
+        serialize_config_with_preserved_comments, should_apply_custom_column_delete,
+        sidebar_width_from_window, update_or_replace_vec_model, visible_playlist_column_kinds,
+        OutputSettingsOptions,
     };
 
     fn unique_temp_directory(test_name: &str) -> PathBuf {
@@ -4491,6 +4755,112 @@ mod tests {
         let sanitized = sanitize_config(input);
         assert_eq!(sanitized.ui.playlist_album_art_column_min_width_px, 24);
         assert_eq!(sanitized.ui.playlist_album_art_column_max_width_px, 512);
+    }
+
+    #[test]
+    fn test_serialize_config_with_preserved_comments_keeps_existing_comments() {
+        let existing = r#"
+# top comment
+[output]
+# output comment
+output_device_name = ""
+output_device_auto = true
+channel_count = 2
+sample_rate_khz = 44100
+bits_per_sample = 24
+channel_count_auto = true
+sample_rate_auto = true
+bits_per_sample_auto = true
+
+[ui]
+# ui comment
+show_layout_edit_intro = true
+playlist_album_art_column_min_width_px = 16
+playlist_album_art_column_max_width_px = 480
+window_width = 900
+window_height = 650
+volume = 1.0
+button_cluster_instances = []
+
+[[ui.playlist_columns]]
+name = "Title"
+format = "{title}"
+enabled = true
+custom = false
+
+[buffering]
+# buffering comment
+player_low_watermark_ms = 12000
+player_target_buffer_ms = 24000
+player_request_interval_ms = 120
+decoder_request_chunk_ms = 1500
+"#;
+
+        let mut config = Config::default();
+        config.output.output_device_name = "My Device".to_string();
+        config.ui.volume = 0.55;
+
+        let serialized = serialize_config_with_preserved_comments(existing, &config)
+            .expect("comment-preserving serialization should succeed");
+
+        assert!(serialized.contains("# top comment"));
+        assert!(serialized.contains("# output comment"));
+        assert!(serialized.contains("# ui comment"));
+        assert!(serialized.contains("# buffering comment"));
+        assert!(serialized.contains("output_device_name = \"My Device\""));
+        assert!(serialized.contains("volume = 0.55"));
+    }
+
+    #[test]
+    fn test_serialize_config_with_preserved_comments_rejects_invalid_toml() {
+        let invalid = "[output\noutput_device_auto = true";
+        let config = Config::default();
+        let result = serialize_config_with_preserved_comments(invalid, &config);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_serialize_config_with_preserved_comments_keeps_system_template_comments() {
+        let existing = include_str!("../config/config.system.toml");
+        let mut config: Config =
+            toml::from_str(existing).expect("system config template should parse");
+        config.ui.show_layout_edit_intro = false;
+
+        let serialized = serialize_config_with_preserved_comments(existing, &config)
+            .expect("comment-preserving serialization should succeed");
+
+        assert!(serialized.contains("# roqtune system config template"));
+        assert!(serialized.contains("# ADVANCED USERS ONLY"));
+        assert!(serialized.contains("# Playback volume (0.0 .. 1.0)."));
+        assert!(serialized.contains("show_layout_edit_intro = false"));
+    }
+
+    #[test]
+    fn test_serialize_config_with_preserved_comments_updates_button_clusters_to_aot() {
+        let existing = include_str!("../config/config.system.toml");
+        let mut config: Config =
+            toml::from_str(existing).expect("system config template should parse");
+        config.ui.button_cluster_instances = vec![crate::config::ButtonClusterInstanceConfig {
+            leaf_id: "n8".to_string(),
+            actions: vec![1, 2, 3],
+        }];
+
+        let serialized = serialize_config_with_preserved_comments(existing, &config)
+            .expect("comment-preserving serialization should succeed");
+
+        assert!(
+            serialized.contains("[[ui.button_cluster_instances]]"),
+            "button cluster list should upgrade to array-of-tables when populated.\nserialized=\n{}",
+            serialized
+        );
+        assert!(
+            serialized.contains("[[ui.playlist_columns]]"),
+            "playlist column array-of-tables should remain valid after rewrite"
+        );
+        let parsed_back: toml_edit::DocumentMut = serialized
+            .parse()
+            .expect("serialized config should remain valid TOML");
+        assert!(parsed_back["ui"]["playlist_columns"].is_array_of_tables());
     }
 
     #[test]
