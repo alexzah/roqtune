@@ -1152,7 +1152,7 @@ impl PlaylistManager {
                         if let Err(err) = self.db_manager.set_playlist_column_width_override(
                             &self.active_playlist_id,
                             &column_key,
-                            width_px.max(48),
+                            width_px,
                         ) {
                             error!(
                                 "Failed to persist playlist column width override for {} key {}: {}",
@@ -1639,6 +1639,47 @@ mod tests {
         assert_eq!(PlaylistManager::paste_insert_gap(&[0, 2, 1], 5), 3);
         assert_eq!(PlaylistManager::paste_insert_gap(&[3], 4), 4);
         assert_eq!(PlaylistManager::paste_insert_gap(&[7, 8], 4), 4);
+    }
+
+    #[test]
+    fn test_set_active_playlist_column_width_override_persists_small_values() {
+        let mut harness = PlaylistManagerHarness::new();
+        harness.drain_messages();
+
+        harness.send(protocol::Message::Playlist(
+            protocol::PlaylistMessage::SetActivePlaylistColumnWidthOverride {
+                column_key: "{album_art}".to_string(),
+                width_px: 16,
+                persist: true,
+            },
+        ));
+        harness.send(protocol::Message::Playlist(
+            protocol::PlaylistMessage::RequestActivePlaylistColumnWidthOverrides,
+        ));
+
+        let message = wait_for_message(&mut harness.receiver, Duration::from_secs(1), |message| {
+            matches!(
+                message,
+                protocol::Message::Playlist(
+                    protocol::PlaylistMessage::ActivePlaylistColumnWidthOverrides(_)
+                )
+            )
+        });
+
+        let overrides = if let protocol::Message::Playlist(
+            protocol::PlaylistMessage::ActivePlaylistColumnWidthOverrides(Some(overrides)),
+        ) = message
+        {
+            overrides
+        } else {
+            panic!("expected persisted width overrides for active playlist");
+        };
+
+        let album_art_width = overrides
+            .iter()
+            .find(|entry| entry.column_key == "{album_art}")
+            .map(|entry| entry.width_px);
+        assert_eq!(album_art_width, Some(16));
     }
 
     #[test]

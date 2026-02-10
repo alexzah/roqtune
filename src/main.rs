@@ -30,12 +30,13 @@ use layout::{
     replace_leaf_panel, sanitize_layout_config, set_split_ratio, split_leaf, LayoutConfig,
     LayoutNode, LayoutPanelKind, SplitAxis, SPLITTER_THICKNESS_PX,
 };
-use log::{debug, info};
+use log::{debug, info, warn};
 use playlist::Playlist;
 use playlist_manager::PlaylistManager;
 use protocol::{ConfigMessage, Message, PlaybackMessage, PlaylistMessage};
 use slint::{ComponentHandle, LogicalSize, Model, ModelRc, VecModel};
 use tokio::sync::broadcast;
+use toml_edit::{value, Array, ArrayOfTables, DocumentMut, Item, Table};
 use ui_manager::{UiManager, UiState};
 
 slint::include_modules!();
@@ -104,6 +105,8 @@ const IMPORT_CLUSTER_PRESET: [i32; 1] = [1];
 const TRANSPORT_CLUSTER_PRESET: [i32; 5] = [2, 3, 4, 5, 6];
 const UTILITY_CLUSTER_PRESET: [i32; 3] = [7, 8, 10];
 const SUPPORTED_AUDIO_EXTENSIONS: [&str; 7] = ["mp3", "wav", "ogg", "flac", "aac", "m4a", "mp4"];
+const PLAYLIST_COLUMN_KIND_TEXT: i32 = 0;
+const PLAYLIST_COLUMN_KIND_ALBUM_ART: i32 = 1;
 
 fn is_supported_audio_file(path: &Path) -> bool {
     path.extension()
@@ -440,6 +443,20 @@ fn sanitize_config(config: Config) -> Config {
     let sanitized_button_cluster_instances =
         sanitize_button_cluster_instances(&sanitized_layout, &config.ui.button_cluster_instances);
     let clamped_volume = config.ui.volume.clamp(0.0, 1.0);
+    let mut clamped_album_art_column_min_width_px = config
+        .ui
+        .playlist_album_art_column_min_width_px
+        .clamp(12, 512);
+    let mut clamped_album_art_column_max_width_px = config
+        .ui
+        .playlist_album_art_column_max_width_px
+        .clamp(24, 1024);
+    if clamped_album_art_column_min_width_px > clamped_album_art_column_max_width_px {
+        std::mem::swap(
+            &mut clamped_album_art_column_min_width_px,
+            &mut clamped_album_art_column_max_width_px,
+        );
+    }
     let clamped_low_watermark = config.buffering.player_low_watermark_ms.max(500);
     let clamped_target = config
         .buffering
@@ -461,8 +478,9 @@ fn sanitize_config(config: Config) -> Config {
             bits_per_sample_auto: config.output.bits_per_sample_auto,
         },
         ui: UiConfig {
-            show_album_art: true,
             show_layout_edit_intro: config.ui.show_layout_edit_intro,
+            playlist_album_art_column_min_width_px: clamped_album_art_column_min_width_px,
+            playlist_album_art_column_max_width_px: clamped_album_art_column_max_width_px,
             layout: sanitized_layout,
             button_cluster_instances: sanitized_button_cluster_instances,
             playlist_columns: sanitized_playlist_columns,
@@ -580,6 +598,26 @@ fn normalize_column_format(format: &str) -> String {
     format.trim().to_ascii_lowercase()
 }
 
+fn is_album_art_builtin_column(column: &PlaylistColumnConfig) -> bool {
+    !column.custom && normalize_column_format(&column.format) == "{album_art}"
+}
+
+fn playlist_column_kind(column: &PlaylistColumnConfig) -> i32 {
+    if is_album_art_builtin_column(column) {
+        PLAYLIST_COLUMN_KIND_ALBUM_ART
+    } else {
+        PLAYLIST_COLUMN_KIND_TEXT
+    }
+}
+
+fn visible_playlist_column_kinds(columns: &[PlaylistColumnConfig]) -> Vec<i32> {
+    columns
+        .iter()
+        .filter(|column| column.enabled)
+        .map(playlist_column_kind)
+        .collect()
+}
+
 fn sanitize_playlist_columns(columns: &[PlaylistColumnConfig]) -> Vec<PlaylistColumnConfig> {
     let default_columns = config::default_playlist_columns();
     let mut seen_builtin_keys: HashSet<String> = HashSet::new();
@@ -665,7 +703,29 @@ struct ColumnWidthBounds {
     max_px: i32,
 }
 
-fn playlist_column_width_bounds(column: &PlaylistColumnConfig) -> ColumnWidthBounds {
+fn album_art_column_width_bounds(ui: &UiConfig) -> ColumnWidthBounds {
+    ColumnWidthBounds {
+        min_px: ui.playlist_album_art_column_min_width_px as i32,
+        max_px: ui.playlist_album_art_column_max_width_px as i32,
+    }
+}
+
+#[cfg(test)]
+fn default_album_art_column_width_bounds() -> ColumnWidthBounds {
+    ColumnWidthBounds {
+        min_px: config::default_playlist_album_art_column_min_width_px() as i32,
+        max_px: config::default_playlist_album_art_column_max_width_px() as i32,
+    }
+}
+
+fn playlist_column_width_bounds_with_album_art(
+    column: &PlaylistColumnConfig,
+    album_art_bounds: ColumnWidthBounds,
+) -> ColumnWidthBounds {
+    if is_album_art_builtin_column(column) {
+        return album_art_bounds;
+    }
+
     let normalized_format = column.format.trim().to_ascii_lowercase();
     let normalized_name = column.name.trim().to_ascii_lowercase();
 
@@ -751,15 +811,21 @@ fn playlist_column_width_bounds(column: &PlaylistColumnConfig) -> ColumnWidthBou
     }
 }
 
+#[cfg(test)]
+fn playlist_column_width_bounds(column: &PlaylistColumnConfig) -> ColumnWidthBounds {
+    playlist_column_width_bounds_with_album_art(column, default_album_art_column_width_bounds())
+}
+
 fn playlist_column_bounds_at_visible_index(
     columns: &[PlaylistColumnConfig],
     visible_index: usize,
+    album_art_bounds: ColumnWidthBounds,
 ) -> Option<ColumnWidthBounds> {
     columns
         .iter()
         .filter(|column| column.enabled)
         .nth(visible_index)
-        .map(playlist_column_width_bounds)
+        .map(|column| playlist_column_width_bounds_with_album_art(column, album_art_bounds))
 }
 
 fn playlist_column_key_at_visible_index(
@@ -777,9 +843,10 @@ fn clamp_width_for_visible_column(
     columns: &[PlaylistColumnConfig],
     visible_index: usize,
     width_px: i32,
+    album_art_bounds: ColumnWidthBounds,
 ) -> Option<i32> {
-    let bounds = playlist_column_bounds_at_visible_index(columns, visible_index)?;
-    Some(width_px.clamp(bounds.min_px.max(48), bounds.max_px.max(bounds.min_px)))
+    let bounds = playlist_column_bounds_at_visible_index(columns, visible_index, album_art_bounds)?;
+    Some(width_px.clamp(bounds.min_px, bounds.max_px.max(bounds.min_px)))
 }
 
 fn reorder_visible_playlist_columns(
@@ -1037,15 +1104,329 @@ fn apply_button_cluster_views_to_ui(
     ui.set_layout_button_cluster_panels(ModelRc::from(Rc::new(VecModel::from(views))));
 }
 
+fn set_table_value_preserving_decor(table: &mut Table, key: &str, item: Item) {
+    let replacing_scalar_with_aot = item.is_array_of_tables()
+        && table
+            .get(key)
+            .is_some_and(|current| !current.is_array_of_tables());
+    if replacing_scalar_with_aot {
+        table.remove(key);
+        table[key] = item;
+        return;
+    }
+
+    let existing_value_decor = table
+        .get(key)
+        .and_then(|current| current.as_value().map(|value| value.decor().clone()));
+    table[key] = item;
+    if let Some(existing_value_decor) = existing_value_decor {
+        if let Some(next_value) = table[key].as_value_mut() {
+            *next_value.decor_mut() = existing_value_decor;
+        }
+    }
+}
+
+fn set_table_scalar_if_changed<T, F>(
+    table: &mut Table,
+    key: &str,
+    previous_value: T,
+    next_value: T,
+    to_item: F,
+) where
+    T: PartialEq + Copy,
+    F: FnOnce(T) -> Item,
+{
+    if table.contains_key(key) && previous_value == next_value {
+        return;
+    }
+    set_table_value_preserving_decor(table, key, to_item(next_value));
+}
+
+fn write_config_to_document(document: &mut DocumentMut, previous: &Config, config: &Config) {
+    if !document["output"].is_table() {
+        document["output"] = Item::Table(Table::new());
+    }
+    if !document["ui"].is_table() {
+        document["ui"] = Item::Table(Table::new());
+    }
+    if !document["buffering"].is_table() {
+        document["buffering"] = Item::Table(Table::new());
+    }
+
+    {
+        let output = document["output"]
+            .as_table_mut()
+            .expect("output should be a table");
+        if !output.contains_key("output_device_name")
+            || previous.output.output_device_name != config.output.output_device_name
+        {
+            set_table_value_preserving_decor(
+                output,
+                "output_device_name",
+                value(config.output.output_device_name.clone()),
+            );
+        }
+        set_table_scalar_if_changed(
+            output,
+            "output_device_auto",
+            previous.output.output_device_auto,
+            config.output.output_device_auto,
+            value,
+        );
+        set_table_scalar_if_changed(
+            output,
+            "channel_count",
+            i64::from(previous.output.channel_count),
+            i64::from(config.output.channel_count),
+            value,
+        );
+        set_table_scalar_if_changed(
+            output,
+            "sample_rate_khz",
+            i64::from(previous.output.sample_rate_khz),
+            i64::from(config.output.sample_rate_khz),
+            value,
+        );
+        set_table_scalar_if_changed(
+            output,
+            "bits_per_sample",
+            i64::from(previous.output.bits_per_sample),
+            i64::from(config.output.bits_per_sample),
+            value,
+        );
+        set_table_scalar_if_changed(
+            output,
+            "channel_count_auto",
+            previous.output.channel_count_auto,
+            config.output.channel_count_auto,
+            value,
+        );
+        set_table_scalar_if_changed(
+            output,
+            "sample_rate_auto",
+            previous.output.sample_rate_auto,
+            config.output.sample_rate_auto,
+            value,
+        );
+        set_table_scalar_if_changed(
+            output,
+            "bits_per_sample_auto",
+            previous.output.bits_per_sample_auto,
+            config.output.bits_per_sample_auto,
+            value,
+        );
+    }
+
+    {
+        let ui = document["ui"].as_table_mut().expect("ui should be a table");
+        set_table_scalar_if_changed(
+            ui,
+            "show_layout_edit_intro",
+            previous.ui.show_layout_edit_intro,
+            config.ui.show_layout_edit_intro,
+            value,
+        );
+        set_table_scalar_if_changed(
+            ui,
+            "playlist_album_art_column_min_width_px",
+            i64::from(previous.ui.playlist_album_art_column_min_width_px),
+            i64::from(config.ui.playlist_album_art_column_min_width_px),
+            value,
+        );
+        set_table_scalar_if_changed(
+            ui,
+            "playlist_album_art_column_max_width_px",
+            i64::from(previous.ui.playlist_album_art_column_max_width_px),
+            i64::from(config.ui.playlist_album_art_column_max_width_px),
+            value,
+        );
+        set_table_scalar_if_changed(
+            ui,
+            "window_width",
+            i64::from(previous.ui.window_width),
+            i64::from(config.ui.window_width),
+            value,
+        );
+        set_table_scalar_if_changed(
+            ui,
+            "window_height",
+            i64::from(previous.ui.window_height),
+            i64::from(config.ui.window_height),
+            value,
+        );
+        set_table_scalar_if_changed(
+            ui,
+            "volume",
+            f64::from(previous.ui.volume),
+            f64::from(config.ui.volume),
+            value,
+        );
+
+        if !ui.contains_key("button_cluster_instances")
+            || previous.ui.button_cluster_instances != config.ui.button_cluster_instances
+        {
+            let mut button_instances = ArrayOfTables::new();
+            for instance in &config.ui.button_cluster_instances {
+                let mut instance_table = Table::new();
+                instance_table["leaf_id"] = value(instance.leaf_id.clone());
+                let mut actions = Array::new();
+                for action in &instance.actions {
+                    actions.push(i64::from(*action));
+                }
+                instance_table["actions"] = value(actions);
+                button_instances.push(instance_table);
+            }
+            set_table_value_preserving_decor(
+                ui,
+                "button_cluster_instances",
+                Item::ArrayOfTables(button_instances),
+            );
+        }
+
+        if !ui.contains_key("playlist_columns")
+            || previous.ui.playlist_columns != config.ui.playlist_columns
+        {
+            let mut playlist_columns = ArrayOfTables::new();
+            for column in &config.ui.playlist_columns {
+                let mut column_table = Table::new();
+                column_table["name"] = value(column.name.clone());
+                column_table["format"] = value(column.format.clone());
+                column_table["enabled"] = value(column.enabled);
+                column_table["custom"] = value(column.custom);
+                playlist_columns.push(column_table);
+            }
+            set_table_value_preserving_decor(
+                ui,
+                "playlist_columns",
+                Item::ArrayOfTables(playlist_columns),
+            );
+        }
+    }
+
+    {
+        let buffering = document["buffering"]
+            .as_table_mut()
+            .expect("buffering should be a table");
+        set_table_scalar_if_changed(
+            buffering,
+            "player_low_watermark_ms",
+            i64::from(previous.buffering.player_low_watermark_ms),
+            i64::from(config.buffering.player_low_watermark_ms),
+            value,
+        );
+        set_table_scalar_if_changed(
+            buffering,
+            "player_target_buffer_ms",
+            i64::from(previous.buffering.player_target_buffer_ms),
+            i64::from(config.buffering.player_target_buffer_ms),
+            value,
+        );
+        set_table_scalar_if_changed(
+            buffering,
+            "player_request_interval_ms",
+            i64::from(previous.buffering.player_request_interval_ms),
+            i64::from(config.buffering.player_request_interval_ms),
+            value,
+        );
+        set_table_scalar_if_changed(
+            buffering,
+            "decoder_request_chunk_ms",
+            i64::from(previous.buffering.decoder_request_chunk_ms),
+            i64::from(config.buffering.decoder_request_chunk_ms),
+            value,
+        );
+    }
+}
+
+fn serialize_config_with_preserved_comments(
+    existing_text: &str,
+    config: &Config,
+) -> Result<String, String> {
+    let previous = toml::from_str::<Config>(existing_text)
+        .map_err(|err| format!("failed to parse existing config as Config: {}", err))?;
+    let mut document = existing_text
+        .parse::<DocumentMut>()
+        .map_err(|err| format!("failed to parse existing config as TOML document: {}", err))?;
+    write_config_to_document(&mut document, &previous, config);
+    Ok(document.to_string())
+}
+
 fn persist_config_file(config: &Config, path: &std::path::Path) {
-    match toml::to_string(config) {
-        Ok(config_text) => {
-            if let Err(err) = std::fs::write(path, config_text) {
-                log::error!("Failed to persist config to {}: {}", path.display(), err);
+    let existing_text = std::fs::read_to_string(path).ok();
+    let config_text = if let Some(existing_text) = existing_text {
+        match serialize_config_with_preserved_comments(&existing_text, config) {
+            Ok(updated_text) => Some(updated_text),
+            Err(err) => {
+                warn!(
+                    "Failed to preserve config comments for {} ({}). Falling back to plain serialization.",
+                    path.display(),
+                    err
+                );
+                toml::to_string(config).ok()
+            }
+        }
+    } else {
+        toml::to_string(config).ok()
+    };
+
+    let Some(config_text) = config_text else {
+        log::error!("Failed to serialize config for {}", path.display());
+        return;
+    };
+
+    if let Err(err) = std::fs::write(path, config_text) {
+        log::error!("Failed to persist config to {}: {}", path.display(), err);
+    }
+}
+
+fn persist_layout_file(layout: &LayoutConfig, path: &std::path::Path) {
+    match toml::to_string(layout) {
+        Ok(layout_text) => {
+            if let Err(err) = std::fs::write(path, layout_text) {
+                log::error!("Failed to persist layout to {}: {}", path.display(), err);
             }
         }
         Err(err) => {
-            log::error!("Failed to serialize config: {}", err);
+            log::error!("Failed to serialize layout: {}", err);
+        }
+    }
+}
+
+fn persist_state_files(config: &Config, config_path: &Path, layout_path: &Path) {
+    persist_config_file(config, config_path);
+    persist_layout_file(&config.ui.layout, layout_path);
+}
+
+fn persist_state_files_with_config_path(config: &Config, config_path: &Path) {
+    let layout_path = config_path
+        .parent()
+        .map(|parent| parent.join("layout.toml"))
+        .unwrap_or_else(|| PathBuf::from("layout.toml"));
+    persist_state_files(config, config_path, &layout_path);
+}
+
+fn load_layout_file(path: &Path) -> LayoutConfig {
+    let layout_content = match std::fs::read_to_string(path) {
+        Ok(content) => content,
+        Err(err) => {
+            warn!(
+                "Failed to read layout file {}. Using defaults. error={}",
+                path.display(),
+                err
+            );
+            return LayoutConfig::default();
+        }
+    };
+
+    match toml::from_str::<LayoutConfig>(&layout_content) {
+        Ok(layout) => layout,
+        Err(err) => {
+            warn!(
+                "Failed to parse layout file {}. Using defaults. error={}",
+                path.display(),
+                err
+            );
+            LayoutConfig::default()
         }
     }
 }
@@ -1054,8 +1435,13 @@ fn with_updated_layout(previous: &Config, layout: LayoutConfig) -> Config {
     sanitize_config(Config {
         output: previous.output.clone(),
         ui: UiConfig {
-            show_album_art: previous.ui.show_album_art,
             show_layout_edit_intro: previous.ui.show_layout_edit_intro,
+            playlist_album_art_column_min_width_px: previous
+                .ui
+                .playlist_album_art_column_min_width_px,
+            playlist_album_art_column_max_width_px: previous
+                .ui
+                .playlist_album_art_column_max_width_px,
             layout,
             button_cluster_instances: previous.ui.button_cluster_instances.clone(),
             playlist_columns: previous.ui.playlist_columns.clone(),
@@ -1240,8 +1626,10 @@ fn apply_playlist_columns_to_ui(ui: &AppWindow, config: &Config) {
         .iter()
         .map(|column| column.custom)
         .collect();
+    let visible_kinds = visible_playlist_column_kinds(&config.ui.playlist_columns);
 
     ui.set_playlist_visible_column_headers(ModelRc::from(Rc::new(VecModel::from(visible_headers))));
+    ui.set_playlist_visible_column_kinds(ModelRc::from(Rc::new(VecModel::from(visible_kinds))));
     ui.set_playlist_column_menu_labels(ModelRc::from(Rc::new(VecModel::from(menu_labels))));
     ui.set_playlist_column_menu_checked(ModelRc::from(Rc::new(VecModel::from(menu_checked))));
     ui.set_playlist_column_menu_is_custom(ModelRc::from(Rc::new(VecModel::from(menu_is_custom))));
@@ -1265,7 +1653,6 @@ fn apply_config_to_ui(
     workspace_width_px: u32,
     workspace_height_px: u32,
 ) {
-    ui.set_show_album_art(true);
     ui.set_volume_level(config.ui.volume);
     ui.set_sidebar_width_px(sidebar_width_from_window(config.ui.window_width));
     ui.set_layout_panel_options(ModelRc::from(Rc::new(VecModel::from(
@@ -1396,13 +1783,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         track_model: Rc::new(VecModel::from(vec![])),
     };
 
-    let config_dir = dirs::config_dir().unwrap();
-    let config_file = config_dir.join("roqtune.toml");
+    let config_root = dirs::config_dir().unwrap().join("roqtune");
+    let config_file = config_root.join("config.toml");
+    let layout_file = config_root.join("layout.toml");
 
-    if let Err(err) = std::fs::create_dir_all(&config_dir) {
+    if let Err(err) = std::fs::create_dir_all(&config_root) {
         return Err(format!(
             "Failed to create config directory {}: {}",
-            config_dir.display(),
+            config_root.display(),
             err
         )
         .into());
@@ -1422,8 +1810,23 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .unwrap();
     }
 
+    if !layout_file.exists() {
+        let default_layout = LayoutConfig::default();
+        info!(
+            "Layout file not found. Creating default layout file. path={}",
+            layout_file.display()
+        );
+        std::fs::write(
+            layout_file.clone(),
+            toml::to_string(&default_layout).unwrap(),
+        )
+        .unwrap();
+    }
+
     let config_content = std::fs::read_to_string(config_file.clone()).unwrap();
-    let config = sanitize_config(toml::from_str::<Config>(&config_content).unwrap_or_default());
+    let mut config = sanitize_config(toml::from_str::<Config>(&config_content).unwrap_or_default());
+    config.ui.layout = load_layout_file(&layout_file);
+    let config = sanitize_config(config);
     let initial_output_options = detect_output_settings_options(&config);
     let runtime_config = resolve_runtime_config(&config, &initial_output_options);
 
@@ -1811,12 +2214,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let state = config_state_clone
             .lock()
             .expect("config state lock poisoned");
+        let album_art_bounds = album_art_column_width_bounds(&state.ui);
         playlist_column_bounds_at_visible_index(
             &state.ui.playlist_columns,
             visible_index.max(0) as usize,
+            album_art_bounds,
         )
-        .map(|bounds| bounds.min_px.max(48))
-        .unwrap_or(48)
+        .map(|bounds| bounds.min_px)
+        .unwrap_or(1)
     });
 
     let config_state_clone = Arc::clone(&config_state);
@@ -1824,9 +2229,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let state = config_state_clone
             .lock()
             .expect("config state lock poisoned");
+        let album_art_bounds = album_art_column_width_bounds(&state.ui);
         playlist_column_bounds_at_visible_index(
             &state.ui.playlist_columns,
             visible_index.max(0) as usize,
+            album_art_bounds,
         )
         .map(|bounds| bounds.max_px.max(bounds.min_px))
         .unwrap_or(1024)
@@ -1840,10 +2247,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 .lock()
                 .expect("config state lock poisoned");
             let visible_index = visible_index.max(0) as usize;
+            let album_art_bounds = album_art_column_width_bounds(&state.ui);
             let column_key =
                 playlist_column_key_at_visible_index(&state.ui.playlist_columns, visible_index);
-            let clamped =
-                clamp_width_for_visible_column(&state.ui.playlist_columns, visible_index, width_px);
+            let clamped = clamp_width_for_visible_column(
+                &state.ui.playlist_columns,
+                visible_index,
+                width_px,
+                album_art_bounds,
+            );
             (column_key, clamped)
         };
         if let (Some(column_key), Some(clamped_width_px)) = (column_key, clamped_width_px) {
@@ -1865,10 +2277,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 .lock()
                 .expect("config state lock poisoned");
             let visible_index = visible_index.max(0) as usize;
+            let album_art_bounds = album_art_column_width_bounds(&state.ui);
             let column_key =
                 playlist_column_key_at_visible_index(&state.ui.playlist_columns, visible_index);
-            let clamped =
-                clamp_width_for_visible_column(&state.ui.playlist_columns, visible_index, width_px);
+            let clamped = clamp_width_for_visible_column(
+                &state.ui.playlist_columns,
+                visible_index,
+                width_px,
+                album_art_bounds,
+            );
             (column_key, clamped)
         };
         if let (Some(column_key), Some(clamped_width_px)) = (column_key, clamped_width_px) {
@@ -2009,7 +2426,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 workspace_size_snapshot(&layout_workspace_size_clone);
             (next_config, workspace_width_px, workspace_height_px)
         };
-        persist_config_file(&next_config, &config_file_clone);
+        persist_state_files_with_config_path(&next_config, &config_file_clone);
         if let Some(ui) = ui_handle_clone.upgrade() {
             apply_layout_to_ui(&ui, &next_config, workspace_width_px, workspace_height_px);
             ui.set_control_cluster_menu_target_leaf_id(leaf_id.clone());
@@ -2049,7 +2466,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 workspace_size_snapshot(&layout_workspace_size_clone);
             (next_config, workspace_width_px, workspace_height_px)
         };
-        persist_config_file(&next_config, &config_file_clone);
+        persist_state_files_with_config_path(&next_config, &config_file_clone);
         if let Some(ui) = ui_handle_clone.upgrade() {
             apply_layout_to_ui(&ui, &next_config, workspace_width_px, workspace_height_px);
             ui.set_control_cluster_menu_target_leaf_id(leaf_id.clone());
@@ -2177,7 +2594,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             ui.set_show_layout_editor_dialog(next.ui.show_layout_edit_intro);
             apply_layout_to_ui(&ui, &next, workspace_width_px, workspace_height_px);
         }
-        persist_config_file(&next, &config_file_clone);
+        persist_state_files_with_config_path(&next, &config_file_clone);
     });
 
     let config_state_clone = Arc::clone(&config_state);
@@ -2195,7 +2612,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
             state.clone()
         };
-        persist_config_file(&next, &config_file_clone);
+        persist_state_files_with_config_path(&next, &config_file_clone);
     });
 
     let config_state_clone = Arc::clone(&config_state);
@@ -2220,7 +2637,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             ui.set_show_layout_splitter_context_menu(false);
             apply_layout_to_ui(&ui, &next, workspace_width_px, workspace_height_px);
         }
-        persist_config_file(&next, &config_file_clone);
+        persist_state_files_with_config_path(&next, &config_file_clone);
     });
 
     let config_state_clone = Arc::clone(&config_state);
@@ -2305,7 +2722,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 .expect("config state lock poisoned");
             *state = next.clone();
         }
-        persist_config_file(&next, &config_file_clone);
+        persist_state_files_with_config_path(&next, &config_file_clone);
         if let Some(ui) = ui_handle_clone.upgrade() {
             apply_layout_to_ui(&ui, &next, workspace_width_px, workspace_height_px);
         }
@@ -2371,7 +2788,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 .expect("config state lock poisoned");
             *state = next.clone();
         }
-        persist_config_file(&next, &config_file_clone);
+        persist_state_files_with_config_path(&next, &config_file_clone);
         if let Some(ui) = ui_handle_clone.upgrade() {
             apply_layout_to_ui(&ui, &next, workspace_width_px, workspace_height_px);
         }
@@ -2411,7 +2828,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 .expect("config state lock poisoned");
             *state = next.clone();
         }
-        persist_config_file(&next, &config_file_clone);
+        persist_state_files_with_config_path(&next, &config_file_clone);
         if let Some(ui) = ui_handle_clone.upgrade() {
             apply_layout_to_ui(&ui, &next, workspace_width_px, workspace_height_px);
         }
@@ -2459,7 +2876,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 .expect("config state lock poisoned");
             *state = next.clone();
         }
-        persist_config_file(&next, &config_file_clone);
+        persist_state_files_with_config_path(&next, &config_file_clone);
         if let Some(ui) = ui_handle_clone.upgrade() {
             apply_layout_to_ui(&ui, &next, workspace_width_px, workspace_height_px);
         }
@@ -2521,7 +2938,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 .expect("config state lock poisoned");
             *state = next.clone();
         }
-        persist_config_file(&next, &config_file_clone);
+        persist_state_files_with_config_path(&next, &config_file_clone);
         if let Some(ui) = ui_handle_clone.upgrade() {
             apply_layout_to_ui(&ui, &next, workspace_width_px, workspace_height_px);
         }
@@ -2553,7 +2970,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 .expect("config state lock poisoned");
             *state = next.clone();
         }
-        persist_config_file(&next, &config_file_clone);
+        persist_state_files_with_config_path(&next, &config_file_clone);
         if let Some(ui) = ui_handle_clone.upgrade() {
             apply_layout_to_ui(&ui, &next, workspace_width_px, workspace_height_px);
         }
@@ -2585,7 +3002,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 .expect("config state lock poisoned");
             *state = next.clone();
         }
-        persist_config_file(&next, &config_file_clone);
+        persist_state_files_with_config_path(&next, &config_file_clone);
         if let Some(ui) = ui_handle_clone.upgrade() {
             apply_layout_to_ui(&ui, &next, workspace_width_px, workspace_height_px);
         }
@@ -2620,7 +3037,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 .expect("config state lock poisoned");
             *state = next.clone();
         }
-        persist_config_file(&next, &config_file_clone);
+        persist_state_files_with_config_path(&next, &config_file_clone);
         if let Some(ui) = ui_handle_clone.upgrade() {
             apply_layout_to_ui(&ui, &next, workspace_width_px, workspace_height_px);
         }
@@ -2763,8 +3180,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     bits_per_sample_auto,
                 },
                 ui: UiConfig {
-                    show_album_art: true,
                     show_layout_edit_intro: show_layout_edit_tutorial,
+                    playlist_album_art_column_min_width_px: previous_config
+                        .ui
+                        .playlist_album_art_column_min_width_px,
+                    playlist_album_art_column_max_width_px: previous_config
+                        .ui
+                        .playlist_album_art_column_max_width_px,
                     layout: previous_config.ui.layout.clone(),
                     button_cluster_instances: previous_config.ui.button_cluster_instances.clone(),
                     playlist_columns: previous_config.ui.playlist_columns.clone(),
@@ -2794,20 +3216,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 *state = next_config.clone();
             }
 
-            match toml::to_string(&next_config) {
-                Ok(config_text) => {
-                    if let Err(err) = std::fs::write(&config_file_clone, config_text) {
-                        log::error!(
-                            "Failed to persist config to {}: {}",
-                            config_file_clone.display(),
-                            err
-                        );
-                    }
-                }
-                Err(err) => {
-                    log::error!("Failed to serialize config: {}", err);
-                }
-            }
+            persist_state_files_with_config_path(&next_config, &config_file_clone);
 
             let runtime_config = resolve_runtime_config(&next_config, &options_snapshot);
             {
@@ -2853,8 +3262,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let next_config = sanitize_config(Config {
             output: previous_config.output.clone(),
             ui: UiConfig {
-                show_album_art: previous_config.ui.show_album_art,
                 show_layout_edit_intro: previous_config.ui.show_layout_edit_intro,
+                playlist_album_art_column_min_width_px: previous_config
+                    .ui
+                    .playlist_album_art_column_min_width_px,
+                playlist_album_art_column_max_width_px: previous_config
+                    .ui
+                    .playlist_album_art_column_max_width_px,
                 layout: previous_config.ui.layout.clone(),
                 button_cluster_instances: previous_config.ui.button_cluster_instances.clone(),
                 playlist_columns: updated_columns,
@@ -2876,20 +3290,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             *state = next_config.clone();
         }
 
-        match toml::to_string(&next_config) {
-            Ok(config_text) => {
-                if let Err(err) = std::fs::write(&config_file_clone, config_text) {
-                    log::error!(
-                        "Failed to persist config to {}: {}",
-                        config_file_clone.display(),
-                        err
-                    );
-                }
-            }
-            Err(err) => {
-                log::error!("Failed to serialize config: {}", err);
-            }
-        }
+        persist_state_files_with_config_path(&next_config, &config_file_clone);
 
         let options_snapshot = {
             let options = output_options_clone
@@ -2951,8 +3352,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let next_config = sanitize_config(Config {
             output: previous_config.output.clone(),
             ui: UiConfig {
-                show_album_art: previous_config.ui.show_album_art,
                 show_layout_edit_intro: previous_config.ui.show_layout_edit_intro,
+                playlist_album_art_column_min_width_px: previous_config
+                    .ui
+                    .playlist_album_art_column_min_width_px,
+                playlist_album_art_column_max_width_px: previous_config
+                    .ui
+                    .playlist_album_art_column_max_width_px,
                 layout: previous_config.ui.layout.clone(),
                 button_cluster_instances: previous_config.ui.button_cluster_instances.clone(),
                 playlist_columns: updated_columns,
@@ -2974,20 +3380,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             *state = next_config.clone();
         }
 
-        match toml::to_string(&next_config) {
-            Ok(config_text) => {
-                if let Err(err) = std::fs::write(&config_file_clone, config_text) {
-                    log::error!(
-                        "Failed to persist config to {}: {}",
-                        config_file_clone.display(),
-                        err
-                    );
-                }
-            }
-            Err(err) => {
-                log::error!("Failed to serialize config: {}", err);
-            }
-        }
+        persist_state_files_with_config_path(&next_config, &config_file_clone);
 
         let options_snapshot = {
             let options = output_options_clone
@@ -3051,8 +3444,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let next_config = sanitize_config(Config {
             output: previous_config.output.clone(),
             ui: UiConfig {
-                show_album_art: previous_config.ui.show_album_art,
                 show_layout_edit_intro: previous_config.ui.show_layout_edit_intro,
+                playlist_album_art_column_min_width_px: previous_config
+                    .ui
+                    .playlist_album_art_column_min_width_px,
+                playlist_album_art_column_max_width_px: previous_config
+                    .ui
+                    .playlist_album_art_column_max_width_px,
                 layout: previous_config.ui.layout.clone(),
                 button_cluster_instances: previous_config.ui.button_cluster_instances.clone(),
                 playlist_columns: updated_columns,
@@ -3074,20 +3472,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             *state = next_config.clone();
         }
 
-        match toml::to_string(&next_config) {
-            Ok(config_text) => {
-                if let Err(err) = std::fs::write(&config_file_clone, config_text) {
-                    log::error!(
-                        "Failed to persist config to {}: {}",
-                        config_file_clone.display(),
-                        err
-                    );
-                }
-            }
-            Err(err) => {
-                log::error!("Failed to serialize config: {}", err);
-            }
-        }
+        persist_state_files_with_config_path(&next_config, &config_file_clone);
 
         let options_snapshot = {
             let options = output_options_clone
@@ -3145,8 +3530,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let next_config = sanitize_config(Config {
             output: previous_config.output.clone(),
             ui: UiConfig {
-                show_album_art: previous_config.ui.show_album_art,
                 show_layout_edit_intro: previous_config.ui.show_layout_edit_intro,
+                playlist_album_art_column_min_width_px: previous_config
+                    .ui
+                    .playlist_album_art_column_min_width_px,
+                playlist_album_art_column_max_width_px: previous_config
+                    .ui
+                    .playlist_album_art_column_max_width_px,
                 layout: previous_config.ui.layout.clone(),
                 button_cluster_instances: previous_config.ui.button_cluster_instances.clone(),
                 playlist_columns: updated_columns,
@@ -3168,20 +3558,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             *state = next_config.clone();
         }
 
-        match toml::to_string(&next_config) {
-            Ok(config_text) => {
-                if let Err(err) = std::fs::write(&config_file_clone, config_text) {
-                    log::error!(
-                        "Failed to persist config to {}: {}",
-                        config_file_clone.display(),
-                        err
-                    );
-                }
-            }
-            Err(err) => {
-                log::error!("Failed to serialize config: {}", err);
-            }
-        }
+        persist_state_files_with_config_path(&next_config, &config_file_clone);
 
         let options_snapshot = {
             let options = output_options_clone
@@ -3371,8 +3748,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     let updated = sanitize_config(Config {
                         output: state.output.clone(),
                         ui: UiConfig {
-                            show_album_art: state.ui.show_album_art,
                             show_layout_edit_intro: state.ui.show_layout_edit_intro,
+                            playlist_album_art_column_min_width_px: state
+                                .ui
+                                .playlist_album_art_column_min_width_px,
+                            playlist_album_art_column_max_width_px: state
+                                .ui
+                                .playlist_album_art_column_max_width_px,
                             layout: state.ui.layout.clone(),
                             button_cluster_instances: state.ui.button_cluster_instances.clone(),
                             playlist_columns: reordered_columns,
@@ -3453,20 +3835,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let state = config_state.lock().expect("config state lock poisoned");
         state.clone()
     };
-    match toml::to_string(&final_config) {
-        Ok(config_text) => {
-            if let Err(err) = std::fs::write(&config_file, config_text) {
-                log::error!(
-                    "Failed to persist config to {}: {}",
-                    config_file.display(),
-                    err
-                );
-            }
-        }
-        Err(err) => {
-            log::error!("Failed to serialize config: {}", err);
-        }
-    }
+    persist_state_files(&final_config, &config_file, &layout_file);
 
     info!("Application exiting");
     Ok(())
@@ -3489,13 +3858,16 @@ mod tests {
     use super::{
         apply_column_order_keys, choose_preferred_u16, choose_preferred_u32,
         clamp_width_for_visible_column, collect_audio_files_from_folder,
-        default_button_cluster_actions_by_index, is_supported_audio_file,
-        playlist_column_key_at_visible_index, playlist_column_width_bounds,
+        default_album_art_column_width_bounds, default_button_cluster_actions_by_index,
+        is_album_art_builtin_column, is_supported_audio_file, playlist_column_key_at_visible_index,
+        playlist_column_width_bounds, playlist_column_width_bounds_with_album_art,
         reorder_visible_playlist_columns, resolve_playlist_header_column_from_x,
         resolve_playlist_header_divider_from_x, resolve_playlist_header_gap_from_x,
-        resolve_runtime_config, sanitize_playlist_columns, select_output_option_index_u16,
-        select_output_option_index_u32, should_apply_custom_column_delete,
-        sidebar_width_from_window, update_or_replace_vec_model, OutputSettingsOptions,
+        resolve_runtime_config, sanitize_config, sanitize_playlist_columns,
+        select_output_option_index_u16, select_output_option_index_u32,
+        serialize_config_with_preserved_comments, should_apply_custom_column_delete,
+        sidebar_width_from_window, update_or_replace_vec_model, visible_playlist_column_kinds,
+        OutputSettingsOptions,
     };
 
     fn unique_temp_directory(test_name: &str) -> PathBuf {
@@ -3861,6 +4233,25 @@ mod tests {
     }
 
     #[test]
+    fn test_playlist_column_width_rendering_matches_runtime_width_model() {
+        let slint_ui = include_str!("roqtune.slint");
+        let playlist_ui = include_str!("ui/components/playlist.slint");
+
+        assert!(
+            slint_ui.contains("return max(1px, root.playlist_column_widths_px[index] * 1px);"),
+            "Header width rendering should use runtime column widths directly"
+        );
+        assert!(
+            slint_ui.contains("let min_width_px = max(1, root.column_resize_min_width_px);"),
+            "Resize preview clamp should honor callback-provided minimums without a fixed floor"
+        );
+        assert!(
+            playlist_ui.contains("return max(1px, root.column-widths-px[index] * 1px);"),
+            "Row cells should use the same runtime width model as header hit-testing"
+        );
+    }
+
+    #[test]
     fn test_layout_editor_and_splitter_callbacks_are_wired_in_slint() {
         let slint_ui = include_str!("roqtune.slint");
         let controls_ui = include_str!("ui/components/controls.slint");
@@ -4148,10 +4539,16 @@ mod tests {
     }
 
     #[test]
-    fn test_playlist_column_width_bounds_for_track_and_custom_columns() {
+    fn test_playlist_column_width_bounds_for_track_custom_and_album_art_columns() {
         let track_column = PlaylistColumnConfig {
             name: "Track #".to_string(),
             format: "{track_number}".to_string(),
+            enabled: true,
+            custom: false,
+        };
+        let album_art_column = PlaylistColumnConfig {
+            name: "Album Art".to_string(),
+            format: "{album_art}".to_string(),
             enabled: true,
             custom: false,
         };
@@ -4166,9 +4563,60 @@ mod tests {
         assert_eq!(track_bounds.min_px, 52);
         assert_eq!(track_bounds.max_px, 90);
 
+        let album_art_bounds = playlist_column_width_bounds(&album_art_column);
+        assert_eq!(album_art_bounds.min_px, 16);
+        assert_eq!(album_art_bounds.max_px, 480);
+
         let custom_bounds = playlist_column_width_bounds(&custom_column);
         assert_eq!(custom_bounds.min_px, 110);
         assert_eq!(custom_bounds.max_px, 340);
+    }
+
+    #[test]
+    fn test_playlist_column_width_bounds_use_custom_album_art_limits() {
+        let album_art_column = PlaylistColumnConfig {
+            name: "Album Art".to_string(),
+            format: "{album_art}".to_string(),
+            enabled: true,
+            custom: false,
+        };
+
+        let bounds = playlist_column_width_bounds_with_album_art(
+            &album_art_column,
+            super::ColumnWidthBounds {
+                min_px: 12,
+                max_px: 600,
+            },
+        );
+
+        assert_eq!(bounds.min_px, 12);
+        assert_eq!(bounds.max_px, 600);
+    }
+
+    #[test]
+    fn test_is_album_art_builtin_column_requires_builtin_marker() {
+        let builtin_album_art = PlaylistColumnConfig {
+            name: "Album Art".to_string(),
+            format: "{album_art}".to_string(),
+            enabled: true,
+            custom: false,
+        };
+        let custom_album_art = PlaylistColumnConfig {
+            name: "Custom Album Art".to_string(),
+            format: "{album_art}".to_string(),
+            enabled: true,
+            custom: true,
+        };
+        let title_column = PlaylistColumnConfig {
+            name: "Title".to_string(),
+            format: "{title}".to_string(),
+            enabled: true,
+            custom: false,
+        };
+
+        assert!(is_album_art_builtin_column(&builtin_album_art));
+        assert!(!is_album_art_builtin_column(&custom_album_art));
+        assert!(!is_album_art_builtin_column(&title_column));
     }
 
     #[test]
@@ -4194,10 +4642,23 @@ mod tests {
             },
         ];
 
-        assert_eq!(clamp_width_for_visible_column(&columns, 0, 10), Some(52));
-        assert_eq!(clamp_width_for_visible_column(&columns, 0, 200), Some(90));
-        assert_eq!(clamp_width_for_visible_column(&columns, 1, 1000), Some(440));
-        assert_eq!(clamp_width_for_visible_column(&columns, 3, 120), None);
+        let album_art_bounds = default_album_art_column_width_bounds();
+        assert_eq!(
+            clamp_width_for_visible_column(&columns, 0, 10, album_art_bounds),
+            Some(52)
+        );
+        assert_eq!(
+            clamp_width_for_visible_column(&columns, 0, 200, album_art_bounds),
+            Some(90)
+        );
+        assert_eq!(
+            clamp_width_for_visible_column(&columns, 1, 1000, album_art_bounds),
+            Some(440)
+        );
+        assert_eq!(
+            clamp_width_for_visible_column(&columns, 3, 120, album_art_bounds),
+            None
+        );
     }
 
     #[test]
@@ -4250,8 +4711,9 @@ mod tests {
                 bits_per_sample_auto: true,
             },
             ui: UiConfig {
-                show_album_art: true,
                 show_layout_edit_intro: true,
+                playlist_album_art_column_min_width_px: 16,
+                playlist_album_art_column_max_width_px: 480,
                 layout: LayoutConfig::default(),
                 button_cluster_instances: Vec::new(),
                 playlist_columns: crate::config::default_playlist_columns(),
@@ -4280,6 +4742,128 @@ mod tests {
     }
 
     #[test]
+    fn test_sanitize_config_clamps_and_orders_album_art_width_bounds() {
+        let input = Config {
+            ui: UiConfig {
+                playlist_album_art_column_min_width_px: 900,
+                playlist_album_art_column_max_width_px: 20,
+                ..Config::default().ui
+            },
+            ..Config::default()
+        };
+
+        let sanitized = sanitize_config(input);
+        assert_eq!(sanitized.ui.playlist_album_art_column_min_width_px, 24);
+        assert_eq!(sanitized.ui.playlist_album_art_column_max_width_px, 512);
+    }
+
+    #[test]
+    fn test_serialize_config_with_preserved_comments_keeps_existing_comments() {
+        let existing = r#"
+# top comment
+[output]
+# output comment
+output_device_name = ""
+output_device_auto = true
+channel_count = 2
+sample_rate_khz = 44100
+bits_per_sample = 24
+channel_count_auto = true
+sample_rate_auto = true
+bits_per_sample_auto = true
+
+[ui]
+# ui comment
+show_layout_edit_intro = true
+playlist_album_art_column_min_width_px = 16
+playlist_album_art_column_max_width_px = 480
+window_width = 900
+window_height = 650
+volume = 1.0
+button_cluster_instances = []
+
+[[ui.playlist_columns]]
+name = "Title"
+format = "{title}"
+enabled = true
+custom = false
+
+[buffering]
+# buffering comment
+player_low_watermark_ms = 12000
+player_target_buffer_ms = 24000
+player_request_interval_ms = 120
+decoder_request_chunk_ms = 1500
+"#;
+
+        let mut config = Config::default();
+        config.output.output_device_name = "My Device".to_string();
+        config.ui.volume = 0.55;
+
+        let serialized = serialize_config_with_preserved_comments(existing, &config)
+            .expect("comment-preserving serialization should succeed");
+
+        assert!(serialized.contains("# top comment"));
+        assert!(serialized.contains("# output comment"));
+        assert!(serialized.contains("# ui comment"));
+        assert!(serialized.contains("# buffering comment"));
+        assert!(serialized.contains("output_device_name = \"My Device\""));
+        assert!(serialized.contains("volume = 0.55"));
+    }
+
+    #[test]
+    fn test_serialize_config_with_preserved_comments_rejects_invalid_toml() {
+        let invalid = "[output\noutput_device_auto = true";
+        let config = Config::default();
+        let result = serialize_config_with_preserved_comments(invalid, &config);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_serialize_config_with_preserved_comments_keeps_system_template_comments() {
+        let existing = include_str!("../config/config.system.toml");
+        let mut config: Config =
+            toml::from_str(existing).expect("system config template should parse");
+        config.ui.show_layout_edit_intro = false;
+
+        let serialized = serialize_config_with_preserved_comments(existing, &config)
+            .expect("comment-preserving serialization should succeed");
+
+        assert!(serialized.contains("# roqtune system config template"));
+        assert!(serialized.contains("# ADVANCED USERS ONLY"));
+        assert!(serialized.contains("# Playback volume (0.0 .. 1.0)."));
+        assert!(serialized.contains("show_layout_edit_intro = false"));
+    }
+
+    #[test]
+    fn test_serialize_config_with_preserved_comments_updates_button_clusters_to_aot() {
+        let existing = include_str!("../config/config.system.toml");
+        let mut config: Config =
+            toml::from_str(existing).expect("system config template should parse");
+        config.ui.button_cluster_instances = vec![crate::config::ButtonClusterInstanceConfig {
+            leaf_id: "n8".to_string(),
+            actions: vec![1, 2, 3],
+        }];
+
+        let serialized = serialize_config_with_preserved_comments(existing, &config)
+            .expect("comment-preserving serialization should succeed");
+
+        assert!(
+            serialized.contains("[[ui.button_cluster_instances]]"),
+            "button cluster list should upgrade to array-of-tables when populated.\nserialized=\n{}",
+            serialized
+        );
+        assert!(
+            serialized.contains("[[ui.playlist_columns]]"),
+            "playlist column array-of-tables should remain valid after rewrite"
+        );
+        let parsed_back: toml_edit::DocumentMut = serialized
+            .parse()
+            .expect("serialized config should remain valid TOML");
+        assert!(parsed_back["ui"]["playlist_columns"].is_array_of_tables());
+    }
+
+    #[test]
     fn test_sanitize_playlist_columns_restores_builtins_and_preserves_custom() {
         let custom = PlaylistColumnConfig {
             name: "Album & Year".to_string(),
@@ -4300,8 +4884,37 @@ mod tests {
         let sanitized = sanitize_playlist_columns(&input_columns);
         assert!(sanitized.iter().any(|column| column.format == "{title}"));
         assert!(sanitized.iter().any(|column| column.format == "{artist}"));
+        assert!(sanitized
+            .iter()
+            .any(|column| !column.custom && column.format == "{album_art}"));
         assert!(sanitized.iter().any(|column| column == &custom));
         assert!(sanitized.iter().any(|column| column.enabled));
+    }
+
+    #[test]
+    fn test_visible_playlist_column_kinds_marks_builtin_album_art_only() {
+        let columns = vec![
+            PlaylistColumnConfig {
+                name: "Title".to_string(),
+                format: "{title}".to_string(),
+                enabled: true,
+                custom: false,
+            },
+            PlaylistColumnConfig {
+                name: "Album Art".to_string(),
+                format: "{album_art}".to_string(),
+                enabled: true,
+                custom: false,
+            },
+            PlaylistColumnConfig {
+                name: "Custom Art".to_string(),
+                format: "{album_art}".to_string(),
+                enabled: true,
+                custom: true,
+            },
+        ];
+
+        assert_eq!(visible_playlist_column_kinds(&columns), vec![0, 1, 0]);
     }
 
     #[test]

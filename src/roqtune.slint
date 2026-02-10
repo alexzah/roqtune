@@ -143,7 +143,7 @@ export component AppWindow inherits Window {
     in-out property <bool> column_resize_active: false;
     in-out property <int> column_hover_divider: -1;
     in-out property <int> column_resize_start_width_px: 0;
-    in-out property <int> column_resize_min_width_px: 48;
+    in-out property <int> column_resize_min_width_px: 1;
     in-out property <int> column_resize_max_width_px: 1024;
     in-out property <int> column_resize_preview_width_px: 0;
     in-out property <int> column_click_candidate: -1;
@@ -225,7 +225,7 @@ export component AppWindow inherits Window {
 
     pure function playlist-column-width(index: int) -> length {
         if index >= 0 && index < root.playlist_column_widths_px.length {
-            return max(48px, root.playlist_column_widths_px[index] * 1px);
+            return max(1px, root.playlist_column_widths_px[index] * 1px);
         }
         return 140px;
     }
@@ -723,7 +723,7 @@ export component AppWindow inherits Window {
                                     root.column_hover_divider = hovered_divider;
                                     if (root.column_resize_active && root.column_resize_index != -1) {
                                         let delta_px = floor((self.mouse-x - root.column_resize_start_mouse_x) / 1px);
-                                        let min_width_px = max(48, root.column_resize_min_width_px);
+                                        let min_width_px = max(1, root.column_resize_min_width_px);
                                         let max_width_px = max(min_width_px, root.column_resize_max_width_px);
                                         let new_width_px = min(max_width_px, max(min_width_px, root.column_resize_start_width_px + delta_px));
                                         root.column_resize_preview_width_px = new_width_px;
@@ -971,14 +971,16 @@ export component AppWindow inherits Window {
                         track-list := ListView {
                             y: 0px;
                             height: parent.height;
-                            property <length> row-height: 30px;
+                            property <length> row-height: max(30px, root.playlist_row_height_px * 1px);
                             property <length> header-height: 28px;
                             for track[i] in root.track_model : TrackRow {
                                 data: track;
                                 is-playing: root.playing_track_index == i;
                                 is-hover: root.hover-index == i && !root.is-dragging;
                                 headers: root.playlist_visible_column_headers;
+                                column-kinds: root.playlist_visible_column_kinds;
                                 column-widths-px: root.playlist_column_widths_px;
+                                row-height: track-list.row-height;
                                 null-column-width: root.null-column-width;
                             }
                         }
@@ -990,7 +992,7 @@ export component AppWindow inherits Window {
                             property <length> scrollbar-lane-reserve: 18px;
                             width: max(0px, parent.width - self.scrollbar-lane-reserve);
                             height: max(0px, parent.height - self.scrollbar-lane-reserve);
-                            property <length> row-height: 30px;
+                            property <length> row-height: track-list.row-height;
                             property <length> header-height: 28px;
                             property <bool> in-viewport: self.mouse-x >= 0px
                                 && self.mouse-y >= 0px
@@ -1062,7 +1064,7 @@ export component AppWindow inherits Window {
 
                         if (root.is-dragging && root.drop-index != -1) : Rectangle {
                             x: 0;
-                            y: max(0 , track-list.header-height + (root.drop-index - 1) * 30px) + track-list.viewport-y;
+                            y: max(0 , track-list.header-height + (root.drop-index - 1) * track-list.row-height) + track-list.viewport-y;
                             width: 100%;
                             height: 2px;
                             background: #2a6def;
@@ -2380,7 +2382,6 @@ export component AppWindow inherits Window {
     in-out property <[int]> playlist_column_sort_states: [];
 
     // Album art properties
-    in-out property <bool> show_album_art: true;
     in-out property <image> current_cover_art;
 
     // Metadata display properties
@@ -2407,6 +2408,8 @@ export component AppWindow inherits Window {
     in-out property <bool> show_settings_restart_notice: false;
     in-out property <string> settings_restart_notice_message: "";
     in-out property <[string]> playlist_visible_column_headers: [];
+    in-out property <[int]> playlist_visible_column_kinds: [];
+    in-out property <int> playlist_row_height_px: 30;
     in-out property <[string]> playlist_column_menu_labels: [];
     in-out property <[bool]> playlist_column_menu_checked: [];
     in-out property <[bool]> playlist_column_menu_is_custom: [];

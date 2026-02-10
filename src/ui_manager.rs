@@ -7,6 +7,7 @@ use std::hash::{Hash, Hasher};
 use std::io::Write;
 use std::time::{Duration, Instant};
 use std::{
+    cell::RefCell,
     collections::hash_map::DefaultHasher,
     collections::{HashMap, HashSet},
     path::PathBuf,
@@ -18,7 +19,7 @@ use std::{
 use governor::state::NotKeyed;
 use id3::{Tag, TagLike};
 use log::{debug, info, warn};
-use slint::{Model, ModelRc, StandardListViewItem, VecModel};
+use slint::{Image, Model, ModelRc, StandardListViewItem, VecModel};
 use tokio::sync::broadcast::{Receiver, Sender};
 
 use crate::{
@@ -44,6 +45,8 @@ pub struct UiManager {
     playlist_ids: Vec<String>,
     track_ids: Vec<String>,
     track_paths: Vec<PathBuf>,
+    track_cover_art_paths: Vec<Option<PathBuf>>,
+    track_cover_art_missing_tracks: HashSet<PathBuf>,
     track_metadata: Vec<TrackMetadata>,
     view_indices: Vec<usize>,
     selected_indices: Vec<usize>,
@@ -62,10 +65,14 @@ pub struct UiManager {
     current_playing_track_metadata: Option<protocol::DetailedMetadata>,
     playlist_columns: Vec<PlaylistColumnConfig>,
     playlist_column_content_targets_px: Vec<u32>,
+    playlist_column_target_widths_px: HashMap<String, u32>,
     playlist_column_widths_px: Vec<u32>,
     playlist_column_width_overrides_px: HashMap<String, u32>,
     playlist_columns_available_width_px: u32,
     playlist_columns_content_width_px: u32,
+    playlist_row_height_px: u32,
+    album_art_column_min_width_px: u32,
+    album_art_column_max_width_px: u32,
     filter_sort_column_key: Option<String>,
     filter_sort_direction: Option<PlaylistSortDirection>,
     filter_search_query: String,
@@ -109,6 +116,18 @@ struct CoverArtLookupRequest {
 enum PlaylistSortDirection {
     Ascending,
     Descending,
+}
+
+const PLAYLIST_COLUMN_KIND_TEXT: i32 = 0;
+const PLAYLIST_COLUMN_KIND_ALBUM_ART: i32 = 1;
+const BASE_ROW_HEIGHT_PX: u32 = 30;
+const ALBUM_ART_ROW_PADDING_PX: u32 = 8;
+
+thread_local! {
+    static TRACK_ROW_COVER_ART_IMAGE_CACHE: RefCell<HashMap<PathBuf, Image>> =
+        RefCell::new(HashMap::new());
+    static TRACK_ROW_COVER_ART_FAILED_PATHS: RefCell<HashSet<PathBuf>> =
+        RefCell::new(HashSet::new());
 }
 
 fn fit_column_widths_to_available_space(
@@ -201,6 +220,8 @@ impl UiManager {
             playlist_ids: Vec::new(),
             track_ids: Vec::new(),
             track_paths: Vec::new(),
+            track_cover_art_paths: Vec::new(),
+            track_cover_art_missing_tracks: HashSet::new(),
             track_metadata: Vec::new(),
             view_indices: Vec::new(),
             selected_indices: Vec::new(),
@@ -219,10 +240,14 @@ impl UiManager {
             current_playing_track_metadata: None,
             playlist_columns: config::default_playlist_columns(),
             playlist_column_content_targets_px: Vec::new(),
+            playlist_column_target_widths_px: HashMap::new(),
             playlist_column_widths_px: Vec::new(),
             playlist_column_width_overrides_px: HashMap::new(),
             playlist_columns_available_width_px: 0,
             playlist_columns_content_width_px: 0,
+            playlist_row_height_px: BASE_ROW_HEIGHT_PX,
+            album_art_column_min_width_px: config::default_playlist_album_art_column_min_width_px(),
+            album_art_column_max_width_px: config::default_playlist_album_art_column_max_width_px(),
             filter_sort_column_key: None,
             filter_sort_direction: None,
             filter_search_query: String::new(),
@@ -376,6 +401,73 @@ impl UiManager {
         });
     }
 
+    fn is_album_art_column_visible(&self) -> bool {
+        self.playlist_columns
+            .iter()
+            .any(|column| column.enabled && Self::is_album_art_builtin_column(column))
+    }
+
+    fn ensure_track_cover_art_slots(&mut self) {
+        if self.track_cover_art_paths.len() < self.track_paths.len() {
+            self.track_cover_art_paths
+                .resize(self.track_paths.len(), None);
+        } else if self.track_cover_art_paths.len() > self.track_paths.len() {
+            self.track_cover_art_paths.truncate(self.track_paths.len());
+        }
+    }
+
+    fn resolve_track_cover_art_path(&mut self, source_index: usize) -> Option<PathBuf> {
+        let track_path = self.track_paths.get(source_index).cloned()?;
+        if let Some(Some(existing_path)) = self.track_cover_art_paths.get(source_index) {
+            return Some(existing_path.clone());
+        }
+        if self.track_cover_art_missing_tracks.contains(&track_path) {
+            return None;
+        }
+
+        let resolved_path = Self::find_cover_art(&track_path);
+        if let Some(cache_slot) = self.track_cover_art_paths.get_mut(source_index) {
+            *cache_slot = resolved_path.clone();
+        }
+        if resolved_path.is_none() {
+            self.track_cover_art_missing_tracks.insert(track_path);
+        }
+        resolved_path
+    }
+
+    fn row_cover_art_path(&mut self, source_index: usize) -> Option<PathBuf> {
+        self.resolve_track_cover_art_path(source_index)
+    }
+
+    fn load_track_row_cover_art_image(path: Option<&PathBuf>) -> Image {
+        let Some(path) = path.cloned() else {
+            return Image::default();
+        };
+        if TRACK_ROW_COVER_ART_FAILED_PATHS.with(|failed| failed.borrow().contains(&path)) {
+            return Image::default();
+        }
+        if let Some(cached) =
+            TRACK_ROW_COVER_ART_IMAGE_CACHE.with(|cache| cache.borrow().get(&path).cloned())
+        {
+            return cached;
+        }
+
+        match Image::load_from_path(&path) {
+            Ok(image) => {
+                TRACK_ROW_COVER_ART_IMAGE_CACHE.with(|cache| {
+                    cache.borrow_mut().insert(path, image.clone());
+                });
+                image
+            }
+            Err(_) => {
+                TRACK_ROW_COVER_ART_FAILED_PATHS.with(|failed| {
+                    failed.borrow_mut().insert(path);
+                });
+                Image::default()
+            }
+        }
+    }
+
     fn to_detailed_metadata(track_metadata: &TrackMetadata) -> protocol::DetailedMetadata {
         protocol::DetailedMetadata {
             title: track_metadata.title.clone(),
@@ -470,7 +562,13 @@ impl UiManager {
         playlist_columns
             .iter()
             .filter(|column| column.enabled)
-            .map(|column| Self::render_column_value(track_metadata, &column.format))
+            .map(|column| {
+                if Self::is_album_art_builtin_column(column) {
+                    String::new()
+                } else {
+                    Self::render_column_value(track_metadata, &column.format)
+                }
+            })
             .collect()
     }
 
@@ -485,6 +583,26 @@ impl UiManager {
         format.trim().to_ascii_lowercase()
     }
 
+    fn is_album_art_builtin_column(column: &PlaylistColumnConfig) -> bool {
+        !column.custom && Self::normalize_column_format(&column.format) == "{album_art}"
+    }
+
+    fn playlist_column_kind(column: &PlaylistColumnConfig) -> i32 {
+        if Self::is_album_art_builtin_column(column) {
+            PLAYLIST_COLUMN_KIND_ALBUM_ART
+        } else {
+            PLAYLIST_COLUMN_KIND_TEXT
+        }
+    }
+
+    fn visible_playlist_column_kinds(columns: &[PlaylistColumnConfig]) -> Vec<i32> {
+        columns
+            .iter()
+            .filter(|column| column.enabled)
+            .map(Self::playlist_column_kind)
+            .collect()
+    }
+
     fn playlist_column_key(column: &PlaylistColumnConfig) -> String {
         if column.custom {
             format!("custom:{}|{}", column.name.trim(), column.format.trim())
@@ -493,7 +611,40 @@ impl UiManager {
         }
     }
 
-    fn column_width_profile(column: &PlaylistColumnConfig) -> ColumnWidthProfile {
+    fn clamp_column_override_width_px(&self, column_key: &str, width_px: u32) -> u32 {
+        if let Some(column) = self
+            .playlist_columns
+            .iter()
+            .find(|column| Self::playlist_column_key(column) == column_key)
+        {
+            let profile = self.column_width_profile_for_column(column);
+            return width_px.clamp(profile.min_px, profile.max_px);
+        }
+        width_px.max(1)
+    }
+
+    fn is_sortable_playlist_column(column: &PlaylistColumnConfig) -> bool {
+        !Self::is_album_art_builtin_column(column)
+    }
+
+    fn album_art_column_width_profile(&self) -> ColumnWidthProfile {
+        let min_px = self.album_art_column_min_width_px.clamp(12, 512);
+        let max_px = self
+            .album_art_column_max_width_px
+            .clamp(min_px.max(24), 1024);
+
+        ColumnWidthProfile {
+            min_px,
+            preferred_px: 72u32.clamp(min_px, max_px),
+            max_px,
+        }
+    }
+
+    fn column_width_profile_for_column(&self, column: &PlaylistColumnConfig) -> ColumnWidthProfile {
+        if Self::is_album_art_builtin_column(column) {
+            return self.album_art_column_width_profile();
+        }
+
         let normalized_format = column.format.trim().to_ascii_lowercase();
         let normalized_name = column.name.trim().to_ascii_lowercase();
 
@@ -608,7 +759,11 @@ impl UiManager {
 
         let mut targets = Vec::with_capacity(visible_columns.len());
         for column in visible_columns {
-            let profile = Self::column_width_profile(column);
+            let profile = self.column_width_profile_for_column(column);
+            if Self::is_album_art_builtin_column(column) {
+                targets.push(profile.preferred_px.clamp(profile.min_px, profile.max_px));
+                continue;
+            }
             let mut char_width_samples = Vec::new();
 
             let header_chars = column.name.chars().take(MAX_MEASURED_CHARS).count() as u32;
@@ -648,31 +803,82 @@ impl UiManager {
         self.playlist_column_content_targets_px = targets;
     }
 
-    fn compute_playlist_column_widths(&self, available_width_px: u32) -> Vec<u32> {
+    fn resolve_playlist_column_target_width_px(
+        override_width_px: Option<u32>,
+        current_width_px: Option<u32>,
+        stored_target_width_px: Option<u32>,
+        content_target_width_px: u32,
+        profile: ColumnWidthProfile,
+        preserve_current_widths: bool,
+    ) -> u32 {
+        let base_width_px = if let Some(override_width_px) = override_width_px {
+            override_width_px
+        } else if preserve_current_widths {
+            stored_target_width_px
+                .or(current_width_px)
+                .unwrap_or(content_target_width_px)
+        } else {
+            content_target_width_px
+        };
+        base_width_px.clamp(profile.min_px, profile.max_px)
+    }
+
+    fn layout_min_width_px_for_column(
+        column: &PlaylistColumnConfig,
+        profile: ColumnWidthProfile,
+        target_width_px: u32,
+    ) -> u32 {
+        if Self::is_album_art_builtin_column(column) {
+            return target_width_px;
+        }
+        profile.min_px
+    }
+
+    fn compute_playlist_column_widths(
+        &self,
+        available_width_px: u32,
+        preserve_current_widths: bool,
+    ) -> (Vec<u32>, HashMap<String, u32>) {
         const COLUMN_SPACING_PX: u32 = 10;
         let visible_columns = self.visible_playlist_columns();
         if visible_columns.is_empty() {
-            return Vec::new();
+            return (Vec::new(), HashMap::new());
         }
 
         let mut min_widths = Vec::with_capacity(visible_columns.len());
         let mut max_widths = Vec::with_capacity(visible_columns.len());
         let mut widths = Vec::with_capacity(visible_columns.len());
+        let mut target_widths_by_key = HashMap::with_capacity(visible_columns.len());
 
         for (index, column) in visible_columns.iter().enumerate() {
-            let profile = Self::column_width_profile(column);
+            let profile = self.column_width_profile_for_column(column);
+            let column_key = Self::playlist_column_key(column);
             let override_width = self
                 .playlist_column_width_overrides_px
-                .get(&Self::playlist_column_key(column))
+                .get(&column_key)
                 .copied();
-            let target = override_width.unwrap_or_else(|| {
-                self.playlist_column_content_targets_px
-                    .get(index)
-                    .copied()
-                    .unwrap_or(profile.preferred_px)
-            });
-            let target = target.clamp(profile.min_px, profile.max_px);
-            min_widths.push(profile.min_px);
+            let content_target = self
+                .playlist_column_content_targets_px
+                .get(index)
+                .copied()
+                .unwrap_or(profile.preferred_px);
+            let stored_target = self
+                .playlist_column_target_widths_px
+                .get(&column_key)
+                .copied();
+            let current_width = self.playlist_column_widths_px.get(index).copied();
+            let target = Self::resolve_playlist_column_target_width_px(
+                override_width,
+                current_width,
+                stored_target,
+                content_target,
+                profile,
+                preserve_current_widths,
+            );
+            target_widths_by_key.insert(column_key, target);
+            min_widths.push(Self::layout_min_width_px_for_column(
+                column, profile, target,
+            ));
             max_widths.push(profile.max_px);
             widths.push(target);
         }
@@ -693,29 +899,73 @@ impl UiManager {
             available_for_columns,
         );
 
-        widths
+        (widths, target_widths_by_key)
     }
 
-    fn apply_playlist_column_layout(&mut self) {
+    fn compute_playlist_row_height_px_for_visible_columns(
+        visible_columns: &[&PlaylistColumnConfig],
+        column_widths_px: &[u32],
+        album_art_profile: ColumnWidthProfile,
+    ) -> u32 {
+        let Some((column_index, _column)) = visible_columns
+            .iter()
+            .enumerate()
+            .find(|(_, column)| Self::is_album_art_builtin_column(column))
+        else {
+            return BASE_ROW_HEIGHT_PX;
+        };
+
+        let album_art_width_px = column_widths_px
+            .get(column_index)
+            .copied()
+            .unwrap_or(album_art_profile.preferred_px);
+
+        album_art_width_px
+            .saturating_add(ALBUM_ART_ROW_PADDING_PX)
+            .clamp(
+                BASE_ROW_HEIGHT_PX,
+                album_art_profile
+                    .max_px
+                    .saturating_add(ALBUM_ART_ROW_PADDING_PX),
+            )
+    }
+
+    fn compute_playlist_row_height_px(&self, column_widths_px: &[u32]) -> u32 {
+        let visible_columns = self.visible_playlist_columns();
+        Self::compute_playlist_row_height_px_for_visible_columns(
+            &visible_columns,
+            column_widths_px,
+            self.album_art_column_width_profile(),
+        )
+    }
+
+    fn apply_playlist_column_layout_internal(&mut self, preserve_current_widths: bool) {
         if self.playlist_column_content_targets_px.len() != self.visible_playlist_columns().len() {
             self.refresh_playlist_column_content_targets();
         }
 
-        let widths = self.compute_playlist_column_widths(self.playlist_columns_available_width_px);
+        let (widths, target_widths_by_key) = self.compute_playlist_column_widths(
+            self.playlist_columns_available_width_px,
+            preserve_current_widths,
+        );
+        let row_height_px = self.compute_playlist_row_height_px(&widths);
         let content_width = widths
             .iter()
             .copied()
             .sum::<u32>()
             .saturating_add(10u32.saturating_mul((widths.len().saturating_sub(1)) as u32));
+        self.playlist_column_target_widths_px = target_widths_by_key;
 
         if widths == self.playlist_column_widths_px
             && content_width == self.playlist_columns_content_width_px
+            && row_height_px == self.playlist_row_height_px
         {
             return;
         }
 
         self.playlist_column_widths_px = widths.clone();
         self.playlist_columns_content_width_px = content_width;
+        self.playlist_row_height_px = row_height_px;
 
         let widths_i32: Vec<i32> = widths
             .into_iter()
@@ -732,13 +982,23 @@ impl UiManager {
             gap_positions.push(cursor_px);
         }
         let content_width_i32 = content_width.min(i32::MAX as u32) as i32;
+        let row_height_i32 = row_height_px.min(i32::MAX as u32) as i32;
         let _ = self.ui.upgrade_in_event_loop(move |ui| {
             ui.set_playlist_column_widths_px(ModelRc::from(Rc::new(VecModel::from(widths_i32))));
             ui.set_playlist_column_gap_positions_px(ModelRc::from(Rc::new(VecModel::from(
                 gap_positions,
             ))));
             ui.set_playlist_columns_content_width_px(content_width_i32);
+            ui.set_playlist_row_height_px(row_height_i32);
         });
+    }
+
+    fn apply_playlist_column_layout(&mut self) {
+        self.apply_playlist_column_layout_internal(false);
+    }
+
+    fn apply_playlist_column_layout_preserving_current_widths(&mut self) {
+        self.apply_playlist_column_layout_internal(true);
     }
 
     fn status_text_from_track_metadata(track_metadata: &TrackMetadata) -> slint::SharedString {
@@ -802,6 +1062,27 @@ impl UiManager {
 
     fn normalized_search_query(query: &str) -> String {
         query.trim().to_ascii_lowercase()
+    }
+
+    fn reset_filter_state_fields(
+        filter_sort_column_key: &mut Option<String>,
+        filter_sort_direction: &mut Option<PlaylistSortDirection>,
+        filter_search_query: &mut String,
+        filter_search_visible: &mut bool,
+    ) {
+        *filter_sort_column_key = None;
+        *filter_sort_direction = None;
+        filter_search_query.clear();
+        *filter_search_visible = false;
+    }
+
+    fn reset_filter_state(&mut self) {
+        Self::reset_filter_state_fields(
+            &mut self.filter_sort_column_key,
+            &mut self.filter_sort_direction,
+            &mut self.filter_search_query,
+            &mut self.filter_search_visible,
+        );
     }
 
     fn is_filter_applied(&self) -> bool {
@@ -973,6 +1254,10 @@ impl UiManager {
 
         let active_sort_index = active_sort.map(|(index, _)| index);
         let descending = self.filter_sort_direction == Some(PlaylistSortDirection::Descending);
+        let album_art_column_visible = self.is_album_art_column_visible();
+        if album_art_column_visible {
+            self.ensure_track_cover_art_slots();
+        }
 
         struct ViewRow {
             source_index: usize,
@@ -1031,7 +1316,7 @@ impl UiManager {
             .and_then(|source_index| self.map_source_to_view_index(source_index))
             .map(|index| index as i32)
             .unwrap_or(-1);
-        let row_data: Vec<(Vec<String>, bool, String)> = rows
+        let row_data: Vec<(Vec<String>, Option<PathBuf>, bool, String)> = rows
             .into_iter()
             .map(|row| {
                 let status = if Some(row.source_index) == active_playing_index {
@@ -1043,8 +1328,12 @@ impl UiManager {
                 } else {
                     ""
                 };
+                let album_art_path = album_art_column_visible
+                    .then(|| self.row_cover_art_path(row.source_index))
+                    .flatten();
                 (
                     row.values,
+                    album_art_path,
                     selected_set.contains(&row.source_index),
                     status.to_string(),
                 )
@@ -1062,12 +1351,14 @@ impl UiManager {
                 track_model.remove(0);
             }
 
-            for (values, selected, status) in row_data {
+            for (values, album_art_path, selected, status) in row_data {
                 let values_shared: Vec<slint::SharedString> =
                     values.into_iter().map(Into::into).collect();
+                let album_art = UiManager::load_track_row_cover_art_image(album_art_path.as_ref());
                 track_model.push(TrackRowData {
                     status: status.into(),
                     values: ModelRc::from(values_shared.as_slice()),
+                    album_art,
                     selected,
                 });
             }
@@ -1101,10 +1392,7 @@ impl UiManager {
     }
 
     fn clear_playlist_filter_view(&mut self) {
-        self.filter_sort_column_key = None;
-        self.filter_sort_direction = None;
-        self.filter_search_query.clear();
-        self.filter_search_visible = false;
+        self.reset_filter_state();
         self.rebuild_track_model();
     }
 
@@ -1114,6 +1402,9 @@ impl UiManager {
             let Some(column) = visible_columns.get(view_column_index) else {
                 return;
             };
+            if !Self::is_sortable_playlist_column(column) {
+                return;
+            }
             Self::playlist_column_key(column)
         };
 
@@ -1158,6 +1449,7 @@ impl UiManager {
 
         let mut new_track_ids = Vec::with_capacity(normalized.len());
         let mut new_track_paths = Vec::with_capacity(normalized.len());
+        let mut new_track_cover_art_paths = Vec::with_capacity(normalized.len());
         let mut new_track_metadata = Vec::with_capacity(normalized.len());
         for &index in &normalized {
             if let (Some(id), Some(path), Some(metadata)) = (
@@ -1167,12 +1459,19 @@ impl UiManager {
             ) {
                 new_track_ids.push(id.clone());
                 new_track_paths.push(path.clone());
+                new_track_cover_art_paths.push(
+                    self.track_cover_art_paths
+                        .get(index)
+                        .cloned()
+                        .unwrap_or(None),
+                );
                 new_track_metadata.push(metadata.clone());
             }
         }
 
         self.track_ids = new_track_ids;
         self.track_paths = new_track_paths;
+        self.track_cover_art_paths = new_track_cover_art_paths;
         self.track_metadata = new_track_metadata;
 
         self.selected_indices = selected_ids
@@ -1191,10 +1490,7 @@ impl UiManager {
             self.current_playing_track_metadata = None;
         }
 
-        self.filter_sort_column_key = None;
-        self.filter_sort_direction = None;
-        self.filter_search_query.clear();
-        self.filter_search_visible = false;
+        self.reset_filter_state();
 
         self.refresh_playlist_column_content_targets();
         self.apply_playlist_column_layout();
@@ -1612,6 +1908,7 @@ impl UiManager {
                             self.active_playlist_id = id.clone();
                             self.selection_anchor_track_id = None;
                             self.playlist_column_width_overrides_px.clear();
+                            self.playlist_column_target_widths_px.clear();
                             self.apply_playlist_column_layout();
                             if let Some(index) =
                                 self.playlist_ids.iter().position(|p_id| p_id == &id)
@@ -1624,13 +1921,18 @@ impl UiManager {
                         protocol::Message::Playlist(
                             protocol::PlaylistMessage::PlaylistRestored(tracks),
                         ) => {
+                            // Switching playlists should always start in the playlist's natural order
+                            // with no active read-only filter/search view state.
+                            self.reset_filter_state();
                             self.selection_anchor_track_id = None;
                             self.track_ids.clear();
                             self.track_paths.clear();
+                            self.track_cover_art_paths.clear();
                             self.track_metadata.clear();
                             for track in tracks {
                                 self.track_ids.push(track.id.clone());
                                 self.track_paths.push(track.path.clone());
+                                self.track_cover_art_paths.push(None);
                                 let metadata = self.read_track_metadata(&track.path);
                                 self.track_metadata.push(metadata);
                             }
@@ -1644,6 +1946,7 @@ impl UiManager {
                         }) => {
                             self.track_ids.push(id.clone());
                             self.track_paths.push(path.clone());
+                            self.track_cover_art_paths.push(None);
                             let tags = self.read_track_metadata(&path);
                             self.track_metadata.push(tags);
                             self.refresh_playlist_column_content_targets();
@@ -1661,6 +1964,9 @@ impl UiManager {
                                 }
                                 if index < self.track_paths.len() {
                                     self.track_paths.remove(index);
+                                }
+                                if index < self.track_cover_art_paths.len() {
+                                    self.track_cover_art_paths.remove(index);
                                 }
                                 if index < self.track_metadata.len() {
                                     self.track_metadata.remove(index);
@@ -1708,6 +2014,7 @@ impl UiManager {
                                 let metadata = self.read_track_metadata(&track.path);
                                 self.track_ids.insert(insert_cursor, track.id);
                                 self.track_paths.insert(insert_cursor, track.path);
+                                self.track_cover_art_paths.insert(insert_cursor, None);
                                 self.track_metadata.insert(insert_cursor, metadata);
                                 insert_cursor += 1;
                             }
@@ -2026,6 +2333,7 @@ impl UiManager {
 
                             let mut moved_paths = Vec::new();
                             let mut moved_ids = Vec::new();
+                            let mut moved_cover_art_paths = Vec::new();
                             let mut moved_metadata = Vec::new();
 
                             for &idx in sorted_indices.iter().rev() {
@@ -2035,12 +2343,17 @@ impl UiManager {
                                 if idx < self.track_ids.len() {
                                     moved_ids.push(self.track_ids.remove(idx));
                                 }
+                                if idx < self.track_cover_art_paths.len() {
+                                    moved_cover_art_paths
+                                        .push(self.track_cover_art_paths.remove(idx));
+                                }
                                 if idx < self.track_metadata.len() {
                                     moved_metadata.push(self.track_metadata.remove(idx));
                                 }
                             }
                             moved_paths.reverse();
                             moved_ids.reverse();
+                            moved_cover_art_paths.reverse();
                             moved_metadata.reverse();
 
                             let removed_before = sorted_indices.iter().filter(|&&i| i < to).count();
@@ -2051,6 +2364,11 @@ impl UiManager {
                             }
                             for (i, id) in moved_ids.into_iter().enumerate() {
                                 self.track_ids.insert(insert_at + i, id);
+                            }
+                            for (i, cover_art_path) in moved_cover_art_paths.into_iter().enumerate()
+                            {
+                                self.track_cover_art_paths
+                                    .insert(insert_at + i, cover_art_path);
                             }
                             for (i, metadata) in moved_metadata.into_iter().enumerate() {
                                 self.track_metadata.insert(insert_at + i, metadata);
@@ -2097,12 +2415,18 @@ impl UiManager {
                             config,
                         )) => {
                             self.playlist_columns = config.ui.playlist_columns.clone();
+                            self.album_art_column_min_width_px =
+                                config.ui.playlist_album_art_column_min_width_px;
+                            self.album_art_column_max_width_px =
+                                config.ui.playlist_album_art_column_max_width_px;
                             let valid_column_keys: HashSet<String> = self
                                 .playlist_columns
                                 .iter()
                                 .map(Self::playlist_column_key)
                                 .collect();
                             self.playlist_column_width_overrides_px
+                                .retain(|key, _| valid_column_keys.contains(key));
+                            self.playlist_column_target_widths_px
                                 .retain(|key, _| valid_column_keys.contains(key));
                             self.refresh_playlist_column_content_targets();
                             self.apply_playlist_column_layout();
@@ -2113,6 +2437,8 @@ impl UiManager {
                                 .filter(|column| column.enabled)
                                 .map(|column| column.name.as_str().into())
                                 .collect();
+                            let visible_kinds =
+                                Self::visible_playlist_column_kinds(&playlist_columns);
                             let menu_labels: Vec<slint::SharedString> = playlist_columns
                                 .iter()
                                 .map(|column| column.name.as_str().into())
@@ -2126,9 +2452,11 @@ impl UiManager {
                                 .map(|column| column.custom)
                                 .collect();
                             let _ = self.ui.upgrade_in_event_loop(move |ui| {
-                                ui.set_show_album_art(true);
                                 ui.set_playlist_visible_column_headers(ModelRc::from(Rc::new(
                                     VecModel::from(visible_headers),
+                                )));
+                                ui.set_playlist_visible_column_kinds(ModelRc::from(Rc::new(
+                                    VecModel::from(visible_kinds),
                                 )));
                                 ui.set_playlist_column_menu_labels(ModelRc::from(Rc::new(
                                     VecModel::from(menu_labels),
@@ -2147,7 +2475,7 @@ impl UiManager {
                         ) => {
                             if self.playlist_columns_available_width_px != width_px {
                                 self.playlist_columns_available_width_px = width_px;
-                                self.apply_playlist_column_layout();
+                                self.apply_playlist_column_layout_preserving_current_widths();
                             }
                         }
                         protocol::Message::Playlist(
@@ -2161,10 +2489,12 @@ impl UiManager {
                                     if override_item.column_key.trim().is_empty() {
                                         continue;
                                     }
-                                    self.playlist_column_width_overrides_px.insert(
-                                        override_item.column_key,
-                                        override_item.width_px.max(48),
+                                    let clamped_width_px = self.clamp_column_override_width_px(
+                                        &override_item.column_key,
+                                        override_item.width_px,
                                     );
+                                    self.playlist_column_width_overrides_px
+                                        .insert(override_item.column_key, clamped_width_px);
                                 }
                             }
                             self.apply_playlist_column_layout();
@@ -2179,8 +2509,10 @@ impl UiManager {
                             if column_key.trim().is_empty() {
                                 continue;
                             }
+                            let clamped_width_px =
+                                self.clamp_column_override_width_px(&column_key, width_px);
                             self.playlist_column_width_overrides_px
-                                .insert(column_key, width_px.max(48));
+                                .insert(column_key, clamped_width_px);
                             self.apply_playlist_column_layout();
                         }
                         protocol::Message::Playlist(
@@ -2220,8 +2552,10 @@ impl UiManager {
 #[cfg(test)]
 mod tests {
     use super::{
-        fit_column_widths_to_available_space, CoverArtLookupRequest, TrackMetadata, UiManager,
+        fit_column_widths_to_available_space, ColumnWidthProfile, CoverArtLookupRequest,
+        PlaylistSortDirection, TrackMetadata, UiManager,
     };
+    use crate::config::PlaylistColumnConfig;
     use std::path::PathBuf;
     use std::sync::mpsc;
 
@@ -2235,6 +2569,14 @@ mod tests {
             year: "2026".to_string(),
             genre: "test".to_string(),
             track_number: "1".to_string(),
+        }
+    }
+
+    fn default_album_art_profile() -> ColumnWidthProfile {
+        ColumnWidthProfile {
+            min_px: crate::config::default_playlist_album_art_column_min_width_px(),
+            preferred_px: 72,
+            max_px: crate::config::default_playlist_album_art_column_max_width_px(),
         }
     }
 
@@ -2255,6 +2597,26 @@ mod tests {
         let first = rx.recv().expect("expected first request");
         let latest = UiManager::coalesce_cover_art_requests(first, &rx);
         assert_eq!(latest.track_path, None);
+    }
+
+    #[test]
+    fn test_reset_filter_state_fields_clears_sort_and_search() {
+        let mut sort_key = Some("title".to_string());
+        let mut sort_direction = Some(PlaylistSortDirection::Descending);
+        let mut search_query = "beatles".to_string();
+        let mut search_visible = true;
+
+        UiManager::reset_filter_state_fields(
+            &mut sort_key,
+            &mut sort_direction,
+            &mut search_query,
+            &mut search_visible,
+        );
+
+        assert!(sort_key.is_none());
+        assert!(sort_direction.is_none());
+        assert!(search_query.is_empty());
+        assert!(!search_visible);
     }
 
     #[test]
@@ -2427,6 +2789,170 @@ mod tests {
     }
 
     #[test]
+    fn test_is_album_art_builtin_column_requires_builtin_column() {
+        let builtin_album_art = PlaylistColumnConfig {
+            name: "Album Art".to_string(),
+            format: "{album_art}".to_string(),
+            enabled: true,
+            custom: false,
+        };
+        let custom_album_art = PlaylistColumnConfig {
+            name: "Custom Album Art".to_string(),
+            format: "{album_art}".to_string(),
+            enabled: true,
+            custom: true,
+        };
+
+        assert!(UiManager::is_album_art_builtin_column(&builtin_album_art));
+        assert!(!UiManager::is_album_art_builtin_column(&custom_album_art));
+    }
+
+    #[test]
+    fn test_build_playlist_row_values_keeps_album_art_builtin_empty() {
+        let metadata = make_meta("Song");
+        let columns = vec![
+            PlaylistColumnConfig {
+                name: "Title".to_string(),
+                format: "{title}".to_string(),
+                enabled: true,
+                custom: false,
+            },
+            PlaylistColumnConfig {
+                name: "Album Art".to_string(),
+                format: "{album_art}".to_string(),
+                enabled: true,
+                custom: false,
+            },
+            PlaylistColumnConfig {
+                name: "Custom Art".to_string(),
+                format: "{album_art}".to_string(),
+                enabled: true,
+                custom: true,
+            },
+        ];
+
+        let values = UiManager::build_playlist_row_values(&metadata, &columns);
+        assert_eq!(values[0], "Song");
+        assert_eq!(values[1], "");
+        assert_eq!(values[2], "");
+    }
+
+    #[test]
+    fn test_is_sortable_playlist_column_rejects_album_art_builtin() {
+        let album_art = PlaylistColumnConfig {
+            name: "Album Art".to_string(),
+            format: "{album_art}".to_string(),
+            enabled: true,
+            custom: false,
+        };
+        let title = PlaylistColumnConfig {
+            name: "Title".to_string(),
+            format: "{title}".to_string(),
+            enabled: true,
+            custom: false,
+        };
+
+        assert!(!UiManager::is_sortable_playlist_column(&album_art));
+        assert!(UiManager::is_sortable_playlist_column(&title));
+    }
+
+    #[test]
+    fn test_compute_playlist_row_height_without_album_art_column_uses_base_height() {
+        let columns = [
+            PlaylistColumnConfig {
+                name: "Title".to_string(),
+                format: "{title}".to_string(),
+                enabled: true,
+                custom: false,
+            },
+            PlaylistColumnConfig {
+                name: "Artist".to_string(),
+                format: "{artist}".to_string(),
+                enabled: true,
+                custom: false,
+            },
+        ];
+        let visible_columns: Vec<&PlaylistColumnConfig> = columns.iter().collect();
+
+        assert_eq!(
+            UiManager::compute_playlist_row_height_px_for_visible_columns(
+                &visible_columns,
+                &[140, 180],
+                default_album_art_profile(),
+            ),
+            30
+        );
+    }
+
+    #[test]
+    fn test_compute_playlist_row_height_with_album_art_column_scales_with_width() {
+        let columns = [
+            PlaylistColumnConfig {
+                name: "Title".to_string(),
+                format: "{title}".to_string(),
+                enabled: true,
+                custom: false,
+            },
+            PlaylistColumnConfig {
+                name: "Album Art".to_string(),
+                format: "{album_art}".to_string(),
+                enabled: true,
+                custom: false,
+            },
+        ];
+        let visible_columns: Vec<&PlaylistColumnConfig> = columns.iter().collect();
+
+        assert_eq!(
+            UiManager::compute_playlist_row_height_px_for_visible_columns(
+                &visible_columns,
+                &[140, 64],
+                default_album_art_profile(),
+            ),
+            72
+        );
+    }
+
+    #[test]
+    fn test_compute_playlist_row_height_with_large_album_art_width_clamps_to_maximum() {
+        let columns = [PlaylistColumnConfig {
+            name: "Album Art".to_string(),
+            format: "{album_art}".to_string(),
+            enabled: true,
+            custom: false,
+        }];
+        let visible_columns: Vec<&PlaylistColumnConfig> = columns.iter().collect();
+
+        assert_eq!(
+            UiManager::compute_playlist_row_height_px_for_visible_columns(
+                &visible_columns,
+                &[700],
+                default_album_art_profile(),
+            ),
+            488
+        );
+    }
+
+    #[test]
+    fn test_compute_playlist_row_height_ignores_custom_album_art_placeholder_column() {
+        let columns = [PlaylistColumnConfig {
+            name: "Custom Art".to_string(),
+            format: "{album_art}".to_string(),
+            enabled: true,
+            custom: true,
+        }];
+        let visible_columns: Vec<&PlaylistColumnConfig> = columns.iter().collect();
+
+        assert_eq!(
+            UiManager::compute_playlist_row_height_px_for_visible_columns(
+                &visible_columns,
+                &[88],
+                default_album_art_profile(),
+            ),
+            30
+        );
+    }
+
+    #[test]
     fn test_fit_column_widths_shrinks_to_available_width() {
         let mut widths = vec![220u32, 180u32, 200u32];
         let mins = vec![100u32, 120u32, 130u32];
@@ -2460,6 +2986,115 @@ mod tests {
         fit_column_widths_to_available_space(&mut widths, &mins, &maxs, 120);
 
         assert_eq!(widths, mins);
+    }
+
+    #[test]
+    fn test_resolve_playlist_column_target_width_preserves_current_width_on_viewport_resize() {
+        let profile = ColumnWidthProfile {
+            min_px: 60,
+            preferred_px: 160,
+            max_px: 320,
+        };
+
+        let target = UiManager::resolve_playlist_column_target_width_px(
+            None,
+            Some(140),
+            None,
+            220,
+            profile,
+            true,
+        );
+
+        assert_eq!(target, 140);
+    }
+
+    #[test]
+    fn test_resolve_playlist_column_target_width_prefers_override_and_clamps() {
+        let profile = ColumnWidthProfile {
+            min_px: 16,
+            preferred_px: 72,
+            max_px: 480,
+        };
+
+        let from_override = UiManager::resolve_playlist_column_target_width_px(
+            Some(12),
+            Some(200),
+            Some(240),
+            72,
+            profile,
+            true,
+        );
+        let from_content = UiManager::resolve_playlist_column_target_width_px(
+            None,
+            Some(200),
+            Some(240),
+            72,
+            profile,
+            false,
+        );
+
+        assert_eq!(from_override, 16);
+        assert_eq!(from_content, 72);
+    }
+
+    #[test]
+    fn test_resolve_playlist_column_target_width_prefers_stored_target_when_preserving() {
+        let profile = ColumnWidthProfile {
+            min_px: 16,
+            preferred_px: 72,
+            max_px: 480,
+        };
+
+        let target = UiManager::resolve_playlist_column_target_width_px(
+            None,
+            Some(24),
+            Some(96),
+            72,
+            profile,
+            true,
+        );
+
+        assert_eq!(target, 96);
+    }
+
+    #[test]
+    fn test_layout_min_width_px_for_album_art_uses_target_width() {
+        let column = PlaylistColumnConfig {
+            name: "Album Art".to_string(),
+            format: "{album_art}".to_string(),
+            enabled: true,
+            custom: false,
+        };
+        let profile = ColumnWidthProfile {
+            min_px: 16,
+            preferred_px: 72,
+            max_px: 480,
+        };
+
+        assert_eq!(
+            UiManager::layout_min_width_px_for_column(&column, profile, 128),
+            128
+        );
+    }
+
+    #[test]
+    fn test_layout_min_width_px_for_text_column_uses_profile_minimum() {
+        let column = PlaylistColumnConfig {
+            name: "Title".to_string(),
+            format: "{title}".to_string(),
+            enabled: true,
+            custom: false,
+        };
+        let profile = ColumnWidthProfile {
+            min_px: 140,
+            preferred_px: 230,
+            max_px: 440,
+        };
+
+        assert_eq!(
+            UiManager::layout_min_width_px_for_column(&column, profile, 220),
+            140
+        );
     }
 
     fn apply_reorder(paths: &mut Vec<String>, indices: &[usize], gap: usize) -> Vec<usize> {

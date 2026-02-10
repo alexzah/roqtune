@@ -9,7 +9,8 @@
 - Cover art lookup from nearby image files and embedded tags (with cache).
 - Adaptive playlist columns:
   - show/hide default columns
-  - add/delete custom columns with format strings
+  - built-in non-text Album Art column
+  - add/delete custom text columns with format strings
   - drag to reorder columns
   - drag/double-click to resize/reset widths
 - Layout editor mode for composing panel arrangements (with undo/redo + reset).
@@ -70,15 +71,22 @@ The app is organized into cooperating runtime components connected through an ev
 
 `roqtune` stores files in OS-appropriate user directories via the `dirs` crate.
 
-- Config file: `<config_dir>/roqtune.toml`
+- Config file: `<config_dir>/roqtune/config.toml`
+- Layout file: `<config_dir>/roqtune/layout.toml`
 - Playlist database: `<data_dir>/roqtune/playlist.db`
 - Cover art cache: `<cache_dir>/roqtune/covers/`
 
 Common Linux defaults:
 
-- `~/.config/roqtune.toml`
+- `~/.config/roqtune/config.toml`
+- `~/.config/roqtune/layout.toml`
 - `~/.local/share/roqtune/playlist.db`
 - `~/.cache/roqtune/covers/`
+
+System templates in this repo:
+
+- `config/config.system.toml` (copy to `~/.config/roqtune/config.toml` and edit)
+- `config/layout.system.toml` (copy to `~/.config/roqtune/layout.toml` and edit)
 
 ## UI Development
 
