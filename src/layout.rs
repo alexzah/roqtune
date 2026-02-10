@@ -1244,4 +1244,11 @@ mod tests {
             .count();
         assert_eq!(track_count, 2);
     }
+
+    #[test]
+    fn test_layout_system_template_matches_default_layout() {
+        let parsed: LayoutConfig = toml::from_str(include_str!("../config/layout.system.toml"))
+            .expect("layout system template should parse");
+        assert_eq!(parsed, LayoutConfig::default());
+    }
 }

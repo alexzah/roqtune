@@ -1,0 +1,136 @@
+# roqtune layout system template
+#
+# Copy this file to your user config path as `layout.toml`, then edit values.
+# Linux default path: ~/.config/roqtune/layout.toml
+#
+# This template tracks the in-code default split-tree layout.
+# Node conventions:
+# - `node_type = "split"` requires: `id`, `axis`, `ratio`, `min_first_px`,
+#   `min_second_px`, and nested `first` + `second` nodes.
+# - `node_type = "leaf"` requires: `id`, `panel`.
+# - `node_type = "empty"` has no additional fields.
+
+# Layout schema version.
+version = 2
+
+[root]
+node_type = "split"
+id = "n17"
+axis = "horizontal"
+ratio = 0.16
+min_first_px = 64
+min_second_px = 120
+
+[root.first]
+node_type = "split"
+id = "n16"
+axis = "horizontal"
+ratio = 0.62
+min_first_px = 32
+min_second_px = 28
+
+[root.first.first]
+node_type = "split"
+id = "n15"
+axis = "vertical"
+ratio = 0.08
+min_first_px = 32
+min_second_px = 240
+
+[root.first.first.first]
+node_type = "leaf"
+id = "n8"
+panel = "button_cluster"
+
+[root.first.first.second]
+node_type = "split"
+id = "n14"
+axis = "vertical"
+ratio = 0.62
+min_first_px = 180
+min_second_px = 110
+
+[root.first.first.second.first]
+node_type = "leaf"
+id = "n9"
+panel = "button_cluster"
+
+[root.first.first.second.second]
+node_type = "split"
+id = "n13"
+axis = "vertical"
+ratio = 0.70
+min_first_px = 120
+min_second_px = 90
+
+[root.first.first.second.second.first]
+node_type = "leaf"
+id = "n10"
+panel = "button_cluster"
+
+[root.first.first.second.second.second]
+node_type = "leaf"
+id = "n11"
+panel = "volume_slider"
+
+[root.first.second]
+node_type = "leaf"
+id = "n12"
+panel = "seek_bar"
+
+[root.second]
+node_type = "split"
+id = "n18"
+axis = "horizontal"
+ratio = 0.96
+min_first_px = 120
+min_second_px = 20
+
+[root.second.first]
+node_type = "split"
+id = "n4"
+axis = "vertical"
+ratio = 0.28
+min_first_px = 140
+min_second_px = 220
+
+[root.second.first.first]
+node_type = "leaf"
+id = "n5"
+panel = "playlist_switcher"
+
+[root.second.first.second]
+node_type = "split"
+id = "n6"
+axis = "vertical"
+ratio = 0.68
+min_first_px = 220
+min_second_px = 140
+
+[root.second.first.second.first]
+node_type = "leaf"
+id = "n7"
+panel = "track_list"
+
+[root.second.first.second.second]
+node_type = "split"
+id = "n1"
+axis = "horizontal"
+ratio = 0.32
+min_first_px = 72
+min_second_px = 120
+
+[root.second.first.second.second.first]
+node_type = "leaf"
+id = "n2"
+panel = "metadata_viewer"
+
+[root.second.first.second.second.second]
+node_type = "leaf"
+id = "n3"
+panel = "album_art_viewer"
+
+[root.second.second]
+node_type = "leaf"
+id = "n19"
+panel = "status_bar"

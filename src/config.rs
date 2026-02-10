@@ -2,13 +2,13 @@
 
 use crate::layout::LayoutConfig;
 
-/// Root configuration persisted to `roqtune.toml`.
+/// Root configuration persisted to `config.toml`.
 #[derive(Debug, Clone, Default, serde::Deserialize, serde::Serialize)]
 pub struct Config {
     /// Audio output and device preferences.
     pub output: OutputConfig,
     #[serde(default)]
-    /// UI and layout preferences.
+    /// UI preferences.
     pub ui: UiConfig,
     #[serde(default)]
     /// Decoder/player buffering behavior.
@@ -42,7 +42,8 @@ pub struct UiConfig {
     pub playlist_album_art_column_min_width_px: u32,
     #[serde(default = "default_playlist_album_art_column_max_width_px")]
     pub playlist_album_art_column_max_width_px: u32,
-    #[serde(default)]
+    /// Runtime-only layout state loaded from `layout.toml`.
+    #[serde(skip)]
     pub layout: LayoutConfig,
     #[serde(default)]
     pub button_cluster_instances: Vec<ButtonClusterInstanceConfig>,
@@ -311,8 +312,17 @@ decoder_request_chunk_ms = 1500
     }
 
     #[test]
+    fn test_config_serialization_omits_layout_table() {
+        let config_text =
+            toml::to_string(&Config::default()).expect("default config should serialize");
+
+        assert!(!config_text.contains("[ui.layout]"));
+        assert!(!config_text.contains("node_type"));
+    }
+
+    #[test]
     fn test_system_config_template_matches_default_values() {
-        let parsed: Config = toml::from_str(include_str!("../roqtune.system.toml"))
+        let parsed: Config = toml::from_str(include_str!("../config/config.system.toml"))
             .expect("system config template should parse");
         let defaults = Config::default();
 

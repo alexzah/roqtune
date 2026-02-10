@@ -1,7 +1,7 @@
 # roqtune system config template
 #
-# Copy this file to your user config path as `roqtune.toml`, then edit values.
-# Linux default path: ~/.config/roqtune.toml
+# Copy this file to your user config path as `config.toml`, then edit values.
+# Linux default path: ~/.config/roqtune/config.toml
 #
 # This template tracks current in-code defaults.
 
@@ -25,6 +25,7 @@ bits_per_sample_auto = true
 [ui]
 # Show the layout editor intro dialog the next time it is opened.
 show_layout_edit_intro = true
+# Layout tree data is persisted separately in `layout.toml`.
 
 # Built-in Album Art playlist-column width defaults.
 # Runtime sanitization clamps to:
@@ -44,10 +45,6 @@ volume = 1.0
 # Per-leaf button cluster action order overrides.
 # Keep empty to use built-in defaults.
 button_cluster_instances = []
-
-# Advanced split-tree layout config.
-# Keep this table empty to use the built-in default layout.
-[ui.layout]
 
 # Playlist columns are ordered and rendered in this sequence.
 # Built-in columns should keep `custom = false`.
@@ -100,8 +97,13 @@ format = "{album_art}"
 enabled = false
 custom = false
 
+# ---------------------------------------------------------------------
+# ADVANCED USERS ONLY
+# These buffering settings directly affect decoder/player behavior.
+# Change these only if you understand the tradeoffs and have a reason.
+# Incorrect values can cause worse responsiveness or playback stability.
+# ---------------------------------------------------------------------
 [buffering]
-# Decoder/player buffering controls.
 # Runtime sanitization enforces:
 # - low watermark >= 500
 # - target buffer >= low watermark + 500

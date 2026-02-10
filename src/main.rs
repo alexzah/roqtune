@@ -30,7 +30,7 @@ use layout::{
     replace_leaf_panel, sanitize_layout_config, set_split_ratio, split_leaf, LayoutConfig,
     LayoutNode, LayoutPanelKind, SplitAxis, SPLITTER_THICKNESS_PX,
 };
-use log::{debug, info};
+use log::{debug, info, warn};
 use playlist::Playlist;
 use playlist_manager::PlaylistManager;
 use protocol::{ConfigMessage, Message, PlaybackMessage, PlaylistMessage};
@@ -1116,6 +1116,58 @@ fn persist_config_file(config: &Config, path: &std::path::Path) {
     }
 }
 
+fn persist_layout_file(layout: &LayoutConfig, path: &std::path::Path) {
+    match toml::to_string(layout) {
+        Ok(layout_text) => {
+            if let Err(err) = std::fs::write(path, layout_text) {
+                log::error!("Failed to persist layout to {}: {}", path.display(), err);
+            }
+        }
+        Err(err) => {
+            log::error!("Failed to serialize layout: {}", err);
+        }
+    }
+}
+
+fn persist_state_files(config: &Config, config_path: &Path, layout_path: &Path) {
+    persist_config_file(config, config_path);
+    persist_layout_file(&config.ui.layout, layout_path);
+}
+
+fn persist_state_files_with_config_path(config: &Config, config_path: &Path) {
+    let layout_path = config_path
+        .parent()
+        .map(|parent| parent.join("layout.toml"))
+        .unwrap_or_else(|| PathBuf::from("layout.toml"));
+    persist_state_files(config, config_path, &layout_path);
+}
+
+fn load_layout_file(path: &Path) -> LayoutConfig {
+    let layout_content = match std::fs::read_to_string(path) {
+        Ok(content) => content,
+        Err(err) => {
+            warn!(
+                "Failed to read layout file {}. Using defaults. error={}",
+                path.display(),
+                err
+            );
+            return LayoutConfig::default();
+        }
+    };
+
+    match toml::from_str::<LayoutConfig>(&layout_content) {
+        Ok(layout) => layout,
+        Err(err) => {
+            warn!(
+                "Failed to parse layout file {}. Using defaults. error={}",
+                path.display(),
+                err
+            );
+            LayoutConfig::default()
+        }
+    }
+}
+
 fn with_updated_layout(previous: &Config, layout: LayoutConfig) -> Config {
     sanitize_config(Config {
         output: previous.output.clone(),
@@ -1468,13 +1520,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         track_model: Rc::new(VecModel::from(vec![])),
     };
 
-    let config_dir = dirs::config_dir().unwrap();
-    let config_file = config_dir.join("roqtune.toml");
+    let config_root = dirs::config_dir().unwrap().join("roqtune");
+    let config_file = config_root.join("config.toml");
+    let layout_file = config_root.join("layout.toml");
 
-    if let Err(err) = std::fs::create_dir_all(&config_dir) {
+    if let Err(err) = std::fs::create_dir_all(&config_root) {
         return Err(format!(
             "Failed to create config directory {}: {}",
-            config_dir.display(),
+            config_root.display(),
             err
         )
         .into());
@@ -1494,8 +1547,23 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .unwrap();
     }
 
+    if !layout_file.exists() {
+        let default_layout = LayoutConfig::default();
+        info!(
+            "Layout file not found. Creating default layout file. path={}",
+            layout_file.display()
+        );
+        std::fs::write(
+            layout_file.clone(),
+            toml::to_string(&default_layout).unwrap(),
+        )
+        .unwrap();
+    }
+
     let config_content = std::fs::read_to_string(config_file.clone()).unwrap();
-    let config = sanitize_config(toml::from_str::<Config>(&config_content).unwrap_or_default());
+    let mut config = sanitize_config(toml::from_str::<Config>(&config_content).unwrap_or_default());
+    config.ui.layout = load_layout_file(&layout_file);
+    let config = sanitize_config(config);
     let initial_output_options = detect_output_settings_options(&config);
     let runtime_config = resolve_runtime_config(&config, &initial_output_options);
 
@@ -2095,7 +2163,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 workspace_size_snapshot(&layout_workspace_size_clone);
             (next_config, workspace_width_px, workspace_height_px)
         };
-        persist_config_file(&next_config, &config_file_clone);
+        persist_state_files_with_config_path(&next_config, &config_file_clone);
         if let Some(ui) = ui_handle_clone.upgrade() {
             apply_layout_to_ui(&ui, &next_config, workspace_width_px, workspace_height_px);
             ui.set_control_cluster_menu_target_leaf_id(leaf_id.clone());
@@ -2135,7 +2203,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 workspace_size_snapshot(&layout_workspace_size_clone);
             (next_config, workspace_width_px, workspace_height_px)
         };
-        persist_config_file(&next_config, &config_file_clone);
+        persist_state_files_with_config_path(&next_config, &config_file_clone);
         if let Some(ui) = ui_handle_clone.upgrade() {
             apply_layout_to_ui(&ui, &next_config, workspace_width_px, workspace_height_px);
             ui.set_control_cluster_menu_target_leaf_id(leaf_id.clone());
@@ -2263,7 +2331,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             ui.set_show_layout_editor_dialog(next.ui.show_layout_edit_intro);
             apply_layout_to_ui(&ui, &next, workspace_width_px, workspace_height_px);
         }
-        persist_config_file(&next, &config_file_clone);
+        persist_state_files_with_config_path(&next, &config_file_clone);
     });
 
     let config_state_clone = Arc::clone(&config_state);
@@ -2281,7 +2349,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
             state.clone()
         };
-        persist_config_file(&next, &config_file_clone);
+        persist_state_files_with_config_path(&next, &config_file_clone);
     });
 
     let config_state_clone = Arc::clone(&config_state);
@@ -2306,7 +2374,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             ui.set_show_layout_splitter_context_menu(false);
             apply_layout_to_ui(&ui, &next, workspace_width_px, workspace_height_px);
         }
-        persist_config_file(&next, &config_file_clone);
+        persist_state_files_with_config_path(&next, &config_file_clone);
     });
 
     let config_state_clone = Arc::clone(&config_state);
@@ -2391,7 +2459,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 .expect("config state lock poisoned");
             *state = next.clone();
         }
-        persist_config_file(&next, &config_file_clone);
+        persist_state_files_with_config_path(&next, &config_file_clone);
         if let Some(ui) = ui_handle_clone.upgrade() {
             apply_layout_to_ui(&ui, &next, workspace_width_px, workspace_height_px);
         }
@@ -2457,7 +2525,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 .expect("config state lock poisoned");
             *state = next.clone();
         }
-        persist_config_file(&next, &config_file_clone);
+        persist_state_files_with_config_path(&next, &config_file_clone);
         if let Some(ui) = ui_handle_clone.upgrade() {
             apply_layout_to_ui(&ui, &next, workspace_width_px, workspace_height_px);
         }
@@ -2497,7 +2565,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 .expect("config state lock poisoned");
             *state = next.clone();
         }
-        persist_config_file(&next, &config_file_clone);
+        persist_state_files_with_config_path(&next, &config_file_clone);
         if let Some(ui) = ui_handle_clone.upgrade() {
             apply_layout_to_ui(&ui, &next, workspace_width_px, workspace_height_px);
         }
@@ -2545,7 +2613,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 .expect("config state lock poisoned");
             *state = next.clone();
         }
-        persist_config_file(&next, &config_file_clone);
+        persist_state_files_with_config_path(&next, &config_file_clone);
         if let Some(ui) = ui_handle_clone.upgrade() {
             apply_layout_to_ui(&ui, &next, workspace_width_px, workspace_height_px);
         }
@@ -2607,7 +2675,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 .expect("config state lock poisoned");
             *state = next.clone();
         }
-        persist_config_file(&next, &config_file_clone);
+        persist_state_files_with_config_path(&next, &config_file_clone);
         if let Some(ui) = ui_handle_clone.upgrade() {
             apply_layout_to_ui(&ui, &next, workspace_width_px, workspace_height_px);
         }
@@ -2639,7 +2707,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 .expect("config state lock poisoned");
             *state = next.clone();
         }
-        persist_config_file(&next, &config_file_clone);
+        persist_state_files_with_config_path(&next, &config_file_clone);
         if let Some(ui) = ui_handle_clone.upgrade() {
             apply_layout_to_ui(&ui, &next, workspace_width_px, workspace_height_px);
         }
@@ -2671,7 +2739,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 .expect("config state lock poisoned");
             *state = next.clone();
         }
-        persist_config_file(&next, &config_file_clone);
+        persist_state_files_with_config_path(&next, &config_file_clone);
         if let Some(ui) = ui_handle_clone.upgrade() {
             apply_layout_to_ui(&ui, &next, workspace_width_px, workspace_height_px);
         }
@@ -2706,7 +2774,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 .expect("config state lock poisoned");
             *state = next.clone();
         }
-        persist_config_file(&next, &config_file_clone);
+        persist_state_files_with_config_path(&next, &config_file_clone);
         if let Some(ui) = ui_handle_clone.upgrade() {
             apply_layout_to_ui(&ui, &next, workspace_width_px, workspace_height_px);
         }
@@ -2885,20 +2953,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 *state = next_config.clone();
             }
 
-            match toml::to_string(&next_config) {
-                Ok(config_text) => {
-                    if let Err(err) = std::fs::write(&config_file_clone, config_text) {
-                        log::error!(
-                            "Failed to persist config to {}: {}",
-                            config_file_clone.display(),
-                            err
-                        );
-                    }
-                }
-                Err(err) => {
-                    log::error!("Failed to serialize config: {}", err);
-                }
-            }
+            persist_state_files_with_config_path(&next_config, &config_file_clone);
 
             let runtime_config = resolve_runtime_config(&next_config, &options_snapshot);
             {
@@ -2972,20 +3027,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             *state = next_config.clone();
         }
 
-        match toml::to_string(&next_config) {
-            Ok(config_text) => {
-                if let Err(err) = std::fs::write(&config_file_clone, config_text) {
-                    log::error!(
-                        "Failed to persist config to {}: {}",
-                        config_file_clone.display(),
-                        err
-                    );
-                }
-            }
-            Err(err) => {
-                log::error!("Failed to serialize config: {}", err);
-            }
-        }
+        persist_state_files_with_config_path(&next_config, &config_file_clone);
 
         let options_snapshot = {
             let options = output_options_clone
@@ -3075,20 +3117,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             *state = next_config.clone();
         }
 
-        match toml::to_string(&next_config) {
-            Ok(config_text) => {
-                if let Err(err) = std::fs::write(&config_file_clone, config_text) {
-                    log::error!(
-                        "Failed to persist config to {}: {}",
-                        config_file_clone.display(),
-                        err
-                    );
-                }
-            }
-            Err(err) => {
-                log::error!("Failed to serialize config: {}", err);
-            }
-        }
+        persist_state_files_with_config_path(&next_config, &config_file_clone);
 
         let options_snapshot = {
             let options = output_options_clone
@@ -3180,20 +3209,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             *state = next_config.clone();
         }
 
-        match toml::to_string(&next_config) {
-            Ok(config_text) => {
-                if let Err(err) = std::fs::write(&config_file_clone, config_text) {
-                    log::error!(
-                        "Failed to persist config to {}: {}",
-                        config_file_clone.display(),
-                        err
-                    );
-                }
-            }
-            Err(err) => {
-                log::error!("Failed to serialize config: {}", err);
-            }
-        }
+        persist_state_files_with_config_path(&next_config, &config_file_clone);
 
         let options_snapshot = {
             let options = output_options_clone
@@ -3279,20 +3295,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             *state = next_config.clone();
         }
 
-        match toml::to_string(&next_config) {
-            Ok(config_text) => {
-                if let Err(err) = std::fs::write(&config_file_clone, config_text) {
-                    log::error!(
-                        "Failed to persist config to {}: {}",
-                        config_file_clone.display(),
-                        err
-                    );
-                }
-            }
-            Err(err) => {
-                log::error!("Failed to serialize config: {}", err);
-            }
-        }
+        persist_state_files_with_config_path(&next_config, &config_file_clone);
 
         let options_snapshot = {
             let options = output_options_clone
@@ -3569,20 +3572,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let state = config_state.lock().expect("config state lock poisoned");
         state.clone()
     };
-    match toml::to_string(&final_config) {
-        Ok(config_text) => {
-            if let Err(err) = std::fs::write(&config_file, config_text) {
-                log::error!(
-                    "Failed to persist config to {}: {}",
-                    config_file.display(),
-                    err
-                );
-            }
-        }
-        Err(err) => {
-            log::error!("Failed to serialize config: {}", err);
-        }
-    }
+    persist_state_files(&final_config, &config_file, &layout_file);
 
     info!("Application exiting");
     Ok(())

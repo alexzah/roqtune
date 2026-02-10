@@ -71,19 +71,22 @@ The app is organized into cooperating runtime components connected through an ev
 
 `roqtune` stores files in OS-appropriate user directories via the `dirs` crate.
 
-- Config file: `<config_dir>/roqtune.toml`
+- Config file: `<config_dir>/roqtune/config.toml`
+- Layout file: `<config_dir>/roqtune/layout.toml`
 - Playlist database: `<data_dir>/roqtune/playlist.db`
 - Cover art cache: `<cache_dir>/roqtune/covers/`
 
 Common Linux defaults:
 
-- `~/.config/roqtune.toml`
+- `~/.config/roqtune/config.toml`
+- `~/.config/roqtune/layout.toml`
 - `~/.local/share/roqtune/playlist.db`
 - `~/.cache/roqtune/covers/`
 
-Config template in this repo:
+System templates in this repo:
 
-- `roqtune.system.toml` (copy this to your config path as `roqtune.toml` and edit)
+- `config/config.system.toml` (copy to `~/.config/roqtune/config.toml` and edit)
+- `config/layout.system.toml` (copy to `~/.config/roqtune/layout.toml` and edit)
 
 ## UI Development
 
