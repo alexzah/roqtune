@@ -11,7 +11,7 @@
 # - `node_type = "empty"` has no additional fields.
 
 # Layout schema version.
-version = 2
+version = 1
 
 [root]
 node_type = "split"
@@ -90,7 +90,7 @@ min_second_px = 20
 node_type = "split"
 id = "n4"
 axis = "vertical"
-ratio = 0.2800000011920929
+ratio = 0.22053973376750946
 min_first_px = 140
 min_second_px = 220
 
@@ -134,4 +134,3 @@ panel = "track_list"
 node_type = "leaf"
 id = "n19"
 panel = "status_bar"
-

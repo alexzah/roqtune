@@ -3,7 +3,7 @@
 use std::collections::HashSet;
 
 /// Current persisted layout schema version.
-pub const LAYOUT_VERSION: u32 = 2;
+pub const LAYOUT_VERSION: u32 = 1;
 /// Divider thickness used between split-tree children.
 pub const SPLITTER_THICKNESS_PX: i32 = 2;
 
@@ -159,8 +159,8 @@ enum LayoutConfigWire {
 
 #[derive(Debug, serde::Deserialize)]
 struct LayoutConfigV2Wire {
-    #[serde(default = "default_layout_version")]
-    version: u32,
+    #[serde(default = "default_layout_version", rename = "version")]
+    _version: u32,
     #[serde(default = "default_layout_root_for_wire")]
     root: LayoutNode,
 }
@@ -187,11 +187,7 @@ impl<'de> serde::Deserialize<'de> for LayoutConfig {
         let wire = LayoutConfigWire::deserialize(deserializer)?;
         let config = match wire {
             LayoutConfigWire::V2(v2) => LayoutConfig {
-                version: if v2.version >= LAYOUT_VERSION {
-                    v2.version
-                } else {
-                    LAYOUT_VERSION
-                },
+                version: LAYOUT_VERSION,
                 root: v2.root,
                 selected_leaf_id: None,
             },
@@ -1148,7 +1144,7 @@ mod tests {
     }
 
     #[test]
-    fn default_layout_is_tree_version_two() {
+    fn default_layout_is_tree_version_one() {
         let config = LayoutConfig::default();
         assert_eq!(config.version, LAYOUT_VERSION);
         assert!(first_leaf_id(&config.root).is_some());
