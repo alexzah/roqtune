@@ -1067,8 +1067,8 @@ fn with_updated_layout(previous: &Config, layout: LayoutConfig) -> Config {
     })
 }
 
-fn push_layout_undo_snapshot(undo_stack: &Arc<Mutex<Vec<LayoutConfig>>>, layout: &LayoutConfig) {
-    let mut stack = undo_stack.lock().expect("layout undo stack lock poisoned");
+fn push_layout_snapshot(stack: &Arc<Mutex<Vec<LayoutConfig>>>, layout: &LayoutConfig) {
+    let mut stack = stack.lock().expect("layout history stack lock poisoned");
     stack.push(layout.clone());
     if stack.len() > 128 {
         let overflow = stack.len() - 128;
@@ -1076,10 +1076,26 @@ fn push_layout_undo_snapshot(undo_stack: &Arc<Mutex<Vec<LayoutConfig>>>, layout:
     }
 }
 
-fn pop_layout_undo_snapshot(undo_stack: &Arc<Mutex<Vec<LayoutConfig>>>) -> Option<LayoutConfig> {
-    undo_stack
+fn clear_layout_snapshot_stack(stack: &Arc<Mutex<Vec<LayoutConfig>>>) {
+    stack
         .lock()
-        .expect("layout undo stack lock poisoned")
+        .expect("layout history stack lock poisoned")
+        .clear();
+}
+
+fn push_layout_undo_snapshot(
+    undo_stack: &Arc<Mutex<Vec<LayoutConfig>>>,
+    redo_stack: &Arc<Mutex<Vec<LayoutConfig>>>,
+    layout: &LayoutConfig,
+) {
+    push_layout_snapshot(undo_stack, layout);
+    clear_layout_snapshot_stack(redo_stack);
+}
+
+fn pop_layout_snapshot(stack: &Arc<Mutex<Vec<LayoutConfig>>>) -> Option<LayoutConfig> {
+    stack
+        .lock()
+        .expect("layout history stack lock poisoned")
         .pop()
 }
 
@@ -1392,6 +1408,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         initial_workspace_height_px,
     )));
     let layout_undo_stack: Arc<Mutex<Vec<LayoutConfig>>> = Arc::new(Mutex::new(Vec::new()));
+    let layout_redo_stack: Arc<Mutex<Vec<LayoutConfig>>> = Arc::new(Mutex::new(Vec::new()));
     let last_runtime_signature = Arc::new(Mutex::new(OutputRuntimeSignature::from_output(
         &runtime_config.output,
     )));
@@ -1571,6 +1588,30 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
         }
         let _ = bus_sender_clone.send(Message::Playlist(PlaylistMessage::PasteCopiedTracks));
+    });
+
+    let bus_sender_clone = bus_sender.clone();
+    let ui_handle_clone = ui.as_weak().clone();
+    ui.on_undo_last_action(move || {
+        if let Some(ui) = ui_handle_clone.upgrade() {
+            if ui.get_playlist_filter_active() {
+                flash_read_only_view_indicator(ui_handle_clone.clone());
+                return;
+            }
+        }
+        let _ = bus_sender_clone.send(Message::Playlist(PlaylistMessage::UndoTrackListEdit));
+    });
+
+    let bus_sender_clone = bus_sender.clone();
+    let ui_handle_clone = ui.as_weak().clone();
+    ui.on_redo_last_action(move || {
+        if let Some(ui) = ui_handle_clone.upgrade() {
+            if ui.get_playlist_filter_active() {
+                flash_read_only_view_indicator(ui_handle_clone.clone());
+                return;
+            }
+        }
+        let _ = bus_sender_clone.send(Message::Playlist(PlaylistMessage::RedoTrackListEdit));
     });
 
     // Wire up pointer down handler
@@ -2167,6 +2208,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let config_state_clone = Arc::clone(&config_state);
     let layout_undo_stack_clone = Arc::clone(&layout_undo_stack);
+    let layout_redo_stack_clone = Arc::clone(&layout_redo_stack);
     let config_file_clone = config_file.clone();
     let layout_workspace_size_clone = Arc::clone(&layout_workspace_size);
     let ui_handle_clone = ui.as_weak().clone();
@@ -2210,7 +2252,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             );
         }
         next = sanitize_config(next);
-        push_layout_undo_snapshot(&layout_undo_stack_clone, &previous.ui.layout);
+        push_layout_undo_snapshot(
+            &layout_undo_stack_clone,
+            &layout_redo_stack_clone,
+            &previous.ui.layout,
+        );
         {
             let mut state = config_state_clone
                 .lock()
@@ -2225,6 +2271,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let config_state_clone = Arc::clone(&config_state);
     let layout_undo_stack_clone = Arc::clone(&layout_undo_stack);
+    let layout_redo_stack_clone = Arc::clone(&layout_redo_stack);
     let config_file_clone = config_file.clone();
     let layout_workspace_size_clone = Arc::clone(&layout_workspace_size);
     let ui_handle_clone = ui.as_weak().clone();
@@ -2271,7 +2318,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
         }
         next = sanitize_config(next);
-        push_layout_undo_snapshot(&layout_undo_stack_clone, &previous.ui.layout);
+        push_layout_undo_snapshot(
+            &layout_undo_stack_clone,
+            &layout_redo_stack_clone,
+            &previous.ui.layout,
+        );
         {
             let mut state = config_state_clone
                 .lock()
@@ -2286,6 +2337,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let config_state_clone = Arc::clone(&config_state);
     let layout_undo_stack_clone = Arc::clone(&layout_undo_stack);
+    let layout_redo_stack_clone = Arc::clone(&layout_redo_stack);
     let config_file_clone = config_file.clone();
     let layout_workspace_size_clone = Arc::clone(&layout_workspace_size);
     let ui_handle_clone = ui.as_weak().clone();
@@ -2306,7 +2358,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         };
         updated_layout.selected_leaf_id = first_leaf_id(&updated_layout.root);
         let next = with_updated_layout(&previous, updated_layout);
-        push_layout_undo_snapshot(&layout_undo_stack_clone, &previous.ui.layout);
+        push_layout_undo_snapshot(
+            &layout_undo_stack_clone,
+            &layout_redo_stack_clone,
+            &previous.ui.layout,
+        );
         {
             let mut state = config_state_clone
                 .lock()
@@ -2321,6 +2377,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let config_state_clone = Arc::clone(&config_state);
     let layout_undo_stack_clone = Arc::clone(&layout_undo_stack);
+    let layout_redo_stack_clone = Arc::clone(&layout_redo_stack);
     let config_file_clone = config_file.clone();
     let layout_workspace_size_clone = Arc::clone(&layout_workspace_size);
     let ui_handle_clone = ui.as_weak().clone();
@@ -2349,7 +2406,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
         }
         next = sanitize_config(next);
-        push_layout_undo_snapshot(&layout_undo_stack_clone, &previous.ui.layout);
+        push_layout_undo_snapshot(
+            &layout_undo_stack_clone,
+            &layout_redo_stack_clone,
+            &previous.ui.layout,
+        );
         {
             let mut state = config_state_clone
                 .lock()
@@ -2390,6 +2451,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let config_state_clone = Arc::clone(&config_state);
     let layout_undo_stack_clone = Arc::clone(&layout_undo_stack);
+    let layout_redo_stack_clone = Arc::clone(&layout_redo_stack);
     let config_file_clone = config_file.clone();
     let layout_workspace_size_clone = Arc::clone(&layout_workspace_size);
     let ui_handle_clone = ui.as_weak().clone();
@@ -2406,7 +2468,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             return;
         };
         let next = with_updated_layout(&previous, updated_layout);
-        push_layout_undo_snapshot(&layout_undo_stack_clone, &previous.ui.layout);
+        push_layout_undo_snapshot(
+            &layout_undo_stack_clone,
+            &layout_redo_stack_clone,
+            &previous.ui.layout,
+        );
         {
             let mut state = config_state_clone
                 .lock()
@@ -2421,13 +2487,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let config_state_clone = Arc::clone(&config_state);
     let layout_undo_stack_clone = Arc::clone(&layout_undo_stack);
+    let layout_redo_stack_clone = Arc::clone(&layout_redo_stack);
     let config_file_clone = config_file.clone();
     let layout_workspace_size_clone = Arc::clone(&layout_workspace_size);
     let ui_handle_clone = ui.as_weak().clone();
     ui.on_layout_undo_last_action(move || {
-        let Some(previous_layout) = pop_layout_undo_snapshot(&layout_undo_stack_clone) else {
-            return;
-        };
         let (workspace_width_px, workspace_height_px) =
             workspace_size_snapshot(&layout_workspace_size_clone);
         let current = {
@@ -2436,6 +2500,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 .expect("config state lock poisoned");
             state.clone()
         };
+        let Some(previous_layout) = pop_layout_snapshot(&layout_undo_stack_clone) else {
+            return;
+        };
+        push_layout_snapshot(&layout_redo_stack_clone, &current.ui.layout);
         let next = with_updated_layout(&current, previous_layout);
         {
             let mut state = config_state_clone
@@ -2451,6 +2519,39 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let config_state_clone = Arc::clone(&config_state);
     let layout_undo_stack_clone = Arc::clone(&layout_undo_stack);
+    let layout_redo_stack_clone = Arc::clone(&layout_redo_stack);
+    let config_file_clone = config_file.clone();
+    let layout_workspace_size_clone = Arc::clone(&layout_workspace_size);
+    let ui_handle_clone = ui.as_weak().clone();
+    ui.on_layout_redo_last_action(move || {
+        let (workspace_width_px, workspace_height_px) =
+            workspace_size_snapshot(&layout_workspace_size_clone);
+        let current = {
+            let state = config_state_clone
+                .lock()
+                .expect("config state lock poisoned");
+            state.clone()
+        };
+        let Some(next_layout) = pop_layout_snapshot(&layout_redo_stack_clone) else {
+            return;
+        };
+        push_layout_snapshot(&layout_undo_stack_clone, &current.ui.layout);
+        let next = with_updated_layout(&current, next_layout);
+        {
+            let mut state = config_state_clone
+                .lock()
+                .expect("config state lock poisoned");
+            *state = next.clone();
+        }
+        persist_config_file(&next, &config_file_clone);
+        if let Some(ui) = ui_handle_clone.upgrade() {
+            apply_layout_to_ui(&ui, &next, workspace_width_px, workspace_height_px);
+        }
+    });
+
+    let config_state_clone = Arc::clone(&config_state);
+    let layout_undo_stack_clone = Arc::clone(&layout_undo_stack);
+    let layout_redo_stack_clone = Arc::clone(&layout_redo_stack);
     let config_file_clone = config_file.clone();
     let layout_workspace_size_clone = Arc::clone(&layout_workspace_size);
     let ui_handle_clone = ui.as_weak().clone();
@@ -2466,7 +2567,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let mut reset_layout = LayoutConfig::default();
         reset_layout.selected_leaf_id = first_leaf_id(&reset_layout.root);
         let next = with_updated_layout(&previous, reset_layout);
-        push_layout_undo_snapshot(&layout_undo_stack_clone, &previous.ui.layout);
+        push_layout_undo_snapshot(
+            &layout_undo_stack_clone,
+            &layout_redo_stack_clone,
+            &previous.ui.layout,
+        );
         {
             let mut state = config_state_clone
                 .lock()
@@ -3718,10 +3823,21 @@ mod tests {
             "Playlist rows should support Ctrl+C/Ctrl+X/Ctrl+V shortcuts"
         );
         assert!(
+            slint_ui.contains("(event.text == \"z\" || event.text == \"Z\")")
+                && slint_ui.contains("root.layout_undo_last_action();")
+                && slint_ui.contains("root.undo_last_action();")
+                && slint_ui.contains("root.layout_redo_last_action();")
+                && slint_ui.contains("root.redo_last_action();"),
+            "Ctrl+Z and Ctrl+Shift+Z should route undo and redo by mode"
+        );
+        assert!(
             slint_ui.contains("callback copy_selected_tracks();")
                 && slint_ui.contains("callback cut_selected_tracks();")
-                && slint_ui.contains("callback paste_copied_tracks();"),
-            "App window should expose copy/cut/paste callbacks for track list"
+                && slint_ui.contains("callback paste_copied_tracks();")
+                && slint_ui.contains("callback undo_last_action();")
+                && slint_ui.contains("callback redo_last_action();")
+                && slint_ui.contains("callback layout_redo_last_action();"),
+            "App window should expose track-list and layout undo/redo callbacks"
         );
         assert!(
             slint_ui.contains("event.text == Key.Escape && root.layout_edit_mode"),

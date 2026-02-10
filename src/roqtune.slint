@@ -28,6 +28,22 @@ export component AppWindow inherits Window {
                 root.open_playlist_search();
                 return accept;
             }
+            if ((event.text == "z" || event.text == "Z") && event.modifiers.control) {
+                if (event.modifiers.shift) {
+                    if (root.layout_edit_mode) {
+                        root.layout_redo_last_action();
+                    } else {
+                        root.redo_last_action();
+                    }
+                } else {
+                    if (root.layout_edit_mode) {
+                        root.layout_undo_last_action();
+                    } else {
+                        root.undo_last_action();
+                    }
+                }
+                return accept;
+            }
             if ((event.text == "c" || event.text == "C") && event.modifiers.control) {
                 root.copy_selected_tracks();
                 return accept;
@@ -2448,6 +2464,8 @@ export component AppWindow inherits Window {
     callback copy_selected_tracks();
     callback cut_selected_tracks();
     callback paste_copied_tracks();
+    callback undo_last_action();
+    callback redo_last_action();
     callback deselect_all();
     callback create_playlist();
     callback switch_playlist(int);
@@ -2489,6 +2507,7 @@ export component AppWindow inherits Window {
     callback preview_layout_splitter_ratio(string, float);
     callback commit_layout_splitter_ratio(string, float);
     callback layout_undo_last_action();
+    callback layout_redo_last_action();
     callback reset_layout_default();
     callback open_settings();
     callback apply_settings(int, int, int, int, string, string, string, string, bool);

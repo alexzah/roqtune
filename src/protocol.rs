@@ -74,6 +74,8 @@ pub enum PlaylistMessage {
     CopySelectedTracks,
     CutSelectedTracks,
     PasteCopiedTracks,
+    UndoTrackListEdit,
+    RedoTrackListEdit,
     PasteTracks(Vec<PathBuf>),
     TracksInserted {
         tracks: Vec<RestoredTrack>,
