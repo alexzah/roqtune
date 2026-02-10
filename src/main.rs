@@ -3411,24 +3411,25 @@ mod tests {
     #[test]
     fn test_custom_column_menu_supports_delete_with_confirmation() {
         let slint_ui = include_str!("music_player.slint");
+        let menu_ui = include_str!("ui/components/menus.slint");
 
         assert!(
-            slint_ui.contains("in property <[bool]> custom: [];"),
+            menu_ui.contains("in property <[bool]> custom: [];"),
             "Column header menu should receive custom-column flags"
         );
         assert!(
-            slint_ui.contains("callback delete-column(int);"),
+            menu_ui.contains("callback delete-column(int);"),
             "Column header menu should expose delete callback"
         );
         assert!(
-            slint_ui.contains("column-toggle := Switch {")
-                && slint_ui.contains("width: 18px;")
-                && slint_ui.contains("font-size: 12px;"),
+            menu_ui.contains("column-toggle := Switch {")
+                && menu_ui.contains("width: 18px;")
+                && menu_ui.contains("font-size: 12px;"),
             "Column header menu should use compact switch controls with consistent label sizing"
         );
         assert!(
-            slint_ui.contains("text: \"X\";")
-                && slint_ui.contains("color: delete-column-ta.has-hover ? #ff5c5c : #db3f3f;"),
+            menu_ui.contains("text: \"X\";")
+                && menu_ui.contains("color: delete-column-ta.has-hover ? #ff5c5c : #db3f3f;"),
             "Custom columns should render a red glyph-only delete icon"
         );
         assert!(
@@ -3515,6 +3516,9 @@ mod tests {
     #[test]
     fn test_layout_editor_and_splitter_callbacks_are_wired_in_slint() {
         let slint_ui = include_str!("music_player.slint");
+        let controls_ui = include_str!("ui/components/controls.slint");
+        let media_ui = include_str!("ui/components/media.slint");
+        let status_ui = include_str!("ui/components/status.slint");
         assert!(
             slint_ui.contains("callback open_layout_editor();"),
             "Layout editor open callback should be declared"
@@ -3548,7 +3552,7 @@ mod tests {
             "Layout region assignment property should exist"
         );
         assert!(
-            slint_ui.contains("component StatusBar inherits Rectangle"),
+            status_ui.contains("component StatusBar inherits Rectangle"),
             "Status bar should be extracted into a reusable component"
         );
         assert!(
@@ -3556,14 +3560,14 @@ mod tests {
             "Layout editor should expose dynamic splitter model"
         );
         assert!(
-            slint_ui.contains("component ButtonCluster inherits Rectangle")
-                && slint_ui.contains("component SeekBarControl inherits Rectangle")
-                && slint_ui.contains("component VolumeSliderControl inherits Rectangle"),
+            controls_ui.contains("component ButtonCluster inherits Rectangle")
+                && media_ui.contains("component SeekBarControl inherits Rectangle")
+                && media_ui.contains("component VolumeSliderControl inherits Rectangle"),
             "Control bar should be composed from reusable sub-components"
         );
         assert!(
-            slint_ui.contains("component AlbumArtViewer inherits Rectangle")
-                && slint_ui.contains("component MetadataViewer inherits Rectangle"),
+            media_ui.contains("component AlbumArtViewer inherits Rectangle")
+                && media_ui.contains("component MetadataViewer inherits Rectangle"),
             "Album art panel should be split into viewer and metadata components"
         );
         assert!(
