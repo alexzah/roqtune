@@ -2,8 +2,7 @@
 
 # roqtune
 
-`roqtune` is a desktop music player written in Rust with a Slint-based UI.
-It is designed around responsive playback, configurable UI layout, and persistent playlist state.
+`roqtune` is a desktop music player designed to be highly customizable and performant. It is written in Rust and uses the Slint UI framework.
 
 ## Features
 
