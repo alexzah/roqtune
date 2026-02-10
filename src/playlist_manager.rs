@@ -440,12 +440,14 @@ impl PlaylistManager {
                     }
                     protocol::Message::Playback(protocol::PlaybackMessage::Play) => {
                         debug!("PlaylistManager: Received play command");
-                        if !self.playback_playlist.is_playing()
-                            && self.playback_playlist_id == Some(self.active_playlist_id.clone())
-                            && self.playback_playlist.num_tracks() > 0
-                            && self.playback_playlist.get_playing_track_index()
-                                == Some(self.editing_playlist.get_selected_track_index())
-                        {
+                        let has_paused_track = !self.playback_playlist.is_playing()
+                            && self.playback_playlist_id.is_some()
+                            && self
+                                .playback_playlist
+                                .get_playing_track_index()
+                                .map(|index| index < self.playback_playlist.num_tracks())
+                                .unwrap_or(false);
+                        if has_paused_track {
                             debug!("PlaylistManager: Resuming playback");
                             self.playback_playlist.set_playing(true);
                             self.broadcast_playlist_changed();
@@ -459,7 +461,12 @@ impl PlaylistManager {
                             self.playback_playlist.set_repeat_mode(self.repeat_mode);
 
                             self.playback_playlist.force_re_randomize_shuffle();
-                            let index = self.playback_playlist.get_selected_track_index();
+                            let index = self
+                                .editing_playlist
+                                .get_selected_indices()
+                                .first()
+                                .copied()
+                                .unwrap_or(0);
                             self.play_playback_track(index);
                         }
                     }
@@ -1864,6 +1871,85 @@ mod tests {
                     _ => false,
                 },
             );
+    }
+
+    #[test]
+    fn test_play_resumes_paused_track_after_deselect_all() {
+        let mut harness = PlaylistManagerHarness::new();
+        let (_id0, _) = harness.add_track("pm_resume_deselect_0");
+        let (_id1, _) = harness.add_track("pm_resume_deselect_1");
+        harness.drain_messages();
+
+        harness.send(protocol::Message::Playback(
+            protocol::PlaybackMessage::PlayTrackByIndex(1),
+        ));
+        let _ = wait_for_message(&mut harness.receiver, Duration::from_secs(1), |message| {
+            matches!(
+                message,
+                protocol::Message::Playlist(protocol::PlaylistMessage::PlaylistIndicesChanged {
+                    is_playing: true,
+                    playing_index: Some(1),
+                    ..
+                })
+            )
+        });
+
+        harness.send(protocol::Message::Playback(
+            protocol::PlaybackMessage::Pause,
+        ));
+        let _ = wait_for_message(&mut harness.receiver, Duration::from_secs(1), |message| {
+            matches!(
+                message,
+                protocol::Message::Playlist(protocol::PlaylistMessage::PlaylistIndicesChanged {
+                    is_playing: false,
+                    playing_index: Some(1),
+                    ..
+                })
+            )
+        });
+
+        harness.drain_messages();
+        harness.send(protocol::Message::Playlist(
+            protocol::PlaylistMessage::DeselectAll,
+        ));
+        let _ = wait_for_message(&mut harness.receiver, Duration::from_secs(1), |message| {
+            matches!(
+                message,
+                protocol::Message::Playlist(protocol::PlaylistMessage::SelectionChanged(indices))
+                    if indices.is_empty()
+            )
+        });
+
+        harness.drain_messages();
+        harness.send(protocol::Message::Playback(protocol::PlaybackMessage::Play));
+
+        let start = Instant::now();
+        loop {
+            if start.elapsed() > Duration::from_secs(1) {
+                panic!("timed out waiting for resumed playback message");
+            }
+            match harness.receiver.try_recv() {
+                Ok(protocol::Message::Audio(protocol::AudioMessage::DecodeTracks(tracks))) => {
+                    panic!(
+                        "unexpected decode request while resuming paused playback: {:?}",
+                        tracks
+                    );
+                }
+                Ok(protocol::Message::Playlist(
+                    protocol::PlaylistMessage::PlaylistIndicesChanged {
+                        is_playing: true,
+                        playing_index: Some(1),
+                        ..
+                    },
+                )) => break,
+                Ok(_) => {}
+                Err(TryRecvError::Empty) => thread::sleep(Duration::from_millis(5)),
+                Err(TryRecvError::Lagged(_)) => continue,
+                Err(TryRecvError::Closed) => {
+                    panic!("bus closed while waiting for resumed playback message")
+                }
+            }
+        }
     }
 
     #[test]
