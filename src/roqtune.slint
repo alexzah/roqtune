@@ -624,14 +624,6 @@ export component AppWindow inherits Window {
                             }
                         }
 
-                        Text {
-                            text: "Select a view for the main track list";
-                            color: #888;
-                            font-size: 11px;
-                            height: 16px;
-                            overflow: elide;
-                        }
-
                         ModeTabs {
                             labels: ["Songs", "Artists", "Albums"];
                             selected_index: root.library_root_index;
@@ -1231,7 +1223,7 @@ export component AppWindow inherits Window {
                                     is-hover: library-list-row-ta.has-hover;
                                 }
                                 library-list-row-ta := TouchArea {
-                                    clicked => {
+                                    double-clicked => {
                                         root.hover-index = -1;
                                         root.library_item_activated(row);
                                     }
