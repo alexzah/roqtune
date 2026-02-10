@@ -1064,6 +1064,27 @@ impl UiManager {
         query.trim().to_ascii_lowercase()
     }
 
+    fn reset_filter_state_fields(
+        filter_sort_column_key: &mut Option<String>,
+        filter_sort_direction: &mut Option<PlaylistSortDirection>,
+        filter_search_query: &mut String,
+        filter_search_visible: &mut bool,
+    ) {
+        *filter_sort_column_key = None;
+        *filter_sort_direction = None;
+        filter_search_query.clear();
+        *filter_search_visible = false;
+    }
+
+    fn reset_filter_state(&mut self) {
+        Self::reset_filter_state_fields(
+            &mut self.filter_sort_column_key,
+            &mut self.filter_sort_direction,
+            &mut self.filter_search_query,
+            &mut self.filter_search_visible,
+        );
+    }
+
     fn is_filter_applied(&self) -> bool {
         self.filter_sort_direction.is_some() || !self.filter_search_query.trim().is_empty()
     }
@@ -1371,10 +1392,7 @@ impl UiManager {
     }
 
     fn clear_playlist_filter_view(&mut self) {
-        self.filter_sort_column_key = None;
-        self.filter_sort_direction = None;
-        self.filter_search_query.clear();
-        self.filter_search_visible = false;
+        self.reset_filter_state();
         self.rebuild_track_model();
     }
 
@@ -1472,10 +1490,7 @@ impl UiManager {
             self.current_playing_track_metadata = None;
         }
 
-        self.filter_sort_column_key = None;
-        self.filter_sort_direction = None;
-        self.filter_search_query.clear();
-        self.filter_search_visible = false;
+        self.reset_filter_state();
 
         self.refresh_playlist_column_content_targets();
         self.apply_playlist_column_layout();
@@ -1906,6 +1921,9 @@ impl UiManager {
                         protocol::Message::Playlist(
                             protocol::PlaylistMessage::PlaylistRestored(tracks),
                         ) => {
+                            // Switching playlists should always start in the playlist's natural order
+                            // with no active read-only filter/search view state.
+                            self.reset_filter_state();
                             self.selection_anchor_track_id = None;
                             self.track_ids.clear();
                             self.track_paths.clear();
@@ -2535,7 +2553,7 @@ impl UiManager {
 mod tests {
     use super::{
         fit_column_widths_to_available_space, ColumnWidthProfile, CoverArtLookupRequest,
-        TrackMetadata, UiManager,
+        PlaylistSortDirection, TrackMetadata, UiManager,
     };
     use crate::config::PlaylistColumnConfig;
     use std::path::PathBuf;
@@ -2579,6 +2597,26 @@ mod tests {
         let first = rx.recv().expect("expected first request");
         let latest = UiManager::coalesce_cover_art_requests(first, &rx);
         assert_eq!(latest.track_path, None);
+    }
+
+    #[test]
+    fn test_reset_filter_state_fields_clears_sort_and_search() {
+        let mut sort_key = Some("title".to_string());
+        let mut sort_direction = Some(PlaylistSortDirection::Descending);
+        let mut search_query = "beatles".to_string();
+        let mut search_visible = true;
+
+        UiManager::reset_filter_state_fields(
+            &mut sort_key,
+            &mut sort_direction,
+            &mut search_query,
+            &mut search_visible,
+        );
+
+        assert!(sort_key.is_none());
+        assert!(sort_direction.is_none());
+        assert!(search_query.is_empty());
+        assert!(!search_visible);
     }
 
     #[test]
