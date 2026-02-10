@@ -1,954 +1,19 @@
-import { Button, ComboBox, VerticalBox, StandardTableView, ScrollView, LineEdit, ListView } from "std-widgets.slint";
-
-struct TrackRowData {
-    status: string,
-    values: [string],
-    selected: bool,
-}
-
-struct LayoutSplitterModel {
-    id: string,
-    axis: int,
-    x_px: int,
-    y_px: int,
-    width_px: int,
-    height_px: int,
-    ratio: float,
-    min_ratio: float,
-    max_ratio: float,
-    track_start_px: int,
-    track_length_px: int,
-}
-
-struct LayoutButtonClusterPanelModel {
-    leaf_id: string,
-    x_px: int,
-    y_px: int,
-    width_px: int,
-    height_px: int,
-    visible: bool,
-    actions: [int],
-}
-
-component ContextMenu inherits PopupWindow {
-    callback rename();
-    callback delete();
-    in property <bool> is-playlist: false;
-    width: 120px;
-    height: is-playlist ? 56px : 32px;
-    
-    Rectangle {
-        background: #333;
-        border-width: 1px;
-        border-color: #444;
-        
-        VerticalLayout {
-            padding: 4px;
-            spacing: 4px;
-            Rectangle {
-                height: 24px;
-                background: item-ta-rename.has-hover ? #444 : transparent;
-                border-radius: 2px;
-                Text {
-                    x: 8px;
-                    text: "Rename";
-                    color: #eee;
-                    font-size: 13px;
-                    vertical-alignment: center;
-                }
-                item-ta-rename := TouchArea {
-                    clicked => {
-                        root.rename();
-                    }
-                }
-            }
-            if is-playlist : Rectangle {
-                height: 24px;
-                background: item-ta-delete.has-hover ? #444 : transparent;
-                border-radius: 2px;
-                Text {
-                    x: 8px;
-                    text: "Delete";
-                    color: #ff5555;
-                    font-size: 13px;
-                    vertical-alignment: center;
-                }
-                item-ta-delete := TouchArea {
-                    clicked => {
-                        root.delete();
-                    }
-                }
-            }
-        }
-    }
-}
-
-component ColumnHeaderMenu inherits PopupWindow {
-    in property <[string]> labels: [];
-    in property <[bool]> checked: [];
-    in property <[bool]> custom: [];
-    callback toggle-column(int);
-    callback delete-column(int);
-    callback add-custom();
-
-    width: 220px;
-    height: 16px + labels.length * 24px + 32px;
-
-    Rectangle {
-        background: #2f2f2f;
-        border-width: 1px;
-        border-color: #454545;
-        border-radius: 4px;
-
-        VerticalLayout {
-            padding: 4px;
-            spacing: 2px;
-
-            for label[i] in root.labels : Rectangle {
-                property <bool> is-custom: i < root.custom.length && root.custom[i];
-                height: 22px;
-                border-radius: 2px;
-                background: column-item-ta.has-hover ? #3d3d3d : transparent;
-                Text {
-                    text: (root.checked[i] ? "☑ " : "☐ ") + label;
-                    color: #ddd;
-                    font-size: 12px;
-                    vertical-alignment: center;
-                    horizontal-alignment: left;
-                    x: 6px;
-                    width: parent.width - (parent.is-custom ? 28px : 0px);
-                }
-                column-item-ta := TouchArea {
-                    width: parent.width - (parent.is-custom ? 24px : 0px);
-                    clicked => {
-                        root.toggle-column(i);
-                    }
-                }
-                if self.is-custom : Rectangle {
-                    width: 14px;
-                    height: 14px;
-                    x: parent.width - self.width - 6px;
-                    y: (parent.height - self.height) / 2;
-                    border-radius: self.width / 2;
-                    background: delete-column-ta.has-hover ? #db3f3f : #b93636;
-                    Text {
-                        text: "x";
-                        color: #f7f7f7;
-                        font-size: 9px;
-                        horizontal-alignment: center;
-                        vertical-alignment: center;
-                    }
-                    delete-column-ta := TouchArea {
-                        clicked => {
-                            root.delete-column(i);
-                        }
-                    }
-                }
-            }
-
-            Rectangle {
-                height: 1px;
-                background: #3c3c3c;
-            }
-
-            Rectangle {
-                height: 22px;
-                border-radius: 2px;
-                background: custom-item-ta.has-hover ? #3d3d3d : transparent;
-                Text {
-                    text: "Custom...";
-                    color: #ddd;
-                    font-size: 12px;
-                    vertical-alignment: center;
-                    horizontal-alignment: left;
-                    x: 6px;
-                }
-                custom-item-ta := TouchArea {
-                    clicked => {
-                        root.add-custom();
-                    }
-                }
-            }
-        }
-    }
-}
-
-component ConfirmationDialog inherits Rectangle {
-    callback confirmed();
-    callback cancelled();
-    in property <string> message: "Are you sure?";
-    in property <bool> is-visible: false;
-    
-    visible: is-visible;
-    background: #00000080;
-    
-    // Prevent clicks from passing through
-    TouchArea {}
-    
-    Rectangle {
-        width: 350px;
-        height: 150px;
-        background: #282828;
-        border-width: 1px;
-        border-color: #444;
-        border-radius: 4px;
-        
-        VerticalLayout {
-            padding: 20px;
-            spacing: 20px;
-            
-            Text {
-                text: root.message;
-                color: #eee;
-                font-size: 14px;
-                horizontal-alignment: center;
-                wrap: word-wrap;
-            }
-            
-            HorizontalLayout {
-                spacing: 15px;
-                alignment: center;
-                
-                Button {
-                    text: "Cancel";
-                    clicked => { root.cancelled(); }
-                }
-                
-                Button {
-                    text: "Delete";
-                    primary: true;
-                    clicked => { root.confirmed(); }
-                }
-            }
-        }
-    }
-}
-
-component InfoDialog inherits Rectangle {
-    callback dismissed();
-    in property <string> message: "";
-    in property <bool> is-visible: false;
-
-    visible: is-visible;
-    background: #00000080;
-
-    TouchArea {}
-
-    Rectangle {
-        width: 430px;
-        height: 180px;
-        background: #282828;
-        border-width: 1px;
-        border-color: #444;
-        border-radius: 4px;
-
-        VerticalLayout {
-            padding: 16px;
-            spacing: 14px;
-
-            Text {
-                text: "Restart Required";
-                color: #eee;
-                font-size: 16px;
-                font-weight: 700;
-                horizontal-alignment: left;
-            }
-
-            Text {
-                text: root.message;
-                color: #ddd;
-                font-size: 13px;
-                wrap: word-wrap;
-                vertical-stretch: 1;
-            }
-
-            HorizontalLayout {
-                Rectangle { horizontal-stretch: 1; }
-                Button {
-                    text: "OK";
-                    primary: true;
-                    clicked => { root.dismissed(); }
-                }
-            }
-        }
-    }
-}
-
-component PlaylistRow inherits Rectangle {
-    in property <string> name;
-    in property <bool> is-active;
-    in property <bool> is-editing;
-    callback clicked();
-    callback renamed(string);
-    callback context-menu-rename();
-    callback context-menu-delete();
-    callback cancel-edit();
-    
-    property <length> menu-x;
-    property <length> menu-y;
-    
-    height: 24px;
-    background: is-active ? #3d3d3d : ta.has-hover ? #333 : transparent;
-    border-radius: 2px;
-    
-    if !is-editing : Text {
-        x: 8px;
-        text: root.name;
-        color: is-active ? #eee : #aaa;
-        font-size: 13px;
-        vertical-alignment: center;
-        horizontal-alignment: left;
-    }
-    
-    if is-editing : LineEdit {
-        x: 4px;
-        width: parent.width - 8px;
-        height: parent.height - 4px;
-        text: root.name;
-        accepted => {
-            root.renamed(self.text);
-        }
-        init => {
-            self.focus();
-        }
-    }
-    
-    ta := TouchArea {
-        visible: !is-editing;
-        clicked => { root.clicked(); }
-        pointer-event(event) => {
-            if (event.button == PointerEventButton.right && event.kind == PointerEventKind.down) {
-                root.menu-x = self.mouse-x;
-                root.menu-y = self.mouse-y;
-                menu.show();
-            }
-        }
-    }
-
-    menu := ContextMenu {
-        is-playlist: true;
-        x: root.menu-x;
-        y: root.menu-y;
-        rename => {
-            root.context-menu-rename();
-        }
-        delete => {
-            root.context-menu-delete();
-        }
-    }
-
-    FocusScope {
-        visible: root.is-editing;
-        key-pressed(event) => {
-            if (event.text == Key.Escape) {
-                root.cancel-edit();
-                return accept;
-            }
-            reject
-        }
-    }
-}
-
-component TrackRow inherits Rectangle {
-    in property <TrackRowData> data;
-    in property <bool> is-playing;
-    in property <bool> is-hover;
-    in property <[string]> headers: [];
-    in property <[int]> column-widths-px: [];
-    in property <length> null-column-width: 120px;
-
-    pure function column-width-for-index(index: int) -> length {
-        if index >= 0 && index < root.column-widths-px.length {
-            return max(48px, root.column-widths-px[index] * 1px);
-        }
-        return 140px;
-    }
-
-    height: 30px;
-    background: data.selected ? #3d3d3d : is-hover ? #333 : transparent;
-    animate background { duration: 100ms; }
-
-    HorizontalLayout {
-        padding-left: 8px;
-        padding-right: 8px;
-        spacing: 10px;
-
-        Rectangle {
-            width: 40px;
-            Text {
-                text: root.data.status;
-                color: #2a6def;
-                font-size: 14px;
-                horizontal-alignment: center;
-                vertical-alignment: center;
-            }
-        }
-
-        for column-value[index] in root.data.values : Rectangle {
-            width: root.column-width-for-index(index);
-            clip: true;
-            Text {
-                x: 0px;
-                width: parent.width;
-                text: column-value;
-                color: (index < root.headers.length && root.headers[index] == "Title") ? #eee : #aaa;
-                font-size: 13px;
-                vertical-alignment: center;
-                overflow: elide;
-                horizontal-alignment: left;
-            }
-        }
-
-        Rectangle { horizontal-stretch: 1; }
-
-        Rectangle {
-            width: root.null-column-width;
-        }
-    }
-}
-
-component PlayerButton inherits Rectangle {
-    width: 32px;
-    height: 32px;
-    background: touch-area.pressed ? #444 : touch-area.has-hover ? #666 : transparent;
-    animate background { duration: 150ms; }
-    in property <string> icon-text;
-    in property <bool> enabled: true;
-    in property <bool> is-primary: false;
-    in property <length> font-size: 16px;
-    callback clicked;
-    Text {
-        text: root.icon-text;
-        font-size: root.font-size;
-        color: root.is-primary ? #2a6def : #eee;
-        horizontal-alignment: center;
-        vertical-alignment: center;
-        opacity: root.enabled ? 1.0 : 0.5;
-    }
-
-    touch-area := TouchArea {
-        pointer-event(event) => {
-            if (event.button == PointerEventButton.right && event.kind == PointerEventKind.down) {
-                root.right-clicked();
-            }
-        }
-        clicked => {
-            if (root.enabled) {
-                root.clicked();
-            }
-        }
-    }
-    callback right-clicked;
-}
-
-component ControlActionButton inherits Rectangle {
-    in property <int> action-id: 0;
-    in property <string> cluster-leaf-id: "";
-    in property <int> playback-order-index: 0;
-    in property <int> repeat-mode: 0;
-    in property <bool> layout-edit-mode: false;
-    callback invoked(int);
-    callback open-add-menu(string);
-
-    pure function icon-for-action(action: int) -> string {
-        if action == 1 { return "+"; }
-        if action == 2 { return "⏮"; }
-        if action == 3 { return "▶"; }
-        if action == 4 { return "⏸"; }
-        if action == 5 { return "⏹"; }
-        if action == 6 { return "⏭"; }
-        if action == 7 { return "⇄"; }
-        if action == 8 { return "⟳"; }
-        if action == 9 { return "◫"; }
-        if action == 10 { return "⚙"; }
-        return "•";
-    }
-
-    pure function font-size-for-action(action: int) -> length {
-        if action == 1 { return 20px; }
-        if action == 3 { return 20px; }
-        if action == 10 { return 21px; }
-        if action == 7 { return 20px; }
-        if action == 8 { return 19px; }
-        return 18px;
-    }
-
-    pure function primary-for-action(action: int) -> bool {
-        if action == 3 { return true; }
-        if action == 7 { return root.playback-order-index != 0; }
-        if action == 8 { return root.repeat-mode != 0; }
-        if action == 9 { return root.layout-edit-mode; }
-        return false;
-    }
-
-    width: 32px;
-    height: 32px;
-
-    PlayerButton {
-        icon-text: root.icon-for-action(root.action-id);
-        font-size: root.font-size-for-action(root.action-id);
-        is-primary: root.primary-for-action(root.action-id);
-        clicked => { root.invoked(root.action-id); }
-        right-clicked => {
-            if (root.layout-edit-mode) {
-                root.open-add-menu(root.cluster-leaf-id);
-            }
-        }
-    }
-
-    if root.action-id == 7 && root.playback-order-index == 2 : Rectangle {
-        width: 10px;
-        height: 10px;
-        x: 15px;
-        y: 11px;
-        border-radius: 5px;
-        background: #2a6def;
-        Text {
-            text: "?";
-            color: white;
-            font-size: 7px;
-            font-weight: 700;
-            horizontal-alignment: center;
-            vertical-alignment: center;
-        }
-    }
-
-    if root.action-id == 8 && root.repeat-mode == 2 : Rectangle {
-        width: 10px;
-        height: 10px;
-        x: 15px;
-        y: 11px;
-        border-radius: 5px;
-        background: #2a6def;
-        Text {
-            text: "1";
-            color: white;
-            font-size: 7px;
-            font-weight: 700;
-            horizontal-alignment: center;
-            vertical-alignment: center;
-        }
-    }
-}
-
-component ButtonCluster inherits Rectangle {
-    in property <string> cluster-leaf-id: "";
-    in property <[int]> button-actions: [];
-    in property <int> playback-order-index: 0;
-    in property <int> repeat-mode: 0;
-    in property <bool> layout-edit-mode: false;
-    callback action-invoked(int);
-    callback request-add-menu(string);
-
-    width: max(32px, button-actions.length * 32px + max(0, button-actions.length - 1) * 8px);
-    height: 32px;
-
-    if root.button-actions.length == 0 : Rectangle {
-        width: 32px;
-        height: 32px;
-        border-radius: 3px;
-        border-width: 1px;
-        border-color: #3d3d3d;
-        background: empty-cluster-ta.has-hover ? #333 : #2a2a2a;
-        Text {
-            text: "…";
-            color: #999;
-            font-size: 16px;
-            horizontal-alignment: center;
-            vertical-alignment: center;
-        }
-        empty-cluster-ta := TouchArea {
-            pointer-event(event) => {
-                if (root.layout-edit-mode
-                    && event.button == PointerEventButton.right
-                    && event.kind == PointerEventKind.down) {
-                    root.request-add-menu(root.cluster-leaf-id);
-                }
-            }
-        }
-    }
-
-    HorizontalLayout {
-        spacing: 8px;
-        for action in root.button-actions : ControlActionButton {
-            action-id: action;
-            cluster-leaf-id: root.cluster-leaf-id;
-            playback-order-index: root.playback-order-index;
-            repeat-mode: root.repeat-mode;
-            layout-edit-mode: root.layout-edit-mode;
-            invoked(action-id) => { root.action-invoked(action-id); }
-            open-add-menu(cluster-leaf-id) => { root.request-add-menu(cluster-leaf-id); }
-        }
-    }
-}
-
-component VolumeSliderControl inherits Rectangle {
-    in-out property <float> value: 1.0;
-    callback changed(float);
-
-    private property <length> icon-slot-width: 18px;
-    private property <length> track-height: 6px;
-    private property <length> handle-base-size: 10px;
-    private property <length> handle-hover-size: 12px;
-    private property <length> track-center-adjust: root.track-height / 3;
-    background: transparent;
-
-    HorizontalLayout {
-        spacing: 6px;
-
-        icon-slot := Rectangle {
-            width: root.icon-slot-width;
-            height: root.height;
-            background: transparent;
-            Text {
-                width: parent.width;
-                height: parent.height;
-                text: "🔊";
-                color: #888;
-                font-size: max(9px, min(12px, root.height * 0.45));
-                horizontal-alignment: center;
-                vertical-alignment: center;
-            }
-        }
-
-        slider-area := Rectangle {
-            horizontal-stretch: 1;
-            height: root.height;
-            background: transparent;
-
-            volume-track := Rectangle {
-                x: 0px;
-                y: (parent.height - self.height) / 2 - root.track-center-adjust;
-                width: parent.width;
-                height: root.track-height;
-                border-radius: 3px;
-                background: #333;
-            }
-
-            Rectangle {
-                x: volume-track.x;
-                y: volume-track.y;
-                width: volume-track.width * root.value;
-                height: volume-track.height;
-                background: #2a6def;
-                border-radius: 3px;
-            }
-
-            volume-handle := Rectangle {
-                width: root.handle-base-size;
-                height: root.handle-base-size;
-                x: volume-track.width > 0px ? volume-track.x + (volume-track.width * root.value) - self.width / 2 : volume-track.x;
-                y: volume-track.y + (volume-track.height - self.height) / 2;
-                background: white;
-                border-radius: 5px;
-                animate x { duration: 100ms; easing: ease-out; }
-            }
-
-            states [
-                hover when ta-volume.has-hover || ta-volume.pressed: {
-                    volume-handle.width: root.handle-hover-size;
-                    volume-handle.height: root.handle-hover-size;
-                }
-            ]
-
-            ta-volume := TouchArea {
-                x: 0px;
-                y: 0px;
-                width: parent.width;
-                height: parent.height;
-                mouse-cursor: pointer;
-                clicked => {
-                    if (volume-track.width > 0px) {
-                        root.value = max(0, min(1, self.mouse-x / volume-track.width));
-                        root.changed(root.value);
-                    }
-                }
-                moved => {
-                    if (self.pressed && volume-track.width > 0px) {
-                        root.value = max(0, min(1, self.mouse-x / volume-track.width));
-                        root.changed(root.value);
-                    }
-                }
-            }
-
-            if ta-volume.pressed : Rectangle {
-                width: 32px;
-                height: 12px;
-                x: min(
-                    volume-track.x + volume-track.width - self.width - 2px,
-                    max(volume-track.x + 2px, volume-handle.x - self.width / 2)
-                );
-                y: max(0px, volume-track.y - self.height - 2px);
-                z: 10;
-                border-radius: 3px;
-                background: #1f1f1f;
-                border-width: 1px;
-                border-color: #3a3a3a;
-                Text {
-                    text: floor(root.value * 100) + "%";
-                    color: #ddd;
-                    font-size: 8px;
-                    horizontal-alignment: center;
-                    vertical-alignment: center;
-                }
-            }
-        }
-    }
-}
-
-component SeekBarControl inherits Rectangle {
-    in property <float> position-percentage: 0.0;
-    in property <string> elapsed-text: "0:00";
-    in property <string> total-text: "0:00";
-    callback seek-requested(float);
-
-    height: 32px;
-    background: #242424;
-    HorizontalLayout {
-        padding-left: 12px;
-        padding-right: 12px;
-        padding-top: 8px;
-        padding-bottom: 8px;
-        spacing: 10px;
-
-        Text {
-            text: root.elapsed-text;
-            color: #888;
-            font-size: 12px;
-            vertical-alignment: center;
-            horizontal-alignment: right;
-            width: 45px;
-        }
-
-        seekbar := Rectangle {
-            height: 6px;
-            border-radius: 3px;
-            background: #333;
-            horizontal-stretch: 1;
-            Rectangle {
-                x: 0;
-                y: 0;
-                width: seekbar.width * root.position-percentage;
-                height: parent.height;
-                background: #2a6def;
-                border-radius: 3px;
-                animate width { duration: 150ms; easing: ease-out; }
-            }
-            handle := Rectangle {
-                width: 12px;
-                height: 12px;
-                x: (seekbar.width * root.position-percentage) - self.width / 2;
-                y: (parent.height - self.height) / 2;
-                background: white;
-                border-radius: 6px;
-                drop-shadow-offset-y: 1px;
-                drop-shadow-blur: 2px;
-                drop-shadow-color: #00000080;
-                animate x { duration: 150ms; easing: ease-out; }
-            }
-            states [
-                hover when ta-seek.has-hover || ta-seek.pressed: {
-                    handle.background: #ffffff;
-                    handle.width: 14px;
-                    handle.height: 14px;
-                }
-            ]
-            ta-seek := TouchArea {
-                width: parent.width;
-                height: 20px;
-                mouse-cursor: pointer;
-                clicked => { root.seek-requested(max(0, min(1, self.mouse-x / seekbar.width))); }
-                moved => {
-                    if (self.pressed) {
-                        root.seek-requested(max(0, min(1, self.mouse-x / seekbar.width)));
-                    }
-                }
-            }
-        }
-
-        Text {
-            text: root.total-text;
-            color: #888;
-            font-size: 12px;
-            vertical-alignment: center;
-            width: 45px;
-        }
-    }
-}
-
-component MetadataViewer inherits Rectangle {
-    in property <string> display-title: "";
-    in property <string> display-artist: "";
-    in property <string> display-album: "";
-    in property <string> display-date: "";
-    in property <string> display-genre: "";
-
-    background: transparent;
-    VerticalLayout {
-        spacing: 4px;
-        if root.display-title != "" : Text {
-            text: root.display-title;
-            color: #eee;
-            font-size: 14px;
-            font-weight: 700;
-            wrap: word-wrap;
-            overflow: elide;
-        }
-        if root.display-artist != "" : Text {
-            text: root.display-artist;
-            color: #ccc;
-            font-size: 13px;
-            wrap: word-wrap;
-            overflow: elide;
-        }
-        if root.display-album != "" : Text {
-            text: root.display-album;
-            color: #aaa;
-            font-size: 12px;
-            wrap: word-wrap;
-            overflow: elide;
-        }
-        HorizontalLayout {
-            spacing: 8px;
-            if root.display-date != "" : Text {
-                text: root.display-date;
-                color: #888;
-                font-size: 11px;
-            }
-            if root.display-genre != "" : Text {
-                text: root.display-genre;
-                color: #888;
-                font-size: 11px;
-                horizontal-stretch: 1;
-                overflow: elide;
-            }
-        }
-    }
-}
-
-component AlbumArtViewer inherits Rectangle {
-    in property <image> art-source;
-
-    vertical-stretch: 1;
-    height: 100px;
-    background: #202020;
-    border-radius: 4px;
-    Image {
-        source: root.art-source;
-        width: parent.width;
-        height: parent.height;
-        image-fit: contain;
-    }
-}
-
-component SettingsDropdownControl inherits Rectangle {
-    in property <string> label;
-    in property <[string]> options;
-    in-out property <int> selected_index;
-    in-out property <string> custom_value;
-    in property <string> custom_placeholder;
-
-    property <bool> use_custom: root.options.length > 0 && root.selected_index == root.options.length - 1;
-    height: root.use_custom ? 76px : 40px;
-
-    VerticalLayout {
-        spacing: 4px;
-
-        HorizontalLayout {
-            spacing: 12px;
-
-            Text {
-                text: root.label;
-                color: #ddd;
-                font-size: 12px;
-                width: 220px;
-                vertical-alignment: center;
-                horizontal-alignment: left;
-            }
-
-            Rectangle {
-                horizontal-stretch: 1;
-                height: 34px;
-                background: transparent;
-                ComboBox {
-                    width: parent.width;
-                    height: parent.height;
-                    model: root.options;
-                    current-index <=> root.selected_index;
-                }
-            }
-        }
-
-        if root.use_custom : HorizontalLayout {
-            spacing: 12px;
-            Rectangle {
-                width: 220px;
-            }
-            LineEdit {
-                horizontal-stretch: 1;
-                text <=> root.custom_value;
-                placeholder-text: root.custom_placeholder;
-            }
-            Rectangle {
-                width: 32px;
-            }
-        }
-    }
-}
-
-component StatusBar inherits Rectangle {
-    in property <string> status-text: "";
-    in property <string> technical-info: "";
-    in property <string> time-range: "0:00 / 0:00";
-
-    background: #1a1a1a;
-
-    HorizontalLayout {
-        padding-left: 12px;
-        padding-right: 12px;
-        spacing: 15px;
-
-        Text {
-            text: root.status-text == "" ? "" : "Now Playing: " + root.status-text;
-            color: #aaa;
-            font-size: 12px;
-            vertical-alignment: center;
-            overflow: elide;
-            horizontal-stretch: 1;
-        }
-
-        Rectangle { horizontal-stretch: 1; }
-
-        Text {
-            text: root.technical-info;
-            color: #777;
-            font-size: 11px;
-            vertical-alignment: center;
-            overflow: elide;
-        }
-
-        VerticalLayout {
-            alignment: center;
-            Rectangle { width: 1px; background: #333; height: 12px; }
-        }
-
-        Text {
-            text: root.time-range;
-            color: #999;
-            font-size: 12px;
-            vertical-alignment: center;
-            width: 100px;
-            horizontal-alignment: right;
-        }
-    }
-}
+import { Button, ComboBox, VerticalBox, StandardTableView, ScrollView, LineEdit, ListView, Switch } from "std-widgets.slint";
+
+import { LayoutButtonClusterPanelModel, LayoutSplitterModel, TrackRowData } from "ui/types.slint";
+import { ColumnHeaderMenu, ConfirmationDialog, InfoDialog } from "ui/components/menus.slint";
+import { PlayerButton, ButtonCluster } from "ui/components/controls.slint";
+import { VolumeSliderControl, SeekBarControl, MetadataViewer, AlbumArtViewer } from "ui/components/media.slint";
+import { PlaylistRow, TrackRow } from "ui/components/playlist.slint";
+import { SettingsDropdownControl } from "ui/components/settings.slint";
+import { StatusBar } from "ui/components/status.slint";
 
 export component AppWindow inherits Window {
     preferred-width: 900px;
     preferred-height: 650px;
     min-width: 600px;
     min-height: 400px;
-    title: "fooBar-like Music Player";
+    title: "roqtune";
     background: #282828;
 
     key-handler := FocusScope {
@@ -957,6 +22,14 @@ export component AppWindow inherits Window {
         key-pressed(event) => {
             if (event.text == Key.F6 || ((event.text == "l" || event.text == "L") && event.modifiers.control)) {
                 root.open_layout_editor();
+                return accept;
+            }
+            if (event.text == Key.Escape && root.show_import_menu) {
+                root.show_import_menu = false;
+                return accept;
+            }
+            if (event.text == Key.Escape && root.show_settings_menu) {
+                root.show_settings_menu = false;
                 return accept;
             }
             if (event.text == Key.Escape && root.layout_edit_mode) {
@@ -1029,6 +102,12 @@ export component AppWindow inherits Window {
     in-out property <int> playlist_columns_content_width_px: 0;
     in-out property <int> playlist_columns_available_width_px: 0;
     in-out property <[LayoutButtonClusterPanelModel]> layout_button_cluster_panels: [];
+    in-out property <bool> show_import_menu: false;
+    property <length> import_menu_x: 0px;
+    property <length> import_menu_y: 0px;
+    in-out property <bool> show_settings_menu: false;
+    property <length> settings_menu_x: 0px;
+    property <length> settings_menu_y: 0px;
     in-out property <bool> show_control_cluster_menu: false;
     in-out property <string> control_cluster_menu_target_leaf_id: "";
     in-out property <[int]> control_cluster_menu_actions: [];
@@ -1245,10 +324,10 @@ export component AppWindow inherits Window {
                 width: root.layout-region-width(i);
                 height: root.layout-region-height(i);
                 visible: root.layout-region-is-visible(i) && root.layout-region-panel-kind(i) == 10;
-                background: #252525;
+                background: root.layout_edit_mode ? #252525 : #202020;
                 border-width: root.layout_edit_mode ? 1px : 0px;
                 border-color: #3a3a3a;
-                Text {
+                if root.layout_edit_mode : Text {
                     text: "Spacer";
                     color: #666;
                     horizontal-alignment: center;
@@ -1275,7 +354,15 @@ export component AppWindow inherits Window {
                         repeat-mode: root.repeat_mode;
                         layout-edit-mode: root.layout_edit_mode;
                         action-invoked(action-id) => {
-                            if (action-id == 1) { root.open_file(); }
+                            if (action-id == 1) {
+                                root.show_settings_menu = false;
+                                root.show_import_menu = true;
+                                root.import_menu_x = min(root.width - 168px, max(8px, cluster-panel.x_px * 1px + 8px));
+                                root.import_menu_y = min(
+                                    root.height - 96px,
+                                    max(8px, cluster-panel.y_px * 1px + cluster-panel.height_px * 1px + 4px)
+                                );
+                            }
                             if (action-id == 2) { root.previous(); }
                             if (action-id == 3) { root.play(); }
                             if (action-id == 4) { root.pause(); }
@@ -1288,7 +375,15 @@ export component AppWindow inherits Window {
                             }
                             if (action-id == 8) { root.toggle_repeat(); }
                             if (action-id == 9) { root.open_layout_editor(); }
-                            if (action-id == 10) { root.open_settings(); }
+                            if (action-id == 10) {
+                                root.show_import_menu = false;
+                                root.show_settings_menu = true;
+                                root.settings_menu_x = min(root.width - 220px, max(8px, cluster-panel.x_px * 1px + 8px));
+                                root.settings_menu_y = min(
+                                    root.height - 120px,
+                                    max(8px, cluster-panel.y_px * 1px + cluster-panel.height_px * 1px + 4px)
+                                );
+                            }
                         }
                         request-add-menu(cluster-leaf-id) => {
                             root.open_control_cluster_menu_for_leaf(
@@ -1517,8 +612,11 @@ export component AppWindow inherits Window {
                             mouse-cursor: (root.column_resize_active || root.column_hover_divider != -1) ? col-resize : default;
                             pointer-event(event) => {
                                 if (event.button == PointerEventButton.right && event.kind == PointerEventKind.down) {
-                                    root.column-menu-x = self.x + self.mouse-x;
-                                    root.column-menu-y = self.y + self.mouse-y;
+                                    let click-x = root.layout-region-x(i) + parent.x + self.x + self.mouse-x;
+                                    let click-y = root.layout-region-y(i) + parent.y + self.y + self.mouse-y;
+                                    let menu-height = 16px + root.playlist_column_menu_labels.length * 24px + 32px;
+                                    root.column-menu-x = min(root.width - 220px, max(8px, click-x));
+                                    root.column-menu-y = min(root.height - menu-height, max(8px, click-y));
                                     column-header-menu.show();
                                 } else if (event.kind == PointerEventKind.down && event.button == PointerEventButton.left) {
                                     let hovered_divider = visible_column_count > 0
@@ -2462,6 +1560,155 @@ export component AppWindow inherits Window {
         }
     }
 
+    if root.show_settings_menu : Rectangle {
+        z: 147;
+        background: transparent;
+        TouchArea {
+            clicked => {
+                root.show_settings_menu = false;
+            }
+        }
+    }
+
+    if root.show_settings_menu : Rectangle {
+        z: 148;
+        x: root.settings_menu_x;
+        y: root.settings_menu_y;
+        width: 210px;
+        height: 70px;
+        border-radius: 6px;
+        background: #262626;
+        border-width: 1px;
+        border-color: #3d3d3d;
+
+        VerticalLayout {
+            padding: 4px;
+            spacing: 2px;
+
+            Rectangle {
+                height: 28px;
+                border-radius: 4px;
+                background: layout-edit-toggle-ta.has-hover ? #363636 : transparent;
+                HorizontalLayout {
+                    padding-left: 10px;
+                    padding-right: 10px;
+                    spacing: 6px;
+                    Text {
+                        text: "Layout Editing Mode";
+                        color: #ddd;
+                        font-size: 12px;
+                        vertical-alignment: center;
+                        horizontal-stretch: 1;
+                        overflow: elide;
+                    }
+                    quick-layout-toggle := Switch {
+                        width: 18px;
+                        text: "";
+                        checked: root.layout_edit_mode;
+                        toggled => {
+                            root.show_settings_menu = false;
+                            root.open_layout_editor();
+                        }
+                    }
+                }
+                layout-edit-toggle-ta := TouchArea {
+                    clicked => {
+                        quick-layout-toggle.checked = !quick-layout-toggle.checked;
+                        root.show_settings_menu = false;
+                        root.open_layout_editor();
+                    }
+                }
+            }
+
+            Rectangle {
+                height: 28px;
+                border-radius: 4px;
+                background: open-settings-ta.has-hover ? #363636 : transparent;
+                Text {
+                    x: 10px;
+                    width: parent.width - 20px;
+                    text: "Settings";
+                    color: #ddd;
+                    font-size: 12px;
+                    vertical-alignment: center;
+                }
+                open-settings-ta := TouchArea {
+                    clicked => {
+                        root.show_settings_menu = false;
+                        root.open_settings();
+                    }
+                }
+            }
+        }
+    }
+
+    if root.show_import_menu : Rectangle {
+        z: 149;
+        background: transparent;
+        TouchArea {
+            clicked => {
+                root.show_import_menu = false;
+            }
+        }
+    }
+
+    if root.show_import_menu : Rectangle {
+        z: 150;
+        x: root.import_menu_x;
+        y: root.import_menu_y;
+        width: 160px;
+        height: 70px;
+        border-radius: 6px;
+        background: #262626;
+        border-width: 1px;
+        border-color: #3d3d3d;
+
+        VerticalLayout {
+            padding: 4px;
+            spacing: 2px;
+
+            Rectangle {
+                height: 28px;
+                border-radius: 4px;
+                background: add-files-ta.has-hover ? #363636 : transparent;
+                Text {
+                    x: 10px;
+                    width: parent.width - 20px;
+                    text: "Add files";
+                    color: #ddd;
+                    font-size: 12px;
+                    vertical-alignment: center;
+                }
+                add-files-ta := TouchArea {
+                    clicked => {
+                        root.show_import_menu = false;
+                        root.open_file();
+                    }
+                }
+            }
+
+            Rectangle {
+                height: 28px;
+                border-radius: 4px;
+                background: add-folder-ta.has-hover ? #363636 : transparent;
+                Text {
+                    x: 10px;
+                    width: parent.width - 20px;
+                    text: "Add folder";
+                    color: #ddd;
+                    font-size: 12px;
+                    vertical-alignment: center;
+                }
+                add-folder-ta := TouchArea {
+                    clicked => {
+                        root.show_import_menu = false;
+                        root.open_folder();
+                    }
+                }
+            }
+        }
+    }
+
     if root.show_control_cluster_menu : Rectangle {
         z: 146;
         x: root.control_cluster_menu_x;
@@ -2777,6 +2024,44 @@ export component AppWindow inherits Window {
                         custom_placeholder: "Enter bit depth";
                     }
 
+                    Rectangle {
+                        height: 34px;
+                        background: settings-layout-intro-toggle-ta.has-hover ? #2d2d2d : transparent;
+                        border-radius: 4px;
+                        HorizontalLayout {
+                            spacing: 12px;
+                            padding-left: 0px;
+                            padding-right: 0px;
+
+                            Text {
+                                text: "Show layout editing mode tutorial";
+                                color: #ddd;
+                                font-size: 12px;
+                                width: 220px;
+                                vertical-alignment: center;
+                                horizontal-alignment: left;
+                            }
+
+                            Rectangle {
+                                horizontal-stretch: 1;
+                                height: parent.height;
+                                background: transparent;
+                                settings-layout-intro-toggle := Switch {
+                                    x: parent.width - self.width - 8px;
+                                    y: (parent.height - self.height) / 2;
+                                    width: 18px;
+                                    text: "";
+                                    checked <=> root.settings_show_layout_edit_tutorial;
+                                }
+                            }
+                        }
+                        settings-layout-intro-toggle-ta := TouchArea {
+                            clicked => {
+                                settings-layout-intro-toggle.checked = !settings-layout-intro-toggle.checked;
+                            }
+                        }
+                    }
+
                 }
 
                 Rectangle { height: 1px; background: #343434; }
@@ -2802,7 +2087,8 @@ export component AppWindow inherits Window {
                                 root.settings_output_device_custom_value,
                                 root.settings_channel_custom_value,
                                 root.settings_sample_rate_custom_value,
-                                root.settings_bits_per_sample_custom_value
+                                root.settings_bits_per_sample_custom_value,
+                                root.settings_show_layout_edit_tutorial
                             );
                             root.show_settings_dialog = false;
                         }
@@ -2865,6 +2151,7 @@ export component AppWindow inherits Window {
     in-out property <string> settings_channel_custom_value: "";
     in-out property <string> settings_sample_rate_custom_value: "";
     in-out property <string> settings_bits_per_sample_custom_value: "";
+    in-out property <bool> settings_show_layout_edit_tutorial: true;
     
     // Computed time display strings (derived from integer ms values)
     // These are computed in Slint to avoid Rust string allocations
@@ -2888,6 +2175,7 @@ export component AppWindow inherits Window {
 
     // Callback declarations
     callback open_file();
+    callback open_folder();
     callback play();
     callback pause();
     callback stop();
@@ -2941,5 +2229,5 @@ export component AppWindow inherits Window {
     callback layout_undo_last_action();
     callback reset_layout_default();
     callback open_settings();
-    callback apply_settings(int, int, int, int, string, string, string, string);
+    callback apply_settings(int, int, int, int, string, string, string, string, bool);
 }

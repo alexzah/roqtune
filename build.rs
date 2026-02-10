@@ -1,3 +1,3 @@
 fn main() {
-    slint_build::compile("src/music_player.slint").unwrap();
+    slint_build::compile("src/roqtune.slint").unwrap();
 }

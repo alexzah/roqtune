@@ -2,7 +2,7 @@
 
 use crate::layout::LayoutConfig;
 
-/// Root configuration persisted to `music_player.toml`.
+/// Root configuration persisted to `roqtune.toml`.
 #[derive(Debug, Clone, Default, serde::Deserialize, serde::Serialize)]
 pub struct Config {
     /// Audio output and device preferences.

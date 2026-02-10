@@ -1,0 +1,174 @@
+export component PlayerButton inherits Rectangle {
+    width: 32px;
+    height: 32px;
+    background: touch-area.pressed ? #444 : touch-area.has-hover ? #666 : transparent;
+    animate background { duration: 150ms; }
+    in property <string> icon-text;
+    in property <bool> enabled: true;
+    in property <bool> is-primary: false;
+    in property <length> font-size: 16px;
+    callback clicked;
+    Text {
+        text: root.icon-text;
+        font-size: root.font-size;
+        color: root.is-primary ? #2a6def : #eee;
+        horizontal-alignment: center;
+        vertical-alignment: center;
+        opacity: root.enabled ? 1.0 : 0.5;
+    }
+
+    touch-area := TouchArea {
+        pointer-event(event) => {
+            if (event.button == PointerEventButton.right && event.kind == PointerEventKind.down) {
+                root.right-clicked();
+            }
+        }
+        clicked => {
+            if (root.enabled) {
+                root.clicked();
+            }
+        }
+    }
+    callback right-clicked;
+}
+
+export component ControlActionButton inherits Rectangle {
+    in property <int> action-id: 0;
+    in property <string> cluster-leaf-id: "";
+    in property <int> playback-order-index: 0;
+    in property <int> repeat-mode: 0;
+    in property <bool> layout-edit-mode: false;
+    callback invoked(int);
+    callback open-add-menu(string);
+
+    pure function icon-for-action(action: int) -> string {
+        if action == 1 { return "+"; }
+        if action == 2 { return "⏮"; }
+        if action == 3 { return "▶"; }
+        if action == 4 { return "⏸"; }
+        if action == 5 { return "⏹"; }
+        if action == 6 { return "⏭"; }
+        if action == 7 { return "⇄"; }
+        if action == 8 { return "⟳"; }
+        if action == 9 { return "◫"; }
+        if action == 10 { return "⚙"; }
+        return "•";
+    }
+
+    pure function font-size-for-action(action: int) -> length {
+        if action == 1 { return 20px; }
+        if action == 3 { return 20px; }
+        if action == 10 { return 21px; }
+        if action == 7 { return 20px; }
+        if action == 8 { return 19px; }
+        return 18px;
+    }
+
+    pure function primary-for-action(action: int) -> bool {
+        if action == 3 { return true; }
+        if action == 7 { return root.playback-order-index != 0; }
+        if action == 8 { return root.repeat-mode != 0; }
+        if action == 9 { return root.layout-edit-mode; }
+        return false;
+    }
+
+    width: 32px;
+    height: 32px;
+
+    PlayerButton {
+        icon-text: root.icon-for-action(root.action-id);
+        font-size: root.font-size-for-action(root.action-id);
+        is-primary: root.primary-for-action(root.action-id);
+        clicked => { root.invoked(root.action-id); }
+        right-clicked => {
+            if (root.layout-edit-mode) {
+                root.open-add-menu(root.cluster-leaf-id);
+            }
+        }
+    }
+
+    if root.action-id == 7 && root.playback-order-index == 2 : Rectangle {
+        width: 10px;
+        height: 10px;
+        x: 15px;
+        y: 11px;
+        border-radius: 5px;
+        background: #2a6def;
+        Text {
+            text: "?";
+            color: white;
+            font-size: 7px;
+            font-weight: 700;
+            horizontal-alignment: center;
+            vertical-alignment: center;
+        }
+    }
+
+    if root.action-id == 8 && root.repeat-mode == 2 : Rectangle {
+        width: 10px;
+        height: 10px;
+        x: 15px;
+        y: 11px;
+        border-radius: 5px;
+        background: #2a6def;
+        Text {
+            text: "1";
+            color: white;
+            font-size: 7px;
+            font-weight: 700;
+            horizontal-alignment: center;
+            vertical-alignment: center;
+        }
+    }
+}
+
+export component ButtonCluster inherits Rectangle {
+    in property <string> cluster-leaf-id: "";
+    in property <[int]> button-actions: [];
+    in property <int> playback-order-index: 0;
+    in property <int> repeat-mode: 0;
+    in property <bool> layout-edit-mode: false;
+    callback action-invoked(int);
+    callback request-add-menu(string);
+
+    width: max(32px, button-actions.length * 32px + max(0, button-actions.length - 1) * 8px);
+    height: 32px;
+
+    if root.button-actions.length == 0 : Rectangle {
+        width: 32px;
+        height: 32px;
+        border-radius: 3px;
+        border-width: 1px;
+        border-color: #3d3d3d;
+        background: empty-cluster-ta.has-hover ? #333 : #2a2a2a;
+        Text {
+            text: "…";
+            color: #999;
+            font-size: 16px;
+            horizontal-alignment: center;
+            vertical-alignment: center;
+        }
+        empty-cluster-ta := TouchArea {
+            pointer-event(event) => {
+                if (root.layout-edit-mode
+                    && event.button == PointerEventButton.right
+                    && event.kind == PointerEventKind.down) {
+                    root.request-add-menu(root.cluster-leaf-id);
+                }
+            }
+        }
+    }
+
+    HorizontalLayout {
+        spacing: 8px;
+        for action in root.button-actions : ControlActionButton {
+            action-id: action;
+            cluster-leaf-id: root.cluster-leaf-id;
+            playback-order-index: root.playback-order-index;
+            repeat-mode: root.repeat-mode;
+            layout-edit-mode: root.layout-edit-mode;
+            invoked(action-id) => { root.action-invoked(action-id); }
+            open-add-menu(cluster-leaf-id) => { root.request-add-menu(cluster-leaf-id); }
+        }
+    }
+}

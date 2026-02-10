@@ -3069,33 +3069,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "music_player"
-version = "0.1.0"
-dependencies = [
- "ape",
- "colog",
- "cpal",
- "dirs",
- "getrandom 0.3.4",
- "governor",
- "id3",
- "log",
- "metaflac",
- "rand 0.9.2",
- "rfd",
- "rubato",
- "rusqlite",
- "serde",
- "serde_json",
- "slint",
- "slint-build",
- "symphonia",
- "tokio",
- "toml 0.8.23",
- "uuid",
-]
-
-[[package]]
 name = "natord"
 version = "1.0.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4388,6 +4361,33 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0c6a884d2998352bb4daf0183589aec883f16a6da1f4dde84d8e2e9a5409a1ce"
 dependencies = [
  "bytemuck",
+]
+
+[[package]]
+name = "roqtune"
+version = "0.1.0"
+dependencies = [
+ "ape",
+ "colog",
+ "cpal",
+ "dirs",
+ "getrandom 0.3.4",
+ "governor",
+ "id3",
+ "log",
+ "metaflac",
+ "rand 0.9.2",
+ "rfd",
+ "rubato",
+ "rusqlite",
+ "serde",
+ "serde_json",
+ "slint",
+ "slint-build",
+ "symphonia",
+ "tokio",
+ "toml 0.8.23",
+ "uuid",
 ]
 
 [[package]]

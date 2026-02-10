@@ -1,0 +1,258 @@
+export component VolumeSliderControl inherits Rectangle {
+    in-out property <float> value: 1.0;
+    callback changed(float);
+
+    private property <length> icon-slot-width: 18px;
+    private property <length> track-height: 6px;
+    private property <length> handle-base-size: 10px;
+    private property <length> handle-hover-size: 12px;
+    private property <length> track-center-adjust: root.track-height / 3;
+    background: transparent;
+
+    HorizontalLayout {
+        spacing: 6px;
+
+        icon-slot := Rectangle {
+            width: root.icon-slot-width;
+            height: root.height;
+            background: transparent;
+            Text {
+                width: parent.width;
+                height: parent.height;
+                text: "🔊";
+                color: #888;
+                font-size: max(9px, min(12px, root.height * 0.45));
+                horizontal-alignment: center;
+                vertical-alignment: center;
+            }
+        }
+
+        slider-area := Rectangle {
+            horizontal-stretch: 1;
+            height: root.height;
+            background: transparent;
+
+            volume-track := Rectangle {
+                x: 0px;
+                y: (parent.height - self.height) / 2 - root.track-center-adjust;
+                width: parent.width;
+                height: root.track-height;
+                border-radius: 3px;
+                background: #333;
+            }
+
+            Rectangle {
+                x: volume-track.x;
+                y: volume-track.y;
+                width: volume-track.width * root.value;
+                height: volume-track.height;
+                background: #2a6def;
+                border-radius: 3px;
+            }
+
+            volume-handle := Rectangle {
+                width: root.handle-base-size;
+                height: root.handle-base-size;
+                x: volume-track.width > 0px ? volume-track.x + (volume-track.width * root.value) - self.width / 2 : volume-track.x;
+                y: volume-track.y + (volume-track.height - self.height) / 2;
+                background: white;
+                border-radius: 5px;
+                animate x { duration: 100ms; easing: ease-out; }
+            }
+
+            states [
+                hover when ta-volume.has-hover || ta-volume.pressed: {
+                    volume-handle.width: root.handle-hover-size;
+                    volume-handle.height: root.handle-hover-size;
+                }
+            ]
+
+            ta-volume := TouchArea {
+                x: 0px;
+                y: 0px;
+                width: parent.width;
+                height: parent.height;
+                mouse-cursor: pointer;
+                clicked => {
+                    if (volume-track.width > 0px) {
+                        root.value = max(0, min(1, self.mouse-x / volume-track.width));
+                        root.changed(root.value);
+                    }
+                }
+                moved => {
+                    if (self.pressed && volume-track.width > 0px) {
+                        root.value = max(0, min(1, self.mouse-x / volume-track.width));
+                        root.changed(root.value);
+                    }
+                }
+            }
+
+            if ta-volume.pressed : Rectangle {
+                width: 32px;
+                height: 12px;
+                x: min(
+                    volume-track.x + volume-track.width - self.width - 2px,
+                    max(volume-track.x + 2px, volume-handle.x - self.width / 2)
+                );
+                y: max(0px, volume-track.y - self.height - 2px);
+                z: 10;
+                border-radius: 3px;
+                background: #1f1f1f;
+                border-width: 1px;
+                border-color: #3a3a3a;
+                Text {
+                    text: floor(root.value * 100) + "%";
+                    color: #ddd;
+                    font-size: 8px;
+                    horizontal-alignment: center;
+                    vertical-alignment: center;
+                }
+            }
+        }
+    }
+}
+
+export component SeekBarControl inherits Rectangle {
+    in property <float> position-percentage: 0.0;
+    in property <string> elapsed-text: "0:00";
+    in property <string> total-text: "0:00";
+    callback seek-requested(float);
+
+    height: 32px;
+    background: #242424;
+    HorizontalLayout {
+        padding-left: 12px;
+        padding-right: 12px;
+        padding-top: 8px;
+        padding-bottom: 8px;
+        spacing: 10px;
+
+        Text {
+            text: root.elapsed-text;
+            color: #888;
+            font-size: 12px;
+            vertical-alignment: center;
+            horizontal-alignment: right;
+            width: 45px;
+        }
+
+        seekbar := Rectangle {
+            height: 6px;
+            border-radius: 3px;
+            background: #333;
+            horizontal-stretch: 1;
+            Rectangle {
+                x: 0;
+                y: 0;
+                width: seekbar.width * root.position-percentage;
+                height: parent.height;
+                background: #2a6def;
+                border-radius: 3px;
+                animate width { duration: 150ms; easing: ease-out; }
+            }
+            handle := Rectangle {
+                width: 12px;
+                height: 12px;
+                x: (seekbar.width * root.position-percentage) - self.width / 2;
+                y: (parent.height - self.height) / 2;
+                background: white;
+                border-radius: 6px;
+                drop-shadow-offset-y: 1px;
+                drop-shadow-blur: 2px;
+                drop-shadow-color: #00000080;
+                animate x { duration: 150ms; easing: ease-out; }
+            }
+            states [
+                hover when ta-seek.has-hover || ta-seek.pressed: {
+                    handle.background: #ffffff;
+                    handle.width: 14px;
+                    handle.height: 14px;
+                }
+            ]
+            ta-seek := TouchArea {
+                width: parent.width;
+                height: 20px;
+                mouse-cursor: pointer;
+                clicked => { root.seek-requested(max(0, min(1, self.mouse-x / seekbar.width))); }
+                moved => {
+                    if (self.pressed) {
+                        root.seek-requested(max(0, min(1, self.mouse-x / seekbar.width)));
+                    }
+                }
+            }
+        }
+
+        Text {
+            text: root.total-text;
+            color: #888;
+            font-size: 12px;
+            vertical-alignment: center;
+            width: 45px;
+        }
+    }
+}
+
+export component MetadataViewer inherits Rectangle {
+    in property <string> display-title: "";
+    in property <string> display-artist: "";
+    in property <string> display-album: "";
+    in property <string> display-date: "";
+    in property <string> display-genre: "";
+
+    background: transparent;
+    VerticalLayout {
+        spacing: 4px;
+        if root.display-title != "" : Text {
+            text: root.display-title;
+            color: #eee;
+            font-size: 14px;
+            font-weight: 700;
+            wrap: word-wrap;
+            overflow: elide;
+        }
+        if root.display-artist != "" : Text {
+            text: root.display-artist;
+            color: #ccc;
+            font-size: 13px;
+            wrap: word-wrap;
+            overflow: elide;
+        }
+        if root.display-album != "" : Text {
+            text: root.display-album;
+            color: #aaa;
+            font-size: 12px;
+            wrap: word-wrap;
+            overflow: elide;
+        }
+        HorizontalLayout {
+            spacing: 8px;
+            if root.display-date != "" : Text {
+                text: root.display-date;
+                color: #888;
+                font-size: 11px;
+            }
+            if root.display-genre != "" : Text {
+                text: root.display-genre;
+                color: #888;
+                font-size: 11px;
+                horizontal-stretch: 1;
+                overflow: elide;
+            }
+        }
+    }
+}
+
+export component AlbumArtViewer inherits Rectangle {
+    in property <image> art-source;
+
+    vertical-stretch: 1;
+    height: 100px;
+    background: #202020;
+    border-radius: 4px;
+    Image {
+        source: root.art-source;
+        width: parent.width;
+        height: parent.height;
+        image-fit: contain;
+    }
+}

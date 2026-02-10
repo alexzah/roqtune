@@ -306,7 +306,7 @@ impl UiManager {
         let mut hasher = DefaultHasher::new();
         track_path.hash(&mut hasher);
         let hash = hasher.finish();
-        let cache_dir = dirs::cache_dir()?.join("music_player").join("covers");
+        let cache_dir = dirs::cache_dir()?.join("roqtune").join("covers");
         if !cache_dir.exists() {
             std::fs::create_dir_all(&cache_dir).ok()?;
         }

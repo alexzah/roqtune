@@ -1,0 +1,137 @@
+import { LineEdit } from "std-widgets.slint";
+
+import { TrackRowData } from "../types.slint";
+import { ContextMenu } from "menus.slint";
+
+export component PlaylistRow inherits Rectangle {
+    in property <string> name;
+    in property <bool> is-active;
+    in property <bool> is-editing;
+    callback clicked();
+    callback renamed(string);
+    callback context-menu-rename();
+    callback context-menu-delete();
+    callback cancel-edit();
+
+    property <length> menu-x;
+    property <length> menu-y;
+
+    height: 24px;
+    background: is-active ? #3d3d3d : ta.has-hover ? #333 : transparent;
+    border-radius: 2px;
+
+    if !is-editing : Text {
+        x: 8px;
+        text: root.name;
+        color: is-active ? #eee : #aaa;
+        font-size: 13px;
+        vertical-alignment: center;
+        horizontal-alignment: left;
+    }
+
+    if is-editing : LineEdit {
+        x: 4px;
+        width: parent.width - 8px;
+        height: parent.height - 4px;
+        text: root.name;
+        accepted => {
+            root.renamed(self.text);
+        }
+        init => {
+            self.focus();
+        }
+    }
+
+    ta := TouchArea {
+        visible: !is-editing;
+        clicked => { root.clicked(); }
+        pointer-event(event) => {
+            if (event.button == PointerEventButton.right && event.kind == PointerEventKind.down) {
+                root.menu-x = self.mouse-x;
+                root.menu-y = self.mouse-y;
+                menu.show();
+            }
+        }
+    }
+
+    menu := ContextMenu {
+        is-playlist: true;
+        x: root.menu-x;
+        y: root.menu-y;
+        rename => {
+            root.context-menu-rename();
+        }
+        delete => {
+            root.context-menu-delete();
+        }
+    }
+
+    FocusScope {
+        visible: root.is-editing;
+        key-pressed(event) => {
+            if (event.text == Key.Escape) {
+                root.cancel-edit();
+                return accept;
+            }
+            reject
+        }
+    }
+}
+
+export component TrackRow inherits Rectangle {
+    in property <TrackRowData> data;
+    in property <bool> is-playing;
+    in property <bool> is-hover;
+    in property <[string]> headers: [];
+    in property <[int]> column-widths-px: [];
+    in property <length> null-column-width: 120px;
+
+    pure function column-width-for-index(index: int) -> length {
+        if index >= 0 && index < root.column-widths-px.length {
+            return max(48px, root.column-widths-px[index] * 1px);
+        }
+        return 140px;
+    }
+
+    height: 30px;
+    background: data.selected ? #3d3d3d : is-hover ? #333 : transparent;
+    animate background { duration: 100ms; }
+
+    HorizontalLayout {
+        padding-left: 8px;
+        padding-right: 8px;
+        spacing: 10px;
+
+        Rectangle {
+            width: 40px;
+            Text {
+                text: root.data.status;
+                color: #2a6def;
+                font-size: 14px;
+                horizontal-alignment: center;
+                vertical-alignment: center;
+            }
+        }
+
+        for column-value[index] in root.data.values : Rectangle {
+            width: root.column-width-for-index(index);
+            clip: true;
+            Text {
+                x: 0px;
+                width: parent.width;
+                text: column-value;
+                color: (index < root.headers.length && root.headers[index] == "Title") ? #eee : #aaa;
+                font-size: 13px;
+                vertical-alignment: center;
+                overflow: elide;
+                horizontal-alignment: left;
+            }
+        }
+
+        Rectangle { horizontal-stretch: 1; }
+
+        Rectangle {
+            width: root.null-column-width;
+        }
+    }
+}
