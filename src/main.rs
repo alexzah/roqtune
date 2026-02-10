@@ -1958,7 +1958,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             album_art_bounds,
         )
         .map(|bounds| bounds.min_px)
-        .unwrap_or(48)
+        .unwrap_or(1)
     });
 
     let config_state_clone = Arc::clone(&config_state);
@@ -3965,6 +3965,25 @@ mod tests {
             slint_ui.contains("for leaf-id[i] in root.layout_leaf_ids : Rectangle {")
                 && slint_ui.contains("root.layout-region-panel-kind(i) == 7"),
             "Track list should be rendered as a movable docking panel that supports duplicate instances"
+        );
+    }
+
+    #[test]
+    fn test_playlist_column_width_rendering_matches_runtime_width_model() {
+        let slint_ui = include_str!("roqtune.slint");
+        let playlist_ui = include_str!("ui/components/playlist.slint");
+
+        assert!(
+            slint_ui.contains("return max(1px, root.playlist_column_widths_px[index] * 1px);"),
+            "Header width rendering should use runtime column widths directly"
+        );
+        assert!(
+            slint_ui.contains("let min_width_px = max(1, root.column_resize_min_width_px);"),
+            "Resize preview clamp should honor callback-provided minimums without a fixed floor"
+        );
+        assert!(
+            playlist_ui.contains("return max(1px, root.column-widths-px[index] * 1px);"),
+            "Row cells should use the same runtime width model as header hit-testing"
         );
     }
 

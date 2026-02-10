@@ -143,7 +143,7 @@ export component AppWindow inherits Window {
     in-out property <bool> column_resize_active: false;
     in-out property <int> column_hover_divider: -1;
     in-out property <int> column_resize_start_width_px: 0;
-    in-out property <int> column_resize_min_width_px: 48;
+    in-out property <int> column_resize_min_width_px: 1;
     in-out property <int> column_resize_max_width_px: 1024;
     in-out property <int> column_resize_preview_width_px: 0;
     in-out property <int> column_click_candidate: -1;
@@ -225,7 +225,7 @@ export component AppWindow inherits Window {
 
     pure function playlist-column-width(index: int) -> length {
         if index >= 0 && index < root.playlist_column_widths_px.length {
-            return max(48px, root.playlist_column_widths_px[index] * 1px);
+            return max(1px, root.playlist_column_widths_px[index] * 1px);
         }
         return 140px;
     }
@@ -723,7 +723,7 @@ export component AppWindow inherits Window {
                                     root.column_hover_divider = hovered_divider;
                                     if (root.column_resize_active && root.column_resize_index != -1) {
                                         let delta_px = floor((self.mouse-x - root.column_resize_start_mouse_x) / 1px);
-                                        let min_width_px = max(48, root.column_resize_min_width_px);
+                                        let min_width_px = max(1, root.column_resize_min_width_px);
                                         let max_width_px = max(min_width_px, root.column_resize_max_width_px);
                                         let new_width_px = min(max_width_px, max(min_width_px, root.column_resize_start_width_px + delta_px));
                                         root.column_resize_preview_width_px = new_width_px;

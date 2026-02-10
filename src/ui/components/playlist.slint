@@ -90,7 +90,7 @@ export component TrackRow inherits Rectangle {
 
     pure function column-width-for-index(index: int) -> length {
         if index >= 0 && index < root.column-widths-px.length {
-            return max(48px, root.column-widths-px[index] * 1px);
+            return max(1px, root.column-widths-px[index] * 1px);
         }
         return 140px;
     }
