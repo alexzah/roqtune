@@ -45,7 +45,10 @@ pub struct UiManager {
     track_ids: Vec<String>,
     track_paths: Vec<PathBuf>,
     track_metadata: Vec<TrackMetadata>,
+    view_indices: Vec<usize>,
     selected_indices: Vec<usize>,
+    copied_track_paths: Vec<PathBuf>,
+    active_playing_index: Option<usize>,
     drag_indices: Vec<usize>,
     is_dragging: bool,
     pressed_index: Option<usize>,
@@ -62,6 +65,10 @@ pub struct UiManager {
     playlist_column_width_overrides_px: HashMap<String, u32>,
     playlist_columns_available_width_px: u32,
     playlist_columns_content_width_px: u32,
+    filter_sort_column_key: Option<String>,
+    filter_sort_direction: Option<PlaylistSortDirection>,
+    filter_search_query: String,
+    filter_search_visible: bool,
     playback_active: bool,
     processed_message_count: u64,
     lagged_message_count: u64,
@@ -95,6 +102,12 @@ struct ColumnWidthProfile {
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct CoverArtLookupRequest {
     track_path: Option<PathBuf>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum PlaylistSortDirection {
+    Ascending,
+    Descending,
 }
 
 fn fit_column_widths_to_available_space(
@@ -188,7 +201,10 @@ impl UiManager {
             track_ids: Vec::new(),
             track_paths: Vec::new(),
             track_metadata: Vec::new(),
+            view_indices: Vec::new(),
             selected_indices: Vec::new(),
+            copied_track_paths: Vec::new(),
+            active_playing_index: None,
             drag_indices: Vec::new(),
             is_dragging: false,
             pressed_index: None,
@@ -205,6 +221,10 @@ impl UiManager {
             playlist_column_width_overrides_px: HashMap::new(),
             playlist_columns_available_width_px: 0,
             playlist_columns_content_width_px: 0,
+            filter_sort_column_key: None,
+            filter_sort_direction: None,
+            filter_search_query: String::new(),
+            filter_search_visible: false,
             playback_active: false,
             processed_message_count: 0,
             lagged_message_count: 0,
@@ -778,6 +798,419 @@ impl UiManager {
         ));
     }
 
+    fn normalized_search_query(query: &str) -> String {
+        query.trim().to_ascii_lowercase()
+    }
+
+    fn is_filter_applied(&self) -> bool {
+        self.filter_sort_direction.is_some() || !self.filter_search_query.trim().is_empty()
+    }
+
+    fn is_filter_view_active(&self) -> bool {
+        self.is_filter_applied()
+    }
+
+    fn map_view_to_source_index(&self, view_index: usize) -> Option<usize> {
+        if self.view_indices.is_empty() {
+            return (view_index < self.track_metadata.len()).then_some(view_index);
+        }
+        self.view_indices.get(view_index).copied()
+    }
+
+    fn map_source_to_view_index(&self, source_index: usize) -> Option<usize> {
+        if self.view_indices.is_empty() {
+            return (source_index < self.track_metadata.len()).then_some(source_index);
+        }
+        self.view_indices
+            .iter()
+            .position(|&candidate| candidate == source_index)
+    }
+
+    fn active_sort_column_state(&self) -> Option<(usize, String)> {
+        let sort_key = self.filter_sort_column_key.as_ref()?;
+        self.visible_playlist_columns()
+            .iter()
+            .enumerate()
+            .find_map(|(index, column)| {
+                (Self::playlist_column_key(column) == *sort_key)
+                    .then(|| (index, column.name.clone()))
+            })
+    }
+
+    fn sort_state_model(&self) -> Vec<i32> {
+        let active_key = self.filter_sort_column_key.as_ref();
+        let active_state = self.filter_sort_direction;
+        self.visible_playlist_columns()
+            .iter()
+            .map(|column| {
+                let key = Self::playlist_column_key(column);
+                if active_key == Some(&key) {
+                    match active_state {
+                        Some(PlaylistSortDirection::Ascending) => 1,
+                        Some(PlaylistSortDirection::Descending) => 2,
+                        None => 0,
+                    }
+                } else {
+                    0
+                }
+            })
+            .collect()
+    }
+
+    fn filter_summary_text(&self) -> String {
+        let mut parts: Vec<String> = Vec::new();
+
+        if let Some((_, column_name)) = self.active_sort_column_state() {
+            let direction = match self.filter_sort_direction {
+                Some(PlaylistSortDirection::Ascending) => "asc",
+                Some(PlaylistSortDirection::Descending) => "desc",
+                None => "",
+            };
+            if !direction.is_empty() {
+                parts.push(format!("Sort: {} ({})", column_name, direction));
+            }
+        }
+
+        let query = self.filter_search_query.trim();
+        if !query.is_empty() {
+            parts.push(format!("Search: \"{}\"", query));
+        }
+
+        if parts.is_empty() {
+            if self.filter_search_visible {
+                return "Filter view active".to_string();
+            }
+            return String::new();
+        }
+
+        format!(
+            "Filter view ({}/{}): {}",
+            self.view_indices.len(),
+            self.track_metadata.len(),
+            parts.join(" | ")
+        )
+    }
+
+    fn search_result_text(&self) -> String {
+        let total = self.track_metadata.len();
+        let found = if self.is_filter_applied() || !self.view_indices.is_empty() {
+            self.view_indices.len()
+        } else {
+            total
+        };
+        format!("{}/{}", found, total)
+    }
+
+    fn sync_filter_state_to_ui(&self) {
+        let sort_states = self.sort_state_model();
+        let filter_active = self.is_filter_view_active();
+        let search_visible = self.filter_search_visible;
+        let search_query = self.filter_search_query.clone();
+        let search_result_text = self.search_result_text();
+        let summary = self.filter_summary_text();
+
+        let _ = self.ui.upgrade_in_event_loop(move |ui| {
+            ui.set_playlist_filter_active(filter_active);
+            ui.set_playlist_search_visible(search_visible);
+            ui.set_playlist_search_query(search_query.into());
+            ui.set_playlist_search_result_text(search_result_text.into());
+            ui.set_playlist_filter_summary(summary.into());
+            ui.set_playlist_column_sort_states(ModelRc::from(Rc::new(VecModel::from(sort_states))));
+        });
+    }
+
+    fn rebuild_track_model(&mut self) {
+        let normalized_query = Self::normalized_search_query(&self.filter_search_query);
+        let mut active_sort = self.active_sort_column_state();
+
+        if self.filter_sort_direction.is_some() && active_sort.is_none() {
+            self.filter_sort_column_key = None;
+            self.filter_sort_direction = None;
+            active_sort = None;
+        }
+
+        let active_sort_index = active_sort.map(|(index, _)| index);
+        let descending = self.filter_sort_direction == Some(PlaylistSortDirection::Descending);
+
+        struct ViewRow {
+            source_index: usize,
+            values: Vec<String>,
+            sort_key: String,
+        }
+
+        let mut rows: Vec<ViewRow> = Vec::with_capacity(self.track_metadata.len());
+        for (source_index, metadata) in self.track_metadata.iter().enumerate() {
+            let values = Self::build_playlist_row_values(metadata, &self.playlist_columns);
+            if !normalized_query.is_empty()
+                && !values
+                    .iter()
+                    .any(|value| value.to_ascii_lowercase().contains(&normalized_query))
+            {
+                continue;
+            }
+
+            let sort_key = active_sort_index
+                .and_then(|index| values.get(index))
+                .map(|value| value.to_ascii_lowercase())
+                .unwrap_or_default();
+
+            rows.push(ViewRow {
+                source_index,
+                values,
+                sort_key,
+            });
+        }
+
+        if active_sort_index.is_some() {
+            rows.sort_by(|lhs, rhs| {
+                let order = lhs
+                    .sort_key
+                    .cmp(&rhs.sort_key)
+                    .then_with(|| lhs.source_index.cmp(&rhs.source_index));
+                if descending {
+                    order.reverse()
+                } else {
+                    order
+                }
+            });
+        }
+
+        self.view_indices = rows.iter().map(|row| row.source_index).collect();
+        let selected_set: HashSet<usize> = self.selected_indices.iter().copied().collect();
+        let active_playing_index = self.active_playing_index;
+        let playback_active = self.playback_active;
+        let selected_view_index = self
+            .selected_indices
+            .iter()
+            .find_map(|&source_index| self.map_source_to_view_index(source_index))
+            .map(|index| index as i32)
+            .unwrap_or(-1);
+        let playing_view_index = active_playing_index
+            .and_then(|source_index| self.map_source_to_view_index(source_index))
+            .map(|index| index as i32)
+            .unwrap_or(-1);
+        let row_data: Vec<(Vec<String>, bool, String)> = rows
+            .into_iter()
+            .map(|row| {
+                let status = if Some(row.source_index) == active_playing_index {
+                    if playback_active {
+                        "▶️"
+                    } else {
+                        "⏸️"
+                    }
+                } else {
+                    ""
+                };
+                (
+                    row.values,
+                    selected_set.contains(&row.source_index),
+                    status.to_string(),
+                )
+            })
+            .collect();
+
+        let _ = self.ui.upgrade_in_event_loop(move |ui| {
+            let track_model_strong = ui.get_track_model();
+            let track_model = track_model_strong
+                .as_any()
+                .downcast_ref::<VecModel<TrackRowData>>()
+                .expect("VecModel<TrackRowData> expected");
+
+            while track_model.row_count() > 0 {
+                track_model.remove(0);
+            }
+
+            for (values, selected, status) in row_data {
+                let values_shared: Vec<slint::SharedString> =
+                    values.into_iter().map(Into::into).collect();
+                track_model.push(TrackRowData {
+                    status: status.into(),
+                    values: ModelRc::from(values_shared.as_slice()),
+                    selected,
+                });
+            }
+
+            ui.set_selected_track_index(selected_view_index);
+            ui.set_playing_track_index(playing_view_index);
+        });
+
+        self.sync_filter_state_to_ui();
+    }
+
+    fn open_playlist_search(&mut self) {
+        self.filter_search_visible = true;
+        self.sync_filter_state_to_ui();
+    }
+
+    fn close_playlist_search(&mut self) {
+        self.filter_search_visible = false;
+        if !self.filter_search_query.is_empty() {
+            self.filter_search_query.clear();
+            self.rebuild_track_model();
+        } else {
+            self.sync_filter_state_to_ui();
+        }
+    }
+
+    fn set_playlist_search_query(&mut self, query: String) {
+        self.filter_search_visible = true;
+        self.filter_search_query = query;
+        self.rebuild_track_model();
+    }
+
+    fn clear_playlist_filter_view(&mut self) {
+        self.filter_sort_column_key = None;
+        self.filter_sort_direction = None;
+        self.filter_search_query.clear();
+        self.filter_search_visible = false;
+        self.rebuild_track_model();
+    }
+
+    fn cycle_playlist_sort_by_column(&mut self, view_column_index: usize) {
+        let sort_key = {
+            let visible_columns = self.visible_playlist_columns();
+            let Some(column) = visible_columns.get(view_column_index) else {
+                return;
+            };
+            Self::playlist_column_key(column)
+        };
+
+        if self.filter_sort_column_key.as_deref() != Some(sort_key.as_str()) {
+            self.filter_sort_column_key = Some(sort_key);
+            self.filter_sort_direction = Some(PlaylistSortDirection::Ascending);
+        } else {
+            match self.filter_sort_direction {
+                Some(PlaylistSortDirection::Ascending) => {
+                    self.filter_sort_direction = Some(PlaylistSortDirection::Descending);
+                }
+                Some(PlaylistSortDirection::Descending) => {
+                    self.filter_sort_direction = None;
+                    self.filter_sort_column_key = None;
+                }
+                None => {
+                    self.filter_sort_direction = Some(PlaylistSortDirection::Ascending);
+                }
+            }
+        }
+
+        self.rebuild_track_model();
+    }
+
+    fn apply_filter_view_snapshot_locally(&mut self, source_indices: Vec<usize>) {
+        let len = self.track_ids.len();
+        let mut seen_indices = HashSet::new();
+        let normalized: Vec<usize> = source_indices
+            .into_iter()
+            .filter(|&index| index < len)
+            .filter(|index| seen_indices.insert(*index))
+            .collect();
+
+        let selected_ids: Vec<String> = self
+            .selected_indices
+            .iter()
+            .filter_map(|&index| self.track_ids.get(index).cloned())
+            .collect();
+        let active_playing_id = self
+            .active_playing_index
+            .and_then(|index| self.track_ids.get(index).cloned());
+
+        let mut new_track_ids = Vec::with_capacity(normalized.len());
+        let mut new_track_paths = Vec::with_capacity(normalized.len());
+        let mut new_track_metadata = Vec::with_capacity(normalized.len());
+        for &index in &normalized {
+            if let (Some(id), Some(path), Some(metadata)) = (
+                self.track_ids.get(index),
+                self.track_paths.get(index),
+                self.track_metadata.get(index),
+            ) {
+                new_track_ids.push(id.clone());
+                new_track_paths.push(path.clone());
+                new_track_metadata.push(metadata.clone());
+            }
+        }
+
+        self.track_ids = new_track_ids;
+        self.track_paths = new_track_paths;
+        self.track_metadata = new_track_metadata;
+
+        self.selected_indices = selected_ids
+            .into_iter()
+            .filter_map(|selected_id| self.track_ids.iter().position(|id| id == &selected_id))
+            .collect();
+        self.selected_indices.sort_unstable();
+        self.selected_indices.dedup();
+
+        self.active_playing_index = active_playing_id
+            .as_ref()
+            .and_then(|playing_id| self.track_ids.iter().position(|id| id == playing_id));
+        if self.active_playing_index.is_none() {
+            self.playback_active = false;
+            self.current_playing_track_path = None;
+            self.current_playing_track_metadata = None;
+        }
+
+        self.filter_sort_column_key = None;
+        self.filter_sort_direction = None;
+        self.filter_search_query.clear();
+        self.filter_search_visible = false;
+
+        self.refresh_playlist_column_content_targets();
+        self.apply_playlist_column_layout();
+        let selected_indices = self.selected_indices.clone();
+        let playing_path = self.current_playing_track_path.clone();
+        let playing_metadata = self.current_playing_track_metadata.clone();
+        self.update_display_for_selection(
+            &selected_indices,
+            playing_path.as_ref(),
+            playing_metadata.as_ref(),
+        );
+        self.rebuild_track_model();
+    }
+
+    fn build_copied_track_paths(
+        track_paths: &[PathBuf],
+        selected_indices: &[usize],
+    ) -> Vec<PathBuf> {
+        let mut normalized = selected_indices.to_vec();
+        normalized.sort_unstable();
+        normalized.dedup();
+        normalized
+            .into_iter()
+            .filter_map(|index| track_paths.get(index).cloned())
+            .collect()
+    }
+
+    fn copy_selected_tracks(&mut self) {
+        if self.selected_indices.is_empty() {
+            return;
+        }
+        self.copied_track_paths =
+            Self::build_copied_track_paths(&self.track_paths, &self.selected_indices);
+        debug!(
+            "UiManager: copied {} track(s) from selection",
+            self.copied_track_paths.len()
+        );
+    }
+
+    fn paste_copied_tracks(&mut self) {
+        if self.copied_track_paths.is_empty() {
+            return;
+        }
+        let _ = self.bus_sender.send(protocol::Message::Playlist(
+            protocol::PlaylistMessage::PasteTracks(self.copied_track_paths.clone()),
+        ));
+    }
+
+    fn cut_selected_tracks(&mut self) {
+        if self.is_filter_view_active() || self.selected_indices.is_empty() {
+            return;
+        }
+        self.copy_selected_tracks();
+        let _ = self.bus_sender.send(protocol::Message::Playlist(
+            protocol::PlaylistMessage::DeleteTracks(self.selected_indices.clone()),
+        ));
+    }
+
     fn read_track_metadata(&self, path: &PathBuf) -> TrackMetadata {
         debug!("Reading metadata for: {}", path.display());
 
@@ -959,13 +1392,17 @@ impl UiManager {
             "on_pointer_down: index={}, ctrl={}, shift={}",
             pressed_index, ctrl, shift
         );
-        self.pressed_index = Some(pressed_index);
+        let Some(source_index) = self.map_view_to_source_index(pressed_index) else {
+            self.pressed_index = None;
+            return;
+        };
+        self.pressed_index = Some(source_index);
 
-        let is_already_selected = self.selected_indices.contains(&pressed_index);
+        let is_already_selected = self.selected_indices.contains(&source_index);
         if !is_already_selected || ctrl || shift {
             let _ = self.bus_sender.send(protocol::Message::Playlist(
                 protocol::PlaylistMessage::SelectTrackMulti {
-                    index: pressed_index,
+                    index: source_index,
                     ctrl,
                     shift,
                 },
@@ -975,18 +1412,27 @@ impl UiManager {
 
     /// Starts drag state for track row reordering.
     pub fn on_drag_start(&mut self, pressed_index: usize) {
+        if self.is_filter_view_active() {
+            self.drag_indices.clear();
+            self.is_dragging = false;
+            return;
+        }
+
+        let Some(source_index) = self.map_view_to_source_index(pressed_index) else {
+            return;
+        };
         debug!(
             ">>> on_drag_start START: pressed_index={}, self.selected_indices={:?}",
-            pressed_index, self.selected_indices
+            source_index, self.selected_indices
         );
-        if self.selected_indices.contains(&pressed_index) {
+        if self.selected_indices.contains(&source_index) {
             self.drag_indices = self.selected_indices.clone();
             debug!(
                 ">>> MULTI-SELECT DRAG: using drag_indices {:?}",
                 self.drag_indices
             );
         } else {
-            self.drag_indices = vec![pressed_index];
+            self.drag_indices = vec![source_index];
             debug!(">>> SINGLE DRAG: using index {:?}", self.drag_indices);
         }
         self.drag_indices.sort();
@@ -999,6 +1445,9 @@ impl UiManager {
 
     /// Updates the visual drag target gap during row drag.
     pub fn on_drag_move(&mut self, drop_gap: usize) {
+        if self.is_filter_view_active() {
+            return;
+        }
         if self.is_dragging {
             let _ = self.ui.upgrade_in_event_loop(move |ui| {
                 ui.set_drop_index(drop_gap as i32);
@@ -1008,6 +1457,18 @@ impl UiManager {
 
     /// Finalizes drag state and emits track reorder command when applicable.
     pub fn on_drag_end(&mut self, drop_gap: usize) {
+        if self.is_filter_view_active() {
+            self.drag_indices.clear();
+            self.is_dragging = false;
+            self.pressed_index = None;
+            let _ = self.ui.upgrade_in_event_loop(move |ui| {
+                ui.set_is_dragging(false);
+                ui.set_drop_index(-1);
+                ui.set_pressed_index(-1);
+            });
+            return;
+        }
+
         debug!(
             ">>> on_drag_end START: is_dragging={}, drop_gap={}, drag_indices={:?}",
             self.is_dragging, drop_gap, self.drag_indices
@@ -1083,44 +1544,15 @@ impl UiManager {
                             self.track_ids.clear();
                             self.track_paths.clear();
                             self.track_metadata.clear();
-
-                            let mut track_row_values: Vec<Vec<String>> = Vec::new();
                             for track in tracks {
                                 self.track_ids.push(track.id.clone());
                                 self.track_paths.push(track.path.clone());
                                 let metadata = self.read_track_metadata(&track.path);
-                                self.track_metadata.push(metadata.clone());
-
-                                let row_values = Self::build_playlist_row_values(
-                                    &metadata,
-                                    &self.playlist_columns,
-                                );
-                                track_row_values.push(row_values);
+                                self.track_metadata.push(metadata);
                             }
                             self.refresh_playlist_column_content_targets();
                             self.apply_playlist_column_layout();
-
-                            let _ = self.ui.upgrade_in_event_loop(move |ui| {
-                                let track_model_strong = ui.get_track_model();
-                                let track_model = track_model_strong
-                                    .as_any()
-                                    .downcast_ref::<VecModel<TrackRowData>>()
-                                    .expect("VecModel<TrackRowData> expected");
-
-                                while track_model.row_count() > 0 {
-                                    track_model.remove(0);
-                                }
-
-                                for row_values in track_row_values {
-                                    let values_shared: Vec<slint::SharedString> =
-                                        row_values.into_iter().map(Into::into).collect();
-                                    track_model.push(TrackRowData {
-                                        status: "".into(),
-                                        values: ModelRc::from(values_shared.as_slice()),
-                                        selected: false,
-                                    });
-                                }
-                            });
+                            self.rebuild_track_model();
                         }
                         protocol::Message::Playlist(protocol::PlaylistMessage::TrackAdded {
                             id,
@@ -1129,32 +1561,15 @@ impl UiManager {
                             self.track_ids.push(id.clone());
                             self.track_paths.push(path.clone());
                             let tags = self.read_track_metadata(&path);
-                            self.track_metadata.push(tags.clone());
+                            self.track_metadata.push(tags);
                             self.refresh_playlist_column_content_targets();
                             self.apply_playlist_column_layout();
-
-                            let row_values =
-                                Self::build_playlist_row_values(&tags, &self.playlist_columns);
-                            let _ = self.ui.upgrade_in_event_loop(move |ui| {
-                                let track_model_strong = ui.get_track_model();
-                                let track_model = track_model_strong
-                                    .as_any()
-                                    .downcast_ref::<VecModel<TrackRowData>>()
-                                    .expect("VecModel<TrackRowData> expected");
-                                let values_shared: Vec<slint::SharedString> =
-                                    row_values.into_iter().map(Into::into).collect();
-                                track_model.push(TrackRowData {
-                                    status: "".into(),
-                                    values: ModelRc::from(values_shared.as_slice()),
-                                    selected: false,
-                                });
-                            });
+                            self.rebuild_track_model();
                         }
                         protocol::Message::Playlist(protocol::PlaylistMessage::DeleteTracks(
                             mut indices,
                         )) => {
                             indices.sort_by(|a, b| b.cmp(a));
-                            let indices_to_remove = indices.clone();
 
                             for index in indices {
                                 if index < self.track_ids.len() {
@@ -1169,22 +1584,12 @@ impl UiManager {
                             }
                             self.refresh_playlist_column_content_targets();
                             self.apply_playlist_column_layout();
-
-                            let _ = self.ui.upgrade_in_event_loop(move |ui| {
-                                let track_model_strong = ui.get_track_model();
-                                let track_model = track_model_strong
-                                    .as_any()
-                                    .downcast_ref::<VecModel<TrackRowData>>()
-                                    .expect("VecModel<TrackRowData> expected");
-
-                                for index in indices_to_remove {
-                                    if index < track_model.row_count() {
-                                        track_model.remove(index);
-                                    }
-                                }
-                            });
+                            self.rebuild_track_model();
                         }
                         protocol::Message::Playlist(protocol::PlaylistMessage::DeleteSelected) => {
+                            if self.is_filter_view_active() {
+                                continue;
+                            }
                             if self.selected_indices.is_empty() {
                                 continue;
                             }
@@ -1193,79 +1598,111 @@ impl UiManager {
                                 protocol::PlaylistMessage::DeleteTracks(indices),
                             ));
                         }
+                        protocol::Message::Playlist(
+                            protocol::PlaylistMessage::CopySelectedTracks,
+                        ) => {
+                            self.copy_selected_tracks();
+                        }
+                        protocol::Message::Playlist(
+                            protocol::PlaylistMessage::CutSelectedTracks,
+                        ) => {
+                            self.cut_selected_tracks();
+                        }
+                        protocol::Message::Playlist(
+                            protocol::PlaylistMessage::PasteCopiedTracks,
+                        ) => {
+                            if self.is_filter_view_active() {
+                                continue;
+                            }
+                            self.paste_copied_tracks();
+                        }
+                        protocol::Message::Playlist(
+                            protocol::PlaylistMessage::TracksInserted { tracks, insert_at },
+                        ) => {
+                            let mut insert_cursor = insert_at.min(self.track_ids.len());
+                            for track in tracks {
+                                let metadata = self.read_track_metadata(&track.path);
+                                self.track_ids.insert(insert_cursor, track.id);
+                                self.track_paths.insert(insert_cursor, track.path);
+                                self.track_metadata.insert(insert_cursor, metadata);
+                                insert_cursor += 1;
+                            }
+                            self.refresh_playlist_column_content_targets();
+                            self.apply_playlist_column_layout();
+                            self.rebuild_track_model();
+                        }
+                        protocol::Message::Playlist(
+                            protocol::PlaylistMessage::PlayTrackByViewIndex(view_index),
+                        ) => {
+                            if let Some(source_index) = self.map_view_to_source_index(view_index) {
+                                let _ = self.bus_sender.send(protocol::Message::Playback(
+                                    protocol::PlaybackMessage::PlayTrackByIndex(source_index),
+                                ));
+                            }
+                        }
+                        protocol::Message::Playlist(
+                            protocol::PlaylistMessage::OpenPlaylistSearch,
+                        ) => {
+                            self.open_playlist_search();
+                        }
+                        protocol::Message::Playlist(
+                            protocol::PlaylistMessage::ClosePlaylistSearch,
+                        ) => {
+                            self.close_playlist_search();
+                        }
+                        protocol::Message::Playlist(
+                            protocol::PlaylistMessage::SetPlaylistSearchQuery(query),
+                        ) => {
+                            self.set_playlist_search_query(query);
+                        }
+                        protocol::Message::Playlist(
+                            protocol::PlaylistMessage::ClearPlaylistFilterView,
+                        ) => {
+                            self.clear_playlist_filter_view();
+                        }
+                        protocol::Message::Playlist(
+                            protocol::PlaylistMessage::CyclePlaylistSortByColumn(column_index),
+                        ) => {
+                            self.cycle_playlist_sort_by_column(column_index);
+                        }
+                        protocol::Message::Playlist(
+                            protocol::PlaylistMessage::RequestApplyFilterView,
+                        ) => {
+                            if !self.is_filter_applied() {
+                                continue;
+                            }
+                            let snapshot = self.view_indices.clone();
+                            let _ = self.bus_sender.send(protocol::Message::Playlist(
+                                protocol::PlaylistMessage::ApplyFilterViewSnapshot(snapshot),
+                            ));
+                        }
+                        protocol::Message::Playlist(
+                            protocol::PlaylistMessage::ApplyFilterViewSnapshot(source_indices),
+                        ) => {
+                            self.apply_filter_view_snapshot_locally(source_indices);
+                        }
                         protocol::Message::Playback(
                             protocol::PlaybackMessage::PlayTrackByIndex(index),
                         ) => {
+                            self.active_playing_index = Some(index);
+                            self.playback_active = true;
                             let status_text = self
                                 .track_metadata
                                 .get(index)
                                 .map(Self::status_text_from_track_metadata)
                                 .unwrap_or_else(|| "".into());
                             let _ = self.ui.upgrade_in_event_loop(move |ui| {
-                                let track_model_strong = ui.get_track_model();
-                                let track_model = track_model_strong
-                                    .as_any()
-                                    .downcast_ref::<VecModel<TrackRowData>>()
-                                    .expect("VecModel<TrackRowData> expected");
-
-                                for i in 0..track_model.row_count() {
-                                    let mut row = track_model.row_data(i).unwrap();
-                                    if i == index {
-                                        row.status = "▶️".into();
-                                        track_model.set_row_data(i, row);
-                                    } else if !row.status.is_empty() {
-                                        row.status = "".into();
-                                        track_model.set_row_data(i, row);
-                                    }
-                                }
-                                ui.set_playing_track_index(index as i32);
                                 ui.set_status_text(status_text);
                             });
+                            self.rebuild_track_model();
                         }
                         protocol::Message::Playback(protocol::PlaybackMessage::Play) => {
-                            let metadata_snapshot = self.track_metadata.clone();
-                            let _ = self.ui.upgrade_in_event_loop(move |ui| {
-                                let playing_index = ui.get_playing_track_index();
-                                if playing_index >= 0 {
-                                    let track_model_strong = ui.get_track_model();
-                                    let track_model = track_model_strong
-                                        .as_any()
-                                        .downcast_ref::<VecModel<TrackRowData>>()
-                                        .expect("VecModel<TrackRowData> expected");
-                                    if (playing_index as usize) < track_model.row_count() {
-                                        let mut row =
-                                            track_model.row_data(playing_index as usize).unwrap();
-                                        row.status = "▶️".into();
-                                        track_model.set_row_data(playing_index as usize, row);
-                                        if (playing_index as usize) < metadata_snapshot.len() {
-                                            ui.set_status_text(
-                                                UiManager::status_text_from_track_metadata(
-                                                    &metadata_snapshot[playing_index as usize],
-                                                ),
-                                            );
-                                        }
-                                    }
-                                }
-                            });
+                            self.playback_active = true;
+                            self.rebuild_track_model();
                         }
                         protocol::Message::Playback(protocol::PlaybackMessage::Pause) => {
-                            let _ = self.ui.upgrade_in_event_loop(move |ui| {
-                                let playing_index = ui.get_playing_track_index();
-                                let track_model_strong = ui.get_track_model();
-                                let track_model = track_model_strong
-                                    .as_any()
-                                    .downcast_ref::<VecModel<TrackRowData>>()
-                                    .expect("VecModel<TrackRowData> expected");
-
-                                if playing_index >= 0
-                                    && (playing_index as usize) < track_model.row_count()
-                                {
-                                    let mut row =
-                                        track_model.row_data(playing_index as usize).unwrap();
-                                    row.status = "⏸️".into();
-                                    track_model.set_row_data(playing_index as usize, row);
-                                }
-                            });
+                            self.playback_active = false;
+                            self.rebuild_track_model();
                         }
                         protocol::Message::Playback(
                             protocol::PlaybackMessage::PlaybackProgress {
@@ -1326,6 +1763,7 @@ impl UiManager {
                         }
                         protocol::Message::Playback(protocol::PlaybackMessage::Stop) => {
                             self.playback_active = false;
+                            self.active_playing_index = None;
                             self.last_progress_at = None;
                             self.current_playing_track_path = None;
                             self.current_playing_track_metadata = None;
@@ -1342,28 +1780,20 @@ impl UiManager {
                                 ui.set_position_percentage(0.0);
                                 ui.set_elapsed_ms(0);
                                 ui.set_total_ms(0);
-
-                                let track_model_strong = ui.get_track_model();
-                                let track_model = track_model_strong
-                                    .as_any()
-                                    .downcast_ref::<VecModel<TrackRowData>>()
-                                    .expect("VecModel<TrackRowData> expected");
-
-                                for i in 0..track_model.row_count() {
-                                    let mut row = track_model.row_data(i).unwrap();
-                                    if !row.status.is_empty() {
-                                        row.status = "".into();
-                                        track_model.set_row_data(i, row);
-                                    }
-                                }
-                                ui.set_playing_track_index(-1);
                             });
+                            self.rebuild_track_model();
                         }
                         protocol::Message::Playlist(protocol::PlaylistMessage::TrackStarted {
                             index,
                             playlist_id,
                         }) => {
                             let is_active_playlist = playlist_id == self.active_playlist_id;
+                            self.active_playing_index = if is_active_playlist {
+                                Some(index)
+                            } else {
+                                None
+                            };
+                            self.playback_active = is_active_playlist;
                             let status_text = self
                                 .track_metadata
                                 .get(index)
@@ -1371,30 +1801,9 @@ impl UiManager {
                                 .unwrap_or_else(|| "".into());
 
                             let _ = self.ui.upgrade_in_event_loop(move |ui| {
-                                if is_active_playlist {
-                                    let track_model_strong = ui.get_track_model();
-                                    let track_model = track_model_strong
-                                        .as_any()
-                                        .downcast_ref::<VecModel<TrackRowData>>()
-                                        .expect("VecModel<TrackRowData> expected");
-
-                                    for i in 0..track_model.row_count() {
-                                        let mut row = track_model.row_data(i).unwrap();
-                                        if i == index {
-                                            row.status = "▶️".into();
-                                            track_model.set_row_data(i, row);
-                                        } else if !row.status.is_empty() {
-                                            row.status = "".into();
-                                            track_model.set_row_data(i, row);
-                                        }
-                                    }
-                                    ui.set_selected_track_index(index as i32);
-                                    ui.set_playing_track_index(index as i32);
-                                } else {
-                                    ui.set_playing_track_index(-1);
-                                }
                                 ui.set_status_text(status_text);
                             });
+                            self.rebuild_track_model();
                         }
                         protocol::Message::Playlist(
                             protocol::PlaylistMessage::PlaylistIndicesChanged {
@@ -1416,6 +1825,11 @@ impl UiManager {
                             self.selected_indices = selected_indices_clone.clone();
                             let is_playing_active_playlist =
                                 playing_playlist_id.as_ref() == Some(&self.active_playlist_id);
+                            self.active_playing_index = if is_playing_active_playlist {
+                                playing_index
+                            } else {
+                                None
+                            };
 
                             self.current_playing_track_path = playing_track_path.clone();
                             self.current_playing_track_metadata = playing_track_metadata.clone();
@@ -1426,14 +1840,6 @@ impl UiManager {
                             );
 
                             let _ = self.ui.upgrade_in_event_loop(move |ui| {
-                                if is_playing_active_playlist {
-                                    ui.set_playing_track_index(
-                                        playing_index.map(|i| i as i32).unwrap_or(-1),
-                                    );
-                                } else {
-                                    ui.set_playing_track_index(-1);
-                                }
-
                                 let repeat_int = match repeat_mode {
                                     protocol::RepeatMode::Off => 0,
                                     protocol::RepeatMode::Playlist => 1,
@@ -1447,44 +1853,8 @@ impl UiManager {
                                     protocol::PlaybackOrder::Random => 2,
                                 };
                                 ui.set_playback_order_index(order_int);
-
-                                ui.set_selected_track_index(
-                                    selected_indices_clone
-                                        .first()
-                                        .copied()
-                                        .map(|i| i as i32)
-                                        .unwrap_or(-1),
-                                );
-
-                                let track_model_strong = ui.get_track_model();
-                                let track_model = track_model_strong
-                                    .as_any()
-                                    .downcast_ref::<VecModel<TrackRowData>>()
-                                    .expect("VecModel<TrackRowData> expected");
-
-                                for i in 0..track_model.row_count() {
-                                    let mut row = track_model.row_data(i).unwrap();
-                                    let was_selected = row.selected;
-                                    let should_be_selected = selected_indices_clone.contains(&i);
-
-                                    if was_selected != should_be_selected {
-                                        row.selected = should_be_selected;
-                                        track_model.set_row_data(i, row);
-                                    }
-                                }
-
-                                for i in 0..track_model.row_count() {
-                                    let mut row = track_model.row_data(i).unwrap();
-                                    if is_playing_active_playlist && playing_index == Some(i) {
-                                        let emoji = if is_playing { "▶️" } else { "⏸️" };
-                                        row.status = emoji.into();
-                                        track_model.set_row_data(i, row);
-                                    } else if !row.status.is_empty() {
-                                        row.status = "".into();
-                                        track_model.set_row_data(i, row);
-                                    }
-                                }
                             });
+                            self.rebuild_track_model();
                         }
                         protocol::Message::Playlist(
                             protocol::PlaylistMessage::SelectionChanged(indices),
@@ -1510,23 +1880,7 @@ impl UiManager {
                                 playing_track_path.as_ref(),
                                 playing_track_metadata.as_ref(),
                             );
-
-                            let _ = self.ui.upgrade_in_event_loop(move |ui| {
-                                let track_model_strong = ui.get_track_model();
-                                let track_model = track_model_strong
-                                    .as_any()
-                                    .downcast_ref::<VecModel<TrackRowData>>()
-                                    .expect("VecModel<TrackRowData> expected");
-
-                                for i in 0..track_model.row_count() {
-                                    let mut row = track_model.row_data(i).unwrap();
-                                    let should_be_selected = indices_clone.contains(&i);
-                                    if row.selected != should_be_selected {
-                                        row.selected = should_be_selected;
-                                        track_model.set_row_data(i, row);
-                                    }
-                                }
-                            });
+                            self.rebuild_track_model();
                         }
                         protocol::Message::Playlist(protocol::PlaylistMessage::OnPointerDown {
                             index,
@@ -1554,9 +1908,10 @@ impl UiManager {
                             indices,
                             to,
                         }) => {
+                            if self.is_filter_view_active() {
+                                continue;
+                            }
                             debug!("ReorderTracks: indices={:?}, to={}", indices, to);
-
-                            let indices_clone = indices.clone();
 
                             let mut sorted_indices = indices.clone();
                             sorted_indices.sort_unstable();
@@ -1615,48 +1970,7 @@ impl UiManager {
                             }
 
                             self.selected_indices = (insert_at..insert_at + block_len).collect();
-
-                            let _ = self.ui.upgrade_in_event_loop(move |ui| {
-                                let track_model_strong = ui.get_track_model();
-                                let track_model = track_model_strong
-                                    .as_any()
-                                    .downcast_ref::<VecModel<TrackRowData>>()
-                                    .expect("VecModel<TrackRowData> expected");
-
-                                let mut sorted_indices = indices_clone.clone();
-                                sorted_indices.sort_unstable();
-                                sorted_indices.dedup();
-                                sorted_indices.retain(|&i| i < track_model.row_count());
-
-                                if sorted_indices.is_empty() {
-                                    return;
-                                }
-
-                                let to = to.min(track_model.row_count());
-                                let first = sorted_indices[0];
-                                let last = *sorted_indices.last().unwrap();
-
-                                if is_contiguous && to >= first && to <= last + 1 {
-                                    return;
-                                }
-
-                                let mut moved_rows = Vec::new();
-                                for &idx in sorted_indices.iter().rev() {
-                                    if idx < track_model.row_count() {
-                                        moved_rows.push(track_model.row_data(idx).unwrap());
-                                        track_model.remove(idx);
-                                    }
-                                }
-                                moved_rows.reverse();
-
-                                let removed_before =
-                                    sorted_indices.iter().filter(|&&i| i < to).count();
-                                let insert_at = to.saturating_sub(removed_before);
-
-                                for (i, row) in moved_rows.into_iter().enumerate() {
-                                    track_model.insert(insert_at + i, row);
-                                }
-                            });
+                            self.rebuild_track_model();
                         }
                         protocol::Message::Playback(
                             protocol::PlaybackMessage::CoverArtChanged(path),
@@ -1706,7 +2020,6 @@ impl UiManager {
                             self.refresh_playlist_column_content_targets();
                             self.apply_playlist_column_layout();
                             let playlist_columns = self.playlist_columns.clone();
-                            let track_metadata = self.track_metadata.clone();
 
                             let visible_headers: Vec<slint::SharedString> = playlist_columns
                                 .iter()
@@ -1739,27 +2052,8 @@ impl UiManager {
                                 ui.set_playlist_column_menu_is_custom(ModelRc::from(Rc::new(
                                     VecModel::from(menu_is_custom),
                                 )));
-
-                                let track_model_strong = ui.get_track_model();
-                                let track_model = track_model_strong
-                                    .as_any()
-                                    .downcast_ref::<VecModel<TrackRowData>>()
-                                    .expect("VecModel<TrackRowData> expected");
-
-                                for i in 0..track_model.row_count() {
-                                    let mut row = track_model.row_data(i).unwrap();
-                                    if i < track_metadata.len() {
-                                        let values = UiManager::build_playlist_row_values(
-                                            &track_metadata[i],
-                                            &playlist_columns,
-                                        );
-                                        let values_shared: Vec<slint::SharedString> =
-                                            values.into_iter().map(Into::into).collect();
-                                        row.values = ModelRc::from(values_shared.as_slice());
-                                        track_model.set_row_data(i, row);
-                                    }
-                                }
                             });
+                            self.rebuild_track_model();
                         }
                         protocol::Message::Playlist(
                             protocol::PlaylistMessage::PlaylistViewportWidthChanged(width_px),
@@ -1874,6 +2168,28 @@ mod tests {
         let first = rx.recv().expect("expected first request");
         let latest = UiManager::coalesce_cover_art_requests(first, &rx);
         assert_eq!(latest.track_path, None);
+    }
+
+    #[test]
+    fn test_build_copied_track_paths_preserves_playlist_order() {
+        let track_paths = vec![
+            PathBuf::from("a.mp3"),
+            PathBuf::from("b.mp3"),
+            PathBuf::from("c.mp3"),
+            PathBuf::from("d.mp3"),
+        ];
+        let selected_indices = vec![3usize, 1, 3, 0];
+
+        let copied = UiManager::build_copied_track_paths(&track_paths, &selected_indices);
+
+        assert_eq!(
+            copied,
+            vec![
+                PathBuf::from("a.mp3"),
+                PathBuf::from("b.mp3"),
+                PathBuf::from("d.mp3")
+            ]
+        );
     }
 
     #[test]

@@ -3,7 +3,7 @@
 use crate::protocol::{PlaybackOrder, RepeatMode};
 use log::debug;
 use rand::{rngs::StdRng, Rng, SeedableRng};
-use std::path::PathBuf;
+use std::{collections::HashSet, path::PathBuf};
 
 /// One playlist entry containing source path and stable id.
 #[derive(Clone)]
@@ -206,6 +206,72 @@ impl Playlist {
     /// Returns the stable id for a track at `index`.
     pub fn get_track_id(&self, index: usize) -> String {
         self.tracks[index].id.clone()
+    }
+
+    /// Replaces playlist contents with tracks referenced by source indices.
+    ///
+    /// Indices are interpreted against the current track order. Missing indices
+    /// are ignored. Existing playback/selection state is preserved by track id
+    /// when possible.
+    pub fn apply_filter_view_snapshot(&mut self, source_indices: Vec<usize>) {
+        let old_tracks = self.tracks.clone();
+        let old_selected_ids: Vec<String> = self
+            .selected_indices
+            .iter()
+            .filter_map(|&index| old_tracks.get(index).map(|track| track.id.clone()))
+            .collect();
+        let old_anchor_id = self
+            .anchor_index
+            .and_then(|index| old_tracks.get(index))
+            .map(|track| track.id.clone());
+        let old_playing_id = self
+            .playing_track_index
+            .and_then(|index| old_tracks.get(index))
+            .map(|track| track.id.clone());
+
+        let mut seen_indices = HashSet::new();
+        let normalized: Vec<usize> = source_indices
+            .into_iter()
+            .filter(|&index| index < old_tracks.len())
+            .filter(|index| seen_indices.insert(*index))
+            .collect();
+
+        let mut new_tracks = Vec::with_capacity(normalized.len());
+        for index in normalized {
+            if let Some(track) = old_tracks.get(index) {
+                new_tracks.push(track.clone());
+            }
+        }
+        self.tracks = new_tracks;
+
+        self.selected_indices = old_selected_ids
+            .iter()
+            .filter_map(|selected_id| {
+                self.tracks
+                    .iter()
+                    .position(|track| &track.id == selected_id)
+            })
+            .collect();
+        self.selected_indices.sort_unstable();
+        self.selected_indices.dedup();
+        self.anchor_index = old_anchor_id
+            .as_ref()
+            .and_then(|anchor_id| self.tracks.iter().position(|track| &track.id == anchor_id));
+        self.playing_track_index = old_playing_id
+            .as_ref()
+            .and_then(|playing_id| self.tracks.iter().position(|track| &track.id == playing_id));
+        if self.playing_track_index.is_none() {
+            self.is_playing = false;
+        }
+
+        if self.playback_order == PlaybackOrder::Shuffle {
+            self.generate_shuffle_order(
+                self.playing_track_index
+                    .or(self.selected_indices.first().copied()),
+            );
+        } else {
+            self.shuffled_indices.clear();
+        }
     }
 
     /// Moves a set of tracks to the target gap index.
@@ -1411,6 +1477,52 @@ mod tests {
 
         assert_order(&playlist, vec!["A", "C", "D", "B"]);
         assert_eq!(playlist.get_playing_track_index(), Some(3));
+    }
+
+    #[test]
+    fn test_apply_filter_view_snapshot_preserves_view_order() {
+        let mut playlist = Playlist::new();
+        playlist.add_track(make_track("A"));
+        playlist.add_track(make_track("B"));
+        playlist.add_track(make_track("C"));
+        playlist.add_track(make_track("D"));
+        playlist.set_selected_indices(vec![1, 3]);
+        playlist.set_playing_track_index(Some(3));
+        playlist.set_playing(true);
+
+        playlist.apply_filter_view_snapshot(vec![3, 1]);
+
+        assert_order(&playlist, vec!["D", "B"]);
+        assert_eq!(playlist.get_playing_track_index(), Some(0));
+        assert_eq!(playlist.get_selected_indices(), vec![0, 1]);
+    }
+
+    #[test]
+    fn test_apply_filter_view_snapshot_stops_when_playing_track_removed() {
+        let mut playlist = Playlist::new();
+        playlist.add_track(make_track("A"));
+        playlist.add_track(make_track("B"));
+        playlist.add_track(make_track("C"));
+        playlist.set_playing_track_index(Some(1));
+        playlist.set_playing(true);
+
+        playlist.apply_filter_view_snapshot(vec![2, 0]);
+
+        assert_order(&playlist, vec!["C", "A"]);
+        assert_eq!(playlist.get_playing_track_index(), None);
+        assert!(!playlist.is_playing());
+    }
+
+    #[test]
+    fn test_apply_filter_view_snapshot_ignores_duplicates_and_invalid_indices() {
+        let mut playlist = Playlist::new();
+        playlist.add_track(make_track("A"));
+        playlist.add_track(make_track("B"));
+        playlist.add_track(make_track("C"));
+
+        playlist.apply_filter_view_snapshot(vec![2, 2, 9, 0]);
+
+        assert_order(&playlist, vec!["C", "A"]);
     }
 
     #[test]

@@ -138,6 +138,16 @@ impl PlaylistManager {
         }
     }
 
+    fn paste_insert_gap(selected_indices: &[usize], playlist_len: usize) -> usize {
+        selected_indices
+            .iter()
+            .copied()
+            .filter(|&index| index < playlist_len)
+            .max()
+            .map(|index| index.saturating_add(1))
+            .unwrap_or(playlist_len)
+    }
+
     /// Starts the blocking event loop for playlist messages and playback coordination.
     pub fn run(&mut self) {
         // Restore playlists from database
@@ -552,6 +562,137 @@ impl PlaylistManager {
 
                         // Re-cache to ensure next tracks are correct
                         self.cache_tracks(false);
+                    }
+                    protocol::Message::Playlist(protocol::PlaylistMessage::PasteTracks(paths)) => {
+                        if paths.is_empty() {
+                            continue;
+                        }
+
+                        let playlist_len = self.editing_playlist.num_tracks();
+                        let insert_gap = Self::paste_insert_gap(
+                            &self.editing_playlist.get_selected_indices(),
+                            playlist_len,
+                        );
+                        let is_active_playback_playlist =
+                            Some(&self.active_playlist_id) == self.playback_playlist_id.as_ref();
+
+                        let mut appended_indices = Vec::with_capacity(paths.len());
+                        let mut inserted_tracks = Vec::with_capacity(paths.len());
+
+                        for path in paths {
+                            let id = Uuid::new_v4().to_string();
+                            let append_index = self.editing_playlist.num_tracks();
+                            if let Err(err) = self.db_manager.save_track(
+                                &id,
+                                &self.active_playlist_id,
+                                path.to_str().unwrap_or(""),
+                                append_index,
+                            ) {
+                                error!("Failed to save pasted track to database: {}", err);
+                                continue;
+                            }
+
+                            let track = Track {
+                                path: path.clone(),
+                                id: id.clone(),
+                            };
+                            self.editing_playlist.add_track(track.clone());
+                            if is_active_playback_playlist {
+                                self.playback_playlist.add_track(track);
+                            }
+
+                            appended_indices.push(append_index);
+                            inserted_tracks.push(protocol::RestoredTrack { id, path });
+                        }
+
+                        if appended_indices.is_empty() {
+                            continue;
+                        }
+
+                        self.editing_playlist
+                            .move_tracks(appended_indices.clone(), insert_gap);
+                        if is_active_playback_playlist {
+                            self.playback_playlist
+                                .move_tracks(appended_indices, insert_gap);
+                        }
+
+                        let insert_at = self
+                            .editing_playlist
+                            .get_selected_indices()
+                            .first()
+                            .copied()
+                            .unwrap_or_else(|| insert_gap.min(self.editing_playlist.num_tracks()));
+
+                        let _ = self.bus_producer.send(protocol::Message::Playlist(
+                            protocol::PlaylistMessage::TracksInserted {
+                                tracks: inserted_tracks,
+                                insert_at,
+                            },
+                        ));
+
+                        let all_ids: Vec<String> = (0..self.editing_playlist.num_tracks())
+                            .map(|i| self.editing_playlist.get_track_id(i))
+                            .collect();
+                        if let Err(err) = self.db_manager.update_positions(all_ids) {
+                            error!("Failed to update positions in database: {}", err);
+                        }
+
+                        self.broadcast_playlist_changed();
+                        self.broadcast_selection_changed();
+
+                        if is_active_playback_playlist {
+                            self.cache_tracks(false);
+                        }
+                    }
+                    protocol::Message::Playlist(
+                        protocol::PlaylistMessage::ApplyFilterViewSnapshot(source_indices),
+                    ) => {
+                        debug!(
+                            "PlaylistManager: Applying filter view snapshot with {} entries",
+                            source_indices.len()
+                        );
+                        let old_ids: Vec<String> = (0..self.editing_playlist.num_tracks())
+                            .map(|index| self.editing_playlist.get_track_id(index))
+                            .collect();
+                        let was_playing_active_playlist = Some(&self.active_playlist_id)
+                            == self.playback_playlist_id.as_ref()
+                            && self.playback_playlist.is_playing();
+
+                        self.editing_playlist
+                            .apply_filter_view_snapshot(source_indices.clone());
+                        if Some(&self.active_playlist_id) == self.playback_playlist_id.as_ref() {
+                            self.playback_playlist
+                                .apply_filter_view_snapshot(source_indices);
+                        }
+
+                        let new_ids: Vec<String> = (0..self.editing_playlist.num_tracks())
+                            .map(|index| self.editing_playlist.get_track_id(index))
+                            .collect();
+                        let new_id_set: HashSet<String> = new_ids.iter().cloned().collect();
+                        for removed_id in old_ids
+                            .into_iter()
+                            .filter(|old_id| !new_id_set.contains(old_id))
+                        {
+                            if let Err(err) = self.db_manager.delete_track(&removed_id) {
+                                error!("Failed to delete track from database: {}", err);
+                            }
+                        }
+                        if let Err(err) = self.db_manager.update_positions(new_ids) {
+                            error!("Failed to update positions in database: {}", err);
+                        }
+
+                        if was_playing_active_playlist && !self.playback_playlist.is_playing() {
+                            let _ = self
+                                .bus_producer
+                                .send(protocol::Message::Playback(protocol::PlaybackMessage::Stop));
+                        } else if Some(&self.active_playlist_id)
+                            == self.playback_playlist_id.as_ref()
+                        {
+                            self.cache_tracks(false);
+                        }
+
+                        self.broadcast_playlist_changed();
+                        self.broadcast_selection_changed();
                     }
                     protocol::Message::Playlist(protocol::PlaylistMessage::CreatePlaylist {
                         name,
@@ -1190,6 +1331,14 @@ mod tests {
                 Err(TryRecvError::Closed) => return,
             }
         }
+    }
+
+    #[test]
+    fn test_paste_insert_gap_uses_end_of_current_selection() {
+        assert_eq!(PlaylistManager::paste_insert_gap(&[], 4), 4);
+        assert_eq!(PlaylistManager::paste_insert_gap(&[0, 2, 1], 5), 3);
+        assert_eq!(PlaylistManager::paste_insert_gap(&[3], 4), 4);
+        assert_eq!(PlaylistManager::paste_insert_gap(&[7, 8], 4), 4);
     }
 
     #[test]

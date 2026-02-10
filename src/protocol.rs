@@ -47,6 +47,10 @@ pub enum PlaylistMessage {
     LoadTrack(PathBuf),
     DeleteTracks(Vec<usize>),
     DeleteSelected,
+    /// UI requested playback for a currently rendered track row.
+    /// The index is in filtered/sorted view coordinates and must be mapped
+    /// to playlist source coordinates by the UI manager.
+    PlayTrackByViewIndex(usize),
     SelectTrackMulti {
         index: usize,
         ctrl: bool,
@@ -67,6 +71,21 @@ pub enum PlaylistMessage {
     OnDragEnd {
         drop_gap: usize,
     },
+    CopySelectedTracks,
+    CutSelectedTracks,
+    PasteCopiedTracks,
+    PasteTracks(Vec<PathBuf>),
+    TracksInserted {
+        tracks: Vec<RestoredTrack>,
+        insert_at: usize,
+    },
+    OpenPlaylistSearch,
+    ClosePlaylistSearch,
+    SetPlaylistSearchQuery(String),
+    ClearPlaylistFilterView,
+    CyclePlaylistSortByColumn(usize),
+    RequestApplyFilterView,
+    ApplyFilterViewSnapshot(Vec<usize>),
     PlaylistViewportWidthChanged(u32),
     DeselectAll,
     ReorderTracks {

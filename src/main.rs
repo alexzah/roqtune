@@ -14,6 +14,7 @@ use std::{
     rc::Rc,
     sync::{Arc, Mutex},
     thread,
+    time::Duration,
 };
 
 use audio_decoder::AudioDecoder;
@@ -51,6 +52,19 @@ fn panic_payload_to_string(payload: &(dyn std::any::Any + Send)) -> String {
         return s.clone();
     }
     "non-string panic payload".to_string()
+}
+
+fn flash_read_only_view_indicator(ui_handle: slint::Weak<AppWindow>) {
+    if let Some(ui) = ui_handle.upgrade() {
+        // Reset first so repeated blocked actions retrigger the highlight reliably.
+        ui.set_playlist_filter_blocked_feedback(false);
+        ui.set_playlist_filter_blocked_feedback(true);
+    }
+    slint::Timer::single_shot(Duration::from_millis(380), move || {
+        if let Some(ui) = ui_handle.upgrade() {
+            ui.set_playlist_filter_blocked_feedback(false);
+        }
+    });
 }
 
 /// Detected and filtered output-setting choices presented in the settings dialog.
@@ -1477,7 +1491,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             "Track clicked at index {:?} (ctrl={}, shift={})",
             index, ctrl, shift
         );
-        let _ = bus_sender_clone.send(Message::Playlist(PlaylistMessage::SelectTrackMulti {
+        let _ = bus_sender_clone.send(Message::Playlist(PlaylistMessage::OnPointerDown {
             index: index as usize,
             ctrl,
             shift,
@@ -1491,38 +1505,72 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     });
 
     let bus_sender_clone = bus_sender.clone();
-    let ui_handle_clone = ui.as_weak().clone();
     ui.on_playlist_item_double_click(move |index| {
         debug!("Playlist item double-clicked: {}", index);
-        let _ = bus_sender_clone.send(Message::Playback(PlaybackMessage::PlayTrackByIndex(
+        let _ = bus_sender_clone.send(Message::Playlist(PlaylistMessage::PlayTrackByViewIndex(
             index as usize,
         )));
-        ui_handle_clone
-            .upgrade()
-            .unwrap()
-            .set_selected_track_index(index);
-        ui_handle_clone
-            .upgrade()
-            .unwrap()
-            .set_playing_track_index(index);
     });
 
     // Wire up delete track handler
     let bus_sender_clone = bus_sender.clone();
+    let ui_handle_clone = ui.as_weak().clone();
     ui.on_delete_selected_tracks(move || {
+        if let Some(ui) = ui_handle_clone.upgrade() {
+            if ui.get_playlist_filter_active() {
+                flash_read_only_view_indicator(ui_handle_clone.clone());
+                return;
+            }
+        }
         debug!("Delete selected tracks requested");
         let _ = bus_sender_clone.send(Message::Playlist(PlaylistMessage::DeleteSelected));
     });
 
     // Wire up reorder track handler
     let bus_sender_clone = bus_sender.clone();
+    let ui_handle_clone = ui.as_weak().clone();
     ui.on_reorder_tracks(move |indices, to| {
+        if let Some(ui) = ui_handle_clone.upgrade() {
+            if ui.get_playlist_filter_active() {
+                flash_read_only_view_indicator(ui_handle_clone.clone());
+                return;
+            }
+        }
         let indices_vec: Vec<usize> = indices.iter().map(|i| i as usize).collect();
         debug!("Reorder tracks requested: from {:?} to {}", indices_vec, to);
         let _ = bus_sender_clone.send(Message::Playlist(PlaylistMessage::ReorderTracks {
             indices: indices_vec,
             to: to as usize,
         }));
+    });
+
+    let bus_sender_clone = bus_sender.clone();
+    ui.on_copy_selected_tracks(move || {
+        let _ = bus_sender_clone.send(Message::Playlist(PlaylistMessage::CopySelectedTracks));
+    });
+
+    let bus_sender_clone = bus_sender.clone();
+    let ui_handle_clone = ui.as_weak().clone();
+    ui.on_cut_selected_tracks(move || {
+        if let Some(ui) = ui_handle_clone.upgrade() {
+            if ui.get_playlist_filter_active() {
+                flash_read_only_view_indicator(ui_handle_clone.clone());
+                return;
+            }
+        }
+        let _ = bus_sender_clone.send(Message::Playlist(PlaylistMessage::CutSelectedTracks));
+    });
+
+    let bus_sender_clone = bus_sender.clone();
+    let ui_handle_clone = ui.as_weak().clone();
+    ui.on_paste_copied_tracks(move || {
+        if let Some(ui) = ui_handle_clone.upgrade() {
+            if ui.get_playlist_filter_active() {
+                flash_read_only_view_indicator(ui_handle_clone.clone());
+                return;
+            }
+        }
+        let _ = bus_sender_clone.send(Message::Playlist(PlaylistMessage::PasteCopiedTracks));
     });
 
     // Wire up pointer down handler
@@ -1541,7 +1589,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Wire up drag start handler
     let bus_sender_clone = bus_sender.clone();
+    let ui_handle_clone = ui.as_weak().clone();
     ui.on_on_drag_start(move |pressed_index| {
+        if let Some(ui) = ui_handle_clone.upgrade() {
+            if ui.get_playlist_filter_active() {
+                flash_read_only_view_indicator(ui_handle_clone.clone());
+                return;
+            }
+        }
         debug!("Drag start at index {:?}", pressed_index);
         let _ = bus_sender_clone.send(Message::Playlist(PlaylistMessage::OnDragStart {
             pressed_index: pressed_index as usize,
@@ -1550,7 +1605,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Wire up drag move handler
     let bus_sender_clone = bus_sender.clone();
+    let ui_handle_clone = ui.as_weak().clone();
     ui.on_on_drag_move(move |drop_gap| {
+        if let Some(ui) = ui_handle_clone.upgrade() {
+            if ui.get_playlist_filter_active() {
+                return;
+            }
+        }
         debug!("Drag move to gap {:?}", drop_gap);
         let _ = bus_sender_clone.send(Message::Playlist(PlaylistMessage::OnDragMove {
             drop_gap: drop_gap as usize,
@@ -1559,11 +1620,59 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Wire up drag end handler
     let bus_sender_clone = bus_sender.clone();
+    let ui_handle_clone = ui.as_weak().clone();
     ui.on_on_drag_end(move |drop_gap| {
+        if let Some(ui) = ui_handle_clone.upgrade() {
+            if ui.get_playlist_filter_active() {
+                return;
+            }
+        }
         debug!("Drag end at gap {:?}", drop_gap);
         let _ = bus_sender_clone.send(Message::Playlist(PlaylistMessage::OnDragEnd {
             drop_gap: drop_gap as usize,
         }));
+    });
+
+    let bus_sender_clone = bus_sender.clone();
+    ui.on_open_playlist_search(move || {
+        let _ = bus_sender_clone.send(Message::Playlist(PlaylistMessage::OpenPlaylistSearch));
+    });
+
+    let bus_sender_clone = bus_sender.clone();
+    ui.on_close_playlist_search(move || {
+        let _ = bus_sender_clone.send(Message::Playlist(PlaylistMessage::ClosePlaylistSearch));
+    });
+
+    let bus_sender_clone = bus_sender.clone();
+    ui.on_set_playlist_search_query(move |query| {
+        let _ = bus_sender_clone.send(Message::Playlist(PlaylistMessage::SetPlaylistSearchQuery(
+            query.to_string(),
+        )));
+    });
+
+    let bus_sender_clone = bus_sender.clone();
+    ui.on_clear_playlist_filter_view(move || {
+        let _ = bus_sender_clone.send(Message::Playlist(PlaylistMessage::ClearPlaylistFilterView));
+    });
+
+    let bus_sender_clone = bus_sender.clone();
+    ui.on_cycle_playlist_sort_by_column(move |column_index| {
+        if column_index < 0 {
+            return;
+        }
+        let _ = bus_sender_clone.send(Message::Playlist(
+            PlaylistMessage::CyclePlaylistSortByColumn(column_index as usize),
+        ));
+    });
+
+    let bus_sender_clone = bus_sender.clone();
+    ui.on_apply_filter_view_to_playlist(move || {
+        let _ = bus_sender_clone.send(Message::Playlist(PlaylistMessage::RequestApplyFilterView));
+    });
+
+    let ui_handle_clone = ui.as_weak().clone();
+    ui.on_playlist_modification_blocked(move || {
+        flash_read_only_view_indicator(ui_handle_clone.clone());
     });
 
     let bus_sender_clone = bus_sender.clone();
@@ -3393,12 +3502,13 @@ mod tests {
             "App window should define a null column width"
         );
         assert!(
-            slint_ui.contains("property <bool> in-null-column: self.mouse-x >= (self.width - root.null-column-width);"),
+            slint_ui.contains("property <bool> in-null-column: self.in-viewport")
+                && slint_ui.contains("track-list.viewport-width - root.null-column-width"),
             "Track overlay should detect clicks in null column"
         );
         assert!(
             slint_ui.contains(
-                "property <bool> is-in-rows: raw-row >= 0 && raw-row < root.track_model.length;"
+                "property <bool> is-in-rows: self.in-viewport && raw-row >= 0 && raw-row < root.track_model.length;"
             ),
             "Track overlay should detect when click is outside rows"
         );
@@ -3507,6 +3617,11 @@ mod tests {
             "Sidebar width should be controllable by viewport-driven logic"
         );
         assert!(
+            slint_ui.contains("callback cycle_playlist_sort_by_column(int);")
+                && slint_ui.contains("in-out property <[int]> playlist_column_sort_states: [];"),
+            "Playlist header should expose sort callback and per-column sort-state model"
+        );
+        assert!(
             slint_ui.contains("for leaf-id[i] in root.layout_leaf_ids : Rectangle {")
                 && slint_ui.contains("root.layout-region-panel-kind(i) == 7"),
             "Track list should be rendered as a movable docking panel that supports duplicate instances"
@@ -3587,6 +3702,26 @@ mod tests {
                 && slint_ui.contains("event.modifiers.control")
                 && slint_ui.contains("root.open_layout_editor();"),
             "Layout editor should be reachable via keyboard shortcut"
+        );
+        assert!(
+            slint_ui.contains("(event.text == \"f\" || event.text == \"F\")")
+                && slint_ui.contains("root.open_playlist_search();"),
+            "Playlist search should be reachable via Ctrl+F"
+        );
+        assert!(
+            slint_ui.contains("(event.text == \"c\" || event.text == \"C\")")
+                && slint_ui.contains("root.copy_selected_tracks();")
+                && slint_ui.contains("(event.text == \"x\" || event.text == \"X\")")
+                && slint_ui.contains("root.cut_selected_tracks();")
+                && slint_ui.contains("(event.text == \"v\" || event.text == \"V\")")
+                && slint_ui.contains("root.paste_copied_tracks();"),
+            "Playlist rows should support Ctrl+C/Ctrl+X/Ctrl+V shortcuts"
+        );
+        assert!(
+            slint_ui.contains("callback copy_selected_tracks();")
+                && slint_ui.contains("callback cut_selected_tracks();")
+                && slint_ui.contains("callback paste_copied_tracks();"),
+            "App window should expose copy/cut/paste callbacks for track list"
         );
         assert!(
             slint_ui.contains("event.text == Key.Escape && root.layout_edit_mode"),
