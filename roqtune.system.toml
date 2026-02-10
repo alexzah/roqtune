@@ -1,0 +1,116 @@
+# roqtune system config template
+#
+# Copy this file to your user config path as `roqtune.toml`, then edit values.
+# Linux default path: ~/.config/roqtune.toml
+#
+# This template tracks current in-code defaults.
+
+[output]
+# When `output_device_auto = true`, this value is ignored.
+output_device_name = ""
+
+# Auto-pick the system default output device.
+output_device_auto = true
+
+# Manual output format values (used only when the matching `*_auto` is false).
+channel_count = 2
+sample_rate_khz = 44100
+bits_per_sample = 24
+
+# Auto-detect each output format field independently.
+channel_count_auto = true
+sample_rate_auto = true
+bits_per_sample_auto = true
+
+[ui]
+# Show the album-art panel in the main UI.
+show_album_art = true
+
+# Show the layout editor intro dialog the next time it is opened.
+show_layout_edit_intro = true
+
+# Built-in Album Art playlist-column width defaults.
+# Runtime sanitization clamps to:
+# min: 12..512
+# max: 24..1024
+# If min > max, values are swapped.
+playlist_album_art_column_min_width_px = 16
+playlist_album_art_column_max_width_px = 480
+
+# Main window size on startup.
+window_width = 900
+window_height = 650
+
+# Playback volume (0.0 .. 1.0).
+volume = 1.0
+
+# Per-leaf button cluster action order overrides.
+# Keep empty to use built-in defaults.
+button_cluster_instances = []
+
+# Advanced split-tree layout config.
+# Keep this table empty to use the built-in default layout.
+[ui.layout]
+
+# Playlist columns are ordered and rendered in this sequence.
+# Built-in columns should keep `custom = false`.
+# Custom user columns use `custom = true`.
+[[ui.playlist_columns]]
+name = "Title"
+format = "{title}"
+enabled = true
+custom = false
+
+[[ui.playlist_columns]]
+name = "Artist"
+format = "{artist}"
+enabled = true
+custom = false
+
+[[ui.playlist_columns]]
+name = "Album"
+format = "{album}"
+enabled = true
+custom = false
+
+[[ui.playlist_columns]]
+name = "Album Artist"
+format = "{album_artist}"
+enabled = false
+custom = false
+
+[[ui.playlist_columns]]
+name = "Genre"
+format = "{genre}"
+enabled = false
+custom = false
+
+[[ui.playlist_columns]]
+name = "Year"
+format = "{year}"
+enabled = false
+custom = false
+
+[[ui.playlist_columns]]
+name = "Track #"
+format = "{track_number}"
+enabled = false
+custom = false
+
+[[ui.playlist_columns]]
+name = "Album Art"
+format = "{album_art}"
+enabled = false
+custom = false
+
+[buffering]
+# Decoder/player buffering controls.
+# Runtime sanitization enforces:
+# - low watermark >= 500
+# - target buffer >= low watermark + 500
+# - request interval >= 20
+# - decoder chunk >= 100
+player_low_watermark_ms = 12000
+player_target_buffer_ms = 24000
+player_request_interval_ms = 120
+decoder_request_chunk_ms = 1500

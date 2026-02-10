@@ -81,6 +81,10 @@ Common Linux defaults:
 - `~/.local/share/roqtune/playlist.db`
 - `~/.cache/roqtune/covers/`
 
+Config template in this repo:
+
+- `roqtune.system.toml` (copy this to your config path as `roqtune.toml` and edit)
+
 ## UI Development
 
 - Main UI file: `src/roqtune.slint`

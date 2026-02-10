@@ -442,6 +442,20 @@ fn sanitize_config(config: Config) -> Config {
     let sanitized_button_cluster_instances =
         sanitize_button_cluster_instances(&sanitized_layout, &config.ui.button_cluster_instances);
     let clamped_volume = config.ui.volume.clamp(0.0, 1.0);
+    let mut clamped_album_art_column_min_width_px = config
+        .ui
+        .playlist_album_art_column_min_width_px
+        .clamp(12, 512);
+    let mut clamped_album_art_column_max_width_px = config
+        .ui
+        .playlist_album_art_column_max_width_px
+        .clamp(24, 1024);
+    if clamped_album_art_column_min_width_px > clamped_album_art_column_max_width_px {
+        std::mem::swap(
+            &mut clamped_album_art_column_min_width_px,
+            &mut clamped_album_art_column_max_width_px,
+        );
+    }
     let clamped_low_watermark = config.buffering.player_low_watermark_ms.max(500);
     let clamped_target = config
         .buffering
@@ -465,6 +479,8 @@ fn sanitize_config(config: Config) -> Config {
         ui: UiConfig {
             show_album_art: true,
             show_layout_edit_intro: config.ui.show_layout_edit_intro,
+            playlist_album_art_column_min_width_px: clamped_album_art_column_min_width_px,
+            playlist_album_art_column_max_width_px: clamped_album_art_column_max_width_px,
             layout: sanitized_layout,
             button_cluster_instances: sanitized_button_cluster_instances,
             playlist_columns: sanitized_playlist_columns,
@@ -687,12 +703,27 @@ struct ColumnWidthBounds {
     max_px: i32,
 }
 
-fn playlist_column_width_bounds(column: &PlaylistColumnConfig) -> ColumnWidthBounds {
+fn album_art_column_width_bounds(ui: &UiConfig) -> ColumnWidthBounds {
+    ColumnWidthBounds {
+        min_px: ui.playlist_album_art_column_min_width_px as i32,
+        max_px: ui.playlist_album_art_column_max_width_px as i32,
+    }
+}
+
+#[cfg(test)]
+fn default_album_art_column_width_bounds() -> ColumnWidthBounds {
+    ColumnWidthBounds {
+        min_px: config::default_playlist_album_art_column_min_width_px() as i32,
+        max_px: config::default_playlist_album_art_column_max_width_px() as i32,
+    }
+}
+
+fn playlist_column_width_bounds_with_album_art(
+    column: &PlaylistColumnConfig,
+    album_art_bounds: ColumnWidthBounds,
+) -> ColumnWidthBounds {
     if is_album_art_builtin_column(column) {
-        return ColumnWidthBounds {
-            min_px: 52,
-            max_px: 88,
-        };
+        return album_art_bounds;
     }
 
     let normalized_format = column.format.trim().to_ascii_lowercase();
@@ -780,15 +811,21 @@ fn playlist_column_width_bounds(column: &PlaylistColumnConfig) -> ColumnWidthBou
     }
 }
 
+#[cfg(test)]
+fn playlist_column_width_bounds(column: &PlaylistColumnConfig) -> ColumnWidthBounds {
+    playlist_column_width_bounds_with_album_art(column, default_album_art_column_width_bounds())
+}
+
 fn playlist_column_bounds_at_visible_index(
     columns: &[PlaylistColumnConfig],
     visible_index: usize,
+    album_art_bounds: ColumnWidthBounds,
 ) -> Option<ColumnWidthBounds> {
     columns
         .iter()
         .filter(|column| column.enabled)
         .nth(visible_index)
-        .map(playlist_column_width_bounds)
+        .map(|column| playlist_column_width_bounds_with_album_art(column, album_art_bounds))
 }
 
 fn playlist_column_key_at_visible_index(
@@ -806,9 +843,10 @@ fn clamp_width_for_visible_column(
     columns: &[PlaylistColumnConfig],
     visible_index: usize,
     width_px: i32,
+    album_art_bounds: ColumnWidthBounds,
 ) -> Option<i32> {
-    let bounds = playlist_column_bounds_at_visible_index(columns, visible_index)?;
-    Some(width_px.clamp(bounds.min_px.max(48), bounds.max_px.max(bounds.min_px)))
+    let bounds = playlist_column_bounds_at_visible_index(columns, visible_index, album_art_bounds)?;
+    Some(width_px.clamp(bounds.min_px, bounds.max_px.max(bounds.min_px)))
 }
 
 fn reorder_visible_playlist_columns(
@@ -1085,6 +1123,12 @@ fn with_updated_layout(previous: &Config, layout: LayoutConfig) -> Config {
         ui: UiConfig {
             show_album_art: previous.ui.show_album_art,
             show_layout_edit_intro: previous.ui.show_layout_edit_intro,
+            playlist_album_art_column_min_width_px: previous
+                .ui
+                .playlist_album_art_column_min_width_px,
+            playlist_album_art_column_max_width_px: previous
+                .ui
+                .playlist_album_art_column_max_width_px,
             layout,
             button_cluster_instances: previous.ui.button_cluster_instances.clone(),
             playlist_columns: previous.ui.playlist_columns.clone(),
@@ -1842,11 +1886,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let state = config_state_clone
             .lock()
             .expect("config state lock poisoned");
+        let album_art_bounds = album_art_column_width_bounds(&state.ui);
         playlist_column_bounds_at_visible_index(
             &state.ui.playlist_columns,
             visible_index.max(0) as usize,
+            album_art_bounds,
         )
-        .map(|bounds| bounds.min_px.max(48))
+        .map(|bounds| bounds.min_px)
         .unwrap_or(48)
     });
 
@@ -1855,9 +1901,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let state = config_state_clone
             .lock()
             .expect("config state lock poisoned");
+        let album_art_bounds = album_art_column_width_bounds(&state.ui);
         playlist_column_bounds_at_visible_index(
             &state.ui.playlist_columns,
             visible_index.max(0) as usize,
+            album_art_bounds,
         )
         .map(|bounds| bounds.max_px.max(bounds.min_px))
         .unwrap_or(1024)
@@ -1871,10 +1919,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 .lock()
                 .expect("config state lock poisoned");
             let visible_index = visible_index.max(0) as usize;
+            let album_art_bounds = album_art_column_width_bounds(&state.ui);
             let column_key =
                 playlist_column_key_at_visible_index(&state.ui.playlist_columns, visible_index);
-            let clamped =
-                clamp_width_for_visible_column(&state.ui.playlist_columns, visible_index, width_px);
+            let clamped = clamp_width_for_visible_column(
+                &state.ui.playlist_columns,
+                visible_index,
+                width_px,
+                album_art_bounds,
+            );
             (column_key, clamped)
         };
         if let (Some(column_key), Some(clamped_width_px)) = (column_key, clamped_width_px) {
@@ -1896,10 +1949,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 .lock()
                 .expect("config state lock poisoned");
             let visible_index = visible_index.max(0) as usize;
+            let album_art_bounds = album_art_column_width_bounds(&state.ui);
             let column_key =
                 playlist_column_key_at_visible_index(&state.ui.playlist_columns, visible_index);
-            let clamped =
-                clamp_width_for_visible_column(&state.ui.playlist_columns, visible_index, width_px);
+            let clamped = clamp_width_for_visible_column(
+                &state.ui.playlist_columns,
+                visible_index,
+                width_px,
+                album_art_bounds,
+            );
             (column_key, clamped)
         };
         if let (Some(column_key), Some(clamped_width_px)) = (column_key, clamped_width_px) {
@@ -2796,6 +2854,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 ui: UiConfig {
                     show_album_art: true,
                     show_layout_edit_intro: show_layout_edit_tutorial,
+                    playlist_album_art_column_min_width_px: previous_config
+                        .ui
+                        .playlist_album_art_column_min_width_px,
+                    playlist_album_art_column_max_width_px: previous_config
+                        .ui
+                        .playlist_album_art_column_max_width_px,
                     layout: previous_config.ui.layout.clone(),
                     button_cluster_instances: previous_config.ui.button_cluster_instances.clone(),
                     playlist_columns: previous_config.ui.playlist_columns.clone(),
@@ -2886,6 +2950,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             ui: UiConfig {
                 show_album_art: previous_config.ui.show_album_art,
                 show_layout_edit_intro: previous_config.ui.show_layout_edit_intro,
+                playlist_album_art_column_min_width_px: previous_config
+                    .ui
+                    .playlist_album_art_column_min_width_px,
+                playlist_album_art_column_max_width_px: previous_config
+                    .ui
+                    .playlist_album_art_column_max_width_px,
                 layout: previous_config.ui.layout.clone(),
                 button_cluster_instances: previous_config.ui.button_cluster_instances.clone(),
                 playlist_columns: updated_columns,
@@ -2984,6 +3054,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             ui: UiConfig {
                 show_album_art: previous_config.ui.show_album_art,
                 show_layout_edit_intro: previous_config.ui.show_layout_edit_intro,
+                playlist_album_art_column_min_width_px: previous_config
+                    .ui
+                    .playlist_album_art_column_min_width_px,
+                playlist_album_art_column_max_width_px: previous_config
+                    .ui
+                    .playlist_album_art_column_max_width_px,
                 layout: previous_config.ui.layout.clone(),
                 button_cluster_instances: previous_config.ui.button_cluster_instances.clone(),
                 playlist_columns: updated_columns,
@@ -3084,6 +3160,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             ui: UiConfig {
                 show_album_art: previous_config.ui.show_album_art,
                 show_layout_edit_intro: previous_config.ui.show_layout_edit_intro,
+                playlist_album_art_column_min_width_px: previous_config
+                    .ui
+                    .playlist_album_art_column_min_width_px,
+                playlist_album_art_column_max_width_px: previous_config
+                    .ui
+                    .playlist_album_art_column_max_width_px,
                 layout: previous_config.ui.layout.clone(),
                 button_cluster_instances: previous_config.ui.button_cluster_instances.clone(),
                 playlist_columns: updated_columns,
@@ -3178,6 +3260,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             ui: UiConfig {
                 show_album_art: previous_config.ui.show_album_art,
                 show_layout_edit_intro: previous_config.ui.show_layout_edit_intro,
+                playlist_album_art_column_min_width_px: previous_config
+                    .ui
+                    .playlist_album_art_column_min_width_px,
+                playlist_album_art_column_max_width_px: previous_config
+                    .ui
+                    .playlist_album_art_column_max_width_px,
                 layout: previous_config.ui.layout.clone(),
                 button_cluster_instances: previous_config.ui.button_cluster_instances.clone(),
                 playlist_columns: updated_columns,
@@ -3404,6 +3492,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         ui: UiConfig {
                             show_album_art: state.ui.show_album_art,
                             show_layout_edit_intro: state.ui.show_layout_edit_intro,
+                            playlist_album_art_column_min_width_px: state
+                                .ui
+                                .playlist_album_art_column_min_width_px,
+                            playlist_album_art_column_max_width_px: state
+                                .ui
+                                .playlist_album_art_column_max_width_px,
                             layout: state.ui.layout.clone(),
                             button_cluster_instances: state.ui.button_cluster_instances.clone(),
                             playlist_columns: reordered_columns,
@@ -3520,11 +3614,12 @@ mod tests {
     use super::{
         apply_column_order_keys, choose_preferred_u16, choose_preferred_u32,
         clamp_width_for_visible_column, collect_audio_files_from_folder,
-        default_button_cluster_actions_by_index, is_album_art_builtin_column,
-        is_supported_audio_file, playlist_column_key_at_visible_index,
-        playlist_column_width_bounds, reorder_visible_playlist_columns,
-        resolve_playlist_header_column_from_x, resolve_playlist_header_divider_from_x,
-        resolve_playlist_header_gap_from_x, resolve_runtime_config, sanitize_playlist_columns,
+        default_album_art_column_width_bounds, default_button_cluster_actions_by_index,
+        is_album_art_builtin_column, is_supported_audio_file, playlist_column_key_at_visible_index,
+        playlist_column_width_bounds, playlist_column_width_bounds_with_album_art,
+        reorder_visible_playlist_columns, resolve_playlist_header_column_from_x,
+        resolve_playlist_header_divider_from_x, resolve_playlist_header_gap_from_x,
+        resolve_runtime_config, sanitize_config, sanitize_playlist_columns,
         select_output_option_index_u16, select_output_option_index_u32,
         should_apply_custom_column_delete, sidebar_width_from_window, update_or_replace_vec_model,
         visible_playlist_column_kinds, OutputSettingsOptions,
@@ -4205,12 +4300,33 @@ mod tests {
         assert_eq!(track_bounds.max_px, 90);
 
         let album_art_bounds = playlist_column_width_bounds(&album_art_column);
-        assert_eq!(album_art_bounds.min_px, 52);
-        assert_eq!(album_art_bounds.max_px, 88);
+        assert_eq!(album_art_bounds.min_px, 16);
+        assert_eq!(album_art_bounds.max_px, 480);
 
         let custom_bounds = playlist_column_width_bounds(&custom_column);
         assert_eq!(custom_bounds.min_px, 110);
         assert_eq!(custom_bounds.max_px, 340);
+    }
+
+    #[test]
+    fn test_playlist_column_width_bounds_use_custom_album_art_limits() {
+        let album_art_column = PlaylistColumnConfig {
+            name: "Album Art".to_string(),
+            format: "{album_art}".to_string(),
+            enabled: true,
+            custom: false,
+        };
+
+        let bounds = playlist_column_width_bounds_with_album_art(
+            &album_art_column,
+            super::ColumnWidthBounds {
+                min_px: 12,
+                max_px: 600,
+            },
+        );
+
+        assert_eq!(bounds.min_px, 12);
+        assert_eq!(bounds.max_px, 600);
     }
 
     #[test]
@@ -4262,10 +4378,23 @@ mod tests {
             },
         ];
 
-        assert_eq!(clamp_width_for_visible_column(&columns, 0, 10), Some(52));
-        assert_eq!(clamp_width_for_visible_column(&columns, 0, 200), Some(90));
-        assert_eq!(clamp_width_for_visible_column(&columns, 1, 1000), Some(440));
-        assert_eq!(clamp_width_for_visible_column(&columns, 3, 120), None);
+        let album_art_bounds = default_album_art_column_width_bounds();
+        assert_eq!(
+            clamp_width_for_visible_column(&columns, 0, 10, album_art_bounds),
+            Some(52)
+        );
+        assert_eq!(
+            clamp_width_for_visible_column(&columns, 0, 200, album_art_bounds),
+            Some(90)
+        );
+        assert_eq!(
+            clamp_width_for_visible_column(&columns, 1, 1000, album_art_bounds),
+            Some(440)
+        );
+        assert_eq!(
+            clamp_width_for_visible_column(&columns, 3, 120, album_art_bounds),
+            None
+        );
     }
 
     #[test]
@@ -4320,6 +4449,8 @@ mod tests {
             ui: UiConfig {
                 show_album_art: true,
                 show_layout_edit_intro: true,
+                playlist_album_art_column_min_width_px: 16,
+                playlist_album_art_column_max_width_px: 480,
                 layout: LayoutConfig::default(),
                 button_cluster_instances: Vec::new(),
                 playlist_columns: crate::config::default_playlist_columns(),
@@ -4345,6 +4476,22 @@ mod tests {
         assert_eq!(runtime.output.sample_rate_khz, 48_000);
         assert_eq!(runtime.output.bits_per_sample, 24);
         assert_eq!(runtime.output.output_device_name, "Device B");
+    }
+
+    #[test]
+    fn test_sanitize_config_clamps_and_orders_album_art_width_bounds() {
+        let input = Config {
+            ui: UiConfig {
+                playlist_album_art_column_min_width_px: 900,
+                playlist_album_art_column_max_width_px: 20,
+                ..Config::default().ui
+            },
+            ..Config::default()
+        };
+
+        let sanitized = sanitize_config(input);
+        assert_eq!(sanitized.ui.playlist_album_art_column_min_width_px, 24);
+        assert_eq!(sanitized.ui.playlist_album_art_column_max_width_px, 512);
     }
 
     #[test]

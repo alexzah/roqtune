@@ -40,6 +40,10 @@ pub struct UiConfig {
     pub show_album_art: bool,
     #[serde(default = "default_true")]
     pub show_layout_edit_intro: bool,
+    #[serde(default = "default_playlist_album_art_column_min_width_px")]
+    pub playlist_album_art_column_min_width_px: u32,
+    #[serde(default = "default_playlist_album_art_column_max_width_px")]
+    pub playlist_album_art_column_max_width_px: u32,
     #[serde(default)]
     pub layout: LayoutConfig,
     #[serde(default)]
@@ -109,6 +113,10 @@ impl Default for UiConfig {
         Self {
             show_album_art: true,
             show_layout_edit_intro: true,
+            playlist_album_art_column_min_width_px: default_playlist_album_art_column_min_width_px(
+            ),
+            playlist_album_art_column_max_width_px: default_playlist_album_art_column_max_width_px(
+            ),
             layout: LayoutConfig::default(),
             button_cluster_instances: Vec::new(),
             playlist_columns: default_playlist_columns(),
@@ -160,6 +168,14 @@ fn default_window_height() -> u32 {
 
 fn default_volume() -> f32 {
     1.0
+}
+
+pub fn default_playlist_album_art_column_min_width_px() -> u32 {
+    16
+}
+
+pub fn default_playlist_album_art_column_max_width_px() -> u32 {
+    480
 }
 
 /// Returns the built-in playlist column set used for new configs.
@@ -235,6 +251,8 @@ mod tests {
 
         assert!(config.ui.show_album_art);
         assert!(config.ui.show_layout_edit_intro);
+        assert_eq!(config.ui.playlist_album_art_column_min_width_px, 16);
+        assert_eq!(config.ui.playlist_album_art_column_max_width_px, 480);
         assert_eq!(config.ui.layout, LayoutConfig::default());
         assert!(config.ui.button_cluster_instances.is_empty());
         assert_eq!(config.ui.playlist_columns, default_playlist_columns());
@@ -274,6 +292,8 @@ decoder_request_chunk_ms = 1500
         assert_eq!(parsed.ui.layout, LayoutConfig::default());
         assert!(parsed.ui.button_cluster_instances.is_empty());
         assert!(parsed.ui.show_layout_edit_intro);
+        assert_eq!(parsed.ui.playlist_album_art_column_min_width_px, 16);
+        assert_eq!(parsed.ui.playlist_album_art_column_max_width_px, 480);
         assert_eq!(parsed.ui.playlist_columns, default_playlist_columns());
         assert_eq!(parsed.ui.window_width, 900);
         assert_eq!(parsed.ui.window_height, 650);
@@ -295,5 +315,79 @@ decoder_request_chunk_ms = 1500
         assert_eq!(album_art_column.name, "Album Art");
         assert!(!album_art_column.enabled);
         assert!(!album_art_column.custom);
+    }
+
+    #[test]
+    fn test_system_config_template_matches_default_values() {
+        let parsed: Config = toml::from_str(include_str!("../roqtune.system.toml"))
+            .expect("system config template should parse");
+        let defaults = Config::default();
+
+        assert_eq!(
+            parsed.output.output_device_name,
+            defaults.output.output_device_name
+        );
+        assert_eq!(
+            parsed.output.output_device_auto,
+            defaults.output.output_device_auto
+        );
+        assert_eq!(parsed.output.channel_count, defaults.output.channel_count);
+        assert_eq!(
+            parsed.output.sample_rate_khz,
+            defaults.output.sample_rate_khz
+        );
+        assert_eq!(
+            parsed.output.bits_per_sample,
+            defaults.output.bits_per_sample
+        );
+        assert_eq!(
+            parsed.output.channel_count_auto,
+            defaults.output.channel_count_auto
+        );
+        assert_eq!(
+            parsed.output.sample_rate_auto,
+            defaults.output.sample_rate_auto
+        );
+        assert_eq!(
+            parsed.output.bits_per_sample_auto,
+            defaults.output.bits_per_sample_auto
+        );
+
+        assert_eq!(parsed.ui.show_album_art, defaults.ui.show_album_art);
+        assert_eq!(
+            parsed.ui.show_layout_edit_intro,
+            defaults.ui.show_layout_edit_intro
+        );
+        assert_eq!(
+            parsed.ui.playlist_album_art_column_min_width_px,
+            defaults.ui.playlist_album_art_column_min_width_px
+        );
+        assert_eq!(
+            parsed.ui.playlist_album_art_column_max_width_px,
+            defaults.ui.playlist_album_art_column_max_width_px
+        );
+        assert_eq!(parsed.ui.layout, LayoutConfig::default());
+        assert!(parsed.ui.button_cluster_instances.is_empty());
+        assert_eq!(parsed.ui.playlist_columns, default_playlist_columns());
+        assert_eq!(parsed.ui.window_width, defaults.ui.window_width);
+        assert_eq!(parsed.ui.window_height, defaults.ui.window_height);
+        assert!((parsed.ui.volume - defaults.ui.volume).abs() < f32::EPSILON);
+
+        assert_eq!(
+            parsed.buffering.player_low_watermark_ms,
+            defaults.buffering.player_low_watermark_ms
+        );
+        assert_eq!(
+            parsed.buffering.player_target_buffer_ms,
+            defaults.buffering.player_target_buffer_ms
+        );
+        assert_eq!(
+            parsed.buffering.player_request_interval_ms,
+            defaults.buffering.player_request_interval_ms
+        );
+        assert_eq!(
+            parsed.buffering.decoder_request_chunk_ms,
+            defaults.buffering.decoder_request_chunk_ms
+        );
     }
 }
