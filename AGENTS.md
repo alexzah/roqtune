@@ -6,7 +6,7 @@ It aims to ensure consistency, quality, and adherence to the project's architect
 ## 1. Project Overview
 
 ### Project Structure
-- This project is a fast, efficient, flexible, and powerful music player designed for desktop usage, akin to something like foobar2000 for the modern era. 
+- This project is a fast, efficient, flexible, and powerful music player designed for modern desktop usage.
 - The project is written in Rust and uses the Slint framework for UI.
 - UI can be changed by editing the .slint files
 - The project uses the standard cargo package manager and build system.

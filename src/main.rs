@@ -1303,7 +1303,7 @@ fn apply_config_to_ui(
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut clog = colog::default_builder();
-    clog.filter(Some("music_player"), log::LevelFilter::Debug);
+    clog.filter(Some("roqtune"), log::LevelFilter::Debug);
     clog.init();
 
     std::panic::set_hook(Box::new(|panic_info| {
@@ -1325,7 +1325,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     };
 
     let config_dir = dirs::config_dir().unwrap();
-    let config_file = config_dir.join("music_player.toml");
+    let config_file = config_dir.join("roqtune.toml");
 
     if let Err(err) = std::fs::create_dir_all(&config_dir) {
         return Err(format!(
@@ -3245,7 +3245,7 @@ mod tests {
             .expect("system clock should be after UNIX_EPOCH")
             .as_nanos();
         std::env::temp_dir().join(format!(
-            "music_player_{}_{}_{}",
+            "roqtune_{}_{}_{}",
             test_name,
             std::process::id(),
             nanos
@@ -3254,7 +3254,7 @@ mod tests {
 
     #[test]
     fn test_import_menu_exposes_add_files_and_add_folder_options() {
-        let slint_ui = include_str!("music_player.slint");
+        let slint_ui = include_str!("roqtune.slint");
         assert!(
             slint_ui.contains("in-out property <bool> show_import_menu: false;"),
             "App window should expose import menu state"
@@ -3271,7 +3271,7 @@ mod tests {
 
     #[test]
     fn test_settings_menu_exposes_layout_edit_toggle_and_settings_entry() {
-        let slint_ui = include_str!("music_player.slint");
+        let slint_ui = include_str!("roqtune.slint");
         assert!(
             slint_ui.contains("in-out property <bool> show_settings_menu: false;"),
             "App window should expose settings action menu state"
@@ -3299,7 +3299,7 @@ mod tests {
 
     #[test]
     fn test_settings_dialog_exposes_layout_tutorial_visibility_toggle() {
-        let slint_ui = include_str!("music_player.slint");
+        let slint_ui = include_str!("roqtune.slint");
         assert!(
             slint_ui.contains("in-out property <bool> settings_show_layout_edit_tutorial: true;"),
             "Settings dialog should expose tutorial visibility state"
@@ -3368,7 +3368,7 @@ mod tests {
 
     #[test]
     fn test_focus_touch_areas_are_not_full_pane_overlays() {
-        let slint_ui = include_str!("music_player.slint");
+        let slint_ui = include_str!("roqtune.slint");
 
         assert!(
             !slint_ui.contains("sidebar-ta := TouchArea"),
@@ -3386,7 +3386,7 @@ mod tests {
 
     #[test]
     fn test_playlist_null_column_and_empty_space_trigger_deselect() {
-        let slint_ui = include_str!("music_player.slint");
+        let slint_ui = include_str!("roqtune.slint");
 
         assert!(
             slint_ui.contains("property <length> null-column-width: 120px;"),
@@ -3410,7 +3410,7 @@ mod tests {
 
     #[test]
     fn test_custom_column_menu_supports_delete_with_confirmation() {
-        let slint_ui = include_str!("music_player.slint");
+        let slint_ui = include_str!("roqtune.slint");
         let menu_ui = include_str!("ui/components/menus.slint");
 
         assert!(
@@ -3453,7 +3453,7 @@ mod tests {
 
     #[test]
     fn test_playlist_header_exposes_drag_reorder_wiring() {
-        let slint_ui = include_str!("music_player.slint");
+        let slint_ui = include_str!("roqtune.slint");
         assert!(
             slint_ui.contains("column-header-drag-ta := TouchArea"),
             "Header should include drag TouchArea for column reordering"
@@ -3515,7 +3515,7 @@ mod tests {
 
     #[test]
     fn test_layout_editor_and_splitter_callbacks_are_wired_in_slint() {
-        let slint_ui = include_str!("music_player.slint");
+        let slint_ui = include_str!("roqtune.slint");
         let controls_ui = include_str!("ui/components/controls.slint");
         let media_ui = include_str!("ui/components/media.slint");
         let status_ui = include_str!("ui/components/status.slint");

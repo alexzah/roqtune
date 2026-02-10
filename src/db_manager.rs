@@ -15,7 +15,7 @@ impl DbManager {
     pub fn new() -> Result<Self, rusqlite::Error> {
         let data_dir = dirs::data_dir()
             .expect("Could not find data directory")
-            .join("music_player");
+            .join("roqtune");
 
         if !data_dir.exists() {
             std::fs::create_dir_all(&data_dir).expect("Could not create data directory");
