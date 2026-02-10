@@ -524,7 +524,7 @@ impl DbManager {
     /// Loads all unique albums with song counts.
     pub fn get_library_albums(&self) -> Result<Vec<LibraryAlbum>, rusqlite::Error> {
         let mut stmt = self.conn.prepare(
-            "SELECT album, album_artist, COUNT(*) AS song_count
+            "SELECT album, album_artist, COUNT(*) AS song_count, MIN(path) AS representative_track_path
              FROM library_tracks
              GROUP BY album, album_artist
              ORDER BY sort_album ASC, album ASC, album_artist ASC",
@@ -534,6 +534,7 @@ impl DbManager {
                 album: row.get(0)?,
                 album_artist: row.get(1)?,
                 song_count: row.get::<_, i64>(2)?.max(0) as u32,
+                representative_track_path: row.get::<_, Option<String>>(3)?.map(PathBuf::from),
             })
         })?;
         let mut albums = Vec::new();
@@ -580,7 +581,7 @@ impl DbManager {
         artist: &str,
     ) -> Result<(Vec<LibraryAlbum>, Vec<LibrarySong>), rusqlite::Error> {
         let mut album_stmt = self.conn.prepare(
-            "SELECT album, album_artist, COUNT(*) AS song_count
+            "SELECT album, album_artist, COUNT(*) AS song_count, MIN(path) AS representative_track_path
              FROM library_tracks
              WHERE artist = ?1 OR album_artist = ?1
              GROUP BY album, album_artist
@@ -591,6 +592,7 @@ impl DbManager {
                 album: row.get(0)?,
                 album_artist: row.get(1)?,
                 song_count: row.get::<_, i64>(2)?.max(0) as u32,
+                representative_track_path: row.get::<_, Option<String>>(3)?.map(PathBuf::from),
             })
         })?;
         let mut albums = Vec::new();

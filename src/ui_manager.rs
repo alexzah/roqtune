@@ -86,6 +86,7 @@ pub struct UiManager {
     collection_mode: i32,
     library_view_stack: Vec<LibraryViewState>,
     library_entries: Vec<LibraryEntry>,
+    library_cover_art_paths: HashMap<PathBuf, Option<PathBuf>>,
     library_scan_in_progress: bool,
     library_status_text: String,
 }
@@ -137,6 +138,14 @@ enum LibraryEntry {
     Song(protocol::LibrarySong),
     Artist(protocol::LibraryArtist),
     Album(protocol::LibraryAlbum),
+}
+
+#[derive(Clone, Debug)]
+struct LibraryRowPresentation {
+    primary: String,
+    secondary: String,
+    item_kind: i32,
+    cover_art_path: Option<PathBuf>,
 }
 
 const PLAYLIST_COLUMN_KIND_TEXT: i32 = 0;
@@ -284,6 +293,7 @@ impl UiManager {
             collection_mode: COLLECTION_MODE_PLAYLIST,
             library_view_stack: vec![LibraryViewState::SongsRoot],
             library_entries: Vec::new(),
+            library_cover_art_paths: HashMap::new(),
             library_scan_in_progress: false,
             library_status_text: String::new(),
         }
@@ -1636,45 +1646,78 @@ impl UiManager {
         }
     }
 
-    fn library_row_from_entry(entry: &LibraryEntry) -> LibraryRowData {
+    fn resolve_library_cover_art_path(&mut self, track_path: &PathBuf) -> Option<PathBuf> {
+        if let Some(cached) = self.library_cover_art_paths.get(track_path) {
+            return cached.clone();
+        }
+        let resolved = Self::find_cover_art(track_path);
+        self.library_cover_art_paths
+            .insert(track_path.clone(), resolved.clone());
+        resolved
+    }
+
+    fn library_row_presentation_from_entry(
+        &mut self,
+        entry: &LibraryEntry,
+    ) -> LibraryRowPresentation {
         match entry {
-            LibraryEntry::Song(song) => LibraryRowData {
-                primary: song.title.clone().into(),
-                secondary: format!("{} • {}", song.artist, song.album).into(),
+            LibraryEntry::Song(song) => LibraryRowPresentation {
+                primary: song.title.clone(),
+                secondary: format!("{} • {}", song.artist, song.album),
                 item_kind: 0,
+                cover_art_path: self.resolve_library_cover_art_path(&song.path),
             },
-            LibraryEntry::Artist(artist) => LibraryRowData {
-                primary: artist.artist.clone().into(),
+            LibraryEntry::Artist(artist) => LibraryRowPresentation {
+                primary: artist.artist.clone(),
                 secondary: format!(
                     "{} albums • {} songs",
                     artist.album_count, artist.song_count
-                )
-                .into(),
+                ),
                 item_kind: 1,
+                cover_art_path: None,
             },
-            LibraryEntry::Album(album) => LibraryRowData {
-                primary: album.album.clone().into(),
-                secondary: format!("{} • {} songs", album.album_artist, album.song_count).into(),
+            LibraryEntry::Album(album) => LibraryRowPresentation {
+                primary: album.album.clone(),
+                secondary: format!("{} • {} songs", album.album_artist, album.song_count),
                 item_kind: 2,
+                cover_art_path: album
+                    .representative_track_path
+                    .as_ref()
+                    .and_then(|track_path| self.resolve_library_cover_art_path(track_path)),
             },
         }
     }
 
-    fn sync_library_ui(&self) {
+    fn sync_library_ui(&mut self) {
         let view = self.current_library_view();
         let (title, subtitle) = Self::library_view_labels(&view);
         let can_go_back = self.library_view_stack.len() > 1;
         let root_index = self.current_library_root_index();
         let scan_in_progress = self.library_scan_in_progress;
         let status_text = self.library_status_text.clone();
-        let rows: Vec<LibraryRowData> = self
-            .library_entries
-            .iter()
-            .map(Self::library_row_from_entry)
+        let entries = self.library_entries.clone();
+        let rows: Vec<LibraryRowPresentation> = entries
+            .into_iter()
+            .map(|entry| self.library_row_presentation_from_entry(&entry))
             .collect();
         let collection_mode = self.collection_mode;
 
         let _ = self.ui.upgrade_in_event_loop(move |ui| {
+            let rows: Vec<LibraryRowData> = rows
+                .into_iter()
+                .map(|entry| {
+                    let album_art =
+                        UiManager::load_track_row_cover_art_image(entry.cover_art_path.as_ref());
+                    let has_album_art = entry.cover_art_path.is_some();
+                    LibraryRowData {
+                        primary: entry.primary.into(),
+                        secondary: entry.secondary.into(),
+                        item_kind: entry.item_kind,
+                        album_art,
+                        has_album_art,
+                    }
+                })
+                .collect();
             ui.set_collection_mode(collection_mode);
             ui.set_library_root_index(root_index);
             ui.set_library_view_title(title.into());
@@ -2132,12 +2175,14 @@ impl UiManager {
                             protocol::LibraryMessage::ScanStarted => {
                                 self.library_scan_in_progress = true;
                                 self.library_status_text = "Scanning library...".to_string();
+                                self.library_cover_art_paths.clear();
                                 self.sync_library_ui();
                             }
                             protocol::LibraryMessage::ScanCompleted { indexed_tracks } => {
                                 self.library_scan_in_progress = false;
                                 self.library_status_text =
                                     format!("Indexed {} tracks", indexed_tracks);
+                                self.library_cover_art_paths.clear();
                                 self.request_library_view_data();
                                 self.sync_library_ui();
                             }

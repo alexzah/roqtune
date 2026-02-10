@@ -240,6 +240,7 @@ pub struct LibraryAlbum {
     pub album: String,
     pub album_artist: String,
     pub song_count: u32,
+    pub representative_track_path: Option<PathBuf>,
 }
 
 /// One artist aggregate entry in the indexed music library.
