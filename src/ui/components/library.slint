@@ -1,0 +1,48 @@
+import { LibraryRowData } from "../types.slint";
+
+export component LibraryRow inherits Rectangle {
+    in property <LibraryRowData> data;
+    in property <bool> is-hover;
+
+    height: 34px;
+    background: is-hover ? #333 : transparent;
+    border-radius: 2px;
+
+    HorizontalLayout {
+        padding-left: 8px;
+        padding-right: 8px;
+        spacing: 8px;
+
+        Rectangle {
+            width: 16px;
+            Text {
+                text: root.data.item_kind == 0 ? "♪" : root.data.item_kind == 1 ? "◎" : "▦";
+                color: #8fa7c6;
+                font-size: 11px;
+                horizontal-alignment: center;
+                vertical-alignment: center;
+            }
+        }
+
+        VerticalLayout {
+            spacing: 0px;
+            vertical-stretch: 1;
+            Text {
+                text: root.data.primary;
+                color: #ddd;
+                font-size: 12px;
+                overflow: elide;
+                horizontal-alignment: left;
+                vertical-alignment: center;
+            }
+            Text {
+                text: root.data.secondary;
+                color: #888;
+                font-size: 11px;
+                overflow: elide;
+                horizontal-alignment: left;
+                vertical-alignment: center;
+            }
+        }
+    }
+}

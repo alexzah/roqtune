@@ -1,10 +1,12 @@
 import { Button, ComboBox, VerticalBox, StandardTableView, ScrollView, LineEdit, ListView, Switch } from "std-widgets.slint";
 
-import { LayoutButtonClusterPanelModel, LayoutSplitterModel, TrackRowData } from "ui/types.slint";
+import { LayoutButtonClusterPanelModel, LayoutSplitterModel, LibraryRowData, TrackRowData } from "ui/types.slint";
 import { ColumnHeaderMenu, ConfirmationDialog, InfoDialog } from "ui/components/menus.slint";
 import { PlayerButton, ButtonCluster } from "ui/components/controls.slint";
 import { VolumeSliderControl, SeekBarControl, MetadataViewer, AlbumArtViewer } from "ui/components/media.slint";
 import { PlaylistRow, TrackRow } from "ui/components/playlist.slint";
+import { ModeTabs } from "ui/components/tabs.slint";
+import { LibraryRow } from "ui/components/library.slint";
 import { SettingsDropdownControl } from "ui/components/settings.slint";
 import { StatusBar } from "ui/components/status.slint";
 
@@ -62,6 +64,10 @@ export component AppWindow inherits Window {
             }
             if (event.text == Key.Escape && root.show_settings_menu) {
                 root.show_settings_menu = false;
+                return accept;
+            }
+            if (event.text == Key.Escape && root.show_library_first_start_dialog) {
+                root.library_skip_first_start();
                 return accept;
             }
             if (event.text == Key.Escape && root.layout_edit_mode) {
@@ -171,6 +177,17 @@ export component AppWindow inherits Window {
     in-out property <length> control_cluster_menu_x: 0px;
     in-out property <length> control_cluster_menu_y: 0px;
     in-out property <int> sidebar_width_px: 220;
+    in-out property <int> collection_mode: 0; // 0: Playlist, 1: Library
+    in-out property <int> library_root_index: 0; // 0: Songs, 1: Artists, 2: Albums
+    in-out property <bool> library_can_go_back: false;
+    in-out property <bool> library_scan_in_progress: false;
+    in-out property <string> library_view_title: "Songs";
+    in-out property <string> library_view_subtitle: "All songs";
+    in-out property <string> library_status_text: "";
+    in-out property <[LibraryRowData]> library_model: [];
+    in-out property <bool> show_library_first_start_dialog: false;
+    in-out property <[string]> settings_library_folders: [];
+    in-out property <int> settings_library_selected_folder_index: -1;
     in-out property <bool> layout_edit_mode: false;
     in-out property <bool> show_layout_editor_dialog: false;
     in-out property <bool> show_layout_leaf_context_menu: false;
@@ -187,10 +204,23 @@ export component AppWindow inherits Window {
     property <length> layout_leaf_context_menu_y: 0px;
     property <length> layout_splitter_context_menu_x: 0px;
     property <length> layout_splitter_context_menu_y: 0px;
+    property <int> panel_kind_none: 0;
+    property <int> panel_kind_button_cluster: 1;
+    property <int> panel_kind_transport_button_cluster: 2;
+    property <int> panel_kind_utility_button_cluster: 3;
+    property <int> panel_kind_volume_slider: 4;
+    property <int> panel_kind_seek_bar: 5;
+    property <int> panel_kind_playlist_switcher: 6;
+    property <int> panel_kind_track_list: 7;
+    property <int> panel_kind_metadata_viewer: 8;
+    property <int> panel_kind_album_art_viewer: 9;
+    property <int> panel_kind_spacer: 10;
+    property <int> panel_kind_status_bar: 11;
+    property <int> panel_kind_import_button_cluster: 12;
     in-out property <[string]> layout_panel_options: [];
-    in-out property <int> layout_editor_replace_panel_kind: 0;
-    in-out property <int> layout_editor_split_panel_kind: 10;
-    in-out property <int> layout_editor_new_root_panel_kind: 7;
+    in-out property <int> layout_editor_replace_panel_kind: root.panel_kind_none;
+    in-out property <int> layout_editor_split_panel_kind: root.panel_kind_spacer;
+    in-out property <int> layout_editor_new_root_panel_kind: root.panel_kind_track_list;
     in-out property <int> layout_editor_split_axis: 1;
     in-out property <[string]> layout_leaf_ids: [];
     in-out property <int> layout_selected_leaf_index: -1;
@@ -210,13 +240,26 @@ export component AppWindow inherits Window {
         "Album Art Viewer",
         "Status Bar"
     ];
-    property <[int]> layout_panel_submenu_codes: [1, 4, 5, 6, 7, 8, 9, 11];
+    property <[int]> layout_panel_submenu_codes: [
+        root.panel_kind_button_cluster,
+        root.panel_kind_volume_slider,
+        root.panel_kind_seek_bar,
+        root.panel_kind_playlist_switcher,
+        root.panel_kind_track_list,
+        root.panel_kind_metadata_viewer,
+        root.panel_kind_album_art_viewer,
+        root.panel_kind_status_bar
+    ];
     property <[string]> layout_replace_preset_labels: [
         "Import Button Cluster",
         "Transport Button Cluster",
         "Utility Button Cluster"
     ];
-    property <[int]> layout_replace_preset_codes: [12, 2, 3];
+    property <[int]> layout_replace_preset_codes: [
+        root.panel_kind_import_button_cluster,
+        root.panel_kind_transport_button_cluster,
+        root.panel_kind_utility_button_cluster
+    ];
     in-out property <[LayoutSplitterModel]> layout_splitters: [];
     in-out property <int> layout_active_splitter_index: -1;
     property <length> layout_splitter_drag_start_mouse_x: 0px;
@@ -281,41 +324,41 @@ export component AppWindow inherits Window {
         if region >= 0 && region < root.layout_region_panel_kinds.length {
             return root.layout_region_panel_kinds[region];
         }
-        return 0;
+        return root.panel_kind_none;
     }
 
     pure function layout-panel-label(panel-kind: int) -> string {
-        if panel-kind == 1 {
+        if panel-kind == root.panel_kind_button_cluster {
             return "Button Cluster";
         }
-        if panel-kind == 2 {
+        if panel-kind == root.panel_kind_transport_button_cluster {
             return "Transport Preset";
         }
-        if panel-kind == 3 {
+        if panel-kind == root.panel_kind_utility_button_cluster {
             return "Utility Preset";
         }
-        if panel-kind == 4 {
+        if panel-kind == root.panel_kind_volume_slider {
             return "Volume Slider";
         }
-        if panel-kind == 5 {
+        if panel-kind == root.panel_kind_seek_bar {
             return "Seek Bar";
         }
-        if panel-kind == 6 {
+        if panel-kind == root.panel_kind_playlist_switcher {
             return "Playlist Switcher";
         }
-        if panel-kind == 7 {
+        if panel-kind == root.panel_kind_track_list {
             return "Track List";
         }
-        if panel-kind == 8 {
+        if panel-kind == root.panel_kind_metadata_viewer {
             return "Metadata Viewer";
         }
-        if panel-kind == 9 {
+        if panel-kind == root.panel_kind_album_art_viewer {
             return "Album Art Viewer";
         }
-        if panel-kind == 10 {
+        if panel-kind == root.panel_kind_spacer {
             return "Spacer";
         }
-        if panel-kind == 11 {
+        if panel-kind == root.panel_kind_status_bar {
             return "Status Bar";
         }
         return "None";
@@ -326,12 +369,12 @@ export component AppWindow inherits Window {
             && root.layout_selected_leaf_index < root.layout_region_panel_kinds.length {
             return root.layout_region_panel_kinds[root.layout_selected_leaf_index];
         }
-        return 0;
+        return root.panel_kind_none;
     }
 
     pure function layout-selected-panel-has-settings() -> bool {
         let panel-kind = root.layout-selected-panel-kind();
-        return panel-kind == 1;
+        return panel-kind == root.panel_kind_button_cluster;
     }
 
     pure function control-action-label(action-id: int) -> string {
@@ -379,7 +422,8 @@ export component AppWindow inherits Window {
                 y: root.layout-region-y(i);
                 width: root.layout-region-width(i);
                 height: root.layout-region-height(i);
-                visible: root.layout-region-is-visible(i) && root.layout-region-panel-kind(i) == 10;
+                visible: root.layout-region-is-visible(i)
+                    && root.layout-region-panel-kind(i) == root.panel_kind_spacer;
                 background: root.layout_edit_mode ? #252525 : #202020;
                 border-width: root.layout_edit_mode ? 1px : 0px;
                 border-color: #3a3a3a;
@@ -457,7 +501,8 @@ export component AppWindow inherits Window {
                 y: root.layout-region-y(i);
                 width: root.layout-region-width(i);
                 height: root.layout-region-height(i);
-                visible: root.layout-region-is-visible(i) && root.layout-region-panel-kind(i) == 4;
+                visible: root.layout-region-is-visible(i)
+                    && root.layout-region-panel-kind(i) == root.panel_kind_volume_slider;
                 clip: true;
                 background: #202020;
                 VolumeSliderControl {
@@ -475,7 +520,8 @@ export component AppWindow inherits Window {
                 y: root.layout-region-y(i);
                 width: root.layout-region-width(i);
                 height: root.layout-region-height(i);
-                visible: root.layout-region-is-visible(i) && root.layout-region-panel-kind(i) == 5;
+                visible: root.layout-region-is-visible(i)
+                    && root.layout-region-panel-kind(i) == root.panel_kind_seek_bar;
                 clip: true;
                 SeekBarControl {
                     width: parent.width;
@@ -492,62 +538,118 @@ export component AppWindow inherits Window {
                 y: root.layout-region-y(i);
                 width: root.layout-region-width(i);
                 height: root.layout-region-height(i);
-                visible: root.layout-region-is-visible(i) && root.layout-region-panel-kind(i) == 6;
+                visible: root.layout-region-is-visible(i)
+                    && root.layout-region-panel-kind(i) == root.panel_kind_playlist_switcher;
                 clip: true;
                 background: #202020;
                 VerticalLayout {
                     padding: 8px;
-                    spacing: 4px;
-                    HorizontalLayout {
-                        Text {
-                            text: "Playlists";
-                            color: #888;
-                            font-size: 12px;
-                            font-weight: 700;
-                            vertical-alignment: center;
-                        }
-                        Rectangle { horizontal-stretch: 1; }
-                        PlayerButton {
-                            icon-text: "+";
-                            font-size: 18px;
-                            clicked => { root.create_playlist(); }
-                        }
+                    spacing: 6px;
+
+                    ModeTabs {
+                        labels: ["Playlists", "Library"];
+                        selected_index: root.collection_mode;
+                        selected(index) => { root.switch_collection_mode(index); }
                     }
 
-                    Rectangle { height: 1px; background: #333; }
-                    ScrollView {
-                        vertical-stretch: 1;
-                        VerticalLayout {
-                            alignment: start;
-                            for p[i] in root.playlists : PlaylistRow {
-                                name: p.text;
-                                is-active: root.active_playlist_index == i;
-                                is-editing: root.editing_playlist_index == i;
-                                clicked => {
-                                    root.switch_playlist(i);
-                                    root.editing_playlist_index = -1;
-                                    root.sidebar_has_focus = true;
-                                    root.refocus_main();
-                                }
-                                renamed(new-name) => {
-                                    root.rename_playlist(i, new-name);
-                                    root.editing_playlist_index = -1;
-                                    root.refocus_main();
-                                }
-                                cancel-edit() => {
-                                    root.editing_playlist_index = -1;
-                                    root.refocus_main();
-                                }
-                                context-menu-rename() => {
-                                    root.editing_playlist_index = i;
-                                }
-                                context-menu-delete() => {
-                                    root.confirm_delete_playlist(i);
+                    if root.collection_mode == 0 : VerticalLayout {
+                        spacing: 4px;
+                        HorizontalLayout {
+                            Text {
+                                text: "Playlists";
+                                color: #888;
+                                font-size: 12px;
+                                font-weight: 700;
+                                vertical-alignment: center;
+                            }
+                            Rectangle { horizontal-stretch: 1; }
+                            PlayerButton {
+                                icon-text: "+";
+                                font-size: 18px;
+                                clicked => { root.create_playlist(); }
+                            }
+                        }
+
+                        Rectangle { height: 1px; background: #333; }
+                        ScrollView {
+                            vertical-stretch: 1;
+                            VerticalLayout {
+                                alignment: start;
+                                for p[i] in root.playlists : PlaylistRow {
+                                    name: p.text;
+                                    is-active: root.active_playlist_index == i;
+                                    is-editing: root.editing_playlist_index == i;
+                                    clicked => {
+                                        root.switch_playlist(i);
+                                        root.editing_playlist_index = -1;
+                                        root.sidebar_has_focus = true;
+                                        root.refocus_main();
+                                    }
+                                    renamed(new-name) => {
+                                        root.rename_playlist(i, new-name);
+                                        root.editing_playlist_index = -1;
+                                        root.refocus_main();
+                                    }
+                                    cancel-edit() => {
+                                        root.editing_playlist_index = -1;
+                                        root.refocus_main();
+                                    }
+                                    context-menu-rename() => {
+                                        root.editing_playlist_index = i;
+                                    }
+                                    context-menu-delete() => {
+                                        root.confirm_delete_playlist(i);
+                                    }
                                 }
                             }
                         }
                     }
+
+                    if root.collection_mode == 1 : VerticalLayout {
+                        spacing: 6px;
+
+                        HorizontalLayout {
+                            Text {
+                                text: "Library";
+                                color: #ddd;
+                                font-size: 12px;
+                                font-weight: 700;
+                                vertical-alignment: center;
+                                horizontal-stretch: 1;
+                            }
+                            PlayerButton {
+                                icon-text: "↻";
+                                font-size: 14px;
+                                clicked => { root.library_rescan(); }
+                            }
+                        }
+
+                        Text {
+                            text: "Select a view for the main track list";
+                            color: #888;
+                            font-size: 11px;
+                            height: 16px;
+                            overflow: elide;
+                        }
+
+                        ModeTabs {
+                            labels: ["Songs", "Artists", "Albums"];
+                            selected_index: root.library_root_index;
+                            selected(index) => { root.library_select_root(index); }
+                        }
+
+                        Rectangle { height: 1px; background: #333; }
+
+                        Text {
+                            text: root.library_scan_in_progress ? "Scanning library..." : root.library_status_text;
+                            color: #7f8ea3;
+                            font-size: 11px;
+                            height: 16px;
+                            overflow: elide;
+                        }
+                    }
                 }
+
             }
 
             for leaf-id[i] in root.layout_leaf_ids : Rectangle {
@@ -555,7 +657,8 @@ export component AppWindow inherits Window {
                 y: root.layout-region-y(i);
                 width: root.layout-region-width(i);
                 height: root.layout-region-height(i);
-                visible: root.layout-region-is-visible(i) && root.layout-region-panel-kind(i) == 8;
+                visible: root.layout-region-is-visible(i)
+                    && root.layout-region-panel-kind(i) == root.panel_kind_metadata_viewer;
                 clip: true;
                 background: #202020;
                 MetadataViewer {
@@ -576,7 +679,8 @@ export component AppWindow inherits Window {
                 y: root.layout-region-y(i);
                 width: root.layout-region-width(i);
                 height: root.layout-region-height(i);
-                visible: root.layout-region-is-visible(i) && root.layout-region-panel-kind(i) == 9;
+                visible: root.layout-region-is-visible(i)
+                    && root.layout-region-panel-kind(i) == root.panel_kind_album_art_viewer;
                 clip: true;
                 background: #202020;
                 AlbumArtViewer {
@@ -593,11 +697,12 @@ export component AppWindow inherits Window {
                 y: root.layout-region-y(i);
                 width: root.layout-region-width(i);
                 height: root.layout-region-height(i);
-                visible: root.layout-region-is-visible(i) && root.layout-region-panel-kind(i) == 7;
+                visible: root.layout-region-is-visible(i)
+                    && root.layout-region-panel-kind(i) == root.panel_kind_track_list;
                 clip: true;
                 background: #282828;
 
-                VerticalLayout {
+                if root.collection_mode == 0 : VerticalLayout {
                     Rectangle {
                         height: 28px;
                         clip: true;
@@ -1071,6 +1176,70 @@ export component AppWindow inherits Window {
                         }
                     }
                 }
+
+                if root.collection_mode == 1 : VerticalLayout {
+                    padding: 8px;
+                    spacing: 6px;
+
+                    HorizontalLayout {
+                        if root.library_can_go_back : PlayerButton {
+                            icon-text: "←";
+                            font-size: 14px;
+                            clicked => { root.library_back(); }
+                        }
+                        if !root.library_can_go_back : Rectangle {
+                            width: 32px;
+                        }
+                        Text {
+                            text: root.library_view_title;
+                            color: #ddd;
+                            font-size: 13px;
+                            font-weight: 700;
+                            horizontal-stretch: 1;
+                            vertical-alignment: center;
+                            overflow: elide;
+                        }
+                        if root.library_scan_in_progress : Text {
+                            text: "Scanning...";
+                            color: #7f8ea3;
+                            font-size: 11px;
+                            vertical-alignment: center;
+                        }
+                    }
+
+                    Text {
+                        text: root.library_view_subtitle;
+                        color: #888;
+                        font-size: 11px;
+                        height: 16px;
+                        overflow: elide;
+                    }
+
+                    Rectangle { height: 1px; background: #333; }
+
+                    ScrollView {
+                        vertical-stretch: 1;
+                        VerticalLayout {
+                            alignment: start;
+                            for item[row] in root.library_model : Rectangle {
+                                horizontal-stretch: 1;
+                                height: 34px;
+                                LibraryRow {
+                                    width: parent.width;
+                                    height: parent.height;
+                                    data: item;
+                                    is-hover: library-list-row-ta.has-hover;
+                                }
+                                library-list-row-ta := TouchArea {
+                                    clicked => {
+                                        root.hover-index = -1;
+                                        root.library_item_activated(row);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
             }
 
             for leaf-id[i] in root.layout_leaf_ids : StatusBar {
@@ -1078,7 +1247,8 @@ export component AppWindow inherits Window {
                 y: root.layout-region-y(i);
                 width: root.layout-region-width(i);
                 height: root.layout-region-height(i);
-                visible: root.layout-region-is-visible(i) && root.layout-region-panel-kind(i) == 11;
+                visible: root.layout-region-is-visible(i)
+                    && root.layout-region-panel-kind(i) == root.panel_kind_status_bar;
                 status-text: root.status-text;
                 technical-info: root.technical-info;
                 time-range: root.format-time-range(root.elapsed-ms, root.total-ms);
@@ -1092,7 +1262,7 @@ export component AppWindow inherits Window {
                 height: root.layout-region-height(i);
                 visible: root.layout_edit_mode
                     && root.layout-region-is-visible(i)
-                    && self.panel-kind != 0;
+                    && self.panel-kind != root.panel_kind_none;
                 background: leaf-select-ta.has-hover ? #4b84c91f : transparent;
                 border-width: 1px;
                 border-color: i == root.layout_selected_leaf_index ? #4b84c9 : #3a3a3a;
@@ -1111,7 +1281,9 @@ export component AppWindow inherits Window {
                     x: 0px;
                     y: 0px;
                     width: parent.width;
-                    height: parent.panel-kind == 1 ? min(parent.height, 22px) : parent.height;
+                    height: parent.panel-kind == root.panel_kind_button_cluster
+                        ? min(parent.height, 22px)
+                        : parent.height;
                     pointer-event(event) => {
                         if (event.kind == PointerEventKind.down && event.button == PointerEventButton.right) {
                             root.layout_select_leaf(leaf-id);
@@ -1555,7 +1727,7 @@ export component AppWindow inherits Window {
                     }
                     spacer-action-ta := TouchArea {
                         clicked => {
-                            root.layout_editor_replace_panel_kind = 10;
+                            root.layout_editor_replace_panel_kind = root.panel_kind_spacer;
                             root.layout_replace_selected_leaf(10);
                             root.show_layout_leaf_replace_submenu = false;
                             root.layout_leaf_replace_submenu_hover = false;
@@ -2141,6 +2313,63 @@ export component AppWindow inherits Window {
         }
     }
 
+    if root.show_library_first_start_dialog : Rectangle {
+        background: #00000088;
+        z: 111;
+
+        TouchArea {}
+
+        Rectangle {
+            width: min(root.width - 40px, 520px);
+            height: 220px;
+            x: (parent.width - self.width) / 2;
+            y: (parent.height - self.height) / 2;
+            border-radius: 6px;
+            background: #242424;
+            border-width: 1px;
+            border-color: #3b3b3b;
+
+            VerticalLayout {
+                padding: 16px;
+                spacing: 12px;
+
+                Text {
+                    text: "Set Up Your Library";
+                    color: #eee;
+                    font-size: 16px;
+                    font-weight: 700;
+                }
+
+                Text {
+                    text: "Add folders to enable Library mode browsing. You can skip this and keep using playlists only.";
+                    color: #bbb;
+                    font-size: 12px;
+                    wrap: word-wrap;
+                }
+
+                Rectangle { vertical-stretch: 1; }
+
+                HorizontalLayout {
+                    spacing: 10px;
+                    Button {
+                        text: "Skip For Now";
+                        clicked => {
+                            root.library_skip_first_start();
+                        }
+                    }
+                    Rectangle { horizontal-stretch: 1; }
+                    Button {
+                        text: "Add Folder";
+                        primary: true;
+                        clicked => {
+                            root.library_add_folder();
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     if root.show_custom_column_dialog : Rectangle {
         background: #00000088;
         z: 110;
@@ -2328,6 +2557,70 @@ export component AppWindow inherits Window {
                         }
                     }
 
+                    Rectangle { height: 1px; background: #343434; }
+
+                    Text {
+                        text: "Library Folders";
+                        color: #ddd;
+                        font-size: 12px;
+                        font-weight: 700;
+                    }
+
+                    Rectangle {
+                        height: 100px;
+                        border-width: 1px;
+                        border-color: #3a3a3a;
+                        border-radius: 4px;
+                        background: #1f1f1f;
+                        ScrollView {
+                            width: parent.width;
+                            height: parent.height;
+                            VerticalLayout {
+                                spacing: 2px;
+                                padding: 4px;
+                                for folder[index] in root.settings_library_folders : Rectangle {
+                                    height: 24px;
+                                    border-radius: 3px;
+                                    background: root.settings_library_selected_folder_index == index
+                                        ? #2f3f56
+                                        : settings-library-folder-ta.has-hover ? #2c2c2c : transparent;
+                                    Text {
+                                        x: 8px;
+                                        width: max(0px, parent.width - 16px);
+                                        text: folder;
+                                        color: root.settings_library_selected_folder_index == index ? #d7e6f8 : #c6c6c6;
+                                        font-size: 11px;
+                                        vertical-alignment: center;
+                                        overflow: elide;
+                                    }
+                                    settings-library-folder-ta := TouchArea {
+                                        clicked => { root.settings_select_library_folder(index); }
+                                    }
+                                }
+                            }
+                        }
+                    }
+
+                    HorizontalLayout {
+                        spacing: 8px;
+                        Button {
+                            text: "Add Folder";
+                            clicked => { root.library_add_folder(); }
+                        }
+                        Button {
+                            text: "Remove";
+                            enabled: root.settings_library_selected_folder_index >= 0;
+                            clicked => {
+                                root.library_remove_folder(root.settings_library_selected_folder_index);
+                            }
+                        }
+                        Rectangle { horizontal-stretch: 1; }
+                        Button {
+                            text: "Rescan";
+                            clicked => { root.library_rescan(); }
+                        }
+                    }
+
                 }
 
                 Rectangle { height: 1px; background: #343434; }
@@ -2455,6 +2748,15 @@ export component AppWindow inherits Window {
     callback stop();
     callback next();
     callback previous();
+    callback switch_collection_mode(int);
+    callback library_select_root(int);
+    callback library_back();
+    callback library_item_activated(int);
+    callback library_add_folder();
+    callback library_remove_folder(int);
+    callback library_rescan();
+    callback settings_select_library_folder(int);
+    callback library_skip_first_start();
     callback handle_track_click(int, bool, bool);
     callback on_pointer_down(int, bool, bool);
     callback on_drag_start(int);

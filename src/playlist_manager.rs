@@ -894,6 +894,30 @@ impl PlaylistManager {
                             self.cache_tracks(false);
                         }
                     }
+                    protocol::Message::Playlist(protocol::PlaylistMessage::PlayLibraryQueue {
+                        tracks,
+                        start_index,
+                    }) => {
+                        if tracks.is_empty() {
+                            continue;
+                        }
+
+                        let mut playback_playlist = Playlist::new();
+                        playback_playlist.set_playback_order(self.playback_order);
+                        playback_playlist.set_repeat_mode(self.repeat_mode);
+                        for track in tracks {
+                            playback_playlist.add_track(Track {
+                                path: track.path,
+                                id: track.id,
+                            });
+                        }
+
+                        let clamped_start = start_index.min(playback_playlist.num_tracks() - 1);
+                        playback_playlist.set_selected_indices(vec![clamped_start]);
+                        self.playback_playlist = playback_playlist;
+                        self.playback_playlist_id = None;
+                        self.play_playback_track(clamped_start);
+                    }
                     protocol::Message::Playlist(protocol::PlaylistMessage::UndoTrackListEdit) => {
                         let Some(previous_snapshot) = self.track_list_undo_stack.pop() else {
                             continue;

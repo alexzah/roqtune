@@ -3,6 +3,7 @@ mod audio_player;
 mod config;
 mod db_manager;
 mod layout;
+mod library_manager;
 mod playlist;
 mod playlist_manager;
 mod protocol;
@@ -20,8 +21,8 @@ use std::{
 use audio_decoder::AudioDecoder;
 use audio_player::AudioPlayer;
 use config::{
-    BufferingConfig, ButtonClusterInstanceConfig, Config, OutputConfig, PlaylistColumnConfig,
-    UiConfig,
+    BufferingConfig, ButtonClusterInstanceConfig, Config, LibraryConfig, OutputConfig,
+    PlaylistColumnConfig, UiConfig,
 };
 use cpal::traits::{DeviceTrait, HostTrait};
 use db_manager::DbManager;
@@ -30,6 +31,7 @@ use layout::{
     replace_leaf_panel, sanitize_layout_config, set_split_ratio, split_leaf, LayoutConfig,
     LayoutNode, LayoutPanelKind, SplitAxis, SPLITTER_THICKNESS_PX,
 };
+use library_manager::LibraryManager;
 use log::{debug, info, warn};
 use playlist::Playlist;
 use playlist_manager::PlaylistManager;
@@ -43,6 +45,12 @@ slint::include_modules!();
 
 fn setup_app_state_associations(ui: &AppWindow, ui_state: &UiState) {
     ui.set_track_model(ModelRc::from(ui_state.track_model.clone()));
+    ui.set_library_model(ModelRc::from(Rc::new(VecModel::from(
+        Vec::<LibraryRowData>::new(),
+    ))));
+    ui.set_settings_library_folders(ModelRc::from(Rc::new(VecModel::from(Vec::<
+        slint::SharedString,
+    >::new()))));
 }
 
 fn panic_payload_to_string(payload: &(dyn std::any::Any + Send)) -> String {
@@ -465,6 +473,18 @@ fn sanitize_config(config: Config) -> Config {
         .clamp(1_000, 120_000);
     let clamped_interval = config.buffering.player_request_interval_ms.max(20);
     let clamped_decoder_chunk = config.buffering.decoder_request_chunk_ms.max(100);
+    let mut sanitized_library_folders = Vec::new();
+    let mut seen_folders = HashSet::new();
+    for folder in config.library.folders {
+        let trimmed = folder.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        let key = trimmed.to_ascii_lowercase();
+        if seen_folders.insert(key) {
+            sanitized_library_folders.push(trimmed.to_string());
+        }
+    }
 
     Config {
         output: OutputConfig {
@@ -487,6 +507,10 @@ fn sanitize_config(config: Config) -> Config {
             window_width: clamped_window_width,
             window_height: clamped_window_height,
             volume: clamped_volume,
+        },
+        library: LibraryConfig {
+            folders: sanitized_library_folders,
+            show_first_start_prompt: config.library.show_first_start_prompt,
         },
         buffering: BufferingConfig {
             player_low_watermark_ms: clamped_low_watermark,
@@ -1021,21 +1045,25 @@ fn layout_panel_options() -> Vec<slint::SharedString> {
 }
 
 fn resolve_layout_panel_selection(panel_code: i32) -> (LayoutPanelKind, Option<Vec<i32>>) {
-    match panel_code {
-        2 => (
+    if panel_code == LayoutPanelKind::TransportButtonCluster.to_code() {
+        return (
             LayoutPanelKind::ButtonCluster,
             Some(TRANSPORT_CLUSTER_PRESET.to_vec()),
-        ),
-        3 => (
+        );
+    }
+    if panel_code == LayoutPanelKind::UtilityButtonCluster.to_code() {
+        return (
             LayoutPanelKind::ButtonCluster,
             Some(UTILITY_CLUSTER_PRESET.to_vec()),
-        ),
-        12 => (
+        );
+    }
+    if panel_code == LayoutPanelKind::ImportButtonCluster.to_code() {
+        return (
             LayoutPanelKind::ButtonCluster,
             Some(IMPORT_CLUSTER_PRESET.to_vec()),
-        ),
-        _ => (LayoutPanelKind::from_code(panel_code), None),
+        );
     }
+    (LayoutPanelKind::from_code(panel_code), None)
 }
 
 fn button_cluster_actions_for_leaf(
@@ -1142,16 +1170,19 @@ fn set_table_scalar_if_changed<T, F>(
     set_table_value_preserving_decor(table, key, to_item(next_value));
 }
 
+fn ensure_section_table(document: &mut DocumentMut, key: &str) {
+    let root = document.as_table_mut();
+    let should_replace = !matches!(root.get(key), Some(item) if item.is_table());
+    if should_replace {
+        root.insert(key, Item::Table(Table::new()));
+    }
+}
+
 fn write_config_to_document(document: &mut DocumentMut, previous: &Config, config: &Config) {
-    if !document["output"].is_table() {
-        document["output"] = Item::Table(Table::new());
-    }
-    if !document["ui"].is_table() {
-        document["ui"] = Item::Table(Table::new());
-    }
-    if !document["buffering"].is_table() {
-        document["buffering"] = Item::Table(Table::new());
-    }
+    ensure_section_table(document, "output");
+    ensure_section_table(document, "ui");
+    ensure_section_table(document, "library");
+    ensure_section_table(document, "buffering");
 
     {
         let output = document["output"]
@@ -1304,6 +1335,26 @@ fn write_config_to_document(document: &mut DocumentMut, previous: &Config, confi
     }
 
     {
+        let library = document["library"]
+            .as_table_mut()
+            .expect("library should be a table");
+        set_table_scalar_if_changed(
+            library,
+            "show_first_start_prompt",
+            previous.library.show_first_start_prompt,
+            config.library.show_first_start_prompt,
+            value,
+        );
+        if !library.contains_key("folders") || previous.library.folders != config.library.folders {
+            let mut folders = Array::new();
+            for folder in &config.library.folders {
+                folders.push(folder.as_str());
+            }
+            set_table_value_preserving_decor(library, "folders", value(folders));
+        }
+    }
+
+    {
         let buffering = document["buffering"]
             .as_table_mut()
             .expect("buffering should be a table");
@@ -1449,6 +1500,7 @@ fn with_updated_layout(previous: &Config, layout: LayoutConfig) -> Config {
             window_height: previous.ui.window_height,
             volume: previous.ui.volume,
         },
+        library: previous.library.clone(),
         buffering: previous.buffering.clone(),
     })
 }
@@ -1756,6 +1808,21 @@ fn apply_config_to_ui(
     ui.set_settings_channel_custom_value(config.output.channel_count.to_string().into());
     ui.set_settings_sample_rate_custom_value(config.output.sample_rate_khz.to_string().into());
     ui.set_settings_bits_per_sample_custom_value(config.output.bits_per_sample.to_string().into());
+    let library_folders: Vec<slint::SharedString> = config
+        .library
+        .folders
+        .iter()
+        .map(|folder| folder.as_str().into())
+        .collect();
+    ui.set_settings_library_folders(ModelRc::from(Rc::new(VecModel::from(library_folders))));
+    if config.library.folders.is_empty() {
+        ui.set_settings_library_selected_folder_index(-1);
+    } else {
+        let current_selection = ui.get_settings_library_selected_folder_index();
+        if current_selection < 0 || current_selection as usize >= config.library.folders.len() {
+            ui.set_settings_library_selected_folder_index(0);
+        }
+    }
     apply_playlist_columns_to_ui(ui, config);
     apply_layout_to_ui(ui, config, workspace_width_px, workspace_height_px);
 }
@@ -1846,6 +1913,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         initial_workspace_width_px,
         initial_workspace_height_px,
     );
+    ui.set_show_library_first_start_dialog(
+        config.library.show_first_start_prompt && config.library.folders.is_empty(),
+    );
     let config_state = Arc::new(Mutex::new(config.clone()));
     let output_options = Arc::new(Mutex::new(initial_output_options.clone()));
     let layout_workspace_size = Arc::new(Mutex::new((
@@ -1909,6 +1979,220 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 }
             });
         }
+    });
+
+    let bus_sender_clone = bus_sender.clone();
+    ui.on_switch_collection_mode(move |mode| {
+        let _ = bus_sender_clone.send(Message::Library(
+            protocol::LibraryMessage::SetCollectionMode(mode),
+        ));
+    });
+
+    let bus_sender_clone = bus_sender.clone();
+    ui.on_library_select_root(move |section| {
+        let _ = bus_sender_clone.send(Message::Library(
+            protocol::LibraryMessage::SelectRootSection(section),
+        ));
+    });
+
+    let bus_sender_clone = bus_sender.clone();
+    ui.on_library_back(move || {
+        let _ = bus_sender_clone.send(Message::Library(protocol::LibraryMessage::NavigateBack));
+    });
+
+    let bus_sender_clone = bus_sender.clone();
+    ui.on_library_item_activated(move |index| {
+        if index < 0 {
+            return;
+        }
+        let _ = bus_sender_clone.send(Message::Library(
+            protocol::LibraryMessage::ActivateListItem(index as usize),
+        ));
+    });
+
+    let ui_handle_clone = ui.as_weak().clone();
+    ui.on_settings_select_library_folder(move |index| {
+        if let Some(ui) = ui_handle_clone.upgrade() {
+            ui.set_settings_library_selected_folder_index(index);
+        }
+    });
+
+    let bus_sender_clone = bus_sender.clone();
+    let config_state_clone = Arc::clone(&config_state);
+    let output_options_clone = Arc::clone(&output_options);
+    let last_runtime_signature_clone = Arc::clone(&last_runtime_signature);
+    let config_file_clone = config_file.clone();
+    let layout_workspace_size_clone = Arc::clone(&layout_workspace_size);
+    let ui_handle_clone = ui.as_weak().clone();
+    ui.on_library_add_folder(move || {
+        let Some(folder_path) = rfd::FileDialog::new().pick_folder() else {
+            return;
+        };
+        let folder = folder_path.to_string_lossy().to_string();
+        let next_config = {
+            let mut state = config_state_clone
+                .lock()
+                .expect("config state lock poisoned");
+            let mut next = state.clone();
+            if !next
+                .library
+                .folders
+                .iter()
+                .any(|existing| existing == &folder)
+            {
+                next.library.folders.push(folder);
+            }
+            next.library.show_first_start_prompt = false;
+            next = sanitize_config(next);
+            *state = next.clone();
+            next
+        };
+
+        persist_state_files_with_config_path(&next_config, &config_file_clone);
+        let options_snapshot = {
+            let options = output_options_clone
+                .lock()
+                .expect("output options lock poisoned");
+            options.clone()
+        };
+        let (workspace_width_px, workspace_height_px) =
+            workspace_size_snapshot(&layout_workspace_size_clone);
+        if let Some(ui) = ui_handle_clone.upgrade() {
+            apply_config_to_ui(
+                &ui,
+                &next_config,
+                &options_snapshot,
+                workspace_width_px,
+                workspace_height_px,
+            );
+            ui.set_show_library_first_start_dialog(false);
+        }
+
+        let runtime_config = resolve_runtime_config(&next_config, &options_snapshot);
+        {
+            let mut last_runtime = last_runtime_signature_clone
+                .lock()
+                .expect("runtime signature lock poisoned");
+            *last_runtime = OutputRuntimeSignature::from_output(&runtime_config.output);
+        }
+        let _ = bus_sender_clone.send(Message::Config(ConfigMessage::ConfigChanged(
+            runtime_config,
+        )));
+        let _ = bus_sender_clone.send(Message::Library(protocol::LibraryMessage::RequestScan));
+    });
+
+    let bus_sender_clone = bus_sender.clone();
+    let config_state_clone = Arc::clone(&config_state);
+    let output_options_clone = Arc::clone(&output_options);
+    let last_runtime_signature_clone = Arc::clone(&last_runtime_signature);
+    let config_file_clone = config_file.clone();
+    let layout_workspace_size_clone = Arc::clone(&layout_workspace_size);
+    let ui_handle_clone = ui.as_weak().clone();
+    ui.on_library_remove_folder(move |index| {
+        if index < 0 {
+            return;
+        }
+        let next_config = {
+            let mut state = config_state_clone
+                .lock()
+                .expect("config state lock poisoned");
+            if index as usize >= state.library.folders.len() {
+                return;
+            }
+            let mut next = state.clone();
+            next.library.folders.remove(index as usize);
+            next.library.show_first_start_prompt = false;
+            next = sanitize_config(next);
+            *state = next.clone();
+            next
+        };
+
+        persist_state_files_with_config_path(&next_config, &config_file_clone);
+        let options_snapshot = {
+            let options = output_options_clone
+                .lock()
+                .expect("output options lock poisoned");
+            options.clone()
+        };
+        let (workspace_width_px, workspace_height_px) =
+            workspace_size_snapshot(&layout_workspace_size_clone);
+        if let Some(ui) = ui_handle_clone.upgrade() {
+            apply_config_to_ui(
+                &ui,
+                &next_config,
+                &options_snapshot,
+                workspace_width_px,
+                workspace_height_px,
+            );
+        }
+
+        let runtime_config = resolve_runtime_config(&next_config, &options_snapshot);
+        {
+            let mut last_runtime = last_runtime_signature_clone
+                .lock()
+                .expect("runtime signature lock poisoned");
+            *last_runtime = OutputRuntimeSignature::from_output(&runtime_config.output);
+        }
+        let _ = bus_sender_clone.send(Message::Config(ConfigMessage::ConfigChanged(
+            runtime_config,
+        )));
+        let _ = bus_sender_clone.send(Message::Library(protocol::LibraryMessage::RequestScan));
+    });
+
+    let bus_sender_clone = bus_sender.clone();
+    ui.on_library_rescan(move || {
+        let _ = bus_sender_clone.send(Message::Library(protocol::LibraryMessage::RequestScan));
+    });
+
+    let config_state_clone = Arc::clone(&config_state);
+    let output_options_clone = Arc::clone(&output_options);
+    let last_runtime_signature_clone = Arc::clone(&last_runtime_signature);
+    let config_file_clone = config_file.clone();
+    let layout_workspace_size_clone = Arc::clone(&layout_workspace_size);
+    let ui_handle_clone = ui.as_weak().clone();
+    let bus_sender_clone = bus_sender.clone();
+    ui.on_library_skip_first_start(move || {
+        let next_config = {
+            let mut state = config_state_clone
+                .lock()
+                .expect("config state lock poisoned");
+            let mut next = state.clone();
+            next.library.show_first_start_prompt = false;
+            next = sanitize_config(next);
+            *state = next.clone();
+            next
+        };
+        persist_state_files_with_config_path(&next_config, &config_file_clone);
+
+        let options_snapshot = {
+            let options = output_options_clone
+                .lock()
+                .expect("output options lock poisoned");
+            options.clone()
+        };
+        let (workspace_width_px, workspace_height_px) =
+            workspace_size_snapshot(&layout_workspace_size_clone);
+        if let Some(ui) = ui_handle_clone.upgrade() {
+            apply_config_to_ui(
+                &ui,
+                &next_config,
+                &options_snapshot,
+                workspace_width_px,
+                workspace_height_px,
+            );
+            ui.set_show_library_first_start_dialog(false);
+        }
+
+        let runtime_config = resolve_runtime_config(&next_config, &options_snapshot);
+        {
+            let mut last_runtime = last_runtime_signature_clone
+                .lock()
+                .expect("runtime signature lock poisoned");
+            *last_runtime = OutputRuntimeSignature::from_output(&runtime_config.output);
+        }
+        let _ = bus_sender_clone.send(Message::Config(ConfigMessage::ConfigChanged(
+            runtime_config,
+        )));
     });
 
     // Wire up play button
@@ -3194,6 +3478,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     window_height: previous_config.ui.window_height,
                     volume: previous_config.ui.volume,
                 },
+                library: previous_config.library.clone(),
                 buffering: previous_config.buffering.clone(),
             });
 
@@ -3276,6 +3561,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 window_height: previous_config.ui.window_height,
                 volume: previous_config.ui.volume,
             },
+            library: previous_config.library.clone(),
             buffering: previous_config.buffering.clone(),
         });
 
@@ -3366,6 +3652,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 window_height: previous_config.ui.window_height,
                 volume: previous_config.ui.volume,
             },
+            library: previous_config.library.clone(),
             buffering: previous_config.buffering.clone(),
         });
 
@@ -3458,6 +3745,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 window_height: previous_config.ui.window_height,
                 volume: previous_config.ui.volume,
             },
+            library: previous_config.library.clone(),
             buffering: previous_config.buffering.clone(),
         });
 
@@ -3544,6 +3832,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 window_height: previous_config.ui.window_height,
                 volume: previous_config.ui.volume,
             },
+            library: previous_config.library.clone(),
             buffering: previous_config.buffering.clone(),
         });
 
@@ -3631,6 +3920,19 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             db_manager,
         );
         playlist_manager.run();
+    });
+
+    // Setup library manager
+    let library_manager_bus_receiver = bus_sender.subscribe();
+    let library_manager_bus_sender = bus_sender.clone();
+    thread::spawn(move || {
+        let db_manager = DbManager::new().expect("Failed to initialize database");
+        let mut library_manager = LibraryManager::new(
+            library_manager_bus_receiver,
+            library_manager_bus_sender,
+            db_manager,
+        );
+        library_manager.run();
     });
 
     // Setup UI manager
@@ -3762,6 +4064,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             window_height: state.ui.window_height,
                             volume: state.ui.volume,
                         },
+                        library: state.library.clone(),
                         buffering: state.buffering.clone(),
                     });
                     *state = updated.clone();
@@ -3851,7 +4154,9 @@ mod tests {
         time::{SystemTime, UNIX_EPOCH},
     };
 
-    use crate::config::{BufferingConfig, Config, OutputConfig, PlaylistColumnConfig, UiConfig};
+    use crate::config::{
+        BufferingConfig, Config, LibraryConfig, OutputConfig, PlaylistColumnConfig, UiConfig,
+    };
     use crate::layout::LayoutConfig;
     use slint::{Model, ModelRc, ModelTracker, VecModel};
 
@@ -4227,7 +4532,9 @@ mod tests {
         );
         assert!(
             slint_ui.contains("for leaf-id[i] in root.layout_leaf_ids : Rectangle {")
-                && slint_ui.contains("root.layout-region-panel-kind(i) == 7"),
+                && slint_ui.contains(
+                    "root.layout-region-panel-kind(i) == root.panel_kind_track_list"
+                ),
             "Track list should be rendered as a movable docking panel that supports duplicate instances"
         );
     }
@@ -4721,6 +5028,7 @@ mod tests {
                 window_height: 650,
                 volume: 1.0,
             },
+            library: LibraryConfig::default(),
             buffering: BufferingConfig::default(),
         };
         let options = OutputSettingsOptions {

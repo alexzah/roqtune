@@ -24,7 +24,7 @@ use tokio::sync::broadcast::{Receiver, Sender};
 
 use crate::{
     config::{self, PlaylistColumnConfig},
-    protocol, AppWindow, TrackRowData,
+    protocol, AppWindow, LibraryRowData, TrackRowData,
 };
 use governor::{Quota, RateLimiter};
 
@@ -83,6 +83,11 @@ pub struct UiManager {
     last_message_at: Instant,
     last_progress_at: Option<Instant>,
     last_health_log_at: Instant,
+    collection_mode: i32,
+    library_view_stack: Vec<LibraryViewState>,
+    library_entries: Vec<LibraryEntry>,
+    library_scan_in_progress: bool,
+    library_status_text: String,
 }
 
 /// Normalized track metadata snapshot used for row rendering and side panel display.
@@ -118,10 +123,28 @@ enum PlaylistSortDirection {
     Descending,
 }
 
+#[derive(Clone, Debug)]
+enum LibraryViewState {
+    SongsRoot,
+    ArtistsRoot,
+    AlbumsRoot,
+    ArtistDetail { artist: String },
+    AlbumDetail { album: String, album_artist: String },
+}
+
+#[derive(Clone, Debug)]
+enum LibraryEntry {
+    Song(protocol::LibrarySong),
+    Artist(protocol::LibraryArtist),
+    Album(protocol::LibraryAlbum),
+}
+
 const PLAYLIST_COLUMN_KIND_TEXT: i32 = 0;
 const PLAYLIST_COLUMN_KIND_ALBUM_ART: i32 = 1;
 const BASE_ROW_HEIGHT_PX: u32 = 30;
 const ALBUM_ART_ROW_PADDING_PX: u32 = 8;
+const COLLECTION_MODE_PLAYLIST: i32 = 0;
+const COLLECTION_MODE_LIBRARY: i32 = 1;
 
 thread_local! {
     static TRACK_ROW_COVER_ART_IMAGE_CACHE: RefCell<HashMap<PathBuf, Image>> =
@@ -258,6 +281,11 @@ impl UiManager {
             last_message_at: Instant::now(),
             last_progress_at: None,
             last_health_log_at: Instant::now(),
+            collection_mode: COLLECTION_MODE_PLAYLIST,
+            library_view_stack: vec![LibraryViewState::SongsRoot],
+            library_entries: Vec::new(),
+            library_scan_in_progress: false,
+            library_status_text: String::new(),
         }
     }
 
@@ -1575,6 +1603,210 @@ impl UiManager {
         ));
     }
 
+    fn current_library_view(&self) -> LibraryViewState {
+        self.library_view_stack
+            .last()
+            .cloned()
+            .unwrap_or(LibraryViewState::SongsRoot)
+    }
+
+    fn current_library_root_index(&self) -> i32 {
+        match self.library_view_stack.first() {
+            Some(LibraryViewState::SongsRoot) => 0,
+            Some(LibraryViewState::ArtistsRoot) => 1,
+            Some(LibraryViewState::AlbumsRoot) => 2,
+            Some(LibraryViewState::ArtistDetail { .. }) => 1,
+            Some(LibraryViewState::AlbumDetail { .. }) => 2,
+            None => 0,
+        }
+    }
+
+    fn library_view_labels(view: &LibraryViewState) -> (String, String) {
+        match view {
+            LibraryViewState::SongsRoot => ("Songs".to_string(), "All songs".to_string()),
+            LibraryViewState::ArtistsRoot => ("Artists".to_string(), "All artists".to_string()),
+            LibraryViewState::AlbumsRoot => ("Albums".to_string(), "All albums".to_string()),
+            LibraryViewState::ArtistDetail { artist } => {
+                (artist.clone(), "Albums and songs from artist".to_string())
+            }
+            LibraryViewState::AlbumDetail {
+                album,
+                album_artist,
+            } => (album.clone(), format!("by {}", album_artist)),
+        }
+    }
+
+    fn library_row_from_entry(entry: &LibraryEntry) -> LibraryRowData {
+        match entry {
+            LibraryEntry::Song(song) => LibraryRowData {
+                primary: song.title.clone().into(),
+                secondary: format!("{} • {}", song.artist, song.album).into(),
+                item_kind: 0,
+            },
+            LibraryEntry::Artist(artist) => LibraryRowData {
+                primary: artist.artist.clone().into(),
+                secondary: format!(
+                    "{} albums • {} songs",
+                    artist.album_count, artist.song_count
+                )
+                .into(),
+                item_kind: 1,
+            },
+            LibraryEntry::Album(album) => LibraryRowData {
+                primary: album.album.clone().into(),
+                secondary: format!("{} • {} songs", album.album_artist, album.song_count).into(),
+                item_kind: 2,
+            },
+        }
+    }
+
+    fn sync_library_ui(&self) {
+        let view = self.current_library_view();
+        let (title, subtitle) = Self::library_view_labels(&view);
+        let can_go_back = self.library_view_stack.len() > 1;
+        let root_index = self.current_library_root_index();
+        let scan_in_progress = self.library_scan_in_progress;
+        let status_text = self.library_status_text.clone();
+        let rows: Vec<LibraryRowData> = self
+            .library_entries
+            .iter()
+            .map(Self::library_row_from_entry)
+            .collect();
+        let collection_mode = self.collection_mode;
+
+        let _ = self.ui.upgrade_in_event_loop(move |ui| {
+            ui.set_collection_mode(collection_mode);
+            ui.set_library_root_index(root_index);
+            ui.set_library_view_title(title.into());
+            ui.set_library_view_subtitle(subtitle.into());
+            ui.set_library_can_go_back(can_go_back);
+            ui.set_library_scan_in_progress(scan_in_progress);
+            ui.set_library_status_text(status_text.into());
+            ui.set_library_model(ModelRc::from(Rc::new(VecModel::from(rows))));
+        });
+    }
+
+    fn set_collection_mode(&mut self, mode: i32) {
+        let normalized_mode = if mode == COLLECTION_MODE_LIBRARY {
+            COLLECTION_MODE_LIBRARY
+        } else {
+            COLLECTION_MODE_PLAYLIST
+        };
+        if self.collection_mode == normalized_mode {
+            return;
+        }
+        self.collection_mode = normalized_mode;
+        if self.collection_mode == COLLECTION_MODE_LIBRARY {
+            self.request_library_view_data();
+        }
+        self.sync_library_ui();
+    }
+
+    fn set_library_root_section(&mut self, section: i32) {
+        let root = match section {
+            1 => LibraryViewState::ArtistsRoot,
+            2 => LibraryViewState::AlbumsRoot,
+            _ => LibraryViewState::SongsRoot,
+        };
+        self.library_view_stack.clear();
+        self.library_view_stack.push(root);
+        self.request_library_view_data();
+        self.sync_library_ui();
+    }
+
+    fn navigate_library_back(&mut self) {
+        if self.library_view_stack.len() <= 1 {
+            return;
+        }
+        self.library_view_stack.pop();
+        self.request_library_view_data();
+        self.sync_library_ui();
+    }
+
+    fn request_library_view_data(&mut self) {
+        let message = match self.current_library_view() {
+            LibraryViewState::SongsRoot => protocol::LibraryMessage::RequestSongs,
+            LibraryViewState::ArtistsRoot => protocol::LibraryMessage::RequestArtists,
+            LibraryViewState::AlbumsRoot => protocol::LibraryMessage::RequestAlbums,
+            LibraryViewState::ArtistDetail { artist } => {
+                protocol::LibraryMessage::RequestArtistDetail { artist }
+            }
+            LibraryViewState::AlbumDetail {
+                album,
+                album_artist,
+            } => protocol::LibraryMessage::RequestAlbumSongs {
+                album,
+                album_artist,
+            },
+        };
+        let _ = self.bus_sender.send(protocol::Message::Library(message));
+    }
+
+    fn set_library_entries(&mut self, entries: Vec<LibraryEntry>) {
+        self.library_entries = entries;
+        self.sync_library_ui();
+    }
+
+    fn play_library_song_from_entries(&mut self, selected_song_id: &str) {
+        let songs: Vec<protocol::LibrarySong> = self
+            .library_entries
+            .iter()
+            .filter_map(|entry| match entry {
+                LibraryEntry::Song(song) => Some(song.clone()),
+                _ => None,
+            })
+            .collect();
+        if songs.is_empty() {
+            return;
+        }
+        let Some(start_index) = songs.iter().position(|song| song.id == selected_song_id) else {
+            return;
+        };
+
+        let tracks: Vec<protocol::RestoredTrack> = songs
+            .into_iter()
+            .map(|song| protocol::RestoredTrack {
+                id: song.id,
+                path: song.path,
+            })
+            .collect();
+
+        let _ = self.bus_sender.send(protocol::Message::Playlist(
+            protocol::PlaylistMessage::PlayLibraryQueue {
+                tracks,
+                start_index,
+            },
+        ));
+    }
+
+    fn activate_library_item(&mut self, index: usize) {
+        let Some(entry) = self.library_entries.get(index).cloned() else {
+            return;
+        };
+
+        match entry {
+            LibraryEntry::Song(song) => {
+                self.play_library_song_from_entries(&song.id);
+            }
+            LibraryEntry::Artist(artist) => {
+                self.library_view_stack
+                    .push(LibraryViewState::ArtistDetail {
+                        artist: artist.artist,
+                    });
+                self.request_library_view_data();
+                self.sync_library_ui();
+            }
+            LibraryEntry::Album(album) => {
+                self.library_view_stack.push(LibraryViewState::AlbumDetail {
+                    album: album.album,
+                    album_artist: album.album_artist,
+                });
+                self.request_library_view_data();
+                self.sync_library_ui();
+            }
+        }
+    }
+
     fn read_track_metadata(&self, path: &PathBuf) -> TrackMetadata {
         debug!("Reading metadata for: {}", path.display());
 
@@ -1877,11 +2109,116 @@ impl UiManager {
 
     /// Starts the blocking UI event loop that listens for bus messages.
     pub fn run(&mut self) {
+        self.sync_library_ui();
         loop {
             match self.bus_receiver.blocking_recv() {
                 Ok(message) => {
                     self.on_message_received();
                     match message {
+                        protocol::Message::Library(library_message) => match library_message {
+                            protocol::LibraryMessage::SetCollectionMode(mode) => {
+                                self.set_collection_mode(mode);
+                            }
+                            protocol::LibraryMessage::SelectRootSection(section) => {
+                                self.set_collection_mode(COLLECTION_MODE_LIBRARY);
+                                self.set_library_root_section(section);
+                            }
+                            protocol::LibraryMessage::NavigateBack => {
+                                self.navigate_library_back();
+                            }
+                            protocol::LibraryMessage::ActivateListItem(index) => {
+                                self.activate_library_item(index);
+                            }
+                            protocol::LibraryMessage::ScanStarted => {
+                                self.library_scan_in_progress = true;
+                                self.library_status_text = "Scanning library...".to_string();
+                                self.sync_library_ui();
+                            }
+                            protocol::LibraryMessage::ScanCompleted { indexed_tracks } => {
+                                self.library_scan_in_progress = false;
+                                self.library_status_text =
+                                    format!("Indexed {} tracks", indexed_tracks);
+                                self.request_library_view_data();
+                                self.sync_library_ui();
+                            }
+                            protocol::LibraryMessage::ScanFailed(error_text) => {
+                                self.library_scan_in_progress = false;
+                                self.library_status_text = error_text;
+                                self.sync_library_ui();
+                            }
+                            protocol::LibraryMessage::SongsResult(songs) => {
+                                if matches!(
+                                    self.current_library_view(),
+                                    LibraryViewState::SongsRoot
+                                ) {
+                                    self.set_library_entries(
+                                        songs.into_iter().map(LibraryEntry::Song).collect(),
+                                    );
+                                }
+                            }
+                            protocol::LibraryMessage::ArtistsResult(artists) => {
+                                if matches!(
+                                    self.current_library_view(),
+                                    LibraryViewState::ArtistsRoot
+                                ) {
+                                    self.set_library_entries(
+                                        artists.into_iter().map(LibraryEntry::Artist).collect(),
+                                    );
+                                }
+                            }
+                            protocol::LibraryMessage::AlbumsResult(albums) => {
+                                if matches!(
+                                    self.current_library_view(),
+                                    LibraryViewState::AlbumsRoot
+                                ) {
+                                    self.set_library_entries(
+                                        albums.into_iter().map(LibraryEntry::Album).collect(),
+                                    );
+                                }
+                            }
+                            protocol::LibraryMessage::ArtistDetailResult {
+                                artist,
+                                albums,
+                                songs,
+                            } => {
+                                if let LibraryViewState::ArtistDetail {
+                                    artist: requested_artist,
+                                } = self.current_library_view()
+                                {
+                                    if requested_artist == artist {
+                                        let mut entries: Vec<LibraryEntry> =
+                                            albums.into_iter().map(LibraryEntry::Album).collect();
+                                        entries.extend(songs.into_iter().map(LibraryEntry::Song));
+                                        self.set_library_entries(entries);
+                                    }
+                                }
+                            }
+                            protocol::LibraryMessage::AlbumSongsResult {
+                                album,
+                                album_artist,
+                                songs,
+                            } => {
+                                if let LibraryViewState::AlbumDetail {
+                                    album: requested_album,
+                                    album_artist: requested_album_artist,
+                                } = self.current_library_view()
+                                {
+                                    if requested_album == album
+                                        && requested_album_artist == album_artist
+                                    {
+                                        self.set_library_entries(
+                                            songs.into_iter().map(LibraryEntry::Song).collect(),
+                                        );
+                                    }
+                                }
+                            }
+                            protocol::LibraryMessage::RequestScan
+                            | protocol::LibraryMessage::RequestSongs
+                            | protocol::LibraryMessage::RequestArtists
+                            | protocol::LibraryMessage::RequestAlbums
+                            | protocol::LibraryMessage::RequestArtistDetail { .. }
+                            | protocol::LibraryMessage::RequestAlbumSongs { .. } => {}
+                        },
                         protocol::Message::Playlist(
                             protocol::PlaylistMessage::PlaylistsRestored(playlists),
                         ) => {

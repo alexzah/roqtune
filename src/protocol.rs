@@ -19,6 +19,7 @@ pub enum RepeatMode {
 #[derive(Debug, Clone)]
 pub enum Message {
     Playlist(PlaylistMessage),
+    Library(LibraryMessage),
     Audio(AudioMessage),
     Playback(PlaybackMessage),
     Config(ConfigMessage),
@@ -77,6 +78,10 @@ pub enum PlaylistMessage {
     UndoTrackListEdit,
     RedoTrackListEdit,
     PasteTracks(Vec<PathBuf>),
+    PlayLibraryQueue {
+        tracks: Vec<RestoredTrack>,
+        start_index: usize,
+    },
     TracksInserted {
         tracks: Vec<RestoredTrack>,
         insert_at: usize,
@@ -151,6 +156,44 @@ pub enum PlaylistMessage {
     RepeatModeChanged(RepeatMode),
 }
 
+/// Library-domain commands and notifications.
+#[derive(Debug, Clone)]
+pub enum LibraryMessage {
+    SetCollectionMode(i32),
+    SelectRootSection(i32),
+    NavigateBack,
+    ActivateListItem(usize),
+    RequestScan,
+    RequestSongs,
+    RequestArtists,
+    RequestAlbums,
+    RequestArtistDetail {
+        artist: String,
+    },
+    RequestAlbumSongs {
+        album: String,
+        album_artist: String,
+    },
+    ScanStarted,
+    ScanCompleted {
+        indexed_tracks: usize,
+    },
+    ScanFailed(String),
+    SongsResult(Vec<LibrarySong>),
+    ArtistsResult(Vec<LibraryArtist>),
+    AlbumsResult(Vec<LibraryAlbum>),
+    ArtistDetailResult {
+        artist: String,
+        albums: Vec<LibraryAlbum>,
+        songs: Vec<LibrarySong>,
+    },
+    AlbumSongsResult {
+        album: String,
+        album_artist: String,
+        songs: Vec<LibrarySong>,
+    },
+}
+
 /// Persisted per-column width override for one playlist.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
 pub struct PlaylistColumnWidthOverride {
@@ -176,6 +219,35 @@ pub struct PlaylistInfo {
     pub id: String,
     /// User-visible name.
     pub name: String,
+}
+
+/// One indexed song entry in the music library.
+#[derive(Debug, Clone, serde::Deserialize, serde::Serialize)]
+pub struct LibrarySong {
+    pub id: String,
+    pub path: PathBuf,
+    pub title: String,
+    pub artist: String,
+    pub album: String,
+    pub album_artist: String,
+    pub year: String,
+    pub track_number: String,
+}
+
+/// One album aggregate entry in the indexed music library.
+#[derive(Debug, Clone, serde::Deserialize, serde::Serialize)]
+pub struct LibraryAlbum {
+    pub album: String,
+    pub album_artist: String,
+    pub song_count: u32,
+}
+
+/// One artist aggregate entry in the indexed music library.
+#[derive(Debug, Clone, serde::Deserialize, serde::Serialize)]
+pub struct LibraryArtist {
+    pub artist: String,
+    pub album_count: u32,
+    pub song_count: u32,
 }
 
 /// Technical metadata emitted for the currently active track.
@@ -272,6 +344,7 @@ pub struct DetailedMetadata {
 
 /// Runtime configuration updates and hardware notifications.
 #[derive(Debug, Clone)]
+#[allow(clippy::large_enum_variant)]
 pub enum ConfigMessage {
     ConfigChanged(Config),
     AudioDeviceOpened { sample_rate: u32, channels: u16 },
