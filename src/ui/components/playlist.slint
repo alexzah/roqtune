@@ -83,6 +83,7 @@ export component TrackRow inherits Rectangle {
     in property <bool> is-playing;
     in property <bool> is-hover;
     in property <[string]> headers: [];
+    in property <[int]> column-kinds: [];
     in property <[int]> column-widths-px: [];
     in property <length> null-column-width: 120px;
 
@@ -116,7 +117,24 @@ export component TrackRow inherits Rectangle {
         for column-value[index] in root.data.values : Rectangle {
             width: root.column-width-for-index(index);
             clip: true;
-            Text {
+            property <int> column-kind: index < root.column-kinds.length ? root.column-kinds[index] : 0;
+
+            if self.column-kind == 1 : Rectangle {
+                x: (parent.width - self.width) / 2;
+                y: (parent.height - self.height) / 2;
+                width: max(16px, min(parent.width, root.height - 8px));
+                height: self.width;
+                border-radius: 2px;
+                background: #2a2a2a;
+                Image {
+                    source: root.data.album_art;
+                    width: parent.width;
+                    height: parent.height;
+                    image-fit: cover;
+                }
+            }
+
+            if self.column-kind != 1 : Text {
                 x: 0px;
                 width: parent.width;
                 text: column-value;

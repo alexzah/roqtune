@@ -9,7 +9,8 @@
 - Cover art lookup from nearby image files and embedded tags (with cache).
 - Adaptive playlist columns:
   - show/hide default columns
-  - add/delete custom columns with format strings
+  - built-in non-text Album Art column
+  - add/delete custom text columns with format strings
   - drag to reorder columns
   - drag/double-click to resize/reset widths
 - Layout editor mode for composing panel arrangements (with undo/redo + reset).

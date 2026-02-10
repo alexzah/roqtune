@@ -978,6 +978,7 @@ export component AppWindow inherits Window {
                                 is-playing: root.playing_track_index == i;
                                 is-hover: root.hover-index == i && !root.is-dragging;
                                 headers: root.playlist_visible_column_headers;
+                                column-kinds: root.playlist_visible_column_kinds;
                                 column-widths-px: root.playlist_column_widths_px;
                                 null-column-width: root.null-column-width;
                             }
@@ -2407,6 +2408,7 @@ export component AppWindow inherits Window {
     in-out property <bool> show_settings_restart_notice: false;
     in-out property <string> settings_restart_notice_message: "";
     in-out property <[string]> playlist_visible_column_headers: [];
+    in-out property <[int]> playlist_visible_column_kinds: [];
     in-out property <[string]> playlist_column_menu_labels: [];
     in-out property <[bool]> playlist_column_menu_checked: [];
     in-out property <[bool]> playlist_column_menu_is_custom: [];

@@ -104,6 +104,8 @@ const IMPORT_CLUSTER_PRESET: [i32; 1] = [1];
 const TRANSPORT_CLUSTER_PRESET: [i32; 5] = [2, 3, 4, 5, 6];
 const UTILITY_CLUSTER_PRESET: [i32; 3] = [7, 8, 10];
 const SUPPORTED_AUDIO_EXTENSIONS: [&str; 7] = ["mp3", "wav", "ogg", "flac", "aac", "m4a", "mp4"];
+const PLAYLIST_COLUMN_KIND_TEXT: i32 = 0;
+const PLAYLIST_COLUMN_KIND_ALBUM_ART: i32 = 1;
 
 fn is_supported_audio_file(path: &Path) -> bool {
     path.extension()
@@ -580,6 +582,26 @@ fn normalize_column_format(format: &str) -> String {
     format.trim().to_ascii_lowercase()
 }
 
+fn is_album_art_builtin_column(column: &PlaylistColumnConfig) -> bool {
+    !column.custom && normalize_column_format(&column.format) == "{album_art}"
+}
+
+fn playlist_column_kind(column: &PlaylistColumnConfig) -> i32 {
+    if is_album_art_builtin_column(column) {
+        PLAYLIST_COLUMN_KIND_ALBUM_ART
+    } else {
+        PLAYLIST_COLUMN_KIND_TEXT
+    }
+}
+
+fn visible_playlist_column_kinds(columns: &[PlaylistColumnConfig]) -> Vec<i32> {
+    columns
+        .iter()
+        .filter(|column| column.enabled)
+        .map(playlist_column_kind)
+        .collect()
+}
+
 fn sanitize_playlist_columns(columns: &[PlaylistColumnConfig]) -> Vec<PlaylistColumnConfig> {
     let default_columns = config::default_playlist_columns();
     let mut seen_builtin_keys: HashSet<String> = HashSet::new();
@@ -666,6 +688,13 @@ struct ColumnWidthBounds {
 }
 
 fn playlist_column_width_bounds(column: &PlaylistColumnConfig) -> ColumnWidthBounds {
+    if is_album_art_builtin_column(column) {
+        return ColumnWidthBounds {
+            min_px: 52,
+            max_px: 88,
+        };
+    }
+
     let normalized_format = column.format.trim().to_ascii_lowercase();
     let normalized_name = column.name.trim().to_ascii_lowercase();
 
@@ -1240,8 +1269,10 @@ fn apply_playlist_columns_to_ui(ui: &AppWindow, config: &Config) {
         .iter()
         .map(|column| column.custom)
         .collect();
+    let visible_kinds = visible_playlist_column_kinds(&config.ui.playlist_columns);
 
     ui.set_playlist_visible_column_headers(ModelRc::from(Rc::new(VecModel::from(visible_headers))));
+    ui.set_playlist_visible_column_kinds(ModelRc::from(Rc::new(VecModel::from(visible_kinds))));
     ui.set_playlist_column_menu_labels(ModelRc::from(Rc::new(VecModel::from(menu_labels))));
     ui.set_playlist_column_menu_checked(ModelRc::from(Rc::new(VecModel::from(menu_checked))));
     ui.set_playlist_column_menu_is_custom(ModelRc::from(Rc::new(VecModel::from(menu_is_custom))));
@@ -3489,13 +3520,14 @@ mod tests {
     use super::{
         apply_column_order_keys, choose_preferred_u16, choose_preferred_u32,
         clamp_width_for_visible_column, collect_audio_files_from_folder,
-        default_button_cluster_actions_by_index, is_supported_audio_file,
-        playlist_column_key_at_visible_index, playlist_column_width_bounds,
-        reorder_visible_playlist_columns, resolve_playlist_header_column_from_x,
-        resolve_playlist_header_divider_from_x, resolve_playlist_header_gap_from_x,
-        resolve_runtime_config, sanitize_playlist_columns, select_output_option_index_u16,
-        select_output_option_index_u32, should_apply_custom_column_delete,
-        sidebar_width_from_window, update_or_replace_vec_model, OutputSettingsOptions,
+        default_button_cluster_actions_by_index, is_album_art_builtin_column,
+        is_supported_audio_file, playlist_column_key_at_visible_index,
+        playlist_column_width_bounds, reorder_visible_playlist_columns,
+        resolve_playlist_header_column_from_x, resolve_playlist_header_divider_from_x,
+        resolve_playlist_header_gap_from_x, resolve_runtime_config, sanitize_playlist_columns,
+        select_output_option_index_u16, select_output_option_index_u32,
+        should_apply_custom_column_delete, sidebar_width_from_window, update_or_replace_vec_model,
+        visible_playlist_column_kinds, OutputSettingsOptions,
     };
 
     fn unique_temp_directory(test_name: &str) -> PathBuf {
@@ -4148,10 +4180,16 @@ mod tests {
     }
 
     #[test]
-    fn test_playlist_column_width_bounds_for_track_and_custom_columns() {
+    fn test_playlist_column_width_bounds_for_track_custom_and_album_art_columns() {
         let track_column = PlaylistColumnConfig {
             name: "Track #".to_string(),
             format: "{track_number}".to_string(),
+            enabled: true,
+            custom: false,
+        };
+        let album_art_column = PlaylistColumnConfig {
+            name: "Album Art".to_string(),
+            format: "{album_art}".to_string(),
             enabled: true,
             custom: false,
         };
@@ -4166,9 +4204,39 @@ mod tests {
         assert_eq!(track_bounds.min_px, 52);
         assert_eq!(track_bounds.max_px, 90);
 
+        let album_art_bounds = playlist_column_width_bounds(&album_art_column);
+        assert_eq!(album_art_bounds.min_px, 52);
+        assert_eq!(album_art_bounds.max_px, 88);
+
         let custom_bounds = playlist_column_width_bounds(&custom_column);
         assert_eq!(custom_bounds.min_px, 110);
         assert_eq!(custom_bounds.max_px, 340);
+    }
+
+    #[test]
+    fn test_is_album_art_builtin_column_requires_builtin_marker() {
+        let builtin_album_art = PlaylistColumnConfig {
+            name: "Album Art".to_string(),
+            format: "{album_art}".to_string(),
+            enabled: true,
+            custom: false,
+        };
+        let custom_album_art = PlaylistColumnConfig {
+            name: "Custom Album Art".to_string(),
+            format: "{album_art}".to_string(),
+            enabled: true,
+            custom: true,
+        };
+        let title_column = PlaylistColumnConfig {
+            name: "Title".to_string(),
+            format: "{title}".to_string(),
+            enabled: true,
+            custom: false,
+        };
+
+        assert!(is_album_art_builtin_column(&builtin_album_art));
+        assert!(!is_album_art_builtin_column(&custom_album_art));
+        assert!(!is_album_art_builtin_column(&title_column));
     }
 
     #[test]
@@ -4300,8 +4368,37 @@ mod tests {
         let sanitized = sanitize_playlist_columns(&input_columns);
         assert!(sanitized.iter().any(|column| column.format == "{title}"));
         assert!(sanitized.iter().any(|column| column.format == "{artist}"));
+        assert!(sanitized
+            .iter()
+            .any(|column| !column.custom && column.format == "{album_art}"));
         assert!(sanitized.iter().any(|column| column == &custom));
         assert!(sanitized.iter().any(|column| column.enabled));
+    }
+
+    #[test]
+    fn test_visible_playlist_column_kinds_marks_builtin_album_art_only() {
+        let columns = vec![
+            PlaylistColumnConfig {
+                name: "Title".to_string(),
+                format: "{title}".to_string(),
+                enabled: true,
+                custom: false,
+            },
+            PlaylistColumnConfig {
+                name: "Album Art".to_string(),
+                format: "{album_art}".to_string(),
+                enabled: true,
+                custom: false,
+            },
+            PlaylistColumnConfig {
+                name: "Custom Art".to_string(),
+                format: "{album_art}".to_string(),
+                enabled: true,
+                custom: true,
+            },
+        ];
+
+        assert_eq!(visible_playlist_column_kinds(&columns), vec![0, 1, 0]);
     }
 
     #[test]

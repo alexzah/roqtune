@@ -207,6 +207,12 @@ pub fn default_playlist_columns() -> Vec<PlaylistColumnConfig> {
             enabled: false,
             custom: false,
         },
+        PlaylistColumnConfig {
+            name: "Album Art".to_string(),
+            format: "{album_art}".to_string(),
+            enabled: false,
+            custom: false,
+        },
     ]
 }
 
@@ -276,5 +282,18 @@ decoder_request_chunk_ms = 1500
             parsed.buffering.player_target_buffer_ms,
             BufferingConfig::default().player_target_buffer_ms
         );
+    }
+
+    #[test]
+    fn test_default_playlist_columns_include_album_art_builtin_disabled() {
+        let columns = default_playlist_columns();
+        let album_art_column = columns
+            .iter()
+            .find(|column| column.format == "{album_art}")
+            .expect("album art built-in column should exist");
+
+        assert_eq!(album_art_column.name, "Album Art");
+        assert!(!album_art_column.enabled);
+        assert!(!album_art_column.custom);
     }
 }
