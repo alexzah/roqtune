@@ -14,6 +14,7 @@ use std::{
     rc::Rc,
     sync::{Arc, Mutex},
     thread,
+    time::Duration,
 };
 
 use audio_decoder::AudioDecoder;
@@ -51,6 +52,19 @@ fn panic_payload_to_string(payload: &(dyn std::any::Any + Send)) -> String {
         return s.clone();
     }
     "non-string panic payload".to_string()
+}
+
+fn flash_read_only_view_indicator(ui_handle: slint::Weak<AppWindow>) {
+    if let Some(ui) = ui_handle.upgrade() {
+        // Reset first so repeated blocked actions retrigger the highlight reliably.
+        ui.set_playlist_filter_blocked_feedback(false);
+        ui.set_playlist_filter_blocked_feedback(true);
+    }
+    slint::Timer::single_shot(Duration::from_millis(380), move || {
+        if let Some(ui) = ui_handle.upgrade() {
+            ui.set_playlist_filter_blocked_feedback(false);
+        }
+    });
 }
 
 /// Detected and filtered output-setting choices presented in the settings dialog.
@@ -1504,7 +1518,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     ui.on_delete_selected_tracks(move || {
         if let Some(ui) = ui_handle_clone.upgrade() {
             if ui.get_playlist_filter_active() {
-                ui.set_status_text("Clear filter view before modifying the playlist".into());
+                flash_read_only_view_indicator(ui_handle_clone.clone());
                 return;
             }
         }
@@ -1518,7 +1532,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     ui.on_reorder_tracks(move |indices, to| {
         if let Some(ui) = ui_handle_clone.upgrade() {
             if ui.get_playlist_filter_active() {
-                ui.set_status_text("Clear filter view before modifying the playlist".into());
+                flash_read_only_view_indicator(ui_handle_clone.clone());
                 return;
             }
         }
@@ -1550,6 +1564,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     ui.on_on_drag_start(move |pressed_index| {
         if let Some(ui) = ui_handle_clone.upgrade() {
             if ui.get_playlist_filter_active() {
+                flash_read_only_view_indicator(ui_handle_clone.clone());
                 return;
             }
         }

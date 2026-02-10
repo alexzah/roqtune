@@ -159,6 +159,7 @@ export component ConfirmationDialog inherits Rectangle {
     callback cancelled();
     in property <string> message: "Are you sure?";
     in property <bool> is-visible: false;
+    in property <string> confirm-button-text: "Delete";
 
     visible: is-visible;
     background: #00000080;
@@ -196,7 +197,7 @@ export component ConfirmationDialog inherits Rectangle {
                 }
 
                 Button {
-                    text: "Delete";
+                    text: root.confirm-button-text;
                     primary: true;
                     clicked => { root.confirmed(); }
                 }

@@ -572,6 +572,7 @@ export component AppWindow inherits Window {
                 VerticalLayout {
                     Rectangle {
                         height: 28px;
+                        clip: true;
                         background: #202020;
                         property <int> viewport-width-px: max(0, floor((self.width - 16px - 40px - root.null-column-width - 20px) / 1px));
                         changed viewport-width-px => {
@@ -581,6 +582,9 @@ export component AppWindow inherits Window {
                             }
                         }
                         HorizontalLayout {
+                            x: track-list.viewport-x;
+                            width: max(parent.width, track-list.viewport-width);
+                            height: parent.height;
                             padding-left: 8px;
                             padding-right: 8px;
                             spacing: 10px;
@@ -640,6 +644,7 @@ export component AppWindow inherits Window {
                                 : self.max-drag-width;
                             height: parent.height;
                             property <int> visible_column_count: root.playlist_visible_column_headers.length;
+                            property <int> content-mouse-x-px: floor((self.mouse-x - track-list.viewport-x) / 1px);
                             mouse-cursor: (root.column_resize_active || root.column_hover_divider != -1) ? col-resize : default;
                             pointer-event(event) => {
                                 if (event.button == PointerEventButton.right && event.kind == PointerEventKind.down) {
@@ -652,16 +657,16 @@ export component AppWindow inherits Window {
                                 } else if (event.kind == PointerEventKind.down && event.button == PointerEventButton.left) {
                                     let hovered_divider = visible_column_count > 0
                                         && self.mouse-x >= 0px && self.mouse-x < self.width
-                                        ? root.playlist_header_divider_at(floor(self.mouse-x / 1px))
+                                        ? root.playlist_header_divider_at(self.content-mouse-x-px)
                                         : -1;
                                     root.column_hover_divider = hovered_divider;
                                     let hovered_column = visible_column_count > 0
                                         && self.mouse-x >= 0px && self.mouse-x < self.width
-                                        ? root.playlist_header_column_at(floor(self.mouse-x / 1px))
+                                        ? root.playlist_header_column_at(self.content-mouse-x-px)
                                         : -1;
                                     let hovered_gap = visible_column_count > 0
                                         && self.mouse-x >= 0px && self.mouse-x < self.width
-                                        ? root.playlist_header_gap_at(floor(self.mouse-x / 1px))
+                                        ? root.playlist_header_gap_at(self.content-mouse-x-px)
                                         : -1;
                                     if (hovered_divider != -1 && hovered_divider < root.playlist_column_widths_px.length) {
                                         root.column_resize_index = hovered_divider;
@@ -685,7 +690,7 @@ export component AppWindow inherits Window {
                                 } else if (event.kind == PointerEventKind.move) {
                                     let hovered_divider = visible_column_count > 0
                                         && self.mouse-x >= 0px && self.mouse-x < self.width
-                                        ? root.playlist_header_divider_at(floor(self.mouse-x / 1px))
+                                        ? root.playlist_header_divider_at(self.content-mouse-x-px)
                                         : -1;
                                     root.column_hover_divider = hovered_divider;
                                     if (root.column_resize_active && root.column_resize_index != -1) {
@@ -698,7 +703,7 @@ export component AppWindow inherits Window {
                                     } else {
                                         let hovered_gap = visible_column_count > 0
                                             && self.mouse-x >= 0px && self.mouse-x < self.width
-                                            ? root.playlist_header_gap_at(floor(self.mouse-x / 1px))
+                                            ? root.playlist_header_gap_at(self.content-mouse-x-px)
                                             : -1;
                                         if (root.column_click_candidate != -1 && abs(self.mouse-x - root.column_click_start_x) > 4px) {
                                             root.column_click_candidate = -1;
@@ -711,7 +716,7 @@ export component AppWindow inherits Window {
                                 } else if (event.kind == PointerEventKind.up) {
                                     let hovered_column = visible_column_count > 0
                                         && self.mouse-x >= 0px && self.mouse-x < self.width
-                                        ? root.playlist_header_column_at(floor(self.mouse-x / 1px))
+                                        ? root.playlist_header_column_at(self.content-mouse-x-px)
                                         : -1;
                                     if (root.column_resize_active && root.column_resize_index != -1) {
                                         let new_width_px = root.column_resize_preview_width_px;
@@ -722,7 +727,7 @@ export component AppWindow inherits Window {
                                     } else if (root.column_drag_from != -1) {
                                         let hovered_gap = visible_column_count > 0
                                             && self.mouse-x >= 0px && self.mouse-x < self.width
-                                            ? root.playlist_header_gap_at(floor(self.mouse-x / 1px))
+                                            ? root.playlist_header_gap_at(self.content-mouse-x-px)
                                             : -1;
                                         let final_gap = hovered_gap != -1 ? hovered_gap : root.column_drop_gap;
                                         let final_drop_index = final_gap <= root.column_drag_from ? final_gap : final_gap - 1;
@@ -757,7 +762,7 @@ export component AppWindow inherits Window {
 
                             double-clicked => {
                                 if (visible_column_count > 0 && self.mouse-x >= 0px && self.mouse-x < self.width) {
-                                    let hovered_divider = root.playlist_header_divider_at(floor(self.mouse-x / 1px));
+                                    let hovered_divider = root.playlist_header_divider_at(self.content-mouse-x-px);
                                     if (hovered_divider != -1) {
                                         root.column_resize_active = false;
                                         root.column_resize_index = -1;
@@ -772,7 +777,8 @@ export component AppWindow inherits Window {
                                 && root.column_drop_gap != -1
                                 && column-header-drag-ta.visible_column_count > 0
                                 && root.column_drop_gap < root.playlist_column_gap_positions_px.length : Rectangle {
-                            x: column-header-drag-ta.x + root.playlist_column_gap_positions_px[root.column_drop_gap] * 1px - 1px;
+                            x: column-header-drag-ta.x + track-list.viewport-x
+                                + root.playlist_column_gap_positions_px[root.column_drop_gap] * 1px - 1px;
                             y: 3px;
                             width: 2px;
                             height: parent.height - 6px;
@@ -783,7 +789,8 @@ export component AppWindow inherits Window {
                         if root.column_resize_active
                                 && root.column_resize_index >= 0
                                 && root.column_resize_index < root.playlist_column_widths_px.length : Rectangle {
-                            x: column-header-drag-ta.x + root.playlist-column-divider-x(root.column_resize_index) * 1px - 1px;
+                            x: column-header-drag-ta.x + track-list.viewport-x
+                                + root.playlist-column-divider-x(root.column_resize_index) * 1px - 1px;
                             y: 3px;
                             width: 2px;
                             height: parent.height - 6px;
@@ -802,20 +809,23 @@ export component AppWindow inherits Window {
                             width: 156px;
                             height: 26px;
                             border-radius: 4px;
-                            background: #1f2f3fe6;
+                            background: root.playlist_filter_blocked_feedback ? #3d2f19f0 : #1f2f3fe6;
                             border-width: 1px;
-                            border-color: #4a6684;
+                            border-color: root.playlist_filter_blocked_feedback ? #dca95a : #4a6684;
                             z: 6;
+                            animate background { duration: 120ms; }
+                            animate border-color { duration: 120ms; }
 
                             Text {
                                 x: 8px;
                                 width: 90px;
                                 height: parent.height;
                                 text: "Read only view";
-                                color: #d6e4f5;
+                                color: root.playlist_filter_blocked_feedback ? #ffe2b8 : #d6e4f5;
                                 font-size: 11px;
                                 vertical-alignment: center;
                                 horizontal-alignment: left;
+                                animate color { duration: 120ms; }
                             }
 
                             save-view-button := Rectangle {
@@ -948,14 +958,21 @@ export component AppWindow inherits Window {
                         track-list-overlay := TouchArea {
                             x: 0;
                             y: 0px;
-                            width: parent.width;
-                            height: parent.height;
+                            // Reserve fixed lanes for scrollbars so the overlay never steals scrollbar clicks.
+                            property <length> scrollbar-lane-reserve: 18px;
+                            width: max(0px, parent.width - self.scrollbar-lane-reserve);
+                            height: max(0px, parent.height - self.scrollbar-lane-reserve);
                             property <length> row-height: 30px;
                             property <length> header-height: 28px;
+                            property <bool> in-viewport: self.mouse-x >= 0px
+                                && self.mouse-y >= 0px
+                                && self.mouse-x < self.width
+                                && self.mouse-y < self.height;
                             property <length> content-y: self.mouse-y - track-list.viewport-y;
                             property <int> raw-row: floor(content-y / row-height);
-                            property <bool> is-in-rows: raw-row >= 0 && raw-row < root.track_model.length;
-                            property <bool> in-null-column: self.mouse-x >= (self.width - root.null-column-width);
+                            property <bool> is-in-rows: self.in-viewport && raw-row >= 0 && raw-row < root.track_model.length;
+                            property <bool> in-null-column: self.in-viewport
+                                && self.mouse-x >= (track-list.viewport-width - root.null-column-width);
                             property <int> hovered-row: is-in-rows ? raw-row : -1;
                             property <int> drop-gap: max(0, min(root.track_model.length, floor((content-y + row-height / 2) / row-height)));
 
@@ -2049,6 +2066,7 @@ export component AppWindow inherits Window {
     apply_filter_view_overlay := ConfirmationDialog {
         is-visible: root.show_apply_filter_view_confirm;
         message: root.apply_filter_view_confirm_message;
+        confirm-button-text: "Overwrite";
         confirmed => {
             root.apply_filter_view_to_playlist();
             root.show_apply_filter_view_confirm = false;
@@ -2318,6 +2336,7 @@ export component AppWindow inherits Window {
     in-out property <int> selected_track_index: -1;
     in-out property <int> playing_track_index: -1;
     in-out property <bool> playlist_filter_active: false;
+    in-out property <bool> playlist_filter_blocked_feedback: false;
     in-out property <bool> playlist_search_visible: false;
     in-out property <string> playlist_search_query: "";
     in-out property <string> playlist_search_result_text: "0/0";
