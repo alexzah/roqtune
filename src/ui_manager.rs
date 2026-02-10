@@ -47,6 +47,7 @@ pub struct UiManager {
     track_metadata: Vec<TrackMetadata>,
     view_indices: Vec<usize>,
     selected_indices: Vec<usize>,
+    selection_anchor_track_id: Option<String>,
     copied_track_paths: Vec<PathBuf>,
     active_playing_index: Option<usize>,
     drag_indices: Vec<usize>,
@@ -203,6 +204,7 @@ impl UiManager {
             track_metadata: Vec::new(),
             view_indices: Vec::new(),
             selected_indices: Vec::new(),
+            selection_anchor_track_id: None,
             copied_track_paths: Vec::new(),
             active_playing_index: None,
             drag_indices: Vec::new(),
@@ -826,6 +828,46 @@ impl UiManager {
             .position(|&candidate| candidate == source_index)
     }
 
+    fn selection_anchor_source_index(&self) -> Option<usize> {
+        self.selection_anchor_track_id
+            .as_ref()
+            .and_then(|anchor_id| {
+                self.track_ids
+                    .iter()
+                    .position(|track_id| track_id == anchor_id)
+            })
+    }
+
+    fn set_selection_anchor_from_source_index(&mut self, source_index: usize) {
+        self.selection_anchor_track_id = self.track_ids.get(source_index).cloned();
+    }
+
+    fn build_shift_selection_from_view_order(
+        view_indices: &[usize],
+        anchor_source_index: Option<usize>,
+        clicked_source_index: usize,
+    ) -> Vec<usize> {
+        if view_indices.is_empty() {
+            return vec![clicked_source_index];
+        }
+        let Some(clicked_view_index) = view_indices
+            .iter()
+            .position(|&source_index| source_index == clicked_source_index)
+        else {
+            return vec![clicked_source_index];
+        };
+        let anchor_source_index = anchor_source_index.unwrap_or(clicked_source_index);
+        let Some(anchor_view_index) = view_indices
+            .iter()
+            .position(|&source_index| source_index == anchor_source_index)
+        else {
+            return vec![clicked_source_index];
+        };
+        let start = anchor_view_index.min(clicked_view_index);
+        let end = anchor_view_index.max(clicked_view_index);
+        view_indices[start..=end].to_vec()
+    }
+
     fn active_sort_column_state(&self) -> Option<(usize, String)> {
         let sort_key = self.filter_sort_column_key.as_ref()?;
         self.visible_playlist_columns()
@@ -1170,11 +1212,34 @@ impl UiManager {
     fn build_copied_track_paths(
         track_paths: &[PathBuf],
         selected_indices: &[usize],
+        view_indices: &[usize],
     ) -> Vec<PathBuf> {
         let mut normalized = selected_indices.to_vec();
         normalized.sort_unstable();
         normalized.dedup();
-        normalized
+
+        let ordered_indices = if view_indices.is_empty() {
+            normalized
+        } else {
+            let mut selected_set: HashSet<usize> = normalized.iter().copied().collect();
+            let mut ordered = Vec::with_capacity(normalized.len());
+
+            for &source_index in view_indices {
+                if selected_set.remove(&source_index) {
+                    ordered.push(source_index);
+                }
+            }
+
+            // Keep any selected-but-not-rendered rows in stable source order.
+            for source_index in normalized {
+                if selected_set.remove(&source_index) {
+                    ordered.push(source_index);
+                }
+            }
+            ordered
+        };
+
+        ordered_indices
             .into_iter()
             .filter_map(|index| track_paths.get(index).cloned())
             .collect()
@@ -1184,8 +1249,11 @@ impl UiManager {
         if self.selected_indices.is_empty() {
             return;
         }
-        self.copied_track_paths =
-            Self::build_copied_track_paths(&self.track_paths, &self.selected_indices);
+        self.copied_track_paths = Self::build_copied_track_paths(
+            &self.track_paths,
+            &self.selected_indices,
+            &self.view_indices,
+        );
         debug!(
             "UiManager: copied {} track(s) from selection",
             self.copied_track_paths.len()
@@ -1400,13 +1468,27 @@ impl UiManager {
 
         let is_already_selected = self.selected_indices.contains(&source_index);
         if !is_already_selected || ctrl || shift {
-            let _ = self.bus_sender.send(protocol::Message::Playlist(
-                protocol::PlaylistMessage::SelectTrackMulti {
-                    index: source_index,
-                    ctrl,
-                    shift,
-                },
-            ));
+            if shift && !self.view_indices.is_empty() {
+                let shift_selected_indices = Self::build_shift_selection_from_view_order(
+                    &self.view_indices,
+                    self.selection_anchor_source_index(),
+                    source_index,
+                );
+                let _ = self.bus_sender.send(protocol::Message::Playlist(
+                    protocol::PlaylistMessage::SelectionChanged(shift_selected_indices),
+                ));
+            } else {
+                let _ = self.bus_sender.send(protocol::Message::Playlist(
+                    protocol::PlaylistMessage::SelectTrackMulti {
+                        index: source_index,
+                        ctrl,
+                        shift,
+                    },
+                ));
+            }
+            if !shift {
+                self.set_selection_anchor_from_source_index(source_index);
+            }
         }
     }
 
@@ -1528,6 +1610,7 @@ impl UiManager {
                             protocol::PlaylistMessage::ActivePlaylistChanged(id),
                         ) => {
                             self.active_playlist_id = id.clone();
+                            self.selection_anchor_track_id = None;
                             self.playlist_column_width_overrides_px.clear();
                             self.apply_playlist_column_layout();
                             if let Some(index) =
@@ -1541,6 +1624,7 @@ impl UiManager {
                         protocol::Message::Playlist(
                             protocol::PlaylistMessage::PlaylistRestored(tracks),
                         ) => {
+                            self.selection_anchor_track_id = None;
                             self.track_ids.clear();
                             self.track_paths.clear();
                             self.track_metadata.clear();
@@ -1865,6 +1949,9 @@ impl UiManager {
                             );
                             let indices_clone = indices.clone();
                             self.selected_indices = indices_clone.clone();
+                            if indices_clone.is_empty() {
+                                self.selection_anchor_track_id = None;
+                            }
                             debug!(
                                 "After SelectionChanged: self.selected_indices = {:?}",
                                 self.selected_indices
@@ -2180,7 +2267,7 @@ mod tests {
         ];
         let selected_indices = vec![3usize, 1, 3, 0];
 
-        let copied = UiManager::build_copied_track_paths(&track_paths, &selected_indices);
+        let copied = UiManager::build_copied_track_paths(&track_paths, &selected_indices, &[]);
 
         assert_eq!(
             copied,
@@ -2190,6 +2277,44 @@ mod tests {
                 PathBuf::from("d.mp3")
             ]
         );
+    }
+
+    #[test]
+    fn test_build_copied_track_paths_preserves_rendered_view_order() {
+        let track_paths = vec![
+            PathBuf::from("a.mp3"),
+            PathBuf::from("b.mp3"),
+            PathBuf::from("c.mp3"),
+            PathBuf::from("d.mp3"),
+        ];
+        let selected_indices = vec![3usize, 1, 0];
+        let view_indices = vec![2usize, 0, 3, 1];
+
+        let copied =
+            UiManager::build_copied_track_paths(&track_paths, &selected_indices, &view_indices);
+
+        assert_eq!(
+            copied,
+            vec![
+                PathBuf::from("a.mp3"),
+                PathBuf::from("d.mp3"),
+                PathBuf::from("b.mp3")
+            ]
+        );
+    }
+
+    #[test]
+    fn test_build_shift_selection_from_view_order_uses_rendered_range() {
+        let view_indices = vec![2usize, 0, 3, 1];
+        let selected = UiManager::build_shift_selection_from_view_order(&view_indices, Some(0), 1);
+        assert_eq!(selected, vec![0, 3, 1]);
+    }
+
+    #[test]
+    fn test_build_shift_selection_from_view_order_without_anchor_selects_clicked_only() {
+        let view_indices = vec![2usize, 0, 3, 1];
+        let selected = UiManager::build_shift_selection_from_view_order(&view_indices, None, 3);
+        assert_eq!(selected, vec![3]);
     }
 
     #[test]

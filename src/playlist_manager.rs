@@ -747,6 +747,16 @@ impl PlaylistManager {
 
                         self.broadcast_selection_changed();
                     }
+                    protocol::Message::Playlist(protocol::PlaylistMessage::SelectionChanged(
+                        indices,
+                    )) => {
+                        let previous_indices = self.editing_playlist.get_selected_indices();
+                        self.editing_playlist.set_selected_indices(indices);
+                        if self.editing_playlist.get_selected_indices() == previous_indices {
+                            continue;
+                        }
+                        self.broadcast_selection_changed();
+                    }
                     protocol::Message::Playlist(protocol::PlaylistMessage::DeselectAll) => {
                         debug!("PlaylistManager: Received deselect all command");
                         self.editing_playlist.deselect_all();
