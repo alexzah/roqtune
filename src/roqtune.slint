@@ -795,8 +795,6 @@ export component AppWindow inherits Window {
 
                     track-list-container := Rectangle {
                         clip: true;
-                        property <length> popup-stack-height: (root.playlist_filter_active ? 34px : 0px)
-                            + (root.playlist_search_visible ? 36px : 0px);
 
                         if root.playlist_filter_active : Rectangle {
                             x: max(8px, parent.width - self.width - 8px);
@@ -933,8 +931,8 @@ export component AppWindow inherits Window {
                         }
 
                         track-list := ListView {
-                            y: parent.popup-stack-height;
-                            height: max(0px, parent.height - parent.popup-stack-height);
+                            y: 0px;
+                            height: parent.height;
                             property <length> row-height: 30px;
                             property <length> header-height: 28px;
                             for track[i] in root.track_model : TrackRow {
@@ -949,9 +947,9 @@ export component AppWindow inherits Window {
 
                         track-list-overlay := TouchArea {
                             x: 0;
-                            y: parent.popup-stack-height;
+                            y: 0px;
                             width: parent.width;
-                            height: max(0px, parent.height - parent.popup-stack-height);
+                            height: parent.height;
                             property <length> row-height: 30px;
                             property <length> header-height: 28px;
                             property <length> content-y: self.mouse-y - track-list.viewport-y;
@@ -1014,7 +1012,7 @@ export component AppWindow inherits Window {
 
                         if (root.is-dragging && root.drop-index != -1) : Rectangle {
                             x: 0;
-                            y: track-list.y + max(0 , track-list.header-height + (root.drop-index - 1) * 30px) + track-list.viewport-y;
+                            y: max(0 , track-list.header-height + (root.drop-index - 1) * 30px) + track-list.viewport-y;
                             width: 100%;
                             height: 2px;
                             background: #2a6def;
