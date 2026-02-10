@@ -2,25 +2,17 @@
 
 # roqtune
 
-`roqtune` is a desktop music player written in Rust with a Slint-based UI.
-It is designed around responsive playback, configurable UI layout, and persistent playlist state.
+`roqtune` is a desktop music player designed to be highly customizable and performant. It is written in Rust and uses the Slint UI framework.
 
 ## Features
 
-- Playback controls: play, pause, stop, previous, next, seek, and volume.
-- Multiple playback modes: `Default`, `Shuffle`, and `Random`.
-- Repeat modes: off, repeat playlist, and repeat current track.
-- Import audio from files or recursively from folders.
-- Playlist management: create, rename, delete, switch, and reorder tracks.
-- Multi-selection behavior (`Ctrl`/`Shift`) and drag-and-drop reordering.
-- Metadata display for title/artist/album/date/genre.
 - Cover art lookup from nearby image files and embedded tags (with cache).
 - Adaptive playlist columns:
   - show/hide default columns
   - add/delete custom columns with format strings
   - drag to reorder columns
   - drag/double-click to resize/reset widths
-- Layout editor mode for composing panel arrangements (with undo + reset).
+- Layout editor mode for composing panel arrangements (with undo/redo + reset).
 - Configurable output settings:
   - output device
   - channel count
@@ -31,16 +23,7 @@ It is designed around responsive playback, configurable UI layout, and persisten
   - config in TOML
   - playlists/tracks in SQLite
   - per-playlist column order/width overrides
-
-## Supported Audio Formats
-
-- `mp3`
-- `wav`
-- `ogg`
-- `flac`
-- `aac`
-- `m4a`
-- `mp4`
+- Supported audio formats: `mp3`, `wav`, `ogg`, `flac`, `aac`, `m4a`, `mp4`.
 
 ## Quick Start
 

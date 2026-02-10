@@ -1099,6 +1099,24 @@ fn pop_layout_snapshot(stack: &Arc<Mutex<Vec<LayoutConfig>>>) -> Option<LayoutCo
         .pop()
 }
 
+fn update_or_replace_vec_model<T: Clone + 'static>(
+    current_model: ModelRc<T>,
+    next_values: Vec<T>,
+) -> ModelRc<T> {
+    if let Some(vec_model) = current_model.as_any().downcast_ref::<VecModel<T>>() {
+        if vec_model.row_count() == next_values.len() {
+            for (index, value) in next_values.into_iter().enumerate() {
+                vec_model.set_row_data(index, value);
+            }
+        } else {
+            vec_model.set_vec(next_values);
+        }
+        current_model
+    } else {
+        ModelRc::from(Rc::new(VecModel::from(next_values)))
+    }
+}
+
 fn apply_layout_to_ui(
     ui: &AppWindow,
     config: &Config,
@@ -1160,14 +1178,38 @@ fn apply_layout_to_ui(
         })
         .collect();
 
-    ui.set_layout_leaf_ids(ModelRc::from(Rc::new(VecModel::from(leaf_ids))));
-    ui.set_layout_region_panel_kinds(ModelRc::from(Rc::new(VecModel::from(region_panel_codes))));
-    ui.set_layout_region_x_px(ModelRc::from(Rc::new(VecModel::from(region_x))));
-    ui.set_layout_region_y_px(ModelRc::from(Rc::new(VecModel::from(region_y))));
-    ui.set_layout_region_width_px(ModelRc::from(Rc::new(VecModel::from(region_widths))));
-    ui.set_layout_region_height_px(ModelRc::from(Rc::new(VecModel::from(region_heights))));
-    ui.set_layout_region_visible(ModelRc::from(Rc::new(VecModel::from(region_visible))));
-    ui.set_layout_splitters(ModelRc::from(Rc::new(VecModel::from(splitter_model))));
+    ui.set_layout_leaf_ids(update_or_replace_vec_model(
+        ui.get_layout_leaf_ids(),
+        leaf_ids,
+    ));
+    ui.set_layout_region_panel_kinds(update_or_replace_vec_model(
+        ui.get_layout_region_panel_kinds(),
+        region_panel_codes,
+    ));
+    ui.set_layout_region_x_px(update_or_replace_vec_model(
+        ui.get_layout_region_x_px(),
+        region_x,
+    ));
+    ui.set_layout_region_y_px(update_or_replace_vec_model(
+        ui.get_layout_region_y_px(),
+        region_y,
+    ));
+    ui.set_layout_region_width_px(update_or_replace_vec_model(
+        ui.get_layout_region_width_px(),
+        region_widths,
+    ));
+    ui.set_layout_region_height_px(update_or_replace_vec_model(
+        ui.get_layout_region_height_px(),
+        region_heights,
+    ));
+    ui.set_layout_region_visible(update_or_replace_vec_model(
+        ui.get_layout_region_visible(),
+        region_visible,
+    ));
+    ui.set_layout_splitters(update_or_replace_vec_model(
+        ui.get_layout_splitters(),
+        splitter_model,
+    ));
     ui.set_layout_selected_leaf_index(selected_leaf_index);
     apply_button_cluster_views_to_ui(ui, &metrics, config);
 }
@@ -3433,13 +3475,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 #[cfg(test)]
 mod tests {
     use std::{
+        any::Any,
         collections::BTreeSet,
         path::{Path, PathBuf},
+        rc::Rc,
         time::{SystemTime, UNIX_EPOCH},
     };
 
     use crate::config::{BufferingConfig, Config, OutputConfig, PlaylistColumnConfig, UiConfig};
     use crate::layout::LayoutConfig;
+    use slint::{Model, ModelRc, ModelTracker, VecModel};
 
     use super::{
         apply_column_order_keys, choose_preferred_u16, choose_preferred_u32,
@@ -3450,7 +3495,7 @@ mod tests {
         resolve_playlist_header_divider_from_x, resolve_playlist_header_gap_from_x,
         resolve_runtime_config, sanitize_playlist_columns, select_output_option_index_u16,
         select_output_option_index_u32, should_apply_custom_column_delete,
-        sidebar_width_from_window, OutputSettingsOptions,
+        sidebar_width_from_window, update_or_replace_vec_model, OutputSettingsOptions,
     };
 
     fn unique_temp_directory(test_name: &str) -> PathBuf {
@@ -3464,6 +3509,88 @@ mod tests {
             std::process::id(),
             nanos
         ))
+    }
+
+    #[test]
+    fn test_update_or_replace_vec_model_reuses_existing_vec_model_when_len_matches() {
+        let current: ModelRc<i32> = ModelRc::from(Rc::new(VecModel::from(vec![1, 2])));
+        let original_ptr = current
+            .as_any()
+            .downcast_ref::<VecModel<i32>>()
+            .expect("VecModel expected") as *const VecModel<i32>;
+
+        let updated = update_or_replace_vec_model(current.clone(), vec![9, 8]);
+        let updated_model = updated
+            .as_any()
+            .downcast_ref::<VecModel<i32>>()
+            .expect("VecModel expected");
+        let updated_ptr = updated_model as *const VecModel<i32>;
+
+        assert_eq!(original_ptr, updated_ptr);
+        assert_eq!(updated_model.row_count(), 2);
+        assert_eq!(updated_model.row_data(0), Some(9));
+        assert_eq!(updated_model.row_data(1), Some(8));
+    }
+
+    #[test]
+    fn test_update_or_replace_vec_model_reuses_existing_vec_model_when_len_changes() {
+        let current: ModelRc<i32> = ModelRc::from(Rc::new(VecModel::from(vec![1, 2])));
+        let original_ptr = current
+            .as_any()
+            .downcast_ref::<VecModel<i32>>()
+            .expect("VecModel expected") as *const VecModel<i32>;
+
+        let updated = update_or_replace_vec_model(current.clone(), vec![7, 6, 5]);
+        let updated_model = updated
+            .as_any()
+            .downcast_ref::<VecModel<i32>>()
+            .expect("VecModel expected");
+        let updated_ptr = updated_model as *const VecModel<i32>;
+
+        assert_eq!(original_ptr, updated_ptr);
+        assert_eq!(updated_model.row_count(), 3);
+        assert_eq!(updated_model.row_data(0), Some(7));
+        assert_eq!(updated_model.row_data(1), Some(6));
+        assert_eq!(updated_model.row_data(2), Some(5));
+    }
+
+    #[test]
+    fn test_update_or_replace_vec_model_falls_back_to_vec_model_for_non_vec_model_inputs() {
+        struct StaticModel {
+            values: Vec<i32>,
+        }
+
+        impl Model for StaticModel {
+            type Data = i32;
+
+            fn row_count(&self) -> usize {
+                self.values.len()
+            }
+
+            fn row_data(&self, row: usize) -> Option<Self::Data> {
+                self.values.get(row).copied()
+            }
+
+            fn model_tracker(&self) -> &dyn ModelTracker {
+                &()
+            }
+
+            fn as_any(&self) -> &dyn Any {
+                self
+            }
+        }
+
+        let current: ModelRc<i32> = ModelRc::new(StaticModel { values: vec![1, 2] });
+        assert!(current.as_any().downcast_ref::<VecModel<i32>>().is_none());
+
+        let updated = update_or_replace_vec_model(current, vec![4, 3]);
+        let updated_model = updated
+            .as_any()
+            .downcast_ref::<VecModel<i32>>()
+            .expect("VecModel expected after fallback creation");
+        assert_eq!(updated_model.row_count(), 2);
+        assert_eq!(updated_model.row_data(0), Some(4));
+        assert_eq!(updated_model.row_data(1), Some(3));
     }
 
     #[test]
@@ -3762,6 +3889,27 @@ mod tests {
         assert!(
             slint_ui.contains("callback commit_layout_splitter_ratio(string, float);"),
             "Splitter commit callback should be declared"
+        );
+        assert!(
+            slint_ui.contains("x: splitter.axis == 1 ? -4px : 0px;")
+                && slint_ui
+                    .contains("width: splitter.axis == 1 ? parent.width + 8px : parent.width;")
+                && slint_ui.contains("y: splitter.axis == 0 ? -4px : 0px;")
+                && slint_ui
+                    .contains("height: splitter.axis == 0 ? parent.height + 8px : parent.height;"),
+            "Layout splitter drag hit areas should remain fixed-size while dragging"
+        );
+        assert!(
+            !slint_ui.contains("active-x-pad") && !slint_ui.contains("active-y-pad"),
+            "Layout splitter drag should not mutate touch-area geometry during active drag"
+        );
+        assert!(
+            slint_ui.contains(
+                "event.kind == PointerEventKind.up && event.button == PointerEventButton.left"
+            ) && slint_ui.contains(
+                "event.kind == PointerEventKind.cancel && root.layout_active_splitter_index == i"
+            ) && slint_ui.contains("moved => {"),
+            "Layout splitter drag should preview on move and end on up/cancel"
         );
         assert!(
             slint_ui.contains("callback layout_workspace_resized(int, int);"),
