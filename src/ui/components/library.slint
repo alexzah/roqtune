@@ -24,7 +24,18 @@ export component LibraryRow inherits Rectangle {
             }
         }
 
-        if root.data.item_kind != 1 : Rectangle {
+        if root.data.item_kind != 1 && root.data.leading != "" : Rectangle {
+            width: 28px;
+            Text {
+                text: root.data.leading;
+                color: #8fa7c6;
+                font-size: 11px;
+                horizontal-alignment: right;
+                vertical-alignment: center;
+            }
+        }
+
+        if root.data.item_kind != 1 && root.data.leading == "" : Rectangle {
             width: 24px;
             height: 24px;
             border-radius: 2px;

@@ -149,6 +149,7 @@ enum LibraryEntry {
 
 #[derive(Clone, Debug)]
 struct LibraryRowPresentation {
+    leading: String,
     primary: String,
     secondary: String,
     item_kind: i32,
@@ -223,6 +224,24 @@ fn fit_column_widths_to_available_space(
 }
 
 impl UiManager {
+    fn library_track_number_leading(track_number: &str) -> String {
+        let trimmed = track_number.trim();
+        if trimmed.is_empty() {
+            return String::new();
+        }
+
+        let first_component = trimmed.split('/').next().map(str::trim).unwrap_or(trimmed);
+        if first_component.is_empty() {
+            return String::new();
+        }
+
+        if let Ok(parsed) = first_component.parse::<u32>() {
+            return format!("{parsed:02}");
+        }
+
+        first_component.to_string()
+    }
+
     fn coalesce_cover_art_requests(
         mut latest: CoverArtLookupRequest,
         request_rx: &StdReceiver<CoverArtLookupRequest>,
@@ -1918,18 +1937,34 @@ impl UiManager {
     fn library_row_presentation_from_entry(
         &mut self,
         entry: &LibraryEntry,
+        view: &LibraryViewState,
         selected: bool,
     ) -> LibraryRowPresentation {
+        let is_album_detail_view = matches!(view, LibraryViewState::AlbumDetail { .. });
         match entry {
             LibraryEntry::Song(song) => LibraryRowPresentation {
+                leading: if is_album_detail_view {
+                    Self::library_track_number_leading(&song.track_number)
+                } else {
+                    String::new()
+                },
                 primary: song.title.clone(),
-                secondary: format!("{} • {}", song.artist, song.album),
+                secondary: if is_album_detail_view {
+                    song.artist.clone()
+                } else {
+                    format!("{} • {}", song.artist, song.album)
+                },
                 item_kind: LIBRARY_ITEM_KIND_SONG,
-                cover_art_path: self.resolve_library_cover_art_path(&song.path),
+                cover_art_path: if is_album_detail_view {
+                    None
+                } else {
+                    self.resolve_library_cover_art_path(&song.path)
+                },
                 is_playing: self.current_playing_track_path.as_ref() == Some(&song.path),
                 selected,
             },
             LibraryEntry::Artist(artist) => LibraryRowPresentation {
+                leading: String::new(),
                 primary: artist.artist.clone(),
                 secondary: format!(
                     "{} albums • {} songs",
@@ -1941,6 +1976,7 @@ impl UiManager {
                 selected,
             },
             LibraryEntry::Album(album) => LibraryRowPresentation {
+                leading: String::new(),
                 primary: album.album.clone(),
                 secondary: format!("{} • {} songs", album.album_artist, album.song_count),
                 item_kind: LIBRARY_ITEM_KIND_ALBUM,
@@ -1957,19 +1993,74 @@ impl UiManager {
     fn sync_library_ui(&mut self) {
         let view = self.current_library_view();
         let (title, subtitle) = Self::library_view_labels(&view);
+        let album_header_visible = matches!(view, LibraryViewState::AlbumDetail { .. });
         let can_go_back = self.library_view_stack.len() > 1;
         let root_index = self.current_library_root_index();
         let scan_in_progress = self.library_scan_in_progress;
         let status_text = self.library_status_text.clone();
         let entries = self.library_entries.clone();
         let selected_set: HashSet<usize> = self.library_selected_indices.iter().copied().collect();
+        let album_header_art_path = if matches!(view, LibraryViewState::AlbumDetail { .. }) {
+            entries.iter().find_map(|entry| {
+                if let LibraryEntry::Song(song) = entry {
+                    self.resolve_library_cover_art_path(&song.path)
+                } else {
+                    None
+                }
+            })
+        } else {
+            None
+        };
+        let album_song_count = if album_header_visible {
+            entries
+                .iter()
+                .filter(|entry| matches!(entry, LibraryEntry::Song(_)))
+                .count()
+        } else {
+            0
+        };
+        let album_year = if album_header_visible {
+            entries.iter().find_map(|entry| {
+                if let LibraryEntry::Song(song) = entry {
+                    let year = song.year.trim();
+                    if year.is_empty() {
+                        None
+                    } else {
+                        Some(year.to_string())
+                    }
+                } else {
+                    None
+                }
+            })
+        } else {
+            None
+        };
+        let album_header_meta = if album_header_visible {
+            let songs_label = if album_song_count == 1 {
+                "song"
+            } else {
+                "songs"
+            };
+            if let Some(year) = album_year {
+                format!("{} • {} {}", year, album_song_count, songs_label)
+            } else {
+                format!("{} {}", album_song_count, songs_label)
+            }
+        } else {
+            String::new()
+        };
         let rows: Vec<LibraryRowPresentation> = entries
             .into_iter()
             .enumerate()
             .map(|(index, entry)| {
-                self.library_row_presentation_from_entry(&entry, selected_set.contains(&index))
+                self.library_row_presentation_from_entry(
+                    &entry,
+                    &view,
+                    selected_set.contains(&index),
+                )
             })
             .collect();
+        let album_header_has_art = album_header_art_path.is_some();
         let collection_mode = self.collection_mode;
 
         let _ = self.ui.upgrade_in_event_loop(move |ui| {
@@ -1980,6 +2071,7 @@ impl UiManager {
                         UiManager::load_track_row_cover_art_image(entry.cover_art_path.as_ref());
                     let has_album_art = entry.cover_art_path.is_some();
                     LibraryRowData {
+                        leading: entry.leading.into(),
                         primary: entry.primary.into(),
                         secondary: entry.secondary.into(),
                         item_kind: entry.item_kind,
@@ -1994,9 +2086,15 @@ impl UiManager {
             ui.set_library_root_index(root_index);
             ui.set_library_view_title(title.into());
             ui.set_library_view_subtitle(subtitle.into());
+            ui.set_library_album_header_visible(album_header_visible);
             ui.set_library_can_go_back(can_go_back);
             ui.set_library_scan_in_progress(scan_in_progress);
             ui.set_library_status_text(status_text.into());
+            let album_header_art =
+                UiManager::load_track_row_cover_art_image(album_header_art_path.as_ref());
+            ui.set_library_album_header_has_art(album_header_has_art);
+            ui.set_library_album_header_art(album_header_art);
+            ui.set_library_album_header_meta(album_header_meta.into());
             ui.set_library_model(ModelRc::from(Rc::new(VecModel::from(rows))));
         });
     }

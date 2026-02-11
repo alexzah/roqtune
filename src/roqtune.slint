@@ -192,6 +192,10 @@ export component AppWindow inherits Window {
     in-out property <string> library_view_title: "Songs";
     in-out property <string> library_view_subtitle: "All songs";
     in-out property <string> library_status_text: "";
+    in-out property <bool> library_album_header_visible: false;
+    in-out property <bool> library_album_header_has_art: false;
+    in-out property <image> library_album_header_art;
+    in-out property <string> library_album_header_meta: "";
     in-out property <[LibraryRowData]> library_model: [];
     in-out property <bool> show_library_context_menu: false;
     property <length> library_context_menu_x: 0px;
@@ -1198,7 +1202,13 @@ export component AppWindow inherits Window {
                         if !root.library_can_go_back : Rectangle {
                             width: 32px;
                         }
-                        Text {
+                        if root.library_album_header_visible && root.library_can_go_back : Text {
+                            text: "Back to Albums";
+                            color: #8fa7c6;
+                            font-size: 11px;
+                            vertical-alignment: center;
+                        }
+                        if !root.library_album_header_visible : Text {
                             text: root.library_view_title;
                             color: #ddd;
                             font-size: 13px;
@@ -1215,12 +1225,70 @@ export component AppWindow inherits Window {
                         }
                     }
 
-                    Text {
+                    if !root.library_album_header_visible : Text {
                         text: root.library_view_subtitle;
                         color: #888;
                         font-size: 11px;
                         height: 16px;
                         overflow: elide;
+                    }
+
+                    if root.library_album_header_visible : Rectangle {
+                        height: 190px;
+                        HorizontalLayout {
+                            spacing: 14px;
+                            Rectangle {
+                                width: 176px;
+                                height: 176px;
+                                border-radius: 4px;
+                                border-width: 1px;
+                                border-color: #3a3a3a;
+                                background: #1f1f1f;
+                                if root.library_album_header_has_art : Image {
+                                    width: parent.width;
+                                    height: parent.height;
+                                    source: root.library_album_header_art;
+                                    image-fit: contain;
+                                }
+                                if !root.library_album_header_has_art : Text {
+                                    text: "▦";
+                                    color: #8fa7c6;
+                                    font-size: 22px;
+                                    horizontal-alignment: center;
+                                    vertical-alignment: center;
+                                }
+                            }
+                            Rectangle {
+                                horizontal-stretch: 1;
+                                VerticalLayout {
+                                    spacing: 4px;
+                                    Rectangle { vertical-stretch: 1; }
+                                    Text {
+                                        text: root.library_view_title;
+                                        color: #e4e4e4;
+                                        font-size: 20px;
+                                        font-weight: 800;
+                                        overflow: elide;
+                                        horizontal-alignment: left;
+                                    }
+                                    Text {
+                                        text: root.library_view_subtitle;
+                                        color: #b3b3b3;
+                                        font-size: 12px;
+                                        overflow: elide;
+                                        horizontal-alignment: left;
+                                    }
+                                    Text {
+                                        text: root.library_album_header_meta;
+                                        color: #8fa7c6;
+                                        font-size: 11px;
+                                        overflow: elide;
+                                        horizontal-alignment: left;
+                                    }
+                                    Rectangle { vertical-stretch: 1; }
+                                }
+                            }
+                        }
                     }
 
                     Rectangle { height: 1px; background: #333; }
