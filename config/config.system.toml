@@ -25,6 +25,8 @@ bits_per_sample_auto = true
 [ui]
 # Show the layout editor intro dialog the next time it is opened.
 show_layout_edit_intro = true
+# Show hover tooltips for icon-driven controls.
+show_tooltips = true
 # Layout tree data is persisted separately in `layout.toml`.
 
 # Built-in Album Art playlist-column width defaults.

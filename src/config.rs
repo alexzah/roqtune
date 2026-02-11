@@ -41,6 +41,8 @@ pub struct OutputConfig {
 pub struct UiConfig {
     #[serde(default = "default_true")]
     pub show_layout_edit_intro: bool,
+    #[serde(default = "default_true")]
+    pub show_tooltips: bool,
     #[serde(default = "default_playlist_album_art_column_min_width_px")]
     pub playlist_album_art_column_min_width_px: u32,
     #[serde(default = "default_playlist_album_art_column_max_width_px")]
@@ -123,6 +125,7 @@ impl Default for UiConfig {
     fn default() -> Self {
         Self {
             show_layout_edit_intro: true,
+            show_tooltips: true,
             playlist_album_art_column_min_width_px: default_playlist_album_art_column_min_width_px(
             ),
             playlist_album_art_column_max_width_px: default_playlist_album_art_column_max_width_px(
@@ -269,6 +272,7 @@ mod tests {
         assert!(config.output.bits_per_sample_auto);
 
         assert!(config.ui.show_layout_edit_intro);
+        assert!(config.ui.show_tooltips);
         assert_eq!(config.ui.playlist_album_art_column_min_width_px, 16);
         assert_eq!(config.ui.playlist_album_art_column_max_width_px, 480);
         assert_eq!(config.ui.layout, LayoutConfig::default());
@@ -309,6 +313,7 @@ decoder_request_chunk_ms = 1500
         assert_eq!(parsed.ui.layout, LayoutConfig::default());
         assert!(parsed.ui.button_cluster_instances.is_empty());
         assert!(parsed.ui.show_layout_edit_intro);
+        assert!(parsed.ui.show_tooltips);
         assert_eq!(parsed.ui.playlist_album_art_column_min_width_px, 16);
         assert_eq!(parsed.ui.playlist_album_art_column_max_width_px, 480);
         assert_eq!(parsed.ui.playlist_columns, default_playlist_columns());
@@ -385,6 +390,7 @@ decoder_request_chunk_ms = 1500
             parsed.ui.show_layout_edit_intro,
             defaults.ui.show_layout_edit_intro
         );
+        assert_eq!(parsed.ui.show_tooltips, defaults.ui.show_tooltips);
         assert_eq!(
             parsed.ui.playlist_album_art_column_min_width_px,
             defaults.ui.playlist_album_art_column_min_width_px

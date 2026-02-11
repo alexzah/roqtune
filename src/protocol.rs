@@ -22,6 +22,7 @@ pub enum Message {
     Library(LibraryMessage),
     Audio(AudioMessage),
     Playback(PlaybackMessage),
+    Metadata(MetadataMessage),
     Config(ConfigMessage),
 }
 
@@ -248,6 +249,49 @@ pub enum LibraryMessage {
     },
 }
 
+/// Metadata editor commands and notifications.
+#[derive(Debug, Clone)]
+pub enum MetadataMessage {
+    OpenPropertiesForCurrentSelection,
+    EditPropertiesField {
+        index: usize,
+        value: String,
+    },
+    SaveProperties,
+    CancelProperties,
+    RequestTrackProperties {
+        request_id: u64,
+        path: PathBuf,
+    },
+    TrackPropertiesLoaded {
+        request_id: u64,
+        path: PathBuf,
+        display_name: String,
+        fields: Vec<MetadataEditorField>,
+    },
+    TrackPropertiesLoadFailed {
+        request_id: u64,
+        path: PathBuf,
+        error: String,
+    },
+    SaveTrackProperties {
+        request_id: u64,
+        path: PathBuf,
+        fields: Vec<MetadataEditorField>,
+    },
+    TrackPropertiesSaved {
+        request_id: u64,
+        path: PathBuf,
+        summary: TrackMetadataSummary,
+        db_sync_warning: Option<String>,
+    },
+    TrackPropertiesSaveFailed {
+        request_id: u64,
+        path: PathBuf,
+        error: String,
+    },
+}
+
 /// Selection item used to resolve library items to concrete track paths.
 #[derive(Debug, Clone, serde::Deserialize, serde::Serialize)]
 pub enum LibrarySelectionSpec {
@@ -420,6 +464,32 @@ pub struct DetailedMetadata {
     pub date: String,
     /// Genre label.
     pub genre: String,
+}
+
+/// One editable metadata row exposed by the Properties editor.
+#[derive(Debug, Clone)]
+pub struct MetadataEditorField {
+    /// Stable field identifier.
+    pub id: String,
+    /// User-visible field name.
+    pub field_name: String,
+    /// Current editable value.
+    pub value: String,
+    /// Whether this field is part of the built-in common set.
+    pub common: bool,
+}
+
+/// Metadata summary used to refresh playlist/library views after save.
+#[derive(Debug, Clone)]
+pub struct TrackMetadataSummary {
+    pub title: String,
+    pub artist: String,
+    pub album: String,
+    pub album_artist: String,
+    pub date: String,
+    pub genre: String,
+    pub year: String,
+    pub track_number: String,
 }
 
 /// Runtime configuration updates and hardware notifications.

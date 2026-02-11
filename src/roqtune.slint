@@ -1,6 +1,6 @@
 import { Button, ComboBox, VerticalBox, StandardTableView, ScrollView, LineEdit, ListView, Switch } from "std-widgets.slint";
 
-import { LayoutButtonClusterPanelModel, LayoutSplitterModel, LibraryRowData, TrackRowData } from "ui/types.slint";
+import { LayoutButtonClusterPanelModel, LayoutSplitterModel, LibraryRowData, MetadataEditorField, TrackRowData } from "ui/types.slint";
 import { ColumnHeaderMenu, ConfirmationDialog, InfoDialog } from "ui/components/menus.slint";
 import { PlayerButton, ButtonCluster } from "ui/components/controls.slint";
 import { VolumeSliderControl, SeekBarControl, MetadataViewer, AlbumArtViewer } from "ui/components/media.slint";
@@ -74,8 +74,16 @@ export component AppWindow inherits Window {
                 root.show_library_context_menu = false;
                 return accept;
             }
+            if (event.text == Key.Escape && root.show_playlist_track_context_menu) {
+                root.show_playlist_track_context_menu = false;
+                return accept;
+            }
             if (event.text == Key.Escape && root.library_add_to_dialog_visible) {
                 root.library_cancel_add_to_playlists();
+                return accept;
+            }
+            if (event.text == Key.Escape && root.show_properties_dialog && !root.properties_busy) {
+                root.properties_cancel();
                 return accept;
             }
             if (event.text == Key.Escape && root.show_library_first_start_dialog) {
@@ -215,11 +223,22 @@ export component AppWindow inherits Window {
     in-out property <bool> show_library_context_menu: false;
     property <length> library_context_menu_x: 0px;
     property <length> library_context_menu_y: 0px;
+    in-out property <bool> show_playlist_track_context_menu: false;
+    property <length> playlist_track_context_menu_x: 0px;
+    property <length> playlist_track_context_menu_y: 0px;
+    in-out property <bool> playlist_properties_enabled: false;
+    in-out property <bool> library_properties_enabled: false;
     in-out property <bool> library_add_to_dialog_visible: false;
     in-out property <[string]> library_add_to_playlist_labels: [];
     in-out property <[bool]> library_add_to_playlist_checked: [];
     in-out property <int> library_selected_count: 0;
     in-out property <bool> library_add_to_confirm_enabled: false;
+    in-out property <bool> show_properties_dialog: false;
+    in-out property <bool> properties_busy: false;
+    in-out property <string> properties_error_text: "";
+    in-out property <string> properties_target_title: "";
+    in-out property <[MetadataEditorField]> properties_fields: [];
+    in-out property <bool> properties_save_enabled: false;
     in-out property <bool> show_library_first_start_dialog: false;
     in-out property <[string]> settings_library_folders: [];
     in-out property <int> settings_library_selected_folder_index: -1;
@@ -527,6 +546,9 @@ export component AppWindow inherits Window {
                                 max(8, cluster-panel.y_px + cluster-panel.height_px + 4)
                             );
                         }
+                        tooltip_hover_changed(is-hovered, tooltip, anchor-x-px, anchor-y-px) => {
+                            root.tooltip_hover_changed(is-hovered, tooltip, anchor-x-px, anchor-y-px);
+                        }
                     }
                 }
             }
@@ -601,6 +623,10 @@ export component AppWindow inherits Window {
                             PlayerButton {
                                 icon-text: "+";
                                 font-size: 18px;
+                                tooltip-text: "Create playlist";
+                                tooltip_hover_changed(is-hovered, tooltip, anchor-x-px, anchor-y-px) => {
+                                    root.tooltip_hover_changed(is-hovered, tooltip, anchor-x-px, anchor-y-px);
+                                }
                                 clicked => { root.create_playlist(); }
                             }
                         }
@@ -655,11 +681,19 @@ export component AppWindow inherits Window {
                             PlayerButton {
                                 icon-text: "⌕";
                                 font-size: 14px;
+                                tooltip-text: "Search entire library";
+                                tooltip_hover_changed(is-hovered, tooltip, anchor-x-px, anchor-y-px) => {
+                                    root.tooltip_hover_changed(is-hovered, tooltip, anchor-x-px, anchor-y-px);
+                                }
                                 clicked => { root.open_global_library_search(); }
                             }
                             PlayerButton {
                                 icon-text: "↻";
                                 font-size: 14px;
+                                tooltip-text: "Rescan library folders";
+                                tooltip_hover_changed(is-hovered, tooltip, anchor-x-px, anchor-y-px) => {
+                                    root.tooltip_hover_changed(is-hovered, tooltip, anchor-x-px, anchor-y-px);
+                                }
                                 clicked => { root.library_rescan(); }
                             }
                         }
@@ -1114,6 +1148,10 @@ export component AppWindow inherits Window {
                                 PlayerButton {
                                     icon-text: "✕";
                                     font-size: 12px;
+                                    tooltip-text: "Close playlist search";
+                                    tooltip_hover_changed(is-hovered, tooltip, anchor-x-px, anchor-y-px) => {
+                                        root.tooltip_hover_changed(is-hovered, tooltip, anchor-x-px, anchor-y-px);
+                                    }
                                     clicked => {
                                         root.close_playlist_search();
                                         root.refocus_main();
@@ -1163,6 +1201,8 @@ export component AppWindow inherits Window {
                             pointer-event(event) => {
                                 if (event.button == PointerEventButton.left) {
                                     if (event.kind == PointerEventKind.down) {
+                                        root.show_playlist_track_context_menu = false;
+                                        root.show_library_context_menu = false;
                                         if (!self.is-in-rows || self.in-null-column) {
                                             root.sidebar_has_focus = false;
                                             key-handler.focus();
@@ -1182,6 +1222,31 @@ export component AppWindow inherits Window {
                                         }
                                         root.hover-index = -1;
                                     }
+                                }
+                                if (event.button == PointerEventButton.right
+                                        && event.kind == PointerEventKind.down
+                                        && self.is-in-rows
+                                        && !self.in-null-column) {
+                                    root.show_library_context_menu = false;
+                                    root.sidebar_has_focus = false;
+                                    key-handler.focus();
+
+                                    let row-selected = self.hovered-row >= 0
+                                        && self.hovered-row < root.track_model.length
+                                        && root.track_model[self.hovered-row].selected;
+                                    if (!row-selected || event.modifiers.control || event.modifiers.shift) {
+                                        root.on_pointer_down(
+                                            self.hovered-row,
+                                            event.modifiers.control,
+                                            event.modifiers.shift
+                                        );
+                                    }
+
+                                    let click-x = root.layout-region-x(i) + parent.x + self.x + self.mouse-x;
+                                    let click-y = root.layout-region-y(i) + parent.y + self.y + self.mouse-y;
+                                    root.playlist_track_context_menu_x = min(root.width - 170px, max(8px, click-x));
+                                    root.playlist_track_context_menu_y = min(root.height - 42px, max(8px, click-y));
+                                    root.show_playlist_track_context_menu = true;
                                 }
                             }
 
@@ -1237,6 +1302,10 @@ export component AppWindow inherits Window {
                         if root.library_can_go_back : PlayerButton {
                             icon-text: "←";
                             font-size: 14px;
+                            tooltip-text: "Back";
+                            tooltip_hover_changed(is-hovered, tooltip, anchor-x-px, anchor-y-px) => {
+                                root.tooltip_hover_changed(is-hovered, tooltip, anchor-x-px, anchor-y-px);
+                            }
                             clicked => { root.library_back(); }
                         }
                         if !root.library_can_go_back : Rectangle {
@@ -1369,6 +1438,10 @@ export component AppWindow inherits Window {
                             PlayerButton {
                                 icon-text: "✕";
                                 font-size: 12px;
+                                tooltip-text: "Close library search";
+                                tooltip_hover_changed(is-hovered, tooltip, anchor-x-px, anchor-y-px) => {
+                                    root.tooltip_hover_changed(is-hovered, tooltip, anchor-x-px, anchor-y-px);
+                                }
                                 clicked => {
                                     root.close_library_search();
                                     root.refocus_main();
@@ -1398,6 +1471,7 @@ export component AppWindow inherits Window {
                                         pointer-event(event) => {
                                             if (event.kind == PointerEventKind.down && event.button == PointerEventButton.left) {
                                                 root.show_library_context_menu = false;
+                                                root.show_playlist_track_context_menu = false;
                                                 root.sidebar_has_focus = false;
                                                 key-handler.focus();
                                                 root.library_select_list_item(
@@ -1407,6 +1481,7 @@ export component AppWindow inherits Window {
                                                     false
                                                 );
                                             } else if (event.kind == PointerEventKind.down && event.button == PointerEventButton.right) {
+                                                root.show_playlist_track_context_menu = false;
                                                 root.sidebar_has_focus = false;
                                                 key-handler.focus();
                                                 root.library_select_list_item(
@@ -1418,7 +1493,7 @@ export component AppWindow inherits Window {
                                                 let click-x = root.layout-region-x(i) + parent.x + self.x + self.mouse-x;
                                                 let click-y = root.layout-region-y(i) + parent.y + self.y + self.mouse-y;
                                                 root.library_context_menu_x = min(root.width - 170px, max(8px, click-x));
-                                                root.library_context_menu_y = min(root.height - 42px, max(8px, click-y));
+                                                root.library_context_menu_y = min(root.height - 70px, max(8px, click-y));
                                                 root.show_library_context_menu = true;
                                             }
                                         }
@@ -2350,20 +2425,20 @@ export component AppWindow inherits Window {
         }
     }
 
-    if root.show_library_context_menu : Rectangle {
+    if root.show_playlist_track_context_menu : Rectangle {
         z: 151;
         background: transparent;
         TouchArea {
             clicked => {
-                root.show_library_context_menu = false;
+                root.show_playlist_track_context_menu = false;
             }
         }
     }
 
-    if root.show_library_context_menu : Rectangle {
+    if root.show_playlist_track_context_menu : Rectangle {
         z: 152;
-        x: root.library_context_menu_x;
-        y: root.library_context_menu_y;
+        x: root.playlist_track_context_menu_x;
+        y: root.playlist_track_context_menu_y;
         width: 160px;
         height: 34px;
         border-radius: 6px;
@@ -2373,6 +2448,54 @@ export component AppWindow inherits Window {
 
         VerticalLayout {
             padding: 4px;
+            Rectangle {
+                height: 24px;
+                border-radius: 4px;
+                background: playlist-properties-ta.has-hover && root.playlist_properties_enabled ? #363636 : transparent;
+                Text {
+                    x: 10px;
+                    width: parent.width - 20px;
+                    text: "Properties";
+                    color: root.playlist_properties_enabled ? #ddd : #777;
+                    font-size: 12px;
+                    vertical-alignment: center;
+                    overflow: elide;
+                }
+                playlist-properties-ta := TouchArea {
+                    enabled: root.playlist_properties_enabled;
+                    clicked => {
+                        root.show_playlist_track_context_menu = false;
+                        root.open_properties_for_current_selection();
+                    }
+                }
+            }
+        }
+    }
+
+    if root.show_library_context_menu : Rectangle {
+        z: 153;
+        background: transparent;
+        TouchArea {
+            clicked => {
+                root.show_library_context_menu = false;
+            }
+        }
+    }
+
+    if root.show_library_context_menu : Rectangle {
+        z: 154;
+        x: root.library_context_menu_x;
+        y: root.library_context_menu_y;
+        width: 160px;
+        height: 62px;
+        border-radius: 6px;
+        background: #262626;
+        border-width: 1px;
+        border-color: #3d3d3d;
+
+        VerticalLayout {
+            padding: 4px;
+            spacing: 2px;
             Rectangle {
                 height: 24px;
                 border-radius: 4px;
@@ -2393,11 +2516,32 @@ export component AppWindow inherits Window {
                     }
                 }
             }
+            Rectangle {
+                height: 24px;
+                border-radius: 4px;
+                background: library-properties-ta.has-hover && root.library_properties_enabled ? #363636 : transparent;
+                Text {
+                    x: 10px;
+                    width: parent.width - 20px;
+                    text: "Properties";
+                    color: root.library_properties_enabled ? #ddd : #777;
+                    font-size: 12px;
+                    vertical-alignment: center;
+                    overflow: elide;
+                }
+                library-properties-ta := TouchArea {
+                    enabled: root.library_properties_enabled;
+                    clicked => {
+                        root.show_library_context_menu = false;
+                        root.open_properties_for_current_selection();
+                    }
+                }
+            }
         }
     }
 
     if root.library_add_to_dialog_visible : Rectangle {
-        z: 153;
+        z: 155;
         background: #00000080;
         TouchArea {
             clicked => {
@@ -2407,7 +2551,7 @@ export component AppWindow inherits Window {
     }
 
     if root.library_add_to_dialog_visible : Rectangle {
-        z: 154;
+        z: 156;
         width: min(root.width - 24px, 460px);
         height: min(root.height - 24px, 420px);
         x: (root.width - self.width) / 2;
@@ -2817,6 +2961,154 @@ export component AppWindow inherits Window {
         }
     }
 
+    if root.show_properties_dialog : Rectangle {
+        background: #00000088;
+        z: 111;
+
+        TouchArea {
+            clicked => {
+                if (!root.properties_busy) {
+                    root.properties_cancel();
+                }
+            }
+        }
+    }
+
+    if root.show_properties_dialog : Rectangle {
+        z: 112;
+        width: min(root.width - 40px, 760px);
+        height: min(root.height - 40px, 560px);
+        x: (root.width - self.width) / 2;
+        y: (root.height - self.height) / 2;
+        border-radius: 6px;
+        background: #242424;
+        border-width: 1px;
+        border-color: #3b3b3b;
+
+        VerticalLayout {
+            padding: 16px;
+            spacing: 10px;
+
+            HorizontalLayout {
+                Text {
+                    text: "Properties";
+                    color: #eee;
+                    font-size: 16px;
+                    font-weight: 700;
+                }
+                Rectangle { horizontal-stretch: 1; }
+                if root.properties_busy : Text {
+                    text: "Working...";
+                    color: #9ab1ce;
+                    font-size: 11px;
+                    vertical-alignment: center;
+                }
+            }
+
+            Text {
+                text: root.properties_target_title;
+                color: #aeb7c2;
+                font-size: 12px;
+                overflow: elide;
+            }
+
+            Rectangle {
+                height: 28px;
+                border-radius: 4px;
+                background: #2c2c2c;
+                HorizontalLayout {
+                    padding-left: 8px;
+                    padding-right: 10px;
+                    spacing: 8px;
+                    Text {
+                        width: 220px;
+                        text: "Field";
+                        color: #cfd8e5;
+                        font-size: 12px;
+                        font-weight: 700;
+                        vertical-alignment: center;
+                        overflow: elide;
+                    }
+                    Text {
+                        text: "Value";
+                        color: #cfd8e5;
+                        font-size: 12px;
+                        font-weight: 700;
+                        horizontal-stretch: 1;
+                        vertical-alignment: center;
+                        overflow: elide;
+                    }
+                }
+            }
+
+            ScrollView {
+                vertical-stretch: 1;
+                VerticalLayout {
+                    spacing: 2px;
+                    for field[index] in root.properties_fields : Rectangle {
+                        height: 30px;
+                        border-radius: 3px;
+                        background: Math.mod(index, 2) == 0 ? transparent : #2a2a2a80;
+
+                        HorizontalLayout {
+                            padding-left: 8px;
+                            padding-right: 8px;
+                            spacing: 8px;
+
+                            Text {
+                                width: 220px;
+                                text: field.field_name;
+                                color: field.common ? #d8deea : #bec6d1;
+                                font-size: 12px;
+                                vertical-alignment: center;
+                                overflow: elide;
+                            }
+
+                            LineEdit {
+                                text: field.value;
+                                horizontal-stretch: 1;
+                                enabled: !root.properties_busy;
+                                edited(text) => {
+                                    root.properties_save_enabled = true;
+                                    root.properties_field_edited(index, text);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            if root.properties_error_text != "" : Text {
+                text: root.properties_error_text;
+                color: #f08f8f;
+                font-size: 11px;
+                wrap: word-wrap;
+            }
+
+            HorizontalLayout {
+                spacing: 10px;
+                Rectangle { horizontal-stretch: 1; }
+                Button {
+                    text: "Cancel";
+                    enabled: !root.properties_busy;
+                    clicked => {
+                        root.properties_cancel();
+                    }
+                }
+                Button {
+                    text: "Save";
+                    primary: true;
+                    enabled: !root.properties_busy;
+                    clicked => {
+                        if (root.properties_save_enabled) {
+                            root.properties_save();
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     if root.show_settings_dialog : Rectangle {
         background: #00000088;
         z: 100;
@@ -2825,7 +3117,7 @@ export component AppWindow inherits Window {
 
         settings-dialog-panel := Rectangle {
             width: min(root.width - 40px, 620px);
-            height: min(root.height - 40px, 430px);
+            height: min(root.height - 40px, 460px);
             x: (parent.width - self.width) / 2;
             y: (parent.height - self.height) / 2;
             border-radius: 6px;
@@ -2854,6 +3146,10 @@ export component AppWindow inherits Window {
                     PlayerButton {
                         icon-text: "✕";
                         font-size: 14px;
+                        tooltip-text: "Close settings";
+                        tooltip_hover_changed(is-hovered, tooltip, anchor-x-px, anchor-y-px) => {
+                            root.tooltip_hover_changed(is-hovered, tooltip, anchor-x-px, anchor-y-px);
+                        }
                         clicked => {
                             root.show_settings_dialog = false;
                         }
@@ -2954,6 +3250,41 @@ export component AppWindow inherits Window {
                             settings-layout-intro-toggle-ta := TouchArea {
                                 clicked => {
                                     settings-layout-intro-toggle.checked = !settings-layout-intro-toggle.checked;
+                                }
+                            }
+                        }
+
+                        Rectangle {
+                            height: 32px;
+                            background: settings-tooltips-toggle-ta.has-hover ? #2d2d2d : transparent;
+                            border-radius: 4px;
+                            HorizontalLayout {
+                                spacing: 10px;
+                                Text {
+                                    text: "Show tooltips";
+                                    color: #ddd;
+                                    font-size: 12px;
+                                    width: settings-dialog-panel.label_column_width + 24px;
+                                    vertical-alignment: center;
+                                    horizontal-alignment: left;
+                                }
+                                Rectangle {
+                                    width: settings-dialog-panel.control_max_width;
+                                    height: parent.height;
+                                    background: transparent;
+                                    settings-tooltips-toggle := Switch {
+                                        x: parent.width - self.width - 8px;
+                                        y: (parent.height - self.height) / 2;
+                                        width: 18px;
+                                        text: "";
+                                        checked <=> root.settings_show_tooltips;
+                                    }
+                                }
+                                Rectangle { horizontal-stretch: 1; }
+                            }
+                            settings-tooltips-toggle-ta := TouchArea {
+                                clicked => {
+                                    settings-tooltips-toggle.checked = !settings-tooltips-toggle.checked;
                                 }
                             }
                         }
@@ -3060,13 +3391,50 @@ export component AppWindow inherits Window {
                                 root.settings_channel_custom_value,
                                 root.settings_sample_rate_custom_value,
                                 root.settings_bits_per_sample_custom_value,
-                                root.settings_show_layout_edit_tutorial
+                                root.settings_show_layout_edit_tutorial,
+                                root.settings_show_tooltips
                             );
                             root.show_settings_dialog = false;
                         }
                     }
                 }
             }
+        }
+    }
+
+    if root.show_tooltip
+            && root.show_tooltips_enabled
+            && root.tooltip_text != ""
+            && !root.show_settings_menu
+            && !root.show_import_menu
+            && !root.show_library_context_menu
+            && !root.show_playlist_track_context_menu
+            && !root.show_properties_dialog
+            && !root.show_settings_dialog
+            && !root.show_control_cluster_menu : Rectangle {
+        z: 120;
+        property <length> tooltip-max-width: min(360px, root.width - 16px);
+        width: min(
+            self.tooltip-max-width,
+            max(56px, tooltip-text-block.preferred-width + 16px)
+        );
+        x: min(root.width - self.width - 8px, max(8px, root.tooltip_anchor_x_px * 1px - self.width / 2));
+        y: min(root.height - self.height - 8px, max(8px, root.tooltip_anchor_y_px * 1px + 8px));
+        height: tooltip-text-block.preferred-height + 10px;
+        border-radius: 4px;
+        border-width: 1px;
+        border-color: #4c4c4c;
+        background: #101010eb;
+
+        tooltip-text-block := Text {
+            x: 8px;
+            y: 5px;
+            width: max(0px, parent.width - 16px);
+            text: root.tooltip_text;
+            color: #dedede;
+            font-size: 11px;
+            wrap: no-wrap;
+            overflow: elide;
         }
     }
 
@@ -3136,7 +3504,13 @@ export component AppWindow inherits Window {
     in-out property <string> settings_sample_rate_custom_value: "";
     in-out property <string> settings_bits_per_sample_custom_value: "";
     in-out property <bool> settings_show_layout_edit_tutorial: true;
+    in-out property <bool> settings_show_tooltips: true;
+    in-out property <bool> show_tooltips_enabled: true;
     in-out property <int> settings_dialog_tab_index: 0;
+    in-out property <bool> show_tooltip: false;
+    in-out property <string> tooltip_text: "";
+    in-out property <int> tooltip_anchor_x_px: 0;
+    in-out property <int> tooltip_anchor_y_px: 0;
     
     // Computed time display strings (derived from integer ms values)
     // These are computed in Slint to avoid Rust string allocations
@@ -3176,6 +3550,10 @@ export component AppWindow inherits Window {
     callback library_toggle_add_to_playlist(int);
     callback library_confirm_add_to_playlists();
     callback library_cancel_add_to_playlists();
+    callback open_properties_for_current_selection();
+    callback properties_field_edited(int, string);
+    callback properties_save();
+    callback properties_cancel();
     callback library_add_folder();
     callback library_remove_folder(int);
     callback library_rescan();
@@ -3245,5 +3623,6 @@ export component AppWindow inherits Window {
     callback layout_redo_last_action();
     callback reset_layout_default();
     callback open_settings();
-    callback apply_settings(int, int, int, int, string, string, string, string, bool);
+    callback tooltip_hover_changed(bool, string, int, int);
+    callback apply_settings(int, int, int, int, string, string, string, string, bool, bool);
 }

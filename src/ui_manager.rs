@@ -10,7 +10,7 @@ use std::{
     cell::RefCell,
     collections::hash_map::DefaultHasher,
     collections::{HashMap, HashSet},
-    path::PathBuf,
+    path::{Path, PathBuf},
     rc::Rc,
     sync::mpsc::{self, Receiver as StdReceiver, Sender as StdSender},
     thread,
@@ -24,7 +24,8 @@ use tokio::sync::broadcast::{Receiver, Sender};
 
 use crate::{
     config::{self, PlaylistColumnConfig},
-    protocol, AppWindow, LibraryRowData, TrackRowData,
+    protocol, AppWindow, LibraryRowData, MetadataEditorField as UiMetadataEditorField,
+    TrackRowData,
 };
 use governor::{Quota, RateLimiter};
 
@@ -100,6 +101,16 @@ pub struct UiManager {
     library_toast_generation: u64,
     pending_paste_feedback: bool,
     copied_library_selections: Vec<protocol::LibrarySelectionSpec>,
+    properties_request_nonce: u64,
+    properties_pending_request_id: Option<u64>,
+    properties_pending_request_kind: Option<PropertiesRequestKind>,
+    properties_target_path: Option<PathBuf>,
+    properties_target_title: String,
+    properties_original_fields: Vec<protocol::MetadataEditorField>,
+    properties_fields: Vec<protocol::MetadataEditorField>,
+    properties_dialog_visible: bool,
+    properties_busy: bool,
+    properties_error_text: String,
 }
 
 /// Normalized track metadata snapshot used for row rendering and side panel display.
@@ -133,6 +144,12 @@ struct CoverArtLookupRequest {
 enum PlaylistSortDirection {
     Ascending,
     Descending,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum PropertiesRequestKind {
+    Load,
+    Save,
 }
 
 #[derive(Clone, Debug)]
@@ -505,6 +522,16 @@ impl UiManager {
             library_toast_generation: 0,
             pending_paste_feedback: false,
             copied_library_selections: Vec::new(),
+            properties_request_nonce: 0,
+            properties_pending_request_id: None,
+            properties_pending_request_kind: None,
+            properties_target_path: None,
+            properties_target_title: String::new(),
+            properties_original_fields: Vec::new(),
+            properties_fields: Vec::new(),
+            properties_dialog_visible: false,
+            properties_busy: false,
+            properties_error_text: String::new(),
         }
     }
 
@@ -1396,6 +1423,443 @@ impl UiManager {
         }
     }
 
+    fn next_properties_request_id(&mut self) -> u64 {
+        self.properties_request_nonce = self.properties_request_nonce.saturating_add(1);
+        if self.properties_request_nonce == 0 {
+            self.properties_request_nonce = 1;
+        }
+        self.properties_request_nonce
+    }
+
+    fn playlist_properties_target(&self) -> Option<(PathBuf, String)> {
+        if self.selected_indices.len() != 1 {
+            return None;
+        }
+        let index = *self.selected_indices.first()?;
+        let path = self.track_paths.get(index)?.clone();
+        let title = self
+            .track_metadata
+            .get(index)
+            .map(|meta| meta.title.trim().to_string())
+            .filter(|title| !title.is_empty())
+            .or_else(|| {
+                path.file_name()
+                    .and_then(|name| name.to_str())
+                    .map(str::to_string)
+            })
+            .unwrap_or_default();
+        Some((path, title))
+    }
+
+    fn library_properties_target(&self) -> Option<(PathBuf, String)> {
+        if self.library_selected_indices.len() != 1 {
+            return None;
+        }
+        let source_index = *self.library_selected_indices.first()?;
+        let song = match self.library_entries.get(source_index)? {
+            LibraryEntry::Song(song) => song,
+            _ => return None,
+        };
+        let title = song.title.trim().to_string();
+        let display_title = if title.is_empty() {
+            song.path
+                .file_name()
+                .and_then(|name| name.to_str())
+                .map(str::to_string)
+                .unwrap_or_default()
+        } else {
+            title
+        };
+        Some((song.path.clone(), display_title))
+    }
+
+    fn active_properties_target(&self) -> Option<(PathBuf, String)> {
+        if self.collection_mode == COLLECTION_MODE_LIBRARY {
+            self.library_properties_target()
+        } else {
+            self.playlist_properties_target()
+        }
+    }
+
+    fn sync_properties_action_state(&self) {
+        let playlist_enabled = self.collection_mode == COLLECTION_MODE_PLAYLIST
+            && self.playlist_properties_target().is_some();
+        let library_enabled = self.collection_mode == COLLECTION_MODE_LIBRARY
+            && self.library_properties_target().is_some();
+        let _ = self.ui.upgrade_in_event_loop(move |ui| {
+            ui.set_playlist_properties_enabled(playlist_enabled);
+            ui.set_library_properties_enabled(library_enabled);
+        });
+    }
+
+    fn to_ui_metadata_fields(
+        fields: &[protocol::MetadataEditorField],
+    ) -> Vec<UiMetadataEditorField> {
+        fields
+            .iter()
+            .map(|field| UiMetadataEditorField {
+                id: field.id.as_str().into(),
+                field_name: field.field_name.as_str().into(),
+                value: field.value.as_str().into(),
+                common: field.common,
+            })
+            .collect()
+    }
+
+    fn properties_has_changes(&self) -> bool {
+        if self.properties_fields.len() != self.properties_original_fields.len() {
+            return true;
+        }
+
+        self.properties_fields
+            .iter()
+            .zip(self.properties_original_fields.iter())
+            .any(|(left, right)| left.id != right.id || left.value != right.value)
+    }
+
+    fn properties_save_enabled(&self) -> bool {
+        self.properties_dialog_visible
+            && !self.properties_busy
+            && self.properties_target_path.is_some()
+            && !self.properties_fields.is_empty()
+            && self.properties_has_changes()
+    }
+
+    fn sync_properties_dialog_ui(&self) {
+        let visible = self.properties_dialog_visible;
+        let busy = self.properties_busy;
+        let error_text = self.properties_error_text.clone();
+        let target_title = self.properties_target_title.clone();
+        let fields = Self::to_ui_metadata_fields(&self.properties_fields);
+        let save_enabled = self.properties_save_enabled();
+        let _ = self.ui.upgrade_in_event_loop(move |ui| {
+            ui.set_show_properties_dialog(visible);
+            ui.set_properties_busy(busy);
+            ui.set_properties_error_text(error_text.into());
+            ui.set_properties_target_title(target_title.into());
+            ui.set_properties_fields(ModelRc::from(Rc::new(VecModel::from(fields))));
+            ui.set_properties_save_enabled(save_enabled);
+        });
+    }
+
+    fn sync_properties_edit_state_ui(&self) {
+        let error_text = self.properties_error_text.clone();
+        let save_enabled = self.properties_save_enabled();
+        let _ = self.ui.upgrade_in_event_loop(move |ui| {
+            ui.set_properties_error_text(error_text.into());
+            ui.set_properties_save_enabled(save_enabled);
+        });
+    }
+
+    fn reset_properties_dialog_state(&mut self) {
+        self.properties_pending_request_id = None;
+        self.properties_pending_request_kind = None;
+        self.properties_target_path = None;
+        self.properties_target_title.clear();
+        self.properties_original_fields.clear();
+        self.properties_fields.clear();
+        self.properties_dialog_visible = false;
+        self.properties_busy = false;
+        self.properties_error_text.clear();
+    }
+
+    fn open_properties_for_current_selection(&mut self) {
+        let Some((path, target_title)) = self.active_properties_target() else {
+            return;
+        };
+
+        self.properties_target_path = Some(path.clone());
+        self.properties_target_title = target_title;
+        self.properties_original_fields.clear();
+        self.properties_fields.clear();
+        self.properties_error_text.clear();
+        self.properties_dialog_visible = true;
+        self.properties_busy = true;
+
+        let request_id = self.next_properties_request_id();
+        self.properties_pending_request_id = Some(request_id);
+        self.properties_pending_request_kind = Some(PropertiesRequestKind::Load);
+
+        let _ = self.bus_sender.send(protocol::Message::Metadata(
+            protocol::MetadataMessage::RequestTrackProperties { request_id, path },
+        ));
+        self.sync_properties_dialog_ui();
+    }
+
+    fn edit_properties_field(&mut self, index: usize, value: String) {
+        if self.properties_busy || !self.properties_dialog_visible {
+            return;
+        }
+        let Some(field) = self.properties_fields.get_mut(index) else {
+            return;
+        };
+        if field.value == value {
+            return;
+        }
+        field.value = value;
+        self.properties_error_text.clear();
+        self.sync_properties_edit_state_ui();
+    }
+
+    fn save_properties(&mut self) {
+        if !self.properties_save_enabled() {
+            return;
+        }
+        let Some(path) = self.properties_target_path.clone() else {
+            return;
+        };
+
+        let request_id = self.next_properties_request_id();
+        self.properties_pending_request_id = Some(request_id);
+        self.properties_pending_request_kind = Some(PropertiesRequestKind::Save);
+        self.properties_busy = true;
+        self.properties_error_text.clear();
+        let fields = self.properties_fields.clone();
+        let _ = self.bus_sender.send(protocol::Message::Metadata(
+            protocol::MetadataMessage::SaveTrackProperties {
+                request_id,
+                path,
+                fields,
+            },
+        ));
+        self.sync_properties_dialog_ui();
+    }
+
+    fn cancel_properties(&mut self) {
+        self.reset_properties_dialog_state();
+        self.sync_properties_dialog_ui();
+    }
+
+    fn expected_properties_response(
+        &self,
+        kind: PropertiesRequestKind,
+        request_id: u64,
+        path: &Path,
+    ) -> bool {
+        self.properties_dialog_visible
+            && self.properties_pending_request_kind == Some(kind)
+            && self.properties_pending_request_id == Some(request_id)
+            && self.properties_target_path.as_deref() == Some(path)
+    }
+
+    fn handle_properties_loaded(
+        &mut self,
+        request_id: u64,
+        path: PathBuf,
+        display_name: String,
+        fields: Vec<protocol::MetadataEditorField>,
+    ) {
+        if !self.expected_properties_response(PropertiesRequestKind::Load, request_id, &path) {
+            return;
+        }
+
+        self.properties_pending_request_id = None;
+        self.properties_pending_request_kind = None;
+        self.properties_busy = false;
+        self.properties_error_text.clear();
+        self.properties_target_title = display_name;
+        self.properties_original_fields = fields.clone();
+        self.properties_fields = fields;
+        self.sync_properties_dialog_ui();
+    }
+
+    fn handle_properties_load_failed(&mut self, request_id: u64, path: PathBuf, error: String) {
+        if !self.expected_properties_response(PropertiesRequestKind::Load, request_id, &path) {
+            return;
+        }
+
+        self.properties_pending_request_id = None;
+        self.properties_pending_request_kind = None;
+        self.properties_busy = false;
+        self.properties_error_text = error;
+        self.sync_properties_dialog_ui();
+    }
+
+    fn apply_summary_to_playlist_metadata(
+        &mut self,
+        path: &Path,
+        summary: &protocol::TrackMetadataSummary,
+    ) -> bool {
+        let mut changed = false;
+        let date = if summary.date.trim().is_empty() {
+            summary.year.clone()
+        } else {
+            summary.date.clone()
+        };
+
+        for (index, track_path) in self.track_paths.iter().enumerate() {
+            if track_path.as_path() != path {
+                continue;
+            }
+            let Some(metadata) = self.track_metadata.get_mut(index) else {
+                continue;
+            };
+
+            if metadata.title != summary.title {
+                metadata.title = summary.title.clone();
+                changed = true;
+            }
+            if metadata.artist != summary.artist {
+                metadata.artist = summary.artist.clone();
+                changed = true;
+            }
+            if metadata.album != summary.album {
+                metadata.album = summary.album.clone();
+                changed = true;
+            }
+            if metadata.album_artist != summary.album_artist {
+                metadata.album_artist = summary.album_artist.clone();
+                changed = true;
+            }
+            if metadata.date != date {
+                metadata.date = date.clone();
+                changed = true;
+            }
+            if metadata.year != summary.year {
+                metadata.year = summary.year.clone();
+                changed = true;
+            }
+            if metadata.genre != summary.genre {
+                metadata.genre = summary.genre.clone();
+                changed = true;
+            }
+            if metadata.track_number != summary.track_number {
+                metadata.track_number = summary.track_number.clone();
+                changed = true;
+            }
+        }
+
+        if self.current_playing_track_path.as_deref() == Some(path) {
+            let detailed = protocol::DetailedMetadata {
+                title: summary.title.clone(),
+                artist: summary.artist.clone(),
+                album: summary.album.clone(),
+                date,
+                genre: summary.genre.clone(),
+            };
+            if self.current_playing_track_metadata.as_ref().map(|meta| {
+                meta.title == detailed.title
+                    && meta.artist == detailed.artist
+                    && meta.album == detailed.album
+                    && meta.date == detailed.date
+                    && meta.genre == detailed.genre
+            }) != Some(true)
+            {
+                self.current_playing_track_metadata = Some(detailed);
+                changed = true;
+            }
+        }
+
+        changed
+    }
+
+    fn apply_summary_to_library_entries(
+        &mut self,
+        path: &Path,
+        summary: &protocol::TrackMetadataSummary,
+    ) -> bool {
+        let mut changed = false;
+        for entry in &mut self.library_entries {
+            let LibraryEntry::Song(song) = entry else {
+                continue;
+            };
+            if song.path.as_path() != path {
+                continue;
+            }
+
+            if song.title != summary.title {
+                song.title = summary.title.clone();
+                changed = true;
+            }
+            if song.artist != summary.artist {
+                song.artist = summary.artist.clone();
+                changed = true;
+            }
+            if song.album != summary.album {
+                song.album = summary.album.clone();
+                changed = true;
+            }
+            if song.album_artist != summary.album_artist {
+                song.album_artist = summary.album_artist.clone();
+                changed = true;
+            }
+            if song.genre != summary.genre {
+                song.genre = summary.genre.clone();
+                changed = true;
+            }
+            if song.year != summary.year {
+                song.year = summary.year.clone();
+                changed = true;
+            }
+            if song.track_number != summary.track_number {
+                song.track_number = summary.track_number.clone();
+                changed = true;
+            }
+        }
+        changed
+    }
+
+    fn handle_properties_saved(
+        &mut self,
+        request_id: u64,
+        path: PathBuf,
+        summary: protocol::TrackMetadataSummary,
+        db_sync_warning: Option<String>,
+    ) {
+        if !self.expected_properties_response(PropertiesRequestKind::Save, request_id, &path) {
+            return;
+        }
+
+        self.properties_pending_request_id = None;
+        self.properties_pending_request_kind = None;
+        self.properties_busy = false;
+
+        let playlist_changed = self.apply_summary_to_playlist_metadata(&path, &summary);
+        let library_changed = self.apply_summary_to_library_entries(&path, &summary);
+
+        if playlist_changed {
+            self.refresh_playlist_column_content_targets();
+            self.apply_playlist_column_layout();
+            self.rebuild_track_model();
+        }
+
+        if self.collection_mode == COLLECTION_MODE_LIBRARY && library_changed {
+            self.sync_library_ui();
+        }
+
+        if self.collection_mode == COLLECTION_MODE_LIBRARY && db_sync_warning.is_none() {
+            self.request_library_view_data();
+        }
+
+        let playing_track_path = self.current_playing_track_path.clone();
+        let playing_track_metadata = self.current_playing_track_metadata.clone();
+        self.update_display_for_active_collection(
+            playing_track_path.as_ref(),
+            playing_track_metadata.as_ref(),
+        );
+
+        if let Some(warning) = db_sync_warning {
+            self.library_status_text = warning.clone();
+            self.show_library_toast(warning);
+        }
+
+        self.reset_properties_dialog_state();
+        self.sync_properties_dialog_ui();
+        self.sync_properties_action_state();
+    }
+
+    fn handle_properties_save_failed(&mut self, request_id: u64, path: PathBuf, error: String) {
+        if !self.expected_properties_response(PropertiesRequestKind::Save, request_id, &path) {
+            return;
+        }
+
+        self.properties_pending_request_id = None;
+        self.properties_pending_request_kind = None;
+        self.properties_busy = false;
+        self.properties_error_text = error;
+        self.sync_properties_dialog_ui();
+    }
+
     fn normalized_search_query(query: &str) -> String {
         query.trim().to_ascii_lowercase()
     }
@@ -1798,6 +2262,7 @@ impl UiManager {
         });
 
         self.sync_filter_state_to_ui();
+        self.sync_properties_action_state();
     }
 
     fn open_playlist_search(&mut self) {
@@ -2338,6 +2803,7 @@ impl UiManager {
 
         self.sync_library_selection_to_ui();
         self.sync_library_add_to_playlist_ui();
+        self.sync_properties_action_state();
     }
 
     fn build_library_selection_specs(&self) -> Vec<protocol::LibrarySelectionSpec> {
@@ -2714,6 +3180,7 @@ impl UiManager {
             Self::update_or_replace_library_model(&ui, rows);
         });
         self.sync_library_search_state_to_ui();
+        self.sync_properties_action_state();
     }
 
     fn set_collection_mode(&mut self, mode: i32) {
@@ -3214,6 +3681,8 @@ impl UiManager {
     pub fn run(&mut self) {
         self.sync_library_ui();
         self.sync_library_add_to_playlist_ui();
+        self.sync_properties_action_state();
+        self.sync_properties_dialog_ui();
         loop {
             match self.bus_receiver.blocking_recv() {
                 Ok(message) => {
@@ -3458,6 +3927,62 @@ impl UiManager {
                             | protocol::LibraryMessage::RequestGenreSongs { .. }
                             | protocol::LibraryMessage::RequestDecadeSongs { .. }
                             | protocol::LibraryMessage::AddSelectionToPlaylists { .. } => {}
+                        },
+                        protocol::Message::Metadata(metadata_message) => match metadata_message {
+                            protocol::MetadataMessage::OpenPropertiesForCurrentSelection => {
+                                self.open_properties_for_current_selection();
+                            }
+                            protocol::MetadataMessage::EditPropertiesField { index, value } => {
+                                self.edit_properties_field(index, value);
+                            }
+                            protocol::MetadataMessage::SaveProperties => {
+                                self.save_properties();
+                            }
+                            protocol::MetadataMessage::CancelProperties => {
+                                self.cancel_properties();
+                            }
+                            protocol::MetadataMessage::TrackPropertiesLoaded {
+                                request_id,
+                                path,
+                                display_name,
+                                fields,
+                            } => {
+                                self.handle_properties_loaded(
+                                    request_id,
+                                    path,
+                                    display_name,
+                                    fields,
+                                );
+                            }
+                            protocol::MetadataMessage::TrackPropertiesLoadFailed {
+                                request_id,
+                                path,
+                                error,
+                            } => {
+                                self.handle_properties_load_failed(request_id, path, error);
+                            }
+                            protocol::MetadataMessage::TrackPropertiesSaved {
+                                request_id,
+                                path,
+                                summary,
+                                db_sync_warning,
+                            } => {
+                                self.handle_properties_saved(
+                                    request_id,
+                                    path,
+                                    summary,
+                                    db_sync_warning,
+                                );
+                            }
+                            protocol::MetadataMessage::TrackPropertiesSaveFailed {
+                                request_id,
+                                path,
+                                error,
+                            } => {
+                                self.handle_properties_save_failed(request_id, path, error);
+                            }
+                            protocol::MetadataMessage::RequestTrackProperties { .. }
+                            | protocol::MetadataMessage::SaveTrackProperties { .. } => {}
                         },
                         protocol::Message::Playlist(
                             protocol::PlaylistMessage::PlaylistsRestored(playlists),

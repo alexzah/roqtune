@@ -5,6 +5,7 @@ mod db_manager;
 mod layout;
 mod library_manager;
 mod media_controls_manager;
+mod metadata_manager;
 mod playlist;
 mod playlist_manager;
 mod protocol;
@@ -35,9 +36,10 @@ use layout::{
 use library_manager::LibraryManager;
 use log::{debug, info, warn};
 use media_controls_manager::MediaControlsManager;
+use metadata_manager::MetadataManager;
 use playlist::Playlist;
 use playlist_manager::PlaylistManager;
-use protocol::{ConfigMessage, Message, PlaybackMessage, PlaylistMessage};
+use protocol::{ConfigMessage, Message, MetadataMessage, PlaybackMessage, PlaylistMessage};
 use slint::{ComponentHandle, LogicalSize, Model, ModelRc, VecModel};
 use tokio::sync::broadcast;
 use toml_edit::{value, Array, ArrayOfTables, DocumentMut, Item, Table};
@@ -117,6 +119,7 @@ const UTILITY_CLUSTER_PRESET: [i32; 3] = [7, 8, 10];
 const SUPPORTED_AUDIO_EXTENSIONS: [&str; 7] = ["mp3", "wav", "ogg", "flac", "aac", "m4a", "mp4"];
 const PLAYLIST_COLUMN_KIND_TEXT: i32 = 0;
 const PLAYLIST_COLUMN_KIND_ALBUM_ART: i32 = 1;
+const TOOLTIP_HOVER_DELAY_MS: u64 = 650;
 
 fn is_supported_audio_file(path: &Path) -> bool {
     path.extension()
@@ -501,6 +504,7 @@ fn sanitize_config(config: Config) -> Config {
         },
         ui: UiConfig {
             show_layout_edit_intro: config.ui.show_layout_edit_intro,
+            show_tooltips: config.ui.show_tooltips,
             playlist_album_art_column_min_width_px: clamped_album_art_column_min_width_px,
             playlist_album_art_column_max_width_px: clamped_album_art_column_max_width_px,
             layout: sanitized_layout,
@@ -1268,6 +1272,13 @@ fn write_config_to_document(document: &mut DocumentMut, previous: &Config, confi
         );
         set_table_scalar_if_changed(
             ui,
+            "show_tooltips",
+            previous.ui.show_tooltips,
+            config.ui.show_tooltips,
+            value,
+        );
+        set_table_scalar_if_changed(
+            ui,
             "playlist_album_art_column_min_width_px",
             i64::from(previous.ui.playlist_album_art_column_min_width_px),
             i64::from(config.ui.playlist_album_art_column_min_width_px),
@@ -1496,6 +1507,7 @@ fn with_updated_layout(previous: &Config, layout: LayoutConfig) -> Config {
         output: previous.output.clone(),
         ui: UiConfig {
             show_layout_edit_intro: previous.ui.show_layout_edit_intro,
+            show_tooltips: previous.ui.show_tooltips,
             playlist_album_art_column_min_width_px: previous
                 .ui
                 .playlist_album_art_column_min_width_px,
@@ -1813,10 +1825,16 @@ fn apply_config_to_ui(
     ui.set_settings_sample_rate_index(sample_rate_index as i32);
     ui.set_settings_bits_per_sample_index(bits_index as i32);
     ui.set_settings_show_layout_edit_tutorial(config.ui.show_layout_edit_intro);
+    ui.set_settings_show_tooltips(config.ui.show_tooltips);
+    ui.set_show_tooltips_enabled(config.ui.show_tooltips);
     ui.set_settings_output_device_custom_value(config.output.output_device_name.to_string().into());
     ui.set_settings_channel_custom_value(config.output.channel_count.to_string().into());
     ui.set_settings_sample_rate_custom_value(config.output.sample_rate_khz.to_string().into());
     ui.set_settings_bits_per_sample_custom_value(config.output.bits_per_sample.to_string().into());
+    if !config.ui.show_tooltips {
+        ui.set_show_tooltip(false);
+        ui.set_tooltip_text("".into());
+    }
     let library_folders: Vec<slint::SharedString> = config
         .library
         .folders
@@ -2066,6 +2084,34 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let _ = bus_sender_clone.send(Message::Library(
             protocol::LibraryMessage::CancelAddToPlaylists,
         ));
+    });
+
+    let bus_sender_clone = bus_sender.clone();
+    ui.on_open_properties_for_current_selection(move || {
+        let _ = bus_sender_clone.send(Message::Metadata(
+            MetadataMessage::OpenPropertiesForCurrentSelection,
+        ));
+    });
+
+    let bus_sender_clone = bus_sender.clone();
+    ui.on_properties_field_edited(move |index, value| {
+        if index < 0 {
+            return;
+        }
+        let _ = bus_sender_clone.send(Message::Metadata(MetadataMessage::EditPropertiesField {
+            index: index as usize,
+            value: value.to_string(),
+        }));
+    });
+
+    let bus_sender_clone = bus_sender.clone();
+    ui.on_properties_save(move || {
+        let _ = bus_sender_clone.send(Message::Metadata(MetadataMessage::SaveProperties));
+    });
+
+    let bus_sender_clone = bus_sender.clone();
+    ui.on_properties_cancel(move || {
+        let _ = bus_sender_clone.send(Message::Metadata(MetadataMessage::CancelProperties));
     });
 
     let ui_handle_clone = ui.as_weak().clone();
@@ -3437,6 +3483,57 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     });
 
+    let tooltip_hover_generation = Arc::new(Mutex::new(0u64));
+    let tooltip_hover_generation_clone = Arc::clone(&tooltip_hover_generation);
+    let ui_handle_clone = ui.as_weak().clone();
+    ui.on_tooltip_hover_changed(move |is_hovered, tooltip, anchor_x_px, anchor_y_px| {
+        let generation = {
+            let mut value = tooltip_hover_generation_clone
+                .lock()
+                .expect("tooltip generation lock poisoned");
+            *value = value.saturating_add(1);
+            *value
+        };
+
+        let trimmed_tooltip = tooltip.trim().to_string();
+        if let Some(ui) = ui_handle_clone.upgrade() {
+            ui.set_show_tooltip(false);
+            if !is_hovered || trimmed_tooltip.is_empty() || !ui.get_show_tooltips_enabled() {
+                ui.set_tooltip_text("".into());
+                return;
+            }
+            ui.set_tooltip_anchor_x_px(anchor_x_px);
+            ui.set_tooltip_anchor_y_px(anchor_y_px);
+        } else {
+            return;
+        }
+
+        let tooltip_hover_generation = Arc::clone(&tooltip_hover_generation_clone);
+        let ui_weak = ui_handle_clone.clone();
+        slint::Timer::single_shot(Duration::from_millis(TOOLTIP_HOVER_DELAY_MS), move || {
+            let should_show = {
+                let current_generation = tooltip_hover_generation
+                    .lock()
+                    .expect("tooltip generation lock poisoned");
+                *current_generation == generation
+            };
+            if !should_show {
+                return;
+            }
+            if let Some(ui) = ui_weak.upgrade() {
+                if ui.get_show_tooltips_enabled() {
+                    ui.set_tooltip_text(trimmed_tooltip.clone().into());
+                    ui.set_tooltip_anchor_x_px(anchor_x_px);
+                    ui.set_tooltip_anchor_y_px(anchor_y_px);
+                    ui.set_show_tooltip(true);
+                } else {
+                    ui.set_show_tooltip(false);
+                    ui.set_tooltip_text("".into());
+                }
+            }
+        });
+    });
+
     // Wire up settings apply handler
     let bus_sender_clone = bus_sender.clone();
     let config_state_clone = Arc::clone(&config_state);
@@ -3454,7 +3551,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
               channel_custom_value,
               sample_rate_custom_value,
               bits_custom_value,
-              show_layout_edit_tutorial| {
+              show_layout_edit_tutorial,
+              show_tooltips_enabled| {
             let previous_config = {
                 let state = config_state_clone
                     .lock()
@@ -3543,6 +3641,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 },
                 ui: UiConfig {
                     show_layout_edit_intro: show_layout_edit_tutorial,
+                    show_tooltips: show_tooltips_enabled,
                     playlist_album_art_column_min_width_px: previous_config
                         .ui
                         .playlist_album_art_column_min_width_px,
@@ -3626,6 +3725,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             output: previous_config.output.clone(),
             ui: UiConfig {
                 show_layout_edit_intro: previous_config.ui.show_layout_edit_intro,
+                show_tooltips: previous_config.ui.show_tooltips,
                 playlist_album_art_column_min_width_px: previous_config
                     .ui
                     .playlist_album_art_column_min_width_px,
@@ -3717,6 +3817,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             output: previous_config.output.clone(),
             ui: UiConfig {
                 show_layout_edit_intro: previous_config.ui.show_layout_edit_intro,
+                show_tooltips: previous_config.ui.show_tooltips,
                 playlist_album_art_column_min_width_px: previous_config
                     .ui
                     .playlist_album_art_column_min_width_px,
@@ -3810,6 +3911,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             output: previous_config.output.clone(),
             ui: UiConfig {
                 show_layout_edit_intro: previous_config.ui.show_layout_edit_intro,
+                show_tooltips: previous_config.ui.show_tooltips,
                 playlist_album_art_column_min_width_px: previous_config
                     .ui
                     .playlist_album_art_column_min_width_px,
@@ -3897,6 +3999,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             output: previous_config.output.clone(),
             ui: UiConfig {
                 show_layout_edit_intro: previous_config.ui.show_layout_edit_intro,
+                show_tooltips: previous_config.ui.show_tooltips,
                 playlist_album_art_column_min_width_px: previous_config
                     .ui
                     .playlist_album_art_column_min_width_px,
@@ -4011,6 +4114,19 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             db_manager,
         );
         library_manager.run();
+    });
+
+    // Setup metadata manager
+    let metadata_manager_bus_receiver = bus_sender.subscribe();
+    let metadata_manager_bus_sender = bus_sender.clone();
+    thread::spawn(move || {
+        let db_manager = DbManager::new().expect("Failed to initialize database");
+        let mut metadata_manager = MetadataManager::new(
+            metadata_manager_bus_receiver,
+            metadata_manager_bus_sender,
+            db_manager,
+        );
+        metadata_manager.run();
     });
 
     // Setup media controls manager
@@ -4138,6 +4254,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         output: state.output.clone(),
                         ui: UiConfig {
                             show_layout_edit_intro: state.ui.show_layout_edit_intro,
+                            show_tooltips: state.ui.show_tooltips,
                             playlist_album_art_column_min_width_px: state
                                 .ui
                                 .playlist_album_art_column_min_width_px,
@@ -4424,6 +4541,11 @@ mod tests {
             "Settings dialog should expose tutorial visibility state"
         );
         assert!(
+            slint_ui.contains("in-out property <bool> settings_show_tooltips: true;")
+                && slint_ui.contains("in-out property <bool> show_tooltips_enabled: true;"),
+            "Settings dialog should expose tooltip settings and runtime state"
+        );
+        assert!(
             slint_ui.contains("in-out property <int> settings_dialog_tab_index: 0;")
                 && slint_ui.contains("labels: [\"General\", \"Library\"];"),
             "Settings dialog should expose and render General/Library tabs"
@@ -4451,8 +4573,13 @@ mod tests {
             "Settings apply flow should submit tutorial visibility flag"
         );
         assert!(
-            slint_ui.contains("callback apply_settings(int, int, int, int, string, string, string, string, bool);"),
-            "Apply settings callback should include tutorial visibility flag"
+            slint_ui.contains("text: \"Show tooltips\"")
+                && slint_ui.contains("checked <=> root.settings_show_tooltips;"),
+            "General tab should expose tooltip visibility toggle row"
+        );
+        assert!(
+            slint_ui.contains("callback apply_settings(int, int, int, int, string, string, string, string, bool, bool);"),
+            "Apply settings callback should include tutorial and tooltip visibility flags"
         );
     }
 
@@ -5165,6 +5292,7 @@ mod tests {
             },
             ui: UiConfig {
                 show_layout_edit_intro: true,
+                show_tooltips: true,
                 playlist_album_art_column_min_width_px: 16,
                 playlist_album_art_column_max_width_px: 480,
                 layout: LayoutConfig::default(),
