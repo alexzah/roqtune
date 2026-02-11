@@ -2,7 +2,7 @@
 
 use crate::protocol::{
     LibraryAlbum, LibraryArtist, LibraryDecade, LibraryGenre, LibrarySong,
-    PlaylistColumnWidthOverride, PlaylistInfo, RestoredTrack,
+    PlaylistColumnWidthOverride, PlaylistInfo, RestoredTrack, TrackMetadataSummary,
 };
 use rusqlite::{params, Connection, OptionalExtension};
 use std::{collections::HashSet, path::PathBuf};
@@ -14,6 +14,14 @@ pub struct DbManager {
 }
 
 impl DbManager {
+    fn normalize_library_sort_key(value: &str, fallback: &str) -> String {
+        let trimmed = value.trim();
+        if trimmed.is_empty() {
+            return fallback.to_string();
+        }
+        trimmed.to_ascii_lowercase()
+    }
+
     /// Opens the on-disk database, initializes schema, and applies migrations.
     pub fn new() -> Result<Self, rusqlite::Error> {
         let data_dir = dirs::data_dir()
@@ -465,6 +473,52 @@ impl DbManager {
             ],
         )?;
         Ok(())
+    }
+
+    /// Updates metadata columns for one existing indexed library track path.
+    pub fn update_library_track_metadata_by_path(
+        &self,
+        path: &str,
+        summary: &TrackMetadataSummary,
+    ) -> Result<bool, rusqlite::Error> {
+        let sort_title = Self::normalize_library_sort_key(&summary.title, "unknown title");
+        let sort_artist = Self::normalize_library_sort_key(&summary.artist, "unknown artist");
+        let sort_album = Self::normalize_library_sort_key(&summary.album, "unknown album");
+        let modified_unix_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|duration| duration.as_millis() as i64)
+            .unwrap_or(0);
+
+        let updated = self.conn.execute(
+            "UPDATE library_tracks
+             SET title = ?1,
+                 artist = ?2,
+                 album = ?3,
+                 album_artist = ?4,
+                 genre = ?5,
+                 year = ?6,
+                 track_number = ?7,
+                 sort_title = ?8,
+                 sort_artist = ?9,
+                 sort_album = ?10,
+                 modified_unix_ms = ?11
+             WHERE path = ?12",
+            params![
+                summary.title,
+                summary.artist,
+                summary.album,
+                summary.album_artist,
+                summary.genre,
+                summary.year,
+                summary.track_number,
+                sort_title,
+                sort_artist,
+                sort_album,
+                modified_unix_ms,
+                path
+            ],
+        )?;
+        Ok(updated > 0)
     }
 
     /// Returns all indexed library paths.
