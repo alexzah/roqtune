@@ -2005,6 +2005,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     });
 
     let bus_sender_clone = bus_sender.clone();
+    ui.on_open_global_library_search(move || {
+        let _ = bus_sender_clone.send(Message::Library(protocol::LibraryMessage::OpenGlobalSearch));
+    });
+
+    let bus_sender_clone = bus_sender.clone();
     ui.on_library_back(move || {
         let _ = bus_sender_clone.send(Message::Library(protocol::LibraryMessage::NavigateBack));
     });
@@ -4761,10 +4766,21 @@ mod tests {
             "Library search should expose edited callback naming"
         );
         assert!(
+            slint_ui.contains("callback open_global_library_search();"),
+            "Library pane should expose global search callback"
+        );
+        assert!(
             slint_ui.contains("library-search-input := LineEdit {")
                 && slint_ui.contains("edited(text) => {")
                 && slint_ui.contains("root.library_search_query_edited(text);"),
             "Library search input should use the edited(text) callback form"
+        );
+        assert!(
+            slint_ui.contains("icon-text: \"⌕\";")
+                && slint_ui.contains("root.open_global_library_search();")
+                && slint_ui.contains("icon-text: \"↻\";")
+                && slint_ui.contains("root.library_rescan();"),
+            "Library sidebar should include global search button before rescan"
         );
         assert!(
             !slint_ui.contains("library-search-input := LineEdit {\n                                placeholder-text: \"Search this library view...\";\n                                horizontal-stretch: 1;\n                                init => { self.focus(); }"),

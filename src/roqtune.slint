@@ -653,6 +653,11 @@ export component AppWindow inherits Window {
                                 horizontal-stretch: 1;
                             }
                             PlayerButton {
+                                icon-text: "⌕";
+                                font-size: 14px;
+                                clicked => { root.open_global_library_search(); }
+                            }
+                            PlayerButton {
                                 icon-text: "↻";
                                 font-size: 14px;
                                 clicked => { root.library_rescan(); }
@@ -3117,6 +3122,7 @@ export component AppWindow inherits Window {
     callback previous();
     callback switch_collection_mode(int);
     callback library_select_root(int);
+    callback open_global_library_search();
     callback library_back();
     callback library_select_list_item(int, bool, bool, bool);
     callback library_item_activated(int);

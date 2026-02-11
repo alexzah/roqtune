@@ -466,6 +466,38 @@ impl LibraryManager {
         }
     }
 
+    fn publish_global_search_data(&self) {
+        let songs = match self.db_manager.get_library_songs() {
+            Ok(songs) => songs,
+            Err(err) => {
+                self.send_scan_failed(format!("Failed to load songs: {}", err));
+                return;
+            }
+        };
+        let artists = match self.db_manager.get_library_artists() {
+            Ok(artists) => artists,
+            Err(err) => {
+                self.send_scan_failed(format!("Failed to load artists: {}", err));
+                return;
+            }
+        };
+        let albums = match self.db_manager.get_library_albums() {
+            Ok(albums) => albums,
+            Err(err) => {
+                self.send_scan_failed(format!("Failed to load albums: {}", err));
+                return;
+            }
+        };
+
+        let _ = self
+            .bus_producer
+            .send(Message::Library(LibraryMessage::GlobalSearchDataResult {
+                songs,
+                artists,
+                albums,
+            }));
+    }
+
     fn publish_artist_detail(&self, artist: String) {
         match self.db_manager.get_library_artist_detail(&artist) {
             Ok((albums, songs)) => {
@@ -684,6 +716,9 @@ impl LibraryManager {
                     }
                     Message::Library(LibraryMessage::RequestDecades) => {
                         self.publish_decades();
+                    }
+                    Message::Library(LibraryMessage::RequestGlobalSearchData) => {
+                        self.publish_global_search_data();
                     }
                     Message::Library(LibraryMessage::RequestArtistDetail { artist }) => {
                         self.publish_artist_detail(artist);

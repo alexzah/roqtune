@@ -165,6 +165,7 @@ pub enum PlaylistMessage {
 pub enum LibraryMessage {
     SetCollectionMode(i32),
     SelectRootSection(i32),
+    OpenGlobalSearch,
     SelectListItem {
         index: usize,
         ctrl: bool,
@@ -190,6 +191,7 @@ pub enum LibraryMessage {
     RequestAlbums,
     RequestGenres,
     RequestDecades,
+    RequestGlobalSearchData,
     RequestArtistDetail {
         artist: String,
     },
@@ -213,6 +215,11 @@ pub enum LibraryMessage {
     AlbumsResult(Vec<LibraryAlbum>),
     GenresResult(Vec<LibraryGenre>),
     DecadesResult(Vec<LibraryDecade>),
+    GlobalSearchDataResult {
+        songs: Vec<LibrarySong>,
+        artists: Vec<LibraryArtist>,
+        albums: Vec<LibraryAlbum>,
+    },
     ArtistDetailResult {
         artist: String,
         albums: Vec<LibraryAlbum>,
