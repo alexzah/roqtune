@@ -253,6 +253,115 @@ impl UiManager {
         first_component.to_string()
     }
 
+    fn parse_library_year(raw_year: &str) -> Option<i32> {
+        let mut digits = String::with_capacity(4);
+        for ch in raw_year.trim().chars() {
+            if ch.is_ascii_digit() {
+                digits.push(ch);
+                if digits.len() == 4 {
+                    return digits.parse::<i32>().ok();
+                }
+            } else {
+                digits.clear();
+            }
+        }
+        None
+    }
+
+    fn build_artist_detail_entries(
+        albums: Vec<protocol::LibraryAlbum>,
+        songs: Vec<protocol::LibrarySong>,
+    ) -> Vec<LibraryEntry> {
+        let mut songs_by_album: HashMap<(String, String), Vec<protocol::LibrarySong>> =
+            HashMap::new();
+        let mut album_year_by_key: HashMap<(String, String), i32> = HashMap::new();
+
+        for song in songs {
+            let key = (song.album.clone(), song.album_artist.clone());
+            if let Some(year) = Self::parse_library_year(&song.year) {
+                album_year_by_key
+                    .entry(key.clone())
+                    .and_modify(|current_year| *current_year = (*current_year).max(year))
+                    .or_insert(year);
+            }
+            songs_by_album.entry(key).or_default().push(song);
+        }
+
+        let mut ordered_albums: Vec<((String, String), protocol::LibraryAlbum, Option<i32>)> =
+            Vec::new();
+        let mut seen_album_keys: HashSet<(String, String)> = HashSet::new();
+
+        for album in albums {
+            let key = (album.album.clone(), album.album_artist.clone());
+            if !seen_album_keys.insert(key.clone()) {
+                continue;
+            }
+            let year = album_year_by_key.get(&key).copied();
+            ordered_albums.push((key, album, year));
+        }
+
+        for (key, album_songs) in &songs_by_album {
+            if seen_album_keys.contains(key) {
+                continue;
+            }
+            let synthetic_album = protocol::LibraryAlbum {
+                album: key.0.clone(),
+                album_artist: key.1.clone(),
+                song_count: album_songs.len() as u32,
+                representative_track_path: album_songs.first().map(|song| song.path.clone()),
+            };
+            let year = album_year_by_key.get(key).copied();
+            ordered_albums.push((key.clone(), synthetic_album, year));
+        }
+
+        ordered_albums.sort_by(
+            |(left_key, left_album, left_year), (right_key, right_album, right_year)| {
+                right_year
+                    .cmp(left_year)
+                    .then_with(|| {
+                        left_album
+                            .album
+                            .to_ascii_lowercase()
+                            .cmp(&right_album.album.to_ascii_lowercase())
+                    })
+                    .then_with(|| {
+                        left_album
+                            .album_artist
+                            .to_ascii_lowercase()
+                            .cmp(&right_album.album_artist.to_ascii_lowercase())
+                    })
+                    .then_with(|| left_key.cmp(right_key))
+            },
+        );
+
+        let mut entries = Vec::new();
+        for (key, album, _) in ordered_albums {
+            entries.push(LibraryEntry::Album(album));
+            if let Some(album_songs) = songs_by_album.remove(&key) {
+                entries.extend(album_songs.into_iter().map(LibraryEntry::Song));
+            }
+        }
+
+        if !songs_by_album.is_empty() {
+            let mut remaining_songs: Vec<protocol::LibrarySong> =
+                songs_by_album.into_values().flatten().collect();
+            remaining_songs.sort_by(|left, right| {
+                left.album
+                    .to_ascii_lowercase()
+                    .cmp(&right.album.to_ascii_lowercase())
+                    .then_with(|| {
+                        left.album_artist
+                            .to_ascii_lowercase()
+                            .cmp(&right.album_artist.to_ascii_lowercase())
+                    })
+                    .then_with(|| left.path.cmp(&right.path))
+            });
+            entries.extend(remaining_songs.into_iter().map(LibraryEntry::Song));
+        }
+
+        entries
+    }
+
     fn coalesce_cover_art_requests(
         mut latest: CoverArtLookupRequest,
         request_rx: &StdReceiver<CoverArtLookupRequest>,
@@ -1863,7 +1972,7 @@ impl UiManager {
             LibraryViewState::GenresRoot => ("Genres".to_string(), "All genres".to_string()),
             LibraryViewState::DecadesRoot => ("Decades".to_string(), "All decades".to_string()),
             LibraryViewState::ArtistDetail { artist } => {
-                (artist.clone(), "Albums and songs from artist".to_string())
+                (artist.clone(), "Songs grouped by album".to_string())
             }
             LibraryViewState::AlbumDetail {
                 album,
@@ -2195,22 +2304,25 @@ impl UiManager {
         view: &LibraryViewState,
         selected: bool,
     ) -> LibraryRowPresentation {
-        let is_album_detail_view = matches!(view, LibraryViewState::AlbumDetail { .. });
+        let compact_song_row_view = matches!(
+            view,
+            LibraryViewState::AlbumDetail { .. } | LibraryViewState::ArtistDetail { .. }
+        );
         match entry {
             LibraryEntry::Song(song) => LibraryRowPresentation {
-                leading: if is_album_detail_view {
+                leading: if compact_song_row_view {
                     Self::library_track_number_leading(&song.track_number)
                 } else {
                     String::new()
                 },
                 primary: song.title.clone(),
-                secondary: if is_album_detail_view {
+                secondary: if compact_song_row_view {
                     song.artist.clone()
                 } else {
                     format!("{} • {}", song.artist, song.album)
                 },
                 item_kind: LIBRARY_ITEM_KIND_SONG,
-                cover_art_path: if is_album_detail_view {
+                cover_art_path: if compact_song_row_view {
                     None
                 } else {
                     self.resolve_library_cover_art_path(&song.path)
@@ -2996,10 +3108,9 @@ impl UiManager {
                                 } = self.current_library_view()
                                 {
                                     if requested_artist == artist {
-                                        let mut entries: Vec<LibraryEntry> =
-                                            albums.into_iter().map(LibraryEntry::Album).collect();
-                                        entries.extend(songs.into_iter().map(LibraryEntry::Song));
-                                        self.set_library_entries(entries);
+                                        self.set_library_entries(
+                                            Self::build_artist_detail_entries(albums, songs),
+                                        );
                                     }
                                 }
                             }
@@ -3816,6 +3927,28 @@ mod tests {
         }
     }
 
+    fn make_library_song_in_album(
+        id: &str,
+        title: &str,
+        path: &str,
+        album: &str,
+        album_artist: &str,
+        year: &str,
+        track_number: &str,
+    ) -> protocol::LibrarySong {
+        protocol::LibrarySong {
+            id: id.to_string(),
+            path: PathBuf::from(path),
+            title: title.to_string(),
+            artist: album_artist.to_string(),
+            album: album.to_string(),
+            album_artist: album_artist.to_string(),
+            genre: "test-genre".to_string(),
+            year: year.to_string(),
+            track_number: track_number.to_string(),
+        }
+    }
+
     fn make_library_album(album: &str, album_artist: &str) -> protocol::LibraryAlbum {
         protocol::LibraryAlbum {
             album: album.to_string(),
@@ -4083,6 +4216,125 @@ mod tests {
         assert_eq!(path, Some(PathBuf::from("playing.mp3")));
         let meta = meta.expect("playing metadata should be preserved");
         assert_eq!(meta.title, "Playing");
+    }
+
+    #[test]
+    fn test_build_artist_detail_entries_groups_songs_by_album_and_sorts_year_desc() {
+        let albums = vec![
+            make_library_album("Alpha", "Artist"),
+            make_library_album("No Year", "Artist"),
+            make_library_album("Zeta", "Artist"),
+        ];
+        let songs = vec![
+            make_library_song_in_album(
+                "alpha-1",
+                "Alpha Song 1",
+                "alpha-1.mp3",
+                "Alpha",
+                "Artist",
+                "1998",
+                "1",
+            ),
+            make_library_song_in_album(
+                "alpha-2",
+                "Alpha Song 2",
+                "alpha-2.mp3",
+                "Alpha",
+                "Artist",
+                "1998",
+                "2",
+            ),
+            make_library_song_in_album(
+                "noyear-1",
+                "No Year Song 1",
+                "noyear-1.mp3",
+                "No Year",
+                "Artist",
+                "",
+                "1",
+            ),
+            make_library_song_in_album(
+                "zeta-1",
+                "Zeta Song 1",
+                "zeta-1.mp3",
+                "Zeta",
+                "Artist",
+                "2024",
+                "1",
+            ),
+            make_library_song_in_album(
+                "zeta-2",
+                "Zeta Song 2",
+                "zeta-2.mp3",
+                "Zeta",
+                "Artist",
+                "2024",
+                "2",
+            ),
+        ];
+
+        let entries = UiManager::build_artist_detail_entries(albums, songs);
+        let summary: Vec<String> = entries
+            .iter()
+            .map(|entry| match entry {
+                LibraryEntry::Album(album) => {
+                    format!("album:{}\u{001f}{}", album.album, album.album_artist)
+                }
+                LibraryEntry::Song(song) => format!("song:{}\u{001f}{}", song.album, song.title),
+                LibraryEntry::Artist(_) | LibraryEntry::Genre(_) | LibraryEntry::Decade(_) => {
+                    "unexpected".to_string()
+                }
+            })
+            .collect();
+
+        assert_eq!(
+            summary,
+            vec![
+                "album:Zeta\u{001f}Artist",
+                "song:Zeta\u{001f}Zeta Song 1",
+                "song:Zeta\u{001f}Zeta Song 2",
+                "album:Alpha\u{001f}Artist",
+                "song:Alpha\u{001f}Alpha Song 1",
+                "song:Alpha\u{001f}Alpha Song 2",
+                "album:No Year\u{001f}Artist",
+                "song:No Year\u{001f}No Year Song 1",
+            ]
+        );
+    }
+
+    #[test]
+    fn test_build_artist_detail_entries_creates_album_header_for_song_only_album() {
+        let albums = vec![];
+        let songs = vec![make_library_song_in_album(
+            "beta-1",
+            "Beta Song 1",
+            "beta-1.mp3",
+            "Beta",
+            "Artist",
+            "2019",
+            "1",
+        )];
+
+        let entries = UiManager::build_artist_detail_entries(albums, songs);
+        assert_eq!(entries.len(), 2);
+
+        match &entries[0] {
+            LibraryEntry::Album(album) => {
+                assert_eq!(album.album, "Beta");
+                assert_eq!(album.album_artist, "Artist");
+            }
+            other => panic!("expected synthetic album header, got {:?}", other),
+        }
+        match &entries[1] {
+            LibraryEntry::Song(song) => {
+                assert_eq!(song.album, "Beta");
+                assert_eq!(song.title, "Beta Song 1");
+            }
+            other => panic!(
+                "expected song row under synthetic album header, got {:?}",
+                other
+            ),
+        }
     }
 
     #[test]
