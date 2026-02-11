@@ -233,6 +233,9 @@ pub enum LibraryMessage {
         track_count: usize,
     },
     AddToPlaylistsFailed(String),
+    ToastTimeout {
+        generation: u64,
+    },
 }
 
 /// Selection item used to resolve library items to concrete track paths.

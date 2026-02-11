@@ -96,6 +96,8 @@ pub struct UiManager {
     library_status_text: String,
     library_add_to_playlist_checked: Vec<bool>,
     library_add_to_dialog_visible: bool,
+    library_toast_generation: u64,
+    pending_paste_feedback: bool,
     copied_library_selections: Vec<protocol::LibrarySelectionSpec>,
 }
 
@@ -344,6 +346,8 @@ impl UiManager {
             library_status_text: String::new(),
             library_add_to_playlist_checked: Vec::new(),
             library_add_to_dialog_visible: false,
+            library_toast_generation: 0,
+            pending_paste_feedback: false,
             copied_library_selections: Vec::new(),
         }
     }
@@ -1726,10 +1730,52 @@ impl UiManager {
             &self.view_indices,
         );
         self.copied_library_selections.clear();
+        let copied_count = self.copied_track_paths.len();
+        self.library_status_text = format!("Copied {} tracks", copied_count);
+        self.show_library_toast(self.library_status_text.clone());
         debug!(
             "UiManager: copied {} track(s) from selection",
             self.copied_track_paths.len()
         );
+    }
+
+    fn estimate_library_copied_track_count(
+        entries: &[LibraryEntry],
+        selected_indices: &[usize],
+    ) -> usize {
+        let mut seen = HashSet::new();
+        let mut total = 0usize;
+
+        for index in selected_indices {
+            let Some(entry) = entries.get(*index) else {
+                continue;
+            };
+            let (key, count) = match entry {
+                LibraryEntry::Song(song) => {
+                    (format!("song:{}", song.path.to_string_lossy()), 1usize)
+                }
+                LibraryEntry::Artist(artist) => (
+                    format!("artist:{}", artist.artist),
+                    artist.song_count as usize,
+                ),
+                LibraryEntry::Album(album) => (
+                    format!("album:{}\u{001f}{}", album.album, album.album_artist),
+                    album.song_count as usize,
+                ),
+                LibraryEntry::Genre(genre) => {
+                    (format!("genre:{}", genre.genre), genre.song_count as usize)
+                }
+                LibraryEntry::Decade(decade) => (
+                    format!("decade:{}", decade.decade),
+                    decade.song_count as usize,
+                ),
+            };
+            if seen.insert(key) {
+                total = total.saturating_add(count);
+            }
+        }
+
+        total
     }
 
     fn copy_selected_library_items(&mut self) {
@@ -1739,6 +1785,12 @@ impl UiManager {
         }
         self.copied_library_selections = selections;
         self.copied_track_paths.clear();
+        let copied_count = Self::estimate_library_copied_track_count(
+            &self.library_entries,
+            &self.library_selected_indices,
+        );
+        self.library_status_text = format!("Copied {} tracks", copied_count);
+        self.show_library_toast(self.library_status_text.clone());
         debug!(
             "UiManager: copied {} library selection item(s)",
             self.copied_library_selections.len()
@@ -1747,6 +1799,7 @@ impl UiManager {
 
     fn paste_copied_tracks(&mut self) {
         if !self.copied_track_paths.is_empty() {
+            self.pending_paste_feedback = true;
             let _ = self.bus_sender.send(protocol::Message::Playlist(
                 protocol::PlaylistMessage::PasteTracks(self.copied_track_paths.clone()),
             ));
@@ -1757,6 +1810,7 @@ impl UiManager {
             return;
         }
 
+        self.pending_paste_feedback = true;
         let _ = self.bus_sender.send(protocol::Message::Library(
             protocol::LibraryMessage::AddSelectionToPlaylists {
                 selections: self.copied_library_selections.clone(),
@@ -2032,11 +2086,13 @@ impl UiManager {
     fn prepare_library_add_to_playlists(&mut self) {
         if self.library_selected_indices.is_empty() {
             self.library_status_text = "Select at least one library item.".to_string();
+            self.show_library_toast("Select at least one library item.");
             self.sync_library_ui();
             return;
         }
         if self.playlist_ids.is_empty() {
             self.library_status_text = "No playlists available for Add To.".to_string();
+            self.show_library_toast("No playlists available for Add To.");
             self.sync_library_ui();
             return;
         }
@@ -2074,6 +2130,7 @@ impl UiManager {
             .collect();
         if playlist_ids.is_empty() {
             self.library_status_text = "Select at least one target playlist.".to_string();
+            self.show_library_toast("Select at least one target playlist.");
             self.sync_library_ui();
             return;
         }
@@ -2081,6 +2138,7 @@ impl UiManager {
         let selections = self.build_library_selection_specs();
         if selections.is_empty() {
             self.library_status_text = "No library items selected.".to_string();
+            self.show_library_toast("No library items selected.");
             self.sync_library_ui();
             self.library_add_to_dialog_visible = false;
             self.sync_library_add_to_playlist_ui();
@@ -2100,6 +2158,35 @@ impl UiManager {
     fn cancel_library_add_to_playlists(&mut self) {
         self.library_add_to_dialog_visible = false;
         self.sync_library_add_to_playlist_ui();
+    }
+
+    fn show_library_toast(&mut self, message: impl Into<String>) {
+        let message = message.into();
+        if message.trim().is_empty() {
+            return;
+        }
+
+        self.library_toast_generation = self.library_toast_generation.wrapping_add(1);
+        let generation = self.library_toast_generation;
+        let toast_message = message.clone();
+        let _ = self.ui.upgrade_in_event_loop(move |ui| {
+            ui.set_library_toast_text(toast_message.into());
+            ui.set_library_toast_visible(true);
+        });
+
+        let bus_sender = self.bus_sender.clone();
+        thread::spawn(move || {
+            thread::sleep(Duration::from_millis(2200));
+            let _ = bus_sender.send(protocol::Message::Library(
+                protocol::LibraryMessage::ToastTimeout { generation },
+            ));
+        });
+    }
+
+    fn hide_library_toast(&self) {
+        let _ = self.ui.upgrade_in_event_loop(move |ui| {
+            ui.set_library_toast_visible(false);
+        });
     }
 
     fn library_row_presentation_from_entry(
@@ -2963,16 +3050,34 @@ impl UiManager {
                                 playlist_count,
                                 track_count,
                             } => {
-                                self.library_status_text = format!(
-                                    "Added {} track(s) to {} playlist(s)",
-                                    track_count, playlist_count
-                                );
-                                self.sync_library_ui();
+                                if self.pending_paste_feedback {
+                                    self.pending_paste_feedback = false;
+                                    let toast_text = format!("Pasted {} tracks", track_count);
+                                    self.library_status_text = toast_text.clone();
+                                    self.show_library_toast(toast_text);
+                                } else {
+                                    let toast_text = format!(
+                                        "Added {} track(s) to {} playlist(s)",
+                                        track_count, playlist_count
+                                    );
+                                    self.library_status_text = toast_text.clone();
+                                    self.show_library_toast(toast_text);
+                                }
                             }
                             protocol::LibraryMessage::AddToPlaylistsFailed(error_text) => {
-                                self.library_status_text =
-                                    format!("Failed to add to playlists: {}", error_text);
-                                self.sync_library_ui();
+                                let toast_text = if self.pending_paste_feedback {
+                                    self.pending_paste_feedback = false;
+                                    format!("Paste failed: {}", error_text)
+                                } else {
+                                    format!("Failed to add to playlists: {}", error_text)
+                                };
+                                self.library_status_text = toast_text.clone();
+                                self.show_library_toast(toast_text);
+                            }
+                            protocol::LibraryMessage::ToastTimeout { generation } => {
+                                if generation == self.library_toast_generation {
+                                    self.hide_library_toast();
+                                }
                             }
                             protocol::LibraryMessage::RequestScan
                             | protocol::LibraryMessage::RequestSongs
@@ -3118,6 +3223,7 @@ impl UiManager {
                         protocol::Message::Playlist(
                             protocol::PlaylistMessage::TracksInserted { tracks, insert_at },
                         ) => {
+                            let inserted_count = tracks.len();
                             let mut insert_cursor = insert_at.min(self.track_ids.len());
                             for track in tracks {
                                 let metadata = self.read_track_metadata(&track.path);
@@ -3126,6 +3232,12 @@ impl UiManager {
                                 self.track_cover_art_paths.insert(insert_cursor, None);
                                 self.track_metadata.insert(insert_cursor, metadata);
                                 insert_cursor += 1;
+                            }
+                            if self.pending_paste_feedback {
+                                self.pending_paste_feedback = false;
+                                let toast_text = format!("Pasted {} tracks", inserted_count);
+                                self.library_status_text = toast_text.clone();
+                                self.show_library_toast(toast_text);
                             }
                             self.refresh_playlist_column_content_targets();
                             self.apply_playlist_column_layout();
