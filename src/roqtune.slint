@@ -2823,15 +2823,20 @@ export component AppWindow inherits Window {
 
         TouchArea {}
 
-        Rectangle {
+        settings-dialog-panel := Rectangle {
             width: min(root.width - 40px, 620px);
-            height: min(root.height - 40px, 370px);
+            height: min(root.height - 40px, 430px);
             x: (parent.width - self.width) / 2;
             y: (parent.height - self.height) / 2;
             border-radius: 6px;
             background: #242424;
             border-width: 1px;
             border-color: #3b3b3b;
+            property <length> label_column_width: 230px;
+            property <length> control_min_width: 170px;
+            property <length> control_max_width: 270px;
+            property <length> button_height: 30px;
+            property <length> button_width: 104px;
 
             VerticalLayout {
                 padding: 16px;
@@ -2857,8 +2862,19 @@ export component AppWindow inherits Window {
 
                 Rectangle { height: 1px; background: #343434; }
 
-                    VerticalLayout {
-                        vertical-stretch: 1;
+                ModeTabs {
+                    labels: ["General", "Library"];
+                    selected_index: root.settings_dialog_tab_index;
+                    selected(tab_index) => {
+                        root.settings_dialog_tab_index = tab_index;
+                    }
+                }
+
+                Rectangle {
+                    vertical-stretch: 1;
+                    clip: true;
+
+                    if root.settings_dialog_tab_index == 0 : VerticalLayout {
                         spacing: 8px;
 
                         SettingsDropdownControl {
@@ -2867,134 +2883,153 @@ export component AppWindow inherits Window {
                             selected_index <=> root.settings_output_device_index;
                             custom_value <=> root.settings_output_device_custom_value;
                             custom_placeholder: "Enter output device name";
+                            label_width: settings-dialog-panel.label_column_width;
+                            control_min_width: settings-dialog-panel.control_min_width;
+                            control_max_width: settings-dialog-panel.control_max_width;
                         }
 
                         SettingsDropdownControl {
                             label: "Output Channels";
                             options: root.settings_channel_options;
-                        selected_index <=> root.settings_channel_index;
-                        custom_value <=> root.settings_channel_custom_value;
-                        custom_placeholder: "Enter channel count";
-                    }
+                            selected_index <=> root.settings_channel_index;
+                            custom_value <=> root.settings_channel_custom_value;
+                            custom_placeholder: "Enter channel count";
+                            label_width: settings-dialog-panel.label_column_width;
+                            control_min_width: settings-dialog-panel.control_min_width;
+                            control_max_width: settings-dialog-panel.control_max_width;
+                        }
 
-                    SettingsDropdownControl {
-                        label: "Output Sample Rate";
-                        options: root.settings_sample_rate_options;
-                        selected_index <=> root.settings_sample_rate_index;
-                        custom_value <=> root.settings_sample_rate_custom_value;
-                        custom_placeholder: "Enter sample rate in Hz";
-                    }
+                        SettingsDropdownControl {
+                            label: "Output Sample Rate";
+                            options: root.settings_sample_rate_options;
+                            selected_index <=> root.settings_sample_rate_index;
+                            custom_value <=> root.settings_sample_rate_custom_value;
+                            custom_placeholder: "Enter sample rate in Hz";
+                            label_width: settings-dialog-panel.label_column_width;
+                            control_min_width: settings-dialog-panel.control_min_width;
+                            control_max_width: settings-dialog-panel.control_max_width;
+                        }
 
-                    SettingsDropdownControl {
-                        label: "Output Bits Per Sample";
-                        options: root.settings_bits_per_sample_options;
-                        selected_index <=> root.settings_bits_per_sample_index;
-                        custom_value <=> root.settings_bits_per_sample_custom_value;
-                        custom_placeholder: "Enter bit depth";
-                    }
+                        SettingsDropdownControl {
+                            label: "Output Bits Per Sample";
+                            options: root.settings_bits_per_sample_options;
+                            selected_index <=> root.settings_bits_per_sample_index;
+                            custom_value <=> root.settings_bits_per_sample_custom_value;
+                            custom_placeholder: "Enter bit depth";
+                            label_width: settings-dialog-panel.label_column_width;
+                            control_min_width: settings-dialog-panel.control_min_width;
+                            control_max_width: settings-dialog-panel.control_max_width;
+                        }
 
-                    Rectangle {
-                        height: 34px;
-                        background: settings-layout-intro-toggle-ta.has-hover ? #2d2d2d : transparent;
-                        border-radius: 4px;
-                        HorizontalLayout {
-                            spacing: 12px;
-                            padding-left: 0px;
-                            padding-right: 0px;
+                        Rectangle { height: 1px; background: #343434; }
 
-                            Text {
-                                text: "Show layout editing mode tutorial";
-                                color: #ddd;
-                                font-size: 12px;
-                                width: 220px;
-                                vertical-alignment: center;
-                                horizontal-alignment: left;
-                            }
-
-                            Rectangle {
-                                horizontal-stretch: 1;
-                                height: parent.height;
-                                background: transparent;
-                                settings-layout-intro-toggle := Switch {
-                                    x: parent.width - self.width - 8px;
-                                    y: (parent.height - self.height) / 2;
-                                    width: 18px;
-                                    text: "";
-                                    checked <=> root.settings_show_layout_edit_tutorial;
+                        Rectangle {
+                            height: 32px;
+                            background: settings-layout-intro-toggle-ta.has-hover ? #2d2d2d : transparent;
+                            border-radius: 4px;
+                            HorizontalLayout {
+                                spacing: 10px;
+                                Text {
+                                    text: "Show layout editing mode tutorial";
+                                    color: #ddd;
+                                    font-size: 12px;
+                                    width: settings-dialog-panel.label_column_width + 24px;
+                                    vertical-alignment: center;
+                                    horizontal-alignment: left;
                                 }
-                            }
-                        }
-                        settings-layout-intro-toggle-ta := TouchArea {
-                            clicked => {
-                                settings-layout-intro-toggle.checked = !settings-layout-intro-toggle.checked;
-                            }
-                        }
-                    }
-
-                    Rectangle { height: 1px; background: #343434; }
-
-                    Text {
-                        text: "Library Folders";
-                        color: #ddd;
-                        font-size: 12px;
-                        font-weight: 700;
-                    }
-
-                    Rectangle {
-                        height: 100px;
-                        border-width: 1px;
-                        border-color: #3a3a3a;
-                        border-radius: 4px;
-                        background: #1f1f1f;
-                        ScrollView {
-                            width: parent.width;
-                            height: parent.height;
-                            VerticalLayout {
-                                spacing: 2px;
-                                padding: 4px;
-                                for folder[index] in root.settings_library_folders : Rectangle {
-                                    height: 24px;
-                                    border-radius: 3px;
-                                    background: root.settings_library_selected_folder_index == index
-                                        ? #2f3f56
-                                        : settings-library-folder-ta.has-hover ? #2c2c2c : transparent;
-                                    Text {
-                                        x: 8px;
-                                        width: max(0px, parent.width - 16px);
-                                        text: folder;
-                                        color: root.settings_library_selected_folder_index == index ? #d7e6f8 : #c6c6c6;
-                                        font-size: 11px;
-                                        vertical-alignment: center;
-                                        overflow: elide;
+                                Rectangle {
+                                    width: settings-dialog-panel.control_max_width;
+                                    height: parent.height;
+                                    background: transparent;
+                                    settings-layout-intro-toggle := Switch {
+                                        x: parent.width - self.width - 8px;
+                                        y: (parent.height - self.height) / 2;
+                                        width: 18px;
+                                        text: "";
+                                        checked <=> root.settings_show_layout_edit_tutorial;
                                     }
-                                    settings-library-folder-ta := TouchArea {
-                                        clicked => { root.settings_select_library_folder(index); }
-                                    }
+                                }
+                                Rectangle { horizontal-stretch: 1; }
+                            }
+                            settings-layout-intro-toggle-ta := TouchArea {
+                                clicked => {
+                                    settings-layout-intro-toggle.checked = !settings-layout-intro-toggle.checked;
                                 }
                             }
                         }
                     }
 
-                    HorizontalLayout {
+                    if root.settings_dialog_tab_index == 1 : VerticalLayout {
                         spacing: 8px;
-                        Button {
-                            text: "Add Folder";
-                            clicked => { root.library_add_folder(); }
+
+                        Text {
+                            text: "Library Folders";
+                            color: #ddd;
+                            font-size: 12px;
+                            font-weight: 700;
                         }
-                        Button {
-                            text: "Remove";
-                            enabled: root.settings_library_selected_folder_index >= 0;
-                            clicked => {
-                                root.library_remove_folder(root.settings_library_selected_folder_index);
+
+                        Rectangle {
+                            vertical-stretch: 1;
+                            border-width: 1px;
+                            border-color: #3a3a3a;
+                            border-radius: 4px;
+                            background: #1f1f1f;
+                            ScrollView {
+                                width: parent.width;
+                                height: parent.height;
+                                VerticalLayout {
+                                    spacing: 2px;
+                                    padding: 4px;
+                                    for folder[index] in root.settings_library_folders : Rectangle {
+                                        height: 24px;
+                                        border-radius: 3px;
+                                        background: root.settings_library_selected_folder_index == index
+                                            ? #2f3f56
+                                            : settings-library-folder-ta.has-hover ? #2c2c2c : transparent;
+                                        Text {
+                                            x: 8px;
+                                            width: max(0px, parent.width - 16px);
+                                            text: folder;
+                                            color: root.settings_library_selected_folder_index == index ? #d7e6f8 : #c6c6c6;
+                                            font-size: 12px;
+                                            vertical-alignment: center;
+                                            overflow: elide;
+                                        }
+                                        settings-library-folder-ta := TouchArea {
+                                            clicked => { root.settings_select_library_folder(index); }
+                                        }
+                                    }
+                                }
                             }
                         }
-                        Rectangle { horizontal-stretch: 1; }
-                        Button {
-                            text: "Rescan";
-                            clicked => { root.library_rescan(); }
+
+                        HorizontalLayout {
+                            spacing: 8px;
+                            Button {
+                                text: "Add Folder";
+                                width: settings-dialog-panel.button_width;
+                                height: settings-dialog-panel.button_height;
+                                clicked => { root.library_add_folder(); }
+                            }
+                            Button {
+                                text: "Remove";
+                                width: settings-dialog-panel.button_width;
+                                height: settings-dialog-panel.button_height;
+                                enabled: root.settings_library_selected_folder_index >= 0;
+                                clicked => {
+                                    root.library_remove_folder(root.settings_library_selected_folder_index);
+                                }
+                            }
+                            Rectangle { horizontal-stretch: 1; }
+                            Button {
+                                text: "Rescan";
+                                width: settings-dialog-panel.button_width;
+                                height: settings-dialog-panel.button_height;
+                                clicked => { root.library_rescan(); }
+                            }
                         }
                     }
-
                 }
 
                 Rectangle { height: 1px; background: #343434; }
@@ -3004,6 +3039,8 @@ export component AppWindow inherits Window {
                     Rectangle { horizontal-stretch: 1; }
                     Button {
                         text: "Cancel";
+                        width: settings-dialog-panel.button_width;
+                        height: settings-dialog-panel.button_height;
                         clicked => {
                             root.show_settings_dialog = false;
                         }
@@ -3011,6 +3048,8 @@ export component AppWindow inherits Window {
                     Button {
                         text: "Apply";
                         primary: true;
+                        width: settings-dialog-panel.button_width;
+                        height: settings-dialog-panel.button_height;
                         clicked => {
                             root.apply_settings(
                                 root.settings_output_device_index,
@@ -3097,6 +3136,7 @@ export component AppWindow inherits Window {
     in-out property <string> settings_sample_rate_custom_value: "";
     in-out property <string> settings_bits_per_sample_custom_value: "";
     in-out property <bool> settings_show_layout_edit_tutorial: true;
+    in-out property <int> settings_dialog_tab_index: 0;
     
     // Computed time display strings (derived from integer ms values)
     // These are computed in Slint to avoid Rust string allocations

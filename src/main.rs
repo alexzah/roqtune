@@ -3432,6 +3432,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 workspace_width_px,
                 workspace_height_px,
             );
+            ui.set_settings_dialog_tab_index(0);
             ui.set_show_settings_dialog(true);
         }
     });
@@ -4423,15 +4424,27 @@ mod tests {
             "Settings dialog should expose tutorial visibility state"
         );
         assert!(
+            slint_ui.contains("in-out property <int> settings_dialog_tab_index: 0;")
+                && slint_ui.contains("labels: [\"General\", \"Library\"];"),
+            "Settings dialog should expose and render General/Library tabs"
+        );
+        assert!(
             slint_ui.contains("text: \"Show layout editing mode tutorial\""),
             "Settings dialog should provide tutorial visibility toggle row"
         );
         assert!(
-            slint_ui.contains("width: 220px;")
+            slint_ui.contains("if root.settings_dialog_tab_index == 0 : VerticalLayout {")
                 && slint_ui.contains("settings-layout-intro-toggle := Switch {")
                 && slint_ui.contains("x: parent.width - self.width - 8px;")
                 && slint_ui.contains("checked <=> root.settings_show_layout_edit_tutorial;"),
-            "Settings dialog tutorial row should keep left-aligned label and right-aligned compact switch"
+            "General tab tutorial row should keep compact right-aligned switch binding"
+        );
+        assert!(
+            slint_ui.contains("if root.settings_dialog_tab_index == 1 : VerticalLayout {")
+                && slint_ui.contains("text: \"Library Folders\"")
+                && slint_ui.contains("text: \"Add Folder\"")
+                && slint_ui.contains("text: \"Rescan\""),
+            "Library tab should expose folder management controls"
         );
         assert!(
             slint_ui.contains("root.settings_show_layout_edit_tutorial"),
