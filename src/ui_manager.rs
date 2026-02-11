@@ -96,6 +96,7 @@ pub struct UiManager {
     library_status_text: String,
     library_add_to_playlist_checked: Vec<bool>,
     library_add_to_dialog_visible: bool,
+    copied_library_selections: Vec<protocol::LibrarySelectionSpec>,
 }
 
 /// Normalized track metadata snapshot used for row rendering and side panel display.
@@ -343,6 +344,7 @@ impl UiManager {
             library_status_text: String::new(),
             library_add_to_playlist_checked: Vec::new(),
             library_add_to_dialog_visible: false,
+            copied_library_selections: Vec::new(),
         }
     }
 
@@ -1711,6 +1713,10 @@ impl UiManager {
     }
 
     fn copy_selected_tracks(&mut self) {
+        if self.collection_mode == COLLECTION_MODE_LIBRARY {
+            self.copy_selected_library_items();
+            return;
+        }
         if self.selected_indices.is_empty() {
             return;
         }
@@ -1719,22 +1725,51 @@ impl UiManager {
             &self.selected_indices,
             &self.view_indices,
         );
+        self.copied_library_selections.clear();
         debug!(
             "UiManager: copied {} track(s) from selection",
             self.copied_track_paths.len()
         );
     }
 
-    fn paste_copied_tracks(&mut self) {
-        if self.copied_track_paths.is_empty() {
+    fn copy_selected_library_items(&mut self) {
+        let selections = self.build_library_selection_specs();
+        if selections.is_empty() {
             return;
         }
-        let _ = self.bus_sender.send(protocol::Message::Playlist(
-            protocol::PlaylistMessage::PasteTracks(self.copied_track_paths.clone()),
+        self.copied_library_selections = selections;
+        self.copied_track_paths.clear();
+        debug!(
+            "UiManager: copied {} library selection item(s)",
+            self.copied_library_selections.len()
+        );
+    }
+
+    fn paste_copied_tracks(&mut self) {
+        if !self.copied_track_paths.is_empty() {
+            let _ = self.bus_sender.send(protocol::Message::Playlist(
+                protocol::PlaylistMessage::PasteTracks(self.copied_track_paths.clone()),
+            ));
+            return;
+        }
+
+        if self.copied_library_selections.is_empty() || self.active_playlist_id.is_empty() {
+            return;
+        }
+
+        let _ = self.bus_sender.send(protocol::Message::Library(
+            protocol::LibraryMessage::AddSelectionToPlaylists {
+                selections: self.copied_library_selections.clone(),
+                playlist_ids: vec![self.active_playlist_id.clone()],
+            },
         ));
     }
 
     fn cut_selected_tracks(&mut self) {
+        if self.collection_mode == COLLECTION_MODE_LIBRARY {
+            self.copy_selected_library_items();
+            return;
+        }
         if self.is_filter_view_active() || self.selected_indices.is_empty() {
             return;
         }
@@ -1938,10 +1973,20 @@ impl UiManager {
     }
 
     fn build_library_selection_specs(&self) -> Vec<protocol::LibrarySelectionSpec> {
+        Self::build_library_selection_specs_for_entries(
+            &self.library_entries,
+            &self.library_selected_indices,
+        )
+    }
+
+    fn build_library_selection_specs_for_entries(
+        entries: &[LibraryEntry],
+        selected_indices: &[usize],
+    ) -> Vec<protocol::LibrarySelectionSpec> {
         let mut specs = Vec::new();
         let mut seen = HashSet::new();
-        for index in &self.library_selected_indices {
-            let Some(entry) = self.library_entries.get(*index) else {
+        for index in selected_indices {
+            let Some(entry) = entries.get(*index) else {
                 continue;
             };
             let (key, spec) = match entry {
@@ -3659,6 +3704,15 @@ mod tests {
         }
     }
 
+    fn make_library_album(album: &str, album_artist: &str) -> protocol::LibraryAlbum {
+        protocol::LibraryAlbum {
+            album: album.to_string(),
+            album_artist: album_artist.to_string(),
+            song_count: 3,
+            representative_track_path: Some(PathBuf::from(format!("{album}.mp3"))),
+        }
+    }
+
     fn default_album_art_profile() -> ColumnWidthProfile {
         ColumnWidthProfile {
             min_px: crate::config::default_playlist_album_art_column_min_width_px(),
@@ -3917,6 +3971,98 @@ mod tests {
         assert_eq!(path, Some(PathBuf::from("playing.mp3")));
         let meta = meta.expect("playing metadata should be preserved");
         assert_eq!(meta.title, "Playing");
+    }
+
+    #[test]
+    fn test_build_library_selection_specs_for_entries_expands_supported_item_types() {
+        let entries = vec![
+            LibraryEntry::Song(make_library_song("song-a", "A", "a.mp3")),
+            LibraryEntry::Artist(protocol::LibraryArtist {
+                artist: "Artist A".to_string(),
+                album_count: 2,
+                song_count: 20,
+            }),
+            LibraryEntry::Album(make_library_album("Album A", "Artist A")),
+            LibraryEntry::Genre(protocol::LibraryGenre {
+                genre: "Rock".to_string(),
+                song_count: 15,
+            }),
+            LibraryEntry::Decade(protocol::LibraryDecade {
+                decade: "1990s".to_string(),
+                song_count: 40,
+            }),
+        ];
+        let selected_indices = vec![1usize, 2, 0, 3, 4];
+
+        let specs =
+            UiManager::build_library_selection_specs_for_entries(&entries, &selected_indices);
+        assert_eq!(specs.len(), 5);
+
+        match &specs[0] {
+            protocol::LibrarySelectionSpec::Artist { artist } => assert_eq!(artist, "Artist A"),
+            other => panic!("expected artist spec, got {:?}", other),
+        }
+        match &specs[1] {
+            protocol::LibrarySelectionSpec::Album {
+                album,
+                album_artist,
+            } => {
+                assert_eq!(album, "Album A");
+                assert_eq!(album_artist, "Artist A");
+            }
+            other => panic!("expected album spec, got {:?}", other),
+        }
+        match &specs[2] {
+            protocol::LibrarySelectionSpec::Song { path } => {
+                assert_eq!(path, &PathBuf::from("a.mp3"));
+            }
+            other => panic!("expected song spec, got {:?}", other),
+        }
+        match &specs[3] {
+            protocol::LibrarySelectionSpec::Genre { genre } => assert_eq!(genre, "Rock"),
+            other => panic!("expected genre spec, got {:?}", other),
+        }
+        match &specs[4] {
+            protocol::LibrarySelectionSpec::Decade { decade } => assert_eq!(decade, "1990s"),
+            other => panic!("expected decade spec, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_build_library_selection_specs_for_entries_deduplicates_items() {
+        let entries = vec![
+            LibraryEntry::Song(make_library_song("song-a", "A", "a.mp3")),
+            LibraryEntry::Song(make_library_song("song-b", "B", "b.mp3")),
+            LibraryEntry::Album(make_library_album("Album A", "Artist A")),
+        ];
+        let selected_indices = vec![0usize, 2, 0, 1, 2, 99];
+
+        let specs =
+            UiManager::build_library_selection_specs_for_entries(&entries, &selected_indices);
+        assert_eq!(specs.len(), 3);
+
+        match &specs[0] {
+            protocol::LibrarySelectionSpec::Song { path } => {
+                assert_eq!(path, &PathBuf::from("a.mp3"));
+            }
+            other => panic!("expected first song spec, got {:?}", other),
+        }
+        match &specs[1] {
+            protocol::LibrarySelectionSpec::Album {
+                album,
+                album_artist,
+            } => {
+                assert_eq!(album, "Album A");
+                assert_eq!(album_artist, "Artist A");
+            }
+            other => panic!("expected album spec, got {:?}", other),
+        }
+        match &specs[2] {
+            protocol::LibrarySelectionSpec::Song { path } => {
+                assert_eq!(path, &PathBuf::from("b.mp3"));
+            }
+            other => panic!("expected second song spec, got {:?}", other),
+        }
     }
 
     #[test]
