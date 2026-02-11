@@ -97,6 +97,15 @@ format = "{album_art}"
 enabled = false
 custom = false
 
+[library]
+# Folders recursively scanned into Library mode.
+# Leave empty if you only use playlists.
+folders = []
+
+# Show the one-time first-start library setup prompt.
+# This is set to false once you skip or add folders.
+show_first_start_prompt = true
+
 # ---------------------------------------------------------------------
 # ADVANCED USERS ONLY
 # These buffering settings directly affect decoder/player behavior.

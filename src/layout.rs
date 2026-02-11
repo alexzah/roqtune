@@ -6,6 +6,32 @@ use std::collections::HashSet;
 pub const LAYOUT_VERSION: u32 = 1;
 /// Divider thickness used between split-tree children.
 pub const SPLITTER_THICKNESS_PX: i32 = 2;
+/// Stable panel kind code for `LayoutPanelKind::None`.
+pub const PANEL_CODE_NONE: i32 = 0;
+/// Stable panel kind code for `LayoutPanelKind::ButtonCluster`.
+pub const PANEL_CODE_BUTTON_CLUSTER: i32 = 1;
+/// Stable panel kind code for `LayoutPanelKind::TransportButtonCluster`.
+pub const PANEL_CODE_TRANSPORT_BUTTON_CLUSTER: i32 = 2;
+/// Stable panel kind code for `LayoutPanelKind::UtilityButtonCluster`.
+pub const PANEL_CODE_UTILITY_BUTTON_CLUSTER: i32 = 3;
+/// Stable panel kind code for `LayoutPanelKind::VolumeSlider`.
+pub const PANEL_CODE_VOLUME_SLIDER: i32 = 4;
+/// Stable panel kind code for `LayoutPanelKind::SeekBar`.
+pub const PANEL_CODE_SEEK_BAR: i32 = 5;
+/// Stable panel kind code for `LayoutPanelKind::PlaylistSwitcher`.
+pub const PANEL_CODE_PLAYLIST_SWITCHER: i32 = 6;
+/// Stable panel kind code for `LayoutPanelKind::TrackList`.
+pub const PANEL_CODE_TRACK_LIST: i32 = 7;
+/// Stable panel kind code for `LayoutPanelKind::MetadataViewer`.
+pub const PANEL_CODE_METADATA_VIEWER: i32 = 8;
+/// Stable panel kind code for `LayoutPanelKind::AlbumArtViewer`.
+pub const PANEL_CODE_ALBUM_ART_VIEWER: i32 = 9;
+/// Stable panel kind code for `LayoutPanelKind::Spacer`.
+pub const PANEL_CODE_SPACER: i32 = 10;
+/// Stable panel kind code for `LayoutPanelKind::StatusBar`.
+pub const PANEL_CODE_STATUS_BAR: i32 = 11;
+/// Stable panel kind code for `LayoutPanelKind::ImportButtonCluster`.
+pub const PANEL_CODE_IMPORT_BUTTON_CLUSTER: i32 = 12;
 
 /// User-selectable panel kind assignable to a layout leaf.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Deserialize, serde::Serialize)]
@@ -32,39 +58,39 @@ impl LayoutPanelKind {
     /// Converts this panel kind to a stable integer code consumed by Slint.
     pub fn to_code(self) -> i32 {
         match self {
-            Self::None => 0,
-            Self::ButtonCluster => 1,
-            Self::TransportButtonCluster => 2,
-            Self::UtilityButtonCluster => 3,
-            Self::VolumeSlider => 4,
-            Self::SeekBar => 5,
-            Self::PlaylistSwitcher => 6,
-            Self::TrackList => 7,
-            Self::MetadataViewer => 8,
-            Self::AlbumArtViewer => 9,
-            Self::Spacer => 10,
-            Self::StatusBar => 11,
-            Self::ImportButtonCluster => 12,
-            Self::ControlBar => 2,
-            Self::AlbumArtPane => 9,
+            Self::None => PANEL_CODE_NONE,
+            Self::ButtonCluster => PANEL_CODE_BUTTON_CLUSTER,
+            Self::TransportButtonCluster => PANEL_CODE_TRANSPORT_BUTTON_CLUSTER,
+            Self::UtilityButtonCluster => PANEL_CODE_UTILITY_BUTTON_CLUSTER,
+            Self::VolumeSlider => PANEL_CODE_VOLUME_SLIDER,
+            Self::SeekBar => PANEL_CODE_SEEK_BAR,
+            Self::PlaylistSwitcher => PANEL_CODE_PLAYLIST_SWITCHER,
+            Self::TrackList => PANEL_CODE_TRACK_LIST,
+            Self::MetadataViewer => PANEL_CODE_METADATA_VIEWER,
+            Self::AlbumArtViewer => PANEL_CODE_ALBUM_ART_VIEWER,
+            Self::Spacer => PANEL_CODE_SPACER,
+            Self::StatusBar => PANEL_CODE_STATUS_BAR,
+            Self::ImportButtonCluster => PANEL_CODE_IMPORT_BUTTON_CLUSTER,
+            Self::ControlBar => PANEL_CODE_TRANSPORT_BUTTON_CLUSTER,
+            Self::AlbumArtPane => PANEL_CODE_ALBUM_ART_VIEWER,
         }
     }
 
     /// Builds a panel kind from a Slint integer code.
     pub fn from_code(code: i32) -> Self {
         match code {
-            1 => Self::ButtonCluster,
-            2 => Self::TransportButtonCluster,
-            3 => Self::UtilityButtonCluster,
-            4 => Self::VolumeSlider,
-            5 => Self::SeekBar,
-            6 => Self::PlaylistSwitcher,
-            7 => Self::TrackList,
-            8 => Self::MetadataViewer,
-            9 => Self::AlbumArtViewer,
-            10 => Self::Spacer,
-            11 => Self::StatusBar,
-            12 => Self::ImportButtonCluster,
+            PANEL_CODE_BUTTON_CLUSTER => Self::ButtonCluster,
+            PANEL_CODE_TRANSPORT_BUTTON_CLUSTER => Self::TransportButtonCluster,
+            PANEL_CODE_UTILITY_BUTTON_CLUSTER => Self::UtilityButtonCluster,
+            PANEL_CODE_VOLUME_SLIDER => Self::VolumeSlider,
+            PANEL_CODE_SEEK_BAR => Self::SeekBar,
+            PANEL_CODE_PLAYLIST_SWITCHER => Self::PlaylistSwitcher,
+            PANEL_CODE_TRACK_LIST => Self::TrackList,
+            PANEL_CODE_METADATA_VIEWER => Self::MetadataViewer,
+            PANEL_CODE_ALBUM_ART_VIEWER => Self::AlbumArtViewer,
+            PANEL_CODE_SPACER => Self::Spacer,
+            PANEL_CODE_STATUS_BAR => Self::StatusBar,
+            PANEL_CODE_IMPORT_BUTTON_CLUSTER => Self::ImportButtonCluster,
             _ => Self::None,
         }
     }

@@ -4,6 +4,7 @@
 //! mutations, and coordinates decode/playback queueing behavior via the event bus.
 
 use std::collections::{HashMap, HashSet};
+use std::path::PathBuf;
 
 use log::{debug, error, info, trace};
 use tokio::sync::broadcast::{Receiver, Sender};
@@ -195,6 +196,39 @@ impl PlaylistManager {
     fn clear_track_list_history(&mut self) {
         self.track_list_undo_stack.clear();
         self.track_list_redo_stack.clear();
+    }
+
+    fn append_tracks_to_playlist(
+        &mut self,
+        playlist_id: &str,
+        paths: &[PathBuf],
+    ) -> Vec<protocol::RestoredTrack> {
+        let existing_len = self
+            .db_manager
+            .get_tracks_for_playlist(playlist_id)
+            .map(|tracks| tracks.len())
+            .unwrap_or(0);
+
+        let mut inserted = Vec::new();
+        for (offset, path) in paths.iter().enumerate() {
+            let id = Uuid::new_v4().to_string();
+            let position = existing_len + offset;
+            if let Err(err) =
+                self.db_manager
+                    .save_track(&id, playlist_id, path.to_str().unwrap_or(""), position)
+            {
+                error!(
+                    "Failed to append track to playlist {} at position {}: {}",
+                    playlist_id, position, err
+                );
+                continue;
+            }
+            inserted.push(protocol::RestoredTrack {
+                id,
+                path: path.clone(),
+            });
+        }
+        inserted
     }
 
     fn restored_tracks_from_snapshot(
@@ -436,6 +470,79 @@ impl PlaylistManager {
                             &self.capture_track_list_snapshot(),
                         ) {
                             self.push_track_list_undo_snapshot(previous_track_list);
+                        }
+                    }
+                    protocol::Message::Playlist(
+                        protocol::PlaylistMessage::AddTracksToPlaylists {
+                            mut playlist_ids,
+                            paths,
+                        },
+                    ) => {
+                        if playlist_ids.is_empty() || paths.is_empty() {
+                            continue;
+                        }
+
+                        let mut seen_playlist_ids = HashSet::new();
+                        playlist_ids
+                            .retain(|playlist_id| seen_playlist_ids.insert(playlist_id.clone()));
+
+                        let mut previous_track_list = None;
+                        let mut inserted_active_tracks = Vec::new();
+                        for playlist_id in &playlist_ids {
+                            let inserted = self.append_tracks_to_playlist(playlist_id, &paths);
+                            if inserted.is_empty() {
+                                continue;
+                            }
+
+                            if *playlist_id == self.active_playlist_id {
+                                if previous_track_list.is_none() {
+                                    previous_track_list = Some(self.capture_track_list_snapshot());
+                                }
+                                for track in &inserted {
+                                    let next_track = Track {
+                                        path: track.path.clone(),
+                                        id: track.id.clone(),
+                                    };
+                                    self.editing_playlist.add_track(next_track.clone());
+                                    if Some(&self.active_playlist_id)
+                                        == self.playback_playlist_id.as_ref()
+                                    {
+                                        self.playback_playlist.add_track(next_track);
+                                    }
+                                }
+                                inserted_active_tracks.extend(inserted);
+                            }
+                        }
+
+                        if inserted_active_tracks.is_empty() {
+                            continue;
+                        }
+
+                        let insert_at = self
+                            .editing_playlist
+                            .num_tracks()
+                            .saturating_sub(inserted_active_tracks.len());
+                        let _ = self.bus_producer.send(protocol::Message::Playlist(
+                            protocol::PlaylistMessage::TracksInserted {
+                                tracks: inserted_active_tracks,
+                                insert_at,
+                            },
+                        ));
+
+                        if let Some(snapshot) = previous_track_list {
+                            if Self::track_list_changed(
+                                &snapshot,
+                                &self.capture_track_list_snapshot(),
+                            ) {
+                                self.push_track_list_undo_snapshot(snapshot);
+                            }
+                        }
+
+                        self.broadcast_playlist_changed();
+                        self.broadcast_selection_changed();
+
+                        if Some(&self.active_playlist_id) == self.playback_playlist_id.as_ref() {
+                            self.cache_tracks(false);
                         }
                     }
                     protocol::Message::Playback(protocol::PlaybackMessage::Play) => {
@@ -893,6 +1000,30 @@ impl PlaylistManager {
                         if is_active_playback_playlist {
                             self.cache_tracks(false);
                         }
+                    }
+                    protocol::Message::Playlist(protocol::PlaylistMessage::PlayLibraryQueue {
+                        tracks,
+                        start_index,
+                    }) => {
+                        if tracks.is_empty() {
+                            continue;
+                        }
+
+                        let mut playback_playlist = Playlist::new();
+                        playback_playlist.set_playback_order(self.playback_order);
+                        playback_playlist.set_repeat_mode(self.repeat_mode);
+                        for track in tracks {
+                            playback_playlist.add_track(Track {
+                                path: track.path,
+                                id: track.id,
+                            });
+                        }
+
+                        let clamped_start = start_index.min(playback_playlist.num_tracks() - 1);
+                        playback_playlist.set_selected_indices(vec![clamped_start]);
+                        self.playback_playlist = playback_playlist;
+                        self.playback_playlist_id = None;
+                        self.play_playback_track(clamped_start);
                     }
                     protocol::Message::Playlist(protocol::PlaylistMessage::UndoTrackListEdit) => {
                         let Some(previous_snapshot) = self.track_list_undo_stack.pop() else {
@@ -1480,6 +1611,7 @@ mod tests {
     struct PlaylistManagerHarness {
         bus_sender: Sender<protocol::Message>,
         receiver: Receiver<protocol::Message>,
+        active_playlist_id: String,
     }
 
     impl PlaylistManagerHarness {
@@ -1500,18 +1632,28 @@ mod tests {
             });
 
             let mut receiver = bus_sender.subscribe();
-            let _ = wait_for_message(&mut receiver, Duration::from_secs(1), |message| {
-                matches!(
-                    message,
-                    protocol::Message::Playlist(protocol::PlaylistMessage::ActivePlaylistChanged(
-                        _
-                    ))
-                )
-            });
+            let active_playlist_message =
+                wait_for_message(&mut receiver, Duration::from_secs(1), |message| {
+                    matches!(
+                        message,
+                        protocol::Message::Playlist(
+                            protocol::PlaylistMessage::ActivePlaylistChanged(_)
+                        )
+                    )
+                });
+            let active_playlist_id = if let protocol::Message::Playlist(
+                protocol::PlaylistMessage::ActivePlaylistChanged(id),
+            ) = active_playlist_message
+            {
+                id
+            } else {
+                panic!("expected ActivePlaylistChanged message");
+            };
 
             let mut harness = Self {
                 bus_sender,
                 receiver,
+                active_playlist_id,
             };
             harness.drain_messages();
             harness
@@ -1795,6 +1937,138 @@ mod tests {
                 )
             },
         );
+    }
+
+    #[test]
+    fn test_add_tracks_to_playlists_appends_to_active_playlist_and_supports_undo() {
+        let mut harness = PlaylistManagerHarness::new();
+        harness.drain_messages();
+
+        let added_paths = vec![
+            PathBuf::from("/tmp/pm_add_to_active_0.mp3"),
+            PathBuf::from("/tmp/pm_add_to_active_1.mp3"),
+        ];
+        harness.send(protocol::Message::Playlist(
+            protocol::PlaylistMessage::AddTracksToPlaylists {
+                playlist_ids: vec![harness.active_playlist_id.clone()],
+                paths: added_paths.clone(),
+            },
+        ));
+
+        let inserted_message =
+            wait_for_message(&mut harness.receiver, Duration::from_secs(1), |message| {
+                matches!(
+                    message,
+                    protocol::Message::Playlist(protocol::PlaylistMessage::TracksInserted {
+                        tracks,
+                        ..
+                    }) if tracks.len() == 2
+                )
+            });
+        let inserted_paths =
+            if let protocol::Message::Playlist(protocol::PlaylistMessage::TracksInserted {
+                tracks,
+                ..
+            }) = inserted_message
+            {
+                tracks
+                    .into_iter()
+                    .map(|track| track.path)
+                    .collect::<Vec<_>>()
+            } else {
+                panic!("expected TracksInserted message");
+            };
+        assert_eq!(inserted_paths, added_paths);
+        harness.drain_messages();
+
+        harness.send(protocol::Message::Playlist(
+            protocol::PlaylistMessage::UndoTrackListEdit,
+        ));
+        let restored_message =
+            wait_for_message(&mut harness.receiver, Duration::from_secs(1), |message| {
+                matches!(
+                    message,
+                    protocol::Message::Playlist(protocol::PlaylistMessage::PlaylistRestored(_))
+                )
+            });
+        if let protocol::Message::Playlist(protocol::PlaylistMessage::PlaylistRestored(tracks)) =
+            restored_message
+        {
+            assert!(tracks.is_empty(), "undo should restore active playlist");
+        } else {
+            panic!("expected PlaylistRestored message");
+        }
+    }
+
+    #[test]
+    fn test_add_tracks_to_playlists_to_non_active_playlist_persists_without_ui_insert() {
+        let mut harness = PlaylistManagerHarness::new();
+        harness.drain_messages();
+
+        harness.send(protocol::Message::Playlist(
+            protocol::PlaylistMessage::CreatePlaylist {
+                name: "Add To Target".to_string(),
+            },
+        ));
+        let playlists_message =
+            wait_for_message(&mut harness.receiver, Duration::from_secs(1), |message| {
+                matches!(
+                    message,
+                    protocol::Message::Playlist(protocol::PlaylistMessage::PlaylistsRestored(list))
+                        if list.iter().any(|playlist| playlist.name == "Add To Target")
+                )
+            });
+        let target_playlist_id = if let protocol::Message::Playlist(
+            protocol::PlaylistMessage::PlaylistsRestored(list),
+        ) = playlists_message
+        {
+            list.into_iter()
+                .find(|playlist| playlist.name == "Add To Target")
+                .map(|playlist| playlist.id)
+                .expect("created playlist should be present")
+        } else {
+            panic!("expected PlaylistsRestored message");
+        };
+        harness.drain_messages();
+
+        let target_path = PathBuf::from("/tmp/pm_add_to_other_0.mp3");
+        harness.send(protocol::Message::Playlist(
+            protocol::PlaylistMessage::AddTracksToPlaylists {
+                playlist_ids: vec![target_playlist_id.clone()],
+                paths: vec![target_path.clone()],
+            },
+        ));
+        assert_no_message(
+            &mut harness.receiver,
+            Duration::from_millis(250),
+            |message| {
+                matches!(
+                    message,
+                    protocol::Message::Playlist(protocol::PlaylistMessage::TracksInserted { .. })
+                )
+            },
+        );
+
+        harness.send(protocol::Message::Playlist(
+            protocol::PlaylistMessage::SwitchPlaylist {
+                id: target_playlist_id.clone(),
+            },
+        ));
+        let restored_message =
+            wait_for_message(&mut harness.receiver, Duration::from_secs(1), |message| {
+                matches!(
+                    message,
+                    protocol::Message::Playlist(protocol::PlaylistMessage::PlaylistRestored(_))
+                )
+            });
+        if let protocol::Message::Playlist(protocol::PlaylistMessage::PlaylistRestored(tracks)) =
+            restored_message
+        {
+            assert_eq!(tracks.len(), 1);
+            assert_eq!(tracks[0].path, target_path);
+        } else {
+            panic!("expected PlaylistRestored message");
+        }
     }
 
     #[test]

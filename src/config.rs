@@ -11,6 +11,9 @@ pub struct Config {
     /// UI preferences.
     pub ui: UiConfig,
     #[serde(default)]
+    /// Library indexing and first-start preferences.
+    pub library: LibraryConfig,
+    #[serde(default)]
     /// Decoder/player buffering behavior.
     pub buffering: BufferingConfig,
 }
@@ -55,6 +58,15 @@ pub struct UiConfig {
     pub window_height: u32,
     #[serde(default = "default_volume")]
     pub volume: f32,
+}
+
+/// Library indexing preferences persisted between sessions.
+#[derive(Debug, Clone, serde::Deserialize, serde::Serialize)]
+pub struct LibraryConfig {
+    #[serde(default)]
+    pub folders: Vec<String>,
+    #[serde(default = "default_true")]
+    pub show_first_start_prompt: bool,
 }
 
 /// Declarative playlist column definition.
@@ -132,6 +144,15 @@ impl Default for BufferingConfig {
             player_target_buffer_ms: default_player_target_buffer_ms(),
             player_request_interval_ms: default_player_request_interval_ms(),
             decoder_request_chunk_ms: default_decoder_request_chunk_ms(),
+        }
+    }
+}
+
+impl Default for LibraryConfig {
+    fn default() -> Self {
+        Self {
+            folders: Vec::new(),
+            show_first_start_prompt: true,
         }
     }
 }
@@ -256,6 +277,8 @@ mod tests {
         assert_eq!(config.ui.window_width, 900);
         assert_eq!(config.ui.window_height, 650);
         assert!((config.ui.volume - 1.0).abs() < f32::EPSILON);
+        assert!(config.library.folders.is_empty());
+        assert!(config.library.show_first_start_prompt);
         assert_eq!(config.buffering.player_low_watermark_ms, 12_000);
         assert_eq!(config.buffering.player_target_buffer_ms, 24_000);
         assert_eq!(config.buffering.player_request_interval_ms, 120);
@@ -292,6 +315,8 @@ decoder_request_chunk_ms = 1500
         assert_eq!(parsed.ui.window_width, 900);
         assert_eq!(parsed.ui.window_height, 650);
         assert!((parsed.ui.volume - 1.0).abs() < f32::EPSILON);
+        assert!(parsed.library.folders.is_empty());
+        assert!(parsed.library.show_first_start_prompt);
         assert_eq!(
             parsed.buffering.player_target_buffer_ms,
             BufferingConfig::default().player_target_buffer_ms
@@ -374,6 +399,11 @@ decoder_request_chunk_ms = 1500
         assert_eq!(parsed.ui.window_width, defaults.ui.window_width);
         assert_eq!(parsed.ui.window_height, defaults.ui.window_height);
         assert!((parsed.ui.volume - defaults.ui.volume).abs() < f32::EPSILON);
+        assert_eq!(parsed.library.folders, defaults.library.folders);
+        assert_eq!(
+            parsed.library.show_first_start_prompt,
+            defaults.library.show_first_start_prompt
+        );
 
         assert_eq!(
             parsed.buffering.player_low_watermark_ms,

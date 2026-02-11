@@ -1,8 +1,11 @@
-//! SQLite-backed persistence for playlists and playlist-scoped UI metadata.
+//! SQLite-backed persistence for playlists, library index data, and playlist-scoped UI metadata.
 
-use crate::protocol::{PlaylistColumnWidthOverride, PlaylistInfo, RestoredTrack};
+use crate::protocol::{
+    LibraryAlbum, LibraryArtist, LibraryDecade, LibraryGenre, LibrarySong,
+    PlaylistColumnWidthOverride, PlaylistInfo, RestoredTrack,
+};
 use rusqlite::{params, Connection, OptionalExtension};
-use std::path::PathBuf;
+use std::{collections::HashSet, path::PathBuf};
 use uuid::Uuid;
 
 /// Database gateway for playlist and track persistence.
@@ -66,6 +69,37 @@ impl DbManager {
             )",
             [],
         )?;
+
+        self.conn.execute(
+            "CREATE TABLE IF NOT EXISTS library_tracks (
+                song_id TEXT PRIMARY KEY,
+                path TEXT NOT NULL UNIQUE,
+                title TEXT NOT NULL,
+                artist TEXT NOT NULL,
+                album TEXT NOT NULL,
+                album_artist TEXT NOT NULL,
+                genre TEXT NOT NULL,
+                year TEXT NOT NULL,
+                track_number TEXT NOT NULL,
+                sort_title TEXT NOT NULL,
+                sort_artist TEXT NOT NULL,
+                sort_album TEXT NOT NULL,
+                modified_unix_ms INTEGER NOT NULL DEFAULT 0
+            )",
+            [],
+        )?;
+        self.conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_library_tracks_sort_title ON library_tracks(sort_title, path)",
+            [],
+        )?;
+        self.conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_library_tracks_sort_artist ON library_tracks(sort_artist, sort_album, sort_title, path)",
+            [],
+        )?;
+        self.conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_library_tracks_sort_album ON library_tracks(sort_album, sort_title, path)",
+            [],
+        )?;
         Ok(())
     }
 
@@ -118,6 +152,22 @@ impl DbManager {
         if !has_column_width_overrides {
             self.conn.execute(
                 "ALTER TABLE playlists ADD COLUMN column_width_overrides TEXT",
+                [],
+            )?;
+        }
+
+        let mut library_stmt = self.conn.prepare("PRAGMA table_info(library_tracks)")?;
+        let library_columns = library_stmt.query_map([], |row| row.get::<_, String>(1))?;
+        let mut has_genre = false;
+        for col in library_columns {
+            if col? == "genre" {
+                has_genre = true;
+                break;
+            }
+        }
+        if !has_genre {
+            self.conn.execute(
+                "ALTER TABLE library_tracks ADD COLUMN genre TEXT NOT NULL DEFAULT ''",
                 [],
             )?;
         }
@@ -360,6 +410,364 @@ impl DbManager {
             .unwrap_or_default();
         overrides.retain(|item| item.column_key != column_key);
         self.set_playlist_column_width_overrides(playlist_id, &overrides)
+    }
+
+    /// Inserts or updates one indexed library track entry.
+    #[allow(clippy::too_many_arguments)]
+    pub fn upsert_library_track(
+        &self,
+        song_id: &str,
+        path: &str,
+        title: &str,
+        artist: &str,
+        album: &str,
+        album_artist: &str,
+        genre: &str,
+        year: &str,
+        track_number: &str,
+        sort_title: &str,
+        sort_artist: &str,
+        sort_album: &str,
+        modified_unix_ms: i64,
+    ) -> Result<(), rusqlite::Error> {
+        self.conn.execute(
+            "INSERT INTO library_tracks (
+                song_id, path, title, artist, album, album_artist, genre, year, track_number,
+                sort_title, sort_artist, sort_album, modified_unix_ms
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)
+            ON CONFLICT(path) DO UPDATE SET
+                song_id = excluded.song_id,
+                title = excluded.title,
+                artist = excluded.artist,
+                album = excluded.album,
+                album_artist = excluded.album_artist,
+                genre = excluded.genre,
+                year = excluded.year,
+                track_number = excluded.track_number,
+                sort_title = excluded.sort_title,
+                sort_artist = excluded.sort_artist,
+                sort_album = excluded.sort_album,
+                modified_unix_ms = excluded.modified_unix_ms",
+            params![
+                song_id,
+                path,
+                title,
+                artist,
+                album,
+                album_artist,
+                genre,
+                year,
+                track_number,
+                sort_title,
+                sort_artist,
+                sort_album,
+                modified_unix_ms,
+            ],
+        )?;
+        Ok(())
+    }
+
+    /// Returns all indexed library paths.
+    pub fn get_all_library_paths(&self) -> Result<Vec<String>, rusqlite::Error> {
+        let mut stmt = self.conn.prepare("SELECT path FROM library_tracks")?;
+        let iter = stmt.query_map([], |row| row.get::<_, String>(0))?;
+        let mut paths = Vec::new();
+        for item in iter {
+            paths.push(item?);
+        }
+        Ok(paths)
+    }
+
+    /// Deletes indexed library rows that are no longer present in scanned paths.
+    pub fn delete_library_paths_not_in_set(
+        &self,
+        keep_paths: &HashSet<String>,
+    ) -> Result<(), rusqlite::Error> {
+        let existing_paths = self.get_all_library_paths()?;
+        for path in existing_paths {
+            if !keep_paths.contains(&path) {
+                self.conn
+                    .execute("DELETE FROM library_tracks WHERE path = ?1", params![path])?;
+            }
+        }
+        Ok(())
+    }
+
+    /// Loads all songs in library sorted alphabetically by title.
+    pub fn get_library_songs(&self) -> Result<Vec<LibrarySong>, rusqlite::Error> {
+        let mut stmt = self.conn.prepare(
+            "SELECT song_id, path, title, artist, album, album_artist, genre, year, track_number
+             FROM library_tracks
+             ORDER BY sort_title ASC, path ASC",
+        )?;
+        let iter = stmt.query_map([], |row| {
+            Ok(LibrarySong {
+                id: row.get(0)?,
+                path: PathBuf::from(row.get::<_, String>(1)?),
+                title: row.get(2)?,
+                artist: row.get(3)?,
+                album: row.get(4)?,
+                album_artist: row.get(5)?,
+                genre: row.get(6)?,
+                year: row.get(7)?,
+                track_number: row.get(8)?,
+            })
+        })?;
+        let mut songs = Vec::new();
+        for item in iter {
+            songs.push(item?);
+        }
+        Ok(songs)
+    }
+
+    /// Loads all unique artists with album/song counts.
+    pub fn get_library_artists(&self) -> Result<Vec<LibraryArtist>, rusqlite::Error> {
+        let mut stmt = self.conn.prepare(
+            "SELECT artist, COUNT(DISTINCT album || '|' || album_artist) AS album_count, COUNT(*) AS song_count
+             FROM library_tracks
+             GROUP BY artist
+             ORDER BY sort_artist ASC, artist ASC",
+        )?;
+        let iter = stmt.query_map([], |row| {
+            Ok(LibraryArtist {
+                artist: row.get(0)?,
+                album_count: row.get::<_, i64>(1)?.max(0) as u32,
+                song_count: row.get::<_, i64>(2)?.max(0) as u32,
+            })
+        })?;
+        let mut artists = Vec::new();
+        for item in iter {
+            artists.push(item?);
+        }
+        Ok(artists)
+    }
+
+    /// Loads all unique albums with song counts.
+    pub fn get_library_albums(&self) -> Result<Vec<LibraryAlbum>, rusqlite::Error> {
+        let mut stmt = self.conn.prepare(
+            "SELECT album, album_artist, COUNT(*) AS song_count, MIN(path) AS representative_track_path
+             FROM library_tracks
+             GROUP BY album, album_artist
+             ORDER BY sort_album ASC, album ASC, album_artist ASC",
+        )?;
+        let iter = stmt.query_map([], |row| {
+            Ok(LibraryAlbum {
+                album: row.get(0)?,
+                album_artist: row.get(1)?,
+                song_count: row.get::<_, i64>(2)?.max(0) as u32,
+                representative_track_path: row.get::<_, Option<String>>(3)?.map(PathBuf::from),
+            })
+        })?;
+        let mut albums = Vec::new();
+        for item in iter {
+            albums.push(item?);
+        }
+        Ok(albums)
+    }
+
+    /// Loads all unique genres with song counts.
+    pub fn get_library_genres(&self) -> Result<Vec<LibraryGenre>, rusqlite::Error> {
+        let mut stmt = self.conn.prepare(
+            "SELECT
+                CASE
+                    WHEN TRIM(genre) = '' THEN 'Unknown Genre'
+                    ELSE TRIM(genre)
+                END AS display_genre,
+                COUNT(*) AS song_count
+             FROM library_tracks
+             GROUP BY display_genre
+             ORDER BY LOWER(display_genre) ASC",
+        )?;
+        let iter = stmt.query_map([], |row| {
+            Ok(LibraryGenre {
+                genre: row.get(0)?,
+                song_count: row.get::<_, i64>(1)?.max(0) as u32,
+            })
+        })?;
+        let mut genres = Vec::new();
+        for item in iter {
+            genres.push(item?);
+        }
+        Ok(genres)
+    }
+
+    /// Loads all unique decades with song counts.
+    pub fn get_library_decades(&self) -> Result<Vec<LibraryDecade>, rusqlite::Error> {
+        let mut stmt = self.conn.prepare(
+            "SELECT
+                CASE
+                    WHEN SUBSTR(TRIM(year), 1, 3) GLOB '[0-9][0-9][0-9]'
+                        THEN SUBSTR(TRIM(year), 1, 3) || '0s'
+                    ELSE 'Unknown Decade'
+                END AS display_decade,
+                COUNT(*) AS song_count
+             FROM library_tracks
+             GROUP BY display_decade
+             ORDER BY display_decade ASC",
+        )?;
+        let iter = stmt.query_map([], |row| {
+            Ok(LibraryDecade {
+                decade: row.get(0)?,
+                song_count: row.get::<_, i64>(1)?.max(0) as u32,
+            })
+        })?;
+        let mut decades = Vec::new();
+        for item in iter {
+            decades.push(item?);
+        }
+        Ok(decades)
+    }
+
+    /// Loads songs for one album+album-artist pair sorted by track number then title.
+    pub fn get_library_album_songs(
+        &self,
+        album: &str,
+        album_artist: &str,
+    ) -> Result<Vec<LibrarySong>, rusqlite::Error> {
+        let mut stmt = self.conn.prepare(
+            "SELECT song_id, path, title, artist, album, album_artist, genre, year, track_number
+             FROM library_tracks
+             WHERE album = ?1 AND album_artist = ?2
+             ORDER BY CAST(track_number AS INTEGER) ASC, sort_title ASC, path ASC",
+        )?;
+        let iter = stmt.query_map(params![album, album_artist], |row| {
+            Ok(LibrarySong {
+                id: row.get(0)?,
+                path: PathBuf::from(row.get::<_, String>(1)?),
+                title: row.get(2)?,
+                artist: row.get(3)?,
+                album: row.get(4)?,
+                album_artist: row.get(5)?,
+                genre: row.get(6)?,
+                year: row.get(7)?,
+                track_number: row.get(8)?,
+            })
+        })?;
+        let mut songs = Vec::new();
+        for item in iter {
+            songs.push(item?);
+        }
+        Ok(songs)
+    }
+
+    /// Loads artist detail (albums and songs) for one artist.
+    pub fn get_library_artist_detail(
+        &self,
+        artist: &str,
+    ) -> Result<(Vec<LibraryAlbum>, Vec<LibrarySong>), rusqlite::Error> {
+        let mut album_stmt = self.conn.prepare(
+            "SELECT album, album_artist, COUNT(*) AS song_count, MIN(path) AS representative_track_path
+             FROM library_tracks
+             WHERE artist = ?1 OR album_artist = ?1
+             GROUP BY album, album_artist
+             ORDER BY sort_album ASC, album ASC",
+        )?;
+        let album_iter = album_stmt.query_map(params![artist], |row| {
+            Ok(LibraryAlbum {
+                album: row.get(0)?,
+                album_artist: row.get(1)?,
+                song_count: row.get::<_, i64>(2)?.max(0) as u32,
+                representative_track_path: row.get::<_, Option<String>>(3)?.map(PathBuf::from),
+            })
+        })?;
+        let mut albums = Vec::new();
+        for item in album_iter {
+            albums.push(item?);
+        }
+
+        let mut song_stmt = self.conn.prepare(
+            "SELECT song_id, path, title, artist, album, album_artist, genre, year, track_number
+             FROM library_tracks
+             WHERE artist = ?1 OR album_artist = ?1
+             ORDER BY sort_album ASC, CAST(track_number AS INTEGER) ASC, sort_title ASC, path ASC",
+        )?;
+        let song_iter = song_stmt.query_map(params![artist], |row| {
+            Ok(LibrarySong {
+                id: row.get(0)?,
+                path: PathBuf::from(row.get::<_, String>(1)?),
+                title: row.get(2)?,
+                artist: row.get(3)?,
+                album: row.get(4)?,
+                album_artist: row.get(5)?,
+                genre: row.get(6)?,
+                year: row.get(7)?,
+                track_number: row.get(8)?,
+            })
+        })?;
+        let mut songs = Vec::new();
+        for item in song_iter {
+            songs.push(item?);
+        }
+        Ok((albums, songs))
+    }
+
+    /// Loads songs for one normalized genre label.
+    pub fn get_library_genre_songs(
+        &self,
+        genre: &str,
+    ) -> Result<Vec<LibrarySong>, rusqlite::Error> {
+        let mut stmt = self.conn.prepare(
+            "SELECT song_id, path, title, artist, album, album_artist, genre, year, track_number
+             FROM library_tracks
+             WHERE CASE
+                 WHEN TRIM(genre) = '' THEN 'Unknown Genre'
+                 ELSE TRIM(genre)
+             END = ?1
+             ORDER BY sort_artist ASC, sort_album ASC, CAST(track_number AS INTEGER) ASC, sort_title ASC, path ASC",
+        )?;
+        let iter = stmt.query_map(params![genre], |row| {
+            Ok(LibrarySong {
+                id: row.get(0)?,
+                path: PathBuf::from(row.get::<_, String>(1)?),
+                title: row.get(2)?,
+                artist: row.get(3)?,
+                album: row.get(4)?,
+                album_artist: row.get(5)?,
+                genre: row.get(6)?,
+                year: row.get(7)?,
+                track_number: row.get(8)?,
+            })
+        })?;
+        let mut songs = Vec::new();
+        for item in iter {
+            songs.push(item?);
+        }
+        Ok(songs)
+    }
+
+    /// Loads songs for one normalized decade label.
+    pub fn get_library_decade_songs(
+        &self,
+        decade: &str,
+    ) -> Result<Vec<LibrarySong>, rusqlite::Error> {
+        let mut stmt = self.conn.prepare(
+            "SELECT song_id, path, title, artist, album, album_artist, genre, year, track_number
+             FROM library_tracks
+             WHERE CASE
+                 WHEN SUBSTR(TRIM(year), 1, 3) GLOB '[0-9][0-9][0-9]'
+                     THEN SUBSTR(TRIM(year), 1, 3) || '0s'
+                 ELSE 'Unknown Decade'
+             END = ?1
+             ORDER BY year ASC, sort_artist ASC, sort_album ASC, CAST(track_number AS INTEGER) ASC, sort_title ASC, path ASC",
+        )?;
+        let iter = stmt.query_map(params![decade], |row| {
+            Ok(LibrarySong {
+                id: row.get(0)?,
+                path: PathBuf::from(row.get::<_, String>(1)?),
+                title: row.get(2)?,
+                artist: row.get(3)?,
+                album: row.get(4)?,
+                album_artist: row.get(5)?,
+                genre: row.get(6)?,
+                year: row.get(7)?,
+                track_number: row.get(8)?,
+            })
+        })?;
+        let mut songs = Vec::new();
+        for item in iter {
+            songs.push(item?);
+        }
+        Ok(songs)
     }
 }
 

@@ -1,0 +1,33 @@
+export component ModeTabs inherits Rectangle {
+    in property <[string]> labels: [];
+    in property <int> selected_index: 0;
+    callback selected(int);
+
+    height: 30px;
+    background: #202020;
+    border-radius: 4px;
+    border-width: 1px;
+    border-color: #3a3a3a;
+
+    HorizontalLayout {
+        spacing: 0px;
+        for label[index] in root.labels : Rectangle {
+            property <bool> active: root.selected_index == index;
+            horizontal-stretch: 1;
+            height: parent.height;
+            background: self.active ? #2f3f56 : tab-ta.has-hover ? #2a2a2a : transparent;
+            border-width: self.active ? 1px : 0px;
+            border-color: #4f6787;
+            Text {
+                text: label;
+                color: parent.active ? #d7e6f8 : #a8a8a8;
+                font-size: 12px;
+                horizontal-alignment: center;
+                vertical-alignment: center;
+            }
+            tab-ta := TouchArea {
+                clicked => { root.selected(index); }
+            }
+        }
+    }
+}

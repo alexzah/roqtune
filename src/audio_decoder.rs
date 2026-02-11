@@ -4,7 +4,7 @@
 //! decode worker thread that performs file decode, optional seek, resampling,
 //! and packet emission.
 
-use crate::config::{BufferingConfig, Config, OutputConfig, UiConfig};
+use crate::config::{BufferingConfig, Config, LibraryConfig, OutputConfig, UiConfig};
 use crate::protocol::{self, AudioMessage, AudioPacket, ConfigMessage, Message, TrackIdentifier};
 use log::{debug, error, warn};
 use rubato::{
@@ -29,6 +29,7 @@ use tokio::sync::mpsc::{self, Receiver as MpscReceiver, Sender as MpscSender};
 
 /// Work items consumed by the decode worker thread.
 #[derive(Debug, Clone)]
+#[allow(clippy::large_enum_variant)]
 enum DecodeWorkItem {
     DecodeTracks {
         tracks: Vec<TrackIdentifier>,
@@ -733,6 +734,7 @@ impl AudioDecoder {
                                 bits_per_sample_auto: false,
                             },
                             ui: UiConfig::default(),
+                            library: LibraryConfig::default(),
                             buffering: BufferingConfig::default(),
                         };
                         self.worker_sender

@@ -1,0 +1,98 @@
+import { LibraryRowData } from "../types.slint";
+
+export component LibraryRow inherits Rectangle {
+    in property <LibraryRowData> data;
+    in property <bool> is-hover;
+
+    height: 34px;
+    background: root.data.selected ? #2f3f56 : is-hover ? #333 : transparent;
+    border-radius: 2px;
+
+    HorizontalLayout {
+        padding-left: 8px;
+        padding-right: 8px;
+        spacing: 8px;
+
+        if root.data.item_kind == 1 : Rectangle {
+            width: 16px;
+            Text {
+                text: "◎";
+                color: #8fa7c6;
+                font-size: 11px;
+                horizontal-alignment: center;
+                vertical-alignment: center;
+            }
+        }
+
+        if root.data.item_kind != 1 && root.data.leading != "" : Rectangle {
+            width: 28px;
+            Text {
+                text: root.data.leading;
+                color: #8fa7c6;
+                font-size: 11px;
+                horizontal-alignment: right;
+                vertical-alignment: center;
+            }
+        }
+
+        if root.data.item_kind != 1 && root.data.leading == "" : Rectangle {
+            width: 24px;
+            height: 24px;
+            border-radius: 2px;
+            border-width: 1px;
+            border-color: #3a3a3a;
+            background: #1f1f1f;
+
+            if root.data.has_album_art : Image {
+                width: parent.width;
+                height: parent.height;
+                source: root.data.album_art;
+                image-fit: contain;
+            }
+
+            if !root.data.has_album_art : Text {
+                text: root.data.item_kind == 0 ? "♪"
+                    : root.data.item_kind == 3 ? "♬"
+                    : root.data.item_kind == 4 ? "◷"
+                    : "▦";
+                color: #8fa7c6;
+                font-size: 11px;
+                horizontal-alignment: center;
+                vertical-alignment: center;
+            }
+        }
+
+        VerticalLayout {
+            spacing: 0px;
+            vertical-stretch: 1;
+            HorizontalLayout {
+                spacing: 4px;
+
+                if root.data.item_kind == 0 && root.data.is_playing : Text {
+                    text: "▶";
+                    color: #8fb8ff;
+                    font-size: 10px;
+                    vertical-alignment: center;
+                }
+
+                Text {
+                    text: root.data.primary;
+                    color: #ddd;
+                    font-size: 12px;
+                    overflow: elide;
+                    horizontal-alignment: left;
+                    vertical-alignment: center;
+                    horizontal-stretch: 1;
+                }
+            }
+            Text {
+                text: root.data.secondary;
+                color: #888;
+                font-size: 11px;
+                overflow: elide;
+                horizontal-alignment: left;
+                vertical-alignment: center;
+            }
+        }
+    }
+}
