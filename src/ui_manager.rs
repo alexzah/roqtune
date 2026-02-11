@@ -17,15 +17,14 @@ use std::{
 };
 
 use governor::state::NotKeyed;
-use id3::{Tag, TagLike};
 use log::{debug, info, warn};
 use slint::{Image, Model, ModelRc, StandardListViewItem, VecModel};
 use tokio::sync::broadcast::{Receiver, Sender};
 
 use crate::{
     config::{self, PlaylistColumnConfig},
-    protocol, AppWindow, LibraryRowData, MetadataEditorField as UiMetadataEditorField,
-    TrackRowData,
+    metadata_tags, protocol, AppWindow, LibraryRowData,
+    MetadataEditorField as UiMetadataEditorField, TrackRowData,
 };
 use governor::{Quota, RateLimiter};
 
@@ -639,24 +638,10 @@ impl UiManager {
             return Some(cache_path);
         }
 
-        // Try extracting from ID3
-        if let Ok(tag) = Tag::read_from_path(track_path) {
-            if let Some(pic) = tag.pictures().next() {
-                if let Ok(mut file) = std::fs::File::create(&cache_path) {
-                    if file.write_all(&pic.data).is_ok() {
-                        return Some(cache_path);
-                    }
-                }
-            }
-        }
-
-        // Try extracting from FLAC
-        if let Ok(tag) = metaflac::Tag::read_from_path(track_path) {
-            if let Some(pic) = tag.pictures().next() {
-                if let Ok(mut file) = std::fs::File::create(&cache_path) {
-                    if file.write_all(&pic.data).is_ok() {
-                        return Some(cache_path);
-                    }
+        if let Some(cover_bytes) = metadata_tags::read_embedded_cover_art(track_path) {
+            if let Ok(mut file) = std::fs::File::create(&cache_path) {
+                if file.write_all(&cover_bytes).is_ok() {
+                    return Some(cache_path);
                 }
             }
         }
@@ -3377,158 +3362,20 @@ impl UiManager {
         }
     }
 
-    fn read_track_metadata(&self, path: &PathBuf) -> TrackMetadata {
+    fn read_track_metadata(&self, path: &Path) -> TrackMetadata {
         debug!("Reading metadata for: {}", path.display());
 
-        // Try ID3 tags first
-        if let Ok(tag) = Tag::read_from_path(path) {
-            let title = tag.title().unwrap_or("");
-            let artist = tag.artist().unwrap_or("");
-            let album = tag.album().unwrap_or("");
-            let album_artist = tag.album_artist().unwrap_or("");
-            let date = tag
-                .date_recorded()
-                .map(|d| d.to_string())
-                .or_else(|| tag.year().map(|y| y.to_string()))
-                .unwrap_or_default();
-            let year = tag
-                .year()
-                .map(|y| y.to_string())
-                .or_else(|| {
-                    if date.len() >= 4 {
-                        Some(date[0..4].to_string())
-                    } else {
-                        None
-                    }
-                })
-                .unwrap_or_default();
-            let genre = tag.genre().unwrap_or("").to_string();
-            let track_number = tag.track().map(|n| n.to_string()).unwrap_or_default();
-
-            if !title.is_empty() || !artist.is_empty() || !album.is_empty() {
+        if let Some(parsed) = metadata_tags::read_common_track_metadata(path) {
+            if !parsed.title.is_empty() || !parsed.artist.is_empty() || !parsed.album.is_empty() {
                 return TrackMetadata {
-                    title: title.to_string(),
-                    artist: artist.to_string(),
-                    album: album.to_string(),
-                    album_artist: album_artist.to_string(),
-                    date,
-                    year,
-                    genre,
-                    track_number,
-                };
-            }
-        }
-
-        // Fall back to APE tags
-        if let Ok(ape_tag) = ape::read_from_path(path) {
-            let title: &str = ape_tag
-                .item("title")
-                .and_then(|i| i.try_into().ok())
-                .unwrap_or("");
-            let artist: &str = ape_tag
-                .item("artist")
-                .and_then(|i| i.try_into().ok())
-                .unwrap_or("");
-            let album: &str = ape_tag
-                .item("album")
-                .and_then(|i| i.try_into().ok())
-                .unwrap_or("");
-            let album_artist: &str = ape_tag
-                .item("album artist")
-                .or_else(|| ape_tag.item("albumartist"))
-                .and_then(|i| i.try_into().ok())
-                .unwrap_or("");
-            let date: &str = ape_tag
-                .item("year")
-                .and_then(|i| i.try_into().ok())
-                .unwrap_or("");
-            let year: &str = ape_tag
-                .item("year")
-                .or_else(|| ape_tag.item("date"))
-                .and_then(|i| i.try_into().ok())
-                .unwrap_or("");
-            let genre: &str = ape_tag
-                .item("genre")
-                .and_then(|i| i.try_into().ok())
-                .unwrap_or("");
-            let track_number: &str = ape_tag
-                .item("track")
-                .or_else(|| ape_tag.item("tracknumber"))
-                .and_then(|i| i.try_into().ok())
-                .unwrap_or("");
-
-            if !title.is_empty() || !artist.is_empty() || !album.is_empty() {
-                return TrackMetadata {
-                    title: title.to_string(),
-                    artist: artist.to_string(),
-                    album: album.to_string(),
-                    album_artist: album_artist.to_string(),
-                    date: date.to_string(),
-                    year: year.to_string(),
-                    genre: genre.to_string(),
-                    track_number: track_number.to_string(),
-                };
-            }
-        }
-
-        // Fall back to FLAC tags
-        if let Ok(flac_tag) = metaflac::Tag::read_from_path(path) {
-            let title = flac_tag
-                .get_vorbis("title")
-                .and_then(|mut i| i.next())
-                .unwrap_or("");
-            let artist = flac_tag
-                .get_vorbis("artist")
-                .and_then(|mut i| i.next())
-                .unwrap_or("");
-            let album = flac_tag
-                .get_vorbis("album")
-                .and_then(|mut i| i.next())
-                .unwrap_or("");
-            let album_artist = flac_tag
-                .get_vorbis("albumartist")
-                .and_then(|mut i| i.next())
-                .or_else(|| {
-                    flac_tag
-                        .get_vorbis("album artist")
-                        .and_then(|mut i| i.next())
-                })
-                .unwrap_or("");
-            let date = flac_tag
-                .get_vorbis("date")
-                .and_then(|mut i| i.next())
-                .unwrap_or("");
-            let year = flac_tag
-                .get_vorbis("year")
-                .and_then(|mut i| i.next())
-                .or_else(|| {
-                    if date.len() >= 4 {
-                        Some(&date[0..4])
-                    } else {
-                        None
-                    }
-                })
-                .unwrap_or("");
-            let genre = flac_tag
-                .get_vorbis("genre")
-                .and_then(|mut i| i.next())
-                .unwrap_or("");
-            let track_number = flac_tag
-                .get_vorbis("tracknumber")
-                .and_then(|mut i| i.next())
-                .or_else(|| flac_tag.get_vorbis("track").and_then(|mut i| i.next()))
-                .unwrap_or("");
-
-            if !title.is_empty() || !artist.is_empty() || !album.is_empty() {
-                return TrackMetadata {
-                    title: title.to_string(),
-                    artist: artist.to_string(),
-                    album: album.to_string(),
-                    album_artist: album_artist.to_string(),
-                    date: date.to_string(),
-                    year: year.to_string(),
-                    genre: genre.to_string(),
-                    track_number: track_number.to_string(),
+                    title: parsed.title,
+                    artist: parsed.artist,
+                    album: parsed.album,
+                    album_artist: parsed.album_artist,
+                    date: parsed.date,
+                    year: parsed.year,
+                    genre: parsed.genre,
+                    track_number: parsed.track_number,
                 };
             }
         }
@@ -4040,7 +3887,7 @@ impl UiManager {
                                 self.track_ids.push(track.id.clone());
                                 self.track_paths.push(track.path.clone());
                                 self.track_cover_art_paths.push(None);
-                                let metadata = self.read_track_metadata(&track.path);
+                                let metadata = self.read_track_metadata(track.path.as_path());
                                 self.track_metadata.push(metadata);
                             }
                             self.refresh_playlist_column_content_targets();
@@ -4054,7 +3901,7 @@ impl UiManager {
                             self.track_ids.push(id.clone());
                             self.track_paths.push(path.clone());
                             self.track_cover_art_paths.push(None);
-                            let tags = self.read_track_metadata(&path);
+                            let tags = self.read_track_metadata(path.as_path());
                             self.track_metadata.push(tags);
                             self.refresh_playlist_column_content_targets();
                             self.apply_playlist_column_layout();
@@ -4119,7 +3966,7 @@ impl UiManager {
                             let inserted_count = tracks.len();
                             let mut insert_cursor = insert_at.min(self.track_ids.len());
                             for track in tracks {
-                                let metadata = self.read_track_metadata(&track.path);
+                                let metadata = self.read_track_metadata(track.path.as_path());
                                 self.track_ids.insert(insert_cursor, track.id);
                                 self.track_paths.insert(insert_cursor, track.path);
                                 self.track_cover_art_paths.insert(insert_cursor, None);

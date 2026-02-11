@@ -6,6 +6,7 @@ mod layout;
 mod library_manager;
 mod media_controls_manager;
 mod metadata_manager;
+mod metadata_tags;
 mod playlist;
 mod playlist_manager;
 mod protocol;
