@@ -198,9 +198,14 @@ export component MetadataViewer inherits Rectangle {
     in property <string> display-album: "";
     in property <string> display-date: "";
     in property <string> display-genre: "";
+    private property <bool> has-metadata: root.display-title != ""
+        || root.display-artist != ""
+        || root.display-album != ""
+        || root.display-date != ""
+        || root.display-genre != "";
 
     background: transparent;
-    VerticalLayout {
+    if root.has-metadata : VerticalLayout {
         spacing: 4px;
         if root.display-title != "" : Text {
             text: root.display-title;
@@ -240,19 +245,76 @@ export component MetadataViewer inherits Rectangle {
             }
         }
     }
+
+    if !root.has-metadata : Rectangle {
+        width: parent.width;
+        height: parent.height;
+        background: transparent;
+
+        Text {
+            text: "No song selected";
+            color: #7c7c7c;
+            font-size: 14px;
+            font-weight: 600;
+            horizontal-alignment: center;
+            vertical-alignment: center;
+        }
+    }
 }
 
 export component AlbumArtViewer inherits Rectangle {
     in property <image> art-source;
+    in property <bool> has-art: false;
 
     vertical-stretch: 1;
     height: 100px;
     background: #202020;
     border-radius: 4px;
-    Image {
+
+    if root.has-art : Image {
         source: root.art-source;
         width: parent.width;
         height: parent.height;
         image-fit: contain;
+    }
+
+    if !root.has-art : Rectangle {
+        width: max(80px, min(parent.width - 24px, parent.height - 24px));
+        height: self.width;
+        x: (parent.width - self.width) / 2;
+        y: (parent.height - self.height) / 2;
+        border-radius: 6px;
+        border-width: 1px;
+        border-color: #393939;
+        background: #292929;
+
+        Rectangle {
+            x: 8px;
+            y: 8px;
+            width: parent.width - 16px;
+            height: parent.height - 16px;
+            border-radius: 4px;
+            border-width: 1px;
+            border-color: #454545;
+            background: #2f2f2f;
+
+            Text {
+                text: "♪";
+                y: parent.height / 2 - 14px;
+                color: #8d8d8d;
+                font-size: 24px;
+                horizontal-alignment: center;
+                vertical-alignment: center;
+            }
+
+            Text {
+                text: "No album art";
+                y: parent.height / 2 + 8px;
+                color: #767676;
+                font-size: 11px;
+                horizontal-alignment: center;
+                vertical-alignment: center;
+            }
+        }
     }
 }

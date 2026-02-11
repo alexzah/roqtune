@@ -717,6 +717,7 @@ export component AppWindow inherits Window {
                     width: parent.width - 20px;
                     height: parent.height - 20px;
                     art-source: root.current_cover_art;
+                    has-art: root.current_cover_art_available;
                 }
             }
 
@@ -2947,6 +2948,7 @@ export component AppWindow inherits Window {
 
     // Album art properties
     in-out property <image> current_cover_art;
+    in-out property <bool> current_cover_art_available: false;
 
     // Metadata display properties
     in-out property <string> display_title: "";
