@@ -185,12 +185,20 @@ pub enum LibraryMessage {
     RequestSongs,
     RequestArtists,
     RequestAlbums,
+    RequestGenres,
+    RequestDecades,
     RequestArtistDetail {
         artist: String,
     },
     RequestAlbumSongs {
         album: String,
         album_artist: String,
+    },
+    RequestGenreSongs {
+        genre: String,
+    },
+    RequestDecadeSongs {
+        decade: String,
     },
     ScanStarted,
     ScanCompleted {
@@ -200,6 +208,8 @@ pub enum LibraryMessage {
     SongsResult(Vec<LibrarySong>),
     ArtistsResult(Vec<LibraryArtist>),
     AlbumsResult(Vec<LibraryAlbum>),
+    GenresResult(Vec<LibraryGenre>),
+    DecadesResult(Vec<LibraryDecade>),
     ArtistDetailResult {
         artist: String,
         albums: Vec<LibraryAlbum>,
@@ -208,6 +218,14 @@ pub enum LibraryMessage {
     AlbumSongsResult {
         album: String,
         album_artist: String,
+        songs: Vec<LibrarySong>,
+    },
+    GenreSongsResult {
+        genre: String,
+        songs: Vec<LibrarySong>,
+    },
+    DecadeSongsResult {
+        decade: String,
         songs: Vec<LibrarySong>,
     },
     AddToPlaylistsCompleted {
@@ -223,6 +241,8 @@ pub enum LibrarySelectionSpec {
     Song { path: PathBuf },
     Artist { artist: String },
     Album { album: String, album_artist: String },
+    Genre { genre: String },
+    Decade { decade: String },
 }
 
 /// Persisted per-column width override for one playlist.
@@ -261,6 +281,7 @@ pub struct LibrarySong {
     pub artist: String,
     pub album: String,
     pub album_artist: String,
+    pub genre: String,
     pub year: String,
     pub track_number: String,
 }
@@ -279,6 +300,20 @@ pub struct LibraryAlbum {
 pub struct LibraryArtist {
     pub artist: String,
     pub album_count: u32,
+    pub song_count: u32,
+}
+
+/// One genre aggregate entry in the indexed music library.
+#[derive(Debug, Clone, serde::Deserialize, serde::Serialize)]
+pub struct LibraryGenre {
+    pub genre: String,
+    pub song_count: u32,
+}
+
+/// One decade aggregate entry in the indexed music library.
+#[derive(Debug, Clone, serde::Deserialize, serde::Serialize)]
+pub struct LibraryDecade {
+    pub decade: String,
     pub song_count: u32,
 }
 

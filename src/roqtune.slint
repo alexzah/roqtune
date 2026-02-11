@@ -186,7 +186,7 @@ export component AppWindow inherits Window {
     in-out property <length> control_cluster_menu_y: 0px;
     in-out property <int> sidebar_width_px: 220;
     in-out property <int> collection_mode: 0; // 0: Playlist, 1: Library
-    in-out property <int> library_root_index: 0; // 0: Songs, 1: Artists, 2: Albums
+    in-out property <int> library_root_index: 0; // 0: Songs, 1: Artists, 2: Albums, 3: Genres, 4: Decades
     in-out property <bool> library_can_go_back: false;
     in-out property <bool> library_scan_in_progress: false;
     in-out property <string> library_view_title: "Songs";
@@ -644,10 +644,26 @@ export component AppWindow inherits Window {
                             }
                         }
 
-                        ModeTabs {
-                            labels: ["Songs", "Artists", "Albums"];
-                            selected_index: root.library_root_index;
-                            selected(index) => { root.library_select_root(index); }
+                        VerticalLayout {
+                            spacing: 2px;
+                            for root-label[index] in ["Songs", "Artists", "Albums", "Genres", "Decades"] : Rectangle {
+                                height: 24px;
+                                border-radius: 2px;
+                                background: root.library_root_index == index ? #3d3d3d : library-root-ta.has-hover ? #333 : transparent;
+
+                                Text {
+                                    x: 8px;
+                                    text: root-label;
+                                    color: root.library_root_index == index ? #eee : #aaa;
+                                    font-size: 13px;
+                                    vertical-alignment: center;
+                                    horizontal-alignment: left;
+                                }
+
+                                library-root-ta := TouchArea {
+                                    clicked => { root.library_select_root(index); }
+                                }
+                            }
                         }
 
                         Rectangle { height: 1px; background: #333; }

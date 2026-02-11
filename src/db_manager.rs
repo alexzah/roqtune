@@ -1,8 +1,8 @@
 //! SQLite-backed persistence for playlists, library index data, and playlist-scoped UI metadata.
 
 use crate::protocol::{
-    LibraryAlbum, LibraryArtist, LibrarySong, PlaylistColumnWidthOverride, PlaylistInfo,
-    RestoredTrack,
+    LibraryAlbum, LibraryArtist, LibraryDecade, LibraryGenre, LibrarySong,
+    PlaylistColumnWidthOverride, PlaylistInfo, RestoredTrack,
 };
 use rusqlite::{params, Connection, OptionalExtension};
 use std::{collections::HashSet, path::PathBuf};
@@ -78,6 +78,7 @@ impl DbManager {
                 artist TEXT NOT NULL,
                 album TEXT NOT NULL,
                 album_artist TEXT NOT NULL,
+                genre TEXT NOT NULL,
                 year TEXT NOT NULL,
                 track_number TEXT NOT NULL,
                 sort_title TEXT NOT NULL,
@@ -151,6 +152,22 @@ impl DbManager {
         if !has_column_width_overrides {
             self.conn.execute(
                 "ALTER TABLE playlists ADD COLUMN column_width_overrides TEXT",
+                [],
+            )?;
+        }
+
+        let mut library_stmt = self.conn.prepare("PRAGMA table_info(library_tracks)")?;
+        let library_columns = library_stmt.query_map([], |row| row.get::<_, String>(1))?;
+        let mut has_genre = false;
+        for col in library_columns {
+            if col? == "genre" {
+                has_genre = true;
+                break;
+            }
+        }
+        if !has_genre {
+            self.conn.execute(
+                "ALTER TABLE library_tracks ADD COLUMN genre TEXT NOT NULL DEFAULT ''",
                 [],
             )?;
         }
@@ -405,6 +422,7 @@ impl DbManager {
         artist: &str,
         album: &str,
         album_artist: &str,
+        genre: &str,
         year: &str,
         track_number: &str,
         sort_title: &str,
@@ -414,15 +432,16 @@ impl DbManager {
     ) -> Result<(), rusqlite::Error> {
         self.conn.execute(
             "INSERT INTO library_tracks (
-                song_id, path, title, artist, album, album_artist, year, track_number,
+                song_id, path, title, artist, album, album_artist, genre, year, track_number,
                 sort_title, sort_artist, sort_album, modified_unix_ms
-            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)
             ON CONFLICT(path) DO UPDATE SET
                 song_id = excluded.song_id,
                 title = excluded.title,
                 artist = excluded.artist,
                 album = excluded.album,
                 album_artist = excluded.album_artist,
+                genre = excluded.genre,
                 year = excluded.year,
                 track_number = excluded.track_number,
                 sort_title = excluded.sort_title,
@@ -436,12 +455,13 @@ impl DbManager {
                 artist,
                 album,
                 album_artist,
+                genre,
                 year,
                 track_number,
                 sort_title,
                 sort_artist,
                 sort_album,
-                modified_unix_ms
+                modified_unix_ms,
             ],
         )?;
         Ok(())
@@ -476,7 +496,7 @@ impl DbManager {
     /// Loads all songs in library sorted alphabetically by title.
     pub fn get_library_songs(&self) -> Result<Vec<LibrarySong>, rusqlite::Error> {
         let mut stmt = self.conn.prepare(
-            "SELECT song_id, path, title, artist, album, album_artist, year, track_number
+            "SELECT song_id, path, title, artist, album, album_artist, genre, year, track_number
              FROM library_tracks
              ORDER BY sort_title ASC, path ASC",
         )?;
@@ -488,8 +508,9 @@ impl DbManager {
                 artist: row.get(3)?,
                 album: row.get(4)?,
                 album_artist: row.get(5)?,
-                year: row.get(6)?,
-                track_number: row.get(7)?,
+                genre: row.get(6)?,
+                year: row.get(7)?,
+                track_number: row.get(8)?,
             })
         })?;
         let mut songs = Vec::new();
@@ -544,6 +565,59 @@ impl DbManager {
         Ok(albums)
     }
 
+    /// Loads all unique genres with song counts.
+    pub fn get_library_genres(&self) -> Result<Vec<LibraryGenre>, rusqlite::Error> {
+        let mut stmt = self.conn.prepare(
+            "SELECT
+                CASE
+                    WHEN TRIM(genre) = '' THEN 'Unknown Genre'
+                    ELSE TRIM(genre)
+                END AS display_genre,
+                COUNT(*) AS song_count
+             FROM library_tracks
+             GROUP BY display_genre
+             ORDER BY LOWER(display_genre) ASC",
+        )?;
+        let iter = stmt.query_map([], |row| {
+            Ok(LibraryGenre {
+                genre: row.get(0)?,
+                song_count: row.get::<_, i64>(1)?.max(0) as u32,
+            })
+        })?;
+        let mut genres = Vec::new();
+        for item in iter {
+            genres.push(item?);
+        }
+        Ok(genres)
+    }
+
+    /// Loads all unique decades with song counts.
+    pub fn get_library_decades(&self) -> Result<Vec<LibraryDecade>, rusqlite::Error> {
+        let mut stmt = self.conn.prepare(
+            "SELECT
+                CASE
+                    WHEN SUBSTR(TRIM(year), 1, 3) GLOB '[0-9][0-9][0-9]'
+                        THEN SUBSTR(TRIM(year), 1, 3) || '0s'
+                    ELSE 'Unknown Decade'
+                END AS display_decade,
+                COUNT(*) AS song_count
+             FROM library_tracks
+             GROUP BY display_decade
+             ORDER BY display_decade ASC",
+        )?;
+        let iter = stmt.query_map([], |row| {
+            Ok(LibraryDecade {
+                decade: row.get(0)?,
+                song_count: row.get::<_, i64>(1)?.max(0) as u32,
+            })
+        })?;
+        let mut decades = Vec::new();
+        for item in iter {
+            decades.push(item?);
+        }
+        Ok(decades)
+    }
+
     /// Loads songs for one album+album-artist pair sorted by track number then title.
     pub fn get_library_album_songs(
         &self,
@@ -551,7 +625,7 @@ impl DbManager {
         album_artist: &str,
     ) -> Result<Vec<LibrarySong>, rusqlite::Error> {
         let mut stmt = self.conn.prepare(
-            "SELECT song_id, path, title, artist, album, album_artist, year, track_number
+            "SELECT song_id, path, title, artist, album, album_artist, genre, year, track_number
              FROM library_tracks
              WHERE album = ?1 AND album_artist = ?2
              ORDER BY CAST(track_number AS INTEGER) ASC, sort_title ASC, path ASC",
@@ -564,8 +638,9 @@ impl DbManager {
                 artist: row.get(3)?,
                 album: row.get(4)?,
                 album_artist: row.get(5)?,
-                year: row.get(6)?,
-                track_number: row.get(7)?,
+                genre: row.get(6)?,
+                year: row.get(7)?,
+                track_number: row.get(8)?,
             })
         })?;
         let mut songs = Vec::new();
@@ -601,7 +676,7 @@ impl DbManager {
         }
 
         let mut song_stmt = self.conn.prepare(
-            "SELECT song_id, path, title, artist, album, album_artist, year, track_number
+            "SELECT song_id, path, title, artist, album, album_artist, genre, year, track_number
              FROM library_tracks
              WHERE artist = ?1 OR album_artist = ?1
              ORDER BY sort_album ASC, CAST(track_number AS INTEGER) ASC, sort_title ASC, path ASC",
@@ -614,8 +689,9 @@ impl DbManager {
                 artist: row.get(3)?,
                 album: row.get(4)?,
                 album_artist: row.get(5)?,
-                year: row.get(6)?,
-                track_number: row.get(7)?,
+                genre: row.get(6)?,
+                year: row.get(7)?,
+                track_number: row.get(8)?,
             })
         })?;
         let mut songs = Vec::new();
@@ -623,6 +699,75 @@ impl DbManager {
             songs.push(item?);
         }
         Ok((albums, songs))
+    }
+
+    /// Loads songs for one normalized genre label.
+    pub fn get_library_genre_songs(
+        &self,
+        genre: &str,
+    ) -> Result<Vec<LibrarySong>, rusqlite::Error> {
+        let mut stmt = self.conn.prepare(
+            "SELECT song_id, path, title, artist, album, album_artist, genre, year, track_number
+             FROM library_tracks
+             WHERE CASE
+                 WHEN TRIM(genre) = '' THEN 'Unknown Genre'
+                 ELSE TRIM(genre)
+             END = ?1
+             ORDER BY sort_artist ASC, sort_album ASC, CAST(track_number AS INTEGER) ASC, sort_title ASC, path ASC",
+        )?;
+        let iter = stmt.query_map(params![genre], |row| {
+            Ok(LibrarySong {
+                id: row.get(0)?,
+                path: PathBuf::from(row.get::<_, String>(1)?),
+                title: row.get(2)?,
+                artist: row.get(3)?,
+                album: row.get(4)?,
+                album_artist: row.get(5)?,
+                genre: row.get(6)?,
+                year: row.get(7)?,
+                track_number: row.get(8)?,
+            })
+        })?;
+        let mut songs = Vec::new();
+        for item in iter {
+            songs.push(item?);
+        }
+        Ok(songs)
+    }
+
+    /// Loads songs for one normalized decade label.
+    pub fn get_library_decade_songs(
+        &self,
+        decade: &str,
+    ) -> Result<Vec<LibrarySong>, rusqlite::Error> {
+        let mut stmt = self.conn.prepare(
+            "SELECT song_id, path, title, artist, album, album_artist, genre, year, track_number
+             FROM library_tracks
+             WHERE CASE
+                 WHEN SUBSTR(TRIM(year), 1, 3) GLOB '[0-9][0-9][0-9]'
+                     THEN SUBSTR(TRIM(year), 1, 3) || '0s'
+                 ELSE 'Unknown Decade'
+             END = ?1
+             ORDER BY year ASC, sort_artist ASC, sort_album ASC, CAST(track_number AS INTEGER) ASC, sort_title ASC, path ASC",
+        )?;
+        let iter = stmt.query_map(params![decade], |row| {
+            Ok(LibrarySong {
+                id: row.get(0)?,
+                path: PathBuf::from(row.get::<_, String>(1)?),
+                title: row.get(2)?,
+                artist: row.get(3)?,
+                album: row.get(4)?,
+                album_artist: row.get(5)?,
+                genre: row.get(6)?,
+                year: row.get(7)?,
+                track_number: row.get(8)?,
+            })
+        })?;
+        let mut songs = Vec::new();
+        for item in iter {
+            songs.push(item?);
+        }
+        Ok(songs)
     }
 }
 

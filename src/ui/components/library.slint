@@ -51,7 +51,10 @@ export component LibraryRow inherits Rectangle {
             }
 
             if !root.data.has_album_art : Text {
-                text: root.data.item_kind == 0 ? "♪" : "▦";
+                text: root.data.item_kind == 0 ? "♪"
+                    : root.data.item_kind == 3 ? "♬"
+                    : root.data.item_kind == 4 ? "◷"
+                    : "▦";
                 color: #8fa7c6;
                 font-size: 11px;
                 horizontal-alignment: center;

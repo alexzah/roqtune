@@ -22,6 +22,7 @@ struct LibraryTrackMetadata {
     artist: String,
     album: String,
     album_artist: String,
+    genre: String,
     year: String,
     track_number: String,
 }
@@ -147,6 +148,7 @@ impl LibraryManager {
             artist: "Unknown Artist".to_string(),
             album: "Unknown Album".to_string(),
             album_artist: String::new(),
+            genre: String::new(),
             year: String::new(),
             track_number: String::new(),
         };
@@ -164,6 +166,9 @@ impl LibraryManager {
             if let Some(album_artist) = tag.album_artist().filter(|value| !value.trim().is_empty())
             {
                 metadata.album_artist = album_artist.to_string();
+            }
+            if let Some(genre) = tag.genre().filter(|value| !value.trim().is_empty()) {
+                metadata.genre = genre.to_string();
             }
             if let Some(year) = tag.year() {
                 metadata.year = year.to_string();
@@ -227,6 +232,14 @@ impl LibraryManager {
                     metadata.year = year.to_string();
                 }
             }
+            if let Some(genre) = ape_tag.item("genre").and_then(|item| {
+                let value: Result<&str, _> = item.try_into();
+                value.ok()
+            }) {
+                if !genre.trim().is_empty() {
+                    metadata.genre = genre.to_string();
+                }
+            }
             if let Some(track_number) = ape_tag
                 .item("track")
                 .or_else(|| ape_tag.item("tracknumber"))
@@ -281,6 +294,11 @@ impl LibraryManager {
             {
                 if !year.trim().is_empty() {
                     metadata.year = year.to_string();
+                }
+            }
+            if let Some(genre) = flac_tag.get_vorbis("genre").and_then(|mut it| it.next()) {
+                if !genre.trim().is_empty() {
+                    metadata.genre = genre.to_string();
                 }
             }
             if let Some(track_number) = flac_tag
@@ -355,6 +373,7 @@ impl LibraryManager {
                     &metadata.artist,
                     &metadata.album,
                     &metadata.album_artist,
+                    &metadata.genre,
                     &metadata.year,
                     &metadata.track_number,
                     &sort_title,
@@ -425,6 +444,28 @@ impl LibraryManager {
         }
     }
 
+    fn publish_genres(&self) {
+        match self.db_manager.get_library_genres() {
+            Ok(genres) => {
+                let _ = self
+                    .bus_producer
+                    .send(Message::Library(LibraryMessage::GenresResult(genres)));
+            }
+            Err(err) => self.send_scan_failed(format!("Failed to load genres: {}", err)),
+        }
+    }
+
+    fn publish_decades(&self) {
+        match self.db_manager.get_library_decades() {
+            Ok(decades) => {
+                let _ = self
+                    .bus_producer
+                    .send(Message::Library(LibraryMessage::DecadesResult(decades)));
+            }
+            Err(err) => self.send_scan_failed(format!("Failed to load decades: {}", err)),
+        }
+    }
+
     fn publish_artist_detail(&self, artist: String) {
         match self.db_manager.get_library_artist_detail(&artist) {
             Ok((albums, songs)) => {
@@ -455,6 +496,34 @@ impl LibraryManager {
                         }));
             }
             Err(err) => self.send_scan_failed(format!("Failed to load album songs: {}", err)),
+        }
+    }
+
+    fn publish_genre_songs(&self, genre: String) {
+        match self.db_manager.get_library_genre_songs(&genre) {
+            Ok(songs) => {
+                let _ =
+                    self.bus_producer
+                        .send(Message::Library(LibraryMessage::GenreSongsResult {
+                            genre,
+                            songs,
+                        }));
+            }
+            Err(err) => self.send_scan_failed(format!("Failed to load genre songs: {}", err)),
+        }
+    }
+
+    fn publish_decade_songs(&self, decade: String) {
+        match self.db_manager.get_library_decade_songs(&decade) {
+            Ok(songs) => {
+                let _ =
+                    self.bus_producer
+                        .send(Message::Library(LibraryMessage::DecadeSongsResult {
+                            decade,
+                            songs,
+                        }));
+            }
+            Err(err) => self.send_scan_failed(format!("Failed to load decade songs: {}", err)),
         }
     }
 
@@ -498,6 +567,30 @@ impl LibraryManager {
                                 album, album_artist, err
                             )
                         })?;
+                    for song in songs {
+                        let dedupe_key = song.path.to_string_lossy().to_string();
+                        if seen_paths.insert(dedupe_key) {
+                            resolved_paths.push(song.path);
+                        }
+                    }
+                }
+                protocol::LibrarySelectionSpec::Genre { genre } => {
+                    let songs = self
+                        .db_manager
+                        .get_library_genre_songs(&genre)
+                        .map_err(|err| format!("Failed to resolve genre '{}': {}", genre, err))?;
+                    for song in songs {
+                        let dedupe_key = song.path.to_string_lossy().to_string();
+                        if seen_paths.insert(dedupe_key) {
+                            resolved_paths.push(song.path);
+                        }
+                    }
+                }
+                protocol::LibrarySelectionSpec::Decade { decade } => {
+                    let songs = self
+                        .db_manager
+                        .get_library_decade_songs(&decade)
+                        .map_err(|err| format!("Failed to resolve decade '{}': {}", decade, err))?;
                     for song in songs {
                         let dedupe_key = song.path.to_string_lossy().to_string();
                         if seen_paths.insert(dedupe_key) {
@@ -586,6 +679,12 @@ impl LibraryManager {
                     Message::Library(LibraryMessage::RequestAlbums) => {
                         self.publish_albums();
                     }
+                    Message::Library(LibraryMessage::RequestGenres) => {
+                        self.publish_genres();
+                    }
+                    Message::Library(LibraryMessage::RequestDecades) => {
+                        self.publish_decades();
+                    }
                     Message::Library(LibraryMessage::RequestArtistDetail { artist }) => {
                         self.publish_artist_detail(artist);
                     }
@@ -594,6 +693,12 @@ impl LibraryManager {
                         album_artist,
                     }) => {
                         self.publish_album_songs(album, album_artist);
+                    }
+                    Message::Library(LibraryMessage::RequestGenreSongs { genre }) => {
+                        self.publish_genre_songs(genre);
+                    }
+                    Message::Library(LibraryMessage::RequestDecadeSongs { decade }) => {
+                        self.publish_decade_songs(decade);
                     }
                     Message::Library(LibraryMessage::AddSelectionToPlaylists {
                         selections,

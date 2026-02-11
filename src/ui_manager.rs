@@ -136,8 +136,12 @@ enum LibraryViewState {
     SongsRoot,
     ArtistsRoot,
     AlbumsRoot,
+    GenresRoot,
+    DecadesRoot,
     ArtistDetail { artist: String },
     AlbumDetail { album: String, album_artist: String },
+    GenreDetail { genre: String },
+    DecadeDetail { decade: String },
 }
 
 #[derive(Clone, Debug)]
@@ -145,6 +149,8 @@ enum LibraryEntry {
     Song(protocol::LibrarySong),
     Artist(protocol::LibraryArtist),
     Album(protocol::LibraryAlbum),
+    Genre(protocol::LibraryGenre),
+    Decade(protocol::LibraryDecade),
 }
 
 #[derive(Clone, Debug)]
@@ -167,6 +173,8 @@ const COLLECTION_MODE_LIBRARY: i32 = 1;
 const LIBRARY_ITEM_KIND_SONG: i32 = 0;
 const LIBRARY_ITEM_KIND_ARTIST: i32 = 1;
 const LIBRARY_ITEM_KIND_ALBUM: i32 = 2;
+const LIBRARY_ITEM_KIND_GENRE: i32 = 3;
+const LIBRARY_ITEM_KIND_DECADE: i32 = 4;
 const LIBRARY_DOUBLE_CLICK_THRESHOLD_MS: u64 = 350;
 
 thread_local! {
@@ -1664,8 +1672,12 @@ impl UiManager {
             Some(LibraryViewState::SongsRoot) => 0,
             Some(LibraryViewState::ArtistsRoot) => 1,
             Some(LibraryViewState::AlbumsRoot) => 2,
+            Some(LibraryViewState::GenresRoot) => 3,
+            Some(LibraryViewState::DecadesRoot) => 4,
             Some(LibraryViewState::ArtistDetail { .. }) => 1,
             Some(LibraryViewState::AlbumDetail { .. }) => 2,
+            Some(LibraryViewState::GenreDetail { .. }) => 3,
+            Some(LibraryViewState::DecadeDetail { .. }) => 4,
             None => 0,
         }
     }
@@ -1675,6 +1687,8 @@ impl UiManager {
             LibraryViewState::SongsRoot => ("Songs".to_string(), "All songs".to_string()),
             LibraryViewState::ArtistsRoot => ("Artists".to_string(), "All artists".to_string()),
             LibraryViewState::AlbumsRoot => ("Albums".to_string(), "All albums".to_string()),
+            LibraryViewState::GenresRoot => ("Genres".to_string(), "All genres".to_string()),
+            LibraryViewState::DecadesRoot => ("Decades".to_string(), "All decades".to_string()),
             LibraryViewState::ArtistDetail { artist } => {
                 (artist.clone(), "Albums and songs from artist".to_string())
             }
@@ -1682,6 +1696,12 @@ impl UiManager {
                 album,
                 album_artist,
             } => (album.clone(), format!("by {}", album_artist)),
+            LibraryViewState::GenreDetail { genre } => {
+                (genre.clone(), "Songs in genre".to_string())
+            }
+            LibraryViewState::DecadeDetail { decade } => {
+                (decade.clone(), "Songs in decade".to_string())
+            }
         }
     }
 
@@ -1853,6 +1873,18 @@ impl UiManager {
                         album_artist: album.album_artist.clone(),
                     },
                 ),
+                LibraryEntry::Genre(genre) => (
+                    format!("genre:{}", genre.genre),
+                    protocol::LibrarySelectionSpec::Genre {
+                        genre: genre.genre.clone(),
+                    },
+                ),
+                LibraryEntry::Decade(decade) => (
+                    format!("decade:{}", decade.decade),
+                    protocol::LibrarySelectionSpec::Decade {
+                        decade: decade.decade.clone(),
+                    },
+                ),
             };
             if seen.insert(key) {
                 specs.push(spec);
@@ -1984,6 +2016,24 @@ impl UiManager {
                     .representative_track_path
                     .as_ref()
                     .and_then(|track_path| self.resolve_library_cover_art_path(track_path)),
+                is_playing: false,
+                selected,
+            },
+            LibraryEntry::Genre(genre) => LibraryRowPresentation {
+                leading: String::new(),
+                primary: genre.genre.clone(),
+                secondary: format!("{} songs", genre.song_count),
+                item_kind: LIBRARY_ITEM_KIND_GENRE,
+                cover_art_path: None,
+                is_playing: false,
+                selected,
+            },
+            LibraryEntry::Decade(decade) => LibraryRowPresentation {
+                leading: String::new(),
+                primary: decade.decade.clone(),
+                secondary: format!("{} songs", decade.song_count),
+                item_kind: LIBRARY_ITEM_KIND_DECADE,
+                cover_art_path: None,
                 is_playing: false,
                 selected,
             },
@@ -2122,6 +2172,8 @@ impl UiManager {
         let root = match section {
             1 => LibraryViewState::ArtistsRoot,
             2 => LibraryViewState::AlbumsRoot,
+            3 => LibraryViewState::GenresRoot,
+            4 => LibraryViewState::DecadesRoot,
             _ => LibraryViewState::SongsRoot,
         };
         self.library_view_stack.clear();
@@ -2152,6 +2204,8 @@ impl UiManager {
             LibraryViewState::SongsRoot => protocol::LibraryMessage::RequestSongs,
             LibraryViewState::ArtistsRoot => protocol::LibraryMessage::RequestArtists,
             LibraryViewState::AlbumsRoot => protocol::LibraryMessage::RequestAlbums,
+            LibraryViewState::GenresRoot => protocol::LibraryMessage::RequestGenres,
+            LibraryViewState::DecadesRoot => protocol::LibraryMessage::RequestDecades,
             LibraryViewState::ArtistDetail { artist } => {
                 protocol::LibraryMessage::RequestArtistDetail { artist }
             }
@@ -2162,6 +2216,12 @@ impl UiManager {
                 album,
                 album_artist,
             },
+            LibraryViewState::GenreDetail { genre } => {
+                protocol::LibraryMessage::RequestGenreSongs { genre }
+            }
+            LibraryViewState::DecadeDetail { decade } => {
+                protocol::LibraryMessage::RequestDecadeSongs { decade }
+            }
         };
         let _ = self.bus_sender.send(protocol::Message::Library(message));
     }
@@ -2233,6 +2293,28 @@ impl UiManager {
                     album: album.album,
                     album_artist: album.album_artist,
                 });
+                self.reset_library_selection();
+                self.reset_library_primary_click_tracking();
+                self.library_add_to_dialog_visible = false;
+                self.sync_library_add_to_playlist_ui();
+                self.request_library_view_data();
+                self.sync_library_ui();
+            }
+            LibraryEntry::Genre(genre) => {
+                self.library_view_stack
+                    .push(LibraryViewState::GenreDetail { genre: genre.genre });
+                self.reset_library_selection();
+                self.reset_library_primary_click_tracking();
+                self.library_add_to_dialog_visible = false;
+                self.sync_library_add_to_playlist_ui();
+                self.request_library_view_data();
+                self.sync_library_ui();
+            }
+            LibraryEntry::Decade(decade) => {
+                self.library_view_stack
+                    .push(LibraryViewState::DecadeDetail {
+                        decade: decade.decade,
+                    });
                 self.reset_library_selection();
                 self.reset_library_primary_click_tracking();
                 self.library_add_to_dialog_visible = false;
@@ -2637,6 +2719,26 @@ impl UiManager {
                                     );
                                 }
                             }
+                            protocol::LibraryMessage::GenresResult(genres) => {
+                                if matches!(
+                                    self.current_library_view(),
+                                    LibraryViewState::GenresRoot
+                                ) {
+                                    self.set_library_entries(
+                                        genres.into_iter().map(LibraryEntry::Genre).collect(),
+                                    );
+                                }
+                            }
+                            protocol::LibraryMessage::DecadesResult(decades) => {
+                                if matches!(
+                                    self.current_library_view(),
+                                    LibraryViewState::DecadesRoot
+                                ) {
+                                    self.set_library_entries(
+                                        decades.into_iter().map(LibraryEntry::Decade).collect(),
+                                    );
+                                }
+                            }
                             protocol::LibraryMessage::ArtistDetailResult {
                                 artist,
                                 albums,
@@ -2673,6 +2775,30 @@ impl UiManager {
                                     }
                                 }
                             }
+                            protocol::LibraryMessage::GenreSongsResult { genre, songs } => {
+                                if let LibraryViewState::GenreDetail {
+                                    genre: requested_genre,
+                                } = self.current_library_view()
+                                {
+                                    if requested_genre == genre {
+                                        self.set_library_entries(
+                                            songs.into_iter().map(LibraryEntry::Song).collect(),
+                                        );
+                                    }
+                                }
+                            }
+                            protocol::LibraryMessage::DecadeSongsResult { decade, songs } => {
+                                if let LibraryViewState::DecadeDetail {
+                                    decade: requested_decade,
+                                } = self.current_library_view()
+                                {
+                                    if requested_decade == decade {
+                                        self.set_library_entries(
+                                            songs.into_iter().map(LibraryEntry::Song).collect(),
+                                        );
+                                    }
+                                }
+                            }
                             protocol::LibraryMessage::AddToPlaylistsCompleted {
                                 playlist_count,
                                 track_count,
@@ -2692,8 +2818,12 @@ impl UiManager {
                             | protocol::LibraryMessage::RequestSongs
                             | protocol::LibraryMessage::RequestArtists
                             | protocol::LibraryMessage::RequestAlbums
+                            | protocol::LibraryMessage::RequestGenres
+                            | protocol::LibraryMessage::RequestDecades
                             | protocol::LibraryMessage::RequestArtistDetail { .. }
                             | protocol::LibraryMessage::RequestAlbumSongs { .. }
+                            | protocol::LibraryMessage::RequestGenreSongs { .. }
+                            | protocol::LibraryMessage::RequestDecadeSongs { .. }
                             | protocol::LibraryMessage::AddSelectionToPlaylists { .. } => {}
                         },
                         protocol::Message::Playlist(
