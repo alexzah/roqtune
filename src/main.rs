@@ -4776,6 +4776,12 @@ mod tests {
             "Library search input should use the edited(text) callback form"
         );
         assert!(
+            slint_ui.contains("library-list-row-ta := TouchArea {")
+                && slint_ui.contains("double-clicked => {")
+                && slint_ui.contains("root.library_item_activated(row);"),
+            "Library rows should activate detail/playback via native double-click handler"
+        );
+        assert!(
             slint_ui.contains("icon-text: \"⌕\";")
                 && slint_ui.contains("root.open_global_library_search();")
                 && slint_ui.contains("icon-text: \"↻\";")

@@ -90,8 +90,6 @@ pub struct UiManager {
     library_view_indices: Vec<usize>,
     library_selected_indices: Vec<usize>,
     library_selection_anchor: Option<usize>,
-    library_last_primary_click_key: Option<String>,
-    library_last_primary_click_at: Option<Instant>,
     library_cover_art_paths: HashMap<PathBuf, Option<PathBuf>>,
     library_search_query: String,
     library_search_visible: bool,
@@ -182,7 +180,6 @@ const LIBRARY_ITEM_KIND_ARTIST: i32 = 1;
 const LIBRARY_ITEM_KIND_ALBUM: i32 = 2;
 const LIBRARY_ITEM_KIND_GENRE: i32 = 3;
 const LIBRARY_ITEM_KIND_DECADE: i32 = 4;
-const LIBRARY_DOUBLE_CLICK_THRESHOLD_MS: u64 = 350;
 
 thread_local! {
     static TRACK_ROW_COVER_ART_IMAGE_CACHE: RefCell<HashMap<PathBuf, Image>> =
@@ -498,8 +495,6 @@ impl UiManager {
             library_view_indices: Vec::new(),
             library_selected_indices: Vec::new(),
             library_selection_anchor: None,
-            library_last_primary_click_key: None,
-            library_last_primary_click_at: None,
             library_cover_art_paths: HashMap::new(),
             library_search_query: String::new(),
             library_search_visible: false,
@@ -1849,7 +1844,6 @@ impl UiManager {
         self.library_search_visible = false;
         if !self.library_search_query.is_empty() {
             self.library_search_query.clear();
-            self.reset_library_primary_click_tracking();
             self.sync_library_ui();
         } else {
             self.sync_library_search_state_to_ui();
@@ -1857,9 +1851,6 @@ impl UiManager {
     }
 
     fn set_library_search_query(&mut self, query: String) {
-        if self.library_search_query != query {
-            self.reset_library_primary_click_tracking();
-        }
         self.library_search_visible = true;
         self.library_search_query = query;
         self.sync_library_ui();
@@ -1870,7 +1861,6 @@ impl UiManager {
         if !matches!(self.current_library_view(), LibraryViewState::GlobalSearch) {
             self.library_view_stack.push(LibraryViewState::GlobalSearch);
             self.reset_library_selection();
-            self.reset_library_primary_click_tracking();
             self.library_add_to_dialog_visible = false;
             self.sync_library_add_to_playlist_ui();
         }
@@ -2213,60 +2203,51 @@ impl UiManager {
         self.library_selection_anchor = None;
     }
 
-    fn reset_library_primary_click_tracking(&mut self) {
-        self.library_last_primary_click_key = None;
-        self.library_last_primary_click_at = None;
-    }
-
-    fn library_activation_key_for_entry(entry: &LibraryEntry) -> String {
-        match entry {
-            LibraryEntry::Song(song) => format!("song:{}", song.path.to_string_lossy()),
-            LibraryEntry::Artist(artist) => format!("artist:{}", artist.artist),
-            LibraryEntry::Album(album) => {
-                format!("album:{}\u{001f}{}", album.album, album.album_artist)
+    fn update_or_replace_library_model(ui: &AppWindow, rows: Vec<LibraryRowData>) {
+        let current_model = ui.get_library_model();
+        if let Some(vec_model) = current_model
+            .as_any()
+            .downcast_ref::<VecModel<LibraryRowData>>()
+        {
+            if vec_model.row_count() == rows.len() {
+                for (row_index, row_data) in rows.into_iter().enumerate() {
+                    vec_model.set_row_data(row_index, row_data);
+                }
+            } else {
+                vec_model.set_vec(rows);
             }
-            LibraryEntry::Genre(genre) => format!("genre:{}", genre.genre),
-            LibraryEntry::Decade(decade) => format!("decade:{}", decade.decade),
+            return;
         }
+        ui.set_library_model(ModelRc::from(Rc::new(VecModel::from(rows))));
     }
 
-    fn should_activate_library_item_on_click(
-        &mut self,
-        source_index: usize,
-        ctrl: bool,
-        shift: bool,
-        context_click: bool,
-    ) -> bool {
-        if ctrl || shift || context_click {
-            self.reset_library_primary_click_tracking();
-            return false;
-        }
+    fn sync_library_selection_to_ui(&self) {
+        let view_indices = self.library_view_indices.clone();
+        let selected_set: HashSet<usize> = self.library_selected_indices.iter().copied().collect();
+        let _ = self.ui.upgrade_in_event_loop(move |ui| {
+            let current_model = ui.get_library_model();
+            let Some(vec_model) = current_model
+                .as_any()
+                .downcast_ref::<VecModel<LibraryRowData>>()
+            else {
+                return;
+            };
+            if vec_model.row_count() != view_indices.len() {
+                return;
+            }
 
-        let Some(entry) = self.library_entries.get(source_index) else {
-            self.reset_library_primary_click_tracking();
-            return false;
-        };
-        let click_key = Self::library_activation_key_for_entry(entry);
-        let now = Instant::now();
-        let threshold = Duration::from_millis(LIBRARY_DOUBLE_CLICK_THRESHOLD_MS);
-        let is_double_click = self
-            .library_last_primary_click_key
-            .as_ref()
-            .map(|previous| previous == &click_key)
-            .unwrap_or(false)
-            && self
-                .library_last_primary_click_at
-                .map(|last| now.saturating_duration_since(last) <= threshold)
-                .unwrap_or(false);
-
-        if is_double_click {
-            self.reset_library_primary_click_tracking();
-            true
-        } else {
-            self.library_last_primary_click_key = Some(click_key);
-            self.library_last_primary_click_at = Some(now);
-            false
-        }
+            for (row_index, source_index) in view_indices.iter().enumerate() {
+                let Some(mut row_data) = vec_model.row_data(row_index) else {
+                    continue;
+                };
+                let selected = selected_set.contains(source_index);
+                if row_data.selected == selected {
+                    continue;
+                }
+                row_data.selected = selected;
+                vec_model.set_row_data(row_index, row_data);
+            }
+        });
     }
 
     fn sync_library_add_to_playlist_ui(&self) {
@@ -2303,8 +2284,6 @@ impl UiManager {
         let Some(source_index) = self.map_library_view_to_source_index(index) else {
             return;
         };
-        let activate_item =
-            self.should_activate_library_item_on_click(source_index, ctrl, shift, context_click);
 
         if context_click {
             if !self.library_selected_indices.contains(&source_index) {
@@ -2357,14 +2336,7 @@ impl UiManager {
             playing_track_metadata.as_ref(),
         );
 
-        if activate_item {
-            self.sync_library_ui();
-            self.sync_library_add_to_playlist_ui();
-            self.activate_library_item(source_index);
-            return;
-        }
-
-        self.sync_library_ui();
+        self.sync_library_selection_to_ui();
         self.sync_library_add_to_playlist_ui();
     }
 
@@ -2739,7 +2711,7 @@ impl UiManager {
             ui.set_library_album_header_has_art(album_header_has_art);
             ui.set_library_album_header_art(album_header_art);
             ui.set_library_album_header_meta(album_header_meta.into());
-            ui.set_library_model(ModelRc::from(Rc::new(VecModel::from(rows))));
+            Self::update_or_replace_library_model(&ui, rows);
         });
         self.sync_library_search_state_to_ui();
     }
@@ -2780,7 +2752,6 @@ impl UiManager {
         self.library_view_stack.clear();
         self.library_view_stack.push(root);
         self.reset_library_selection();
-        self.reset_library_primary_click_tracking();
         self.library_add_to_dialog_visible = false;
         self.sync_library_add_to_playlist_ui();
         let playing_track_path = self.current_playing_track_path.clone();
@@ -2799,7 +2770,6 @@ impl UiManager {
         }
         self.library_view_stack.pop();
         self.reset_library_selection();
-        self.reset_library_primary_click_tracking();
         self.library_add_to_dialog_visible = false;
         self.sync_library_add_to_playlist_ui();
         let playing_track_path = self.current_playing_track_path.clone();
@@ -2843,7 +2813,6 @@ impl UiManager {
     fn set_library_entries(&mut self, entries: Vec<LibraryEntry>) {
         self.library_entries = entries;
         self.reset_library_selection();
-        self.reset_library_primary_click_tracking();
         self.library_add_to_dialog_visible = false;
         self.sync_library_add_to_playlist_ui();
         let playing_track_path = self.current_playing_track_path.clone();
@@ -2902,7 +2871,6 @@ impl UiManager {
                         artist: artist.artist,
                     });
                 self.reset_library_selection();
-                self.reset_library_primary_click_tracking();
                 self.library_add_to_dialog_visible = false;
                 self.sync_library_add_to_playlist_ui();
                 self.request_library_view_data();
@@ -2914,7 +2882,6 @@ impl UiManager {
                     album_artist: album.album_artist,
                 });
                 self.reset_library_selection();
-                self.reset_library_primary_click_tracking();
                 self.library_add_to_dialog_visible = false;
                 self.sync_library_add_to_playlist_ui();
                 self.request_library_view_data();
@@ -2924,7 +2891,6 @@ impl UiManager {
                 self.library_view_stack
                     .push(LibraryViewState::GenreDetail { genre: genre.genre });
                 self.reset_library_selection();
-                self.reset_library_primary_click_tracking();
                 self.library_add_to_dialog_visible = false;
                 self.sync_library_add_to_playlist_ui();
                 self.request_library_view_data();
@@ -2936,7 +2902,6 @@ impl UiManager {
                         decade: decade.decade,
                     });
                 self.reset_library_selection();
-                self.reset_library_primary_click_tracking();
                 self.library_add_to_dialog_visible = false;
                 self.sync_library_add_to_playlist_ui();
                 self.request_library_view_data();

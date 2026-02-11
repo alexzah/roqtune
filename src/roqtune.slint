@@ -1422,6 +1422,12 @@ export component AppWindow inherits Window {
                                                 root.show_library_context_menu = true;
                                             }
                                         }
+                                        double-clicked => {
+                                            root.show_library_context_menu = false;
+                                            root.sidebar_has_focus = false;
+                                            key-handler.focus();
+                                            root.library_item_activated(row);
+                                        }
                                     }
                                 }
                             }
