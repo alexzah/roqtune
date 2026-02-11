@@ -4,6 +4,7 @@ mod config;
 mod db_manager;
 mod layout;
 mod library_manager;
+mod media_controls_manager;
 mod playlist;
 mod playlist_manager;
 mod protocol;
@@ -33,6 +34,7 @@ use layout::{
 };
 use library_manager::LibraryManager;
 use log::{debug, info, warn};
+use media_controls_manager::MediaControlsManager;
 use playlist::Playlist;
 use playlist_manager::PlaylistManager;
 use protocol::{ConfigMessage, Message, PlaybackMessage, PlaylistMessage};
@@ -3977,6 +3979,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             db_manager,
         );
         library_manager.run();
+    });
+
+    // Setup media controls manager
+    let media_controls_bus_receiver = bus_sender.subscribe();
+    let media_controls_bus_sender = bus_sender.clone();
+    thread::spawn(move || {
+        let mut media_controls_manager =
+            MediaControlsManager::new(media_controls_bus_receiver, media_controls_bus_sender);
+        media_controls_manager.run();
     });
 
     // Setup UI manager
