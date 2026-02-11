@@ -1028,6 +1028,13 @@ fn workspace_size_snapshot(workspace_size: &Arc<Mutex<(u32, u32)>>) -> (u32, u32
     (width.max(1), height.max(1))
 }
 
+fn quantize_splitter_ratio_to_precision(ratio: f32) -> f32 {
+    if !ratio.is_finite() {
+        return ratio;
+    }
+    (ratio * 100.0).round() / 100.0
+}
+
 fn layout_panel_options() -> Vec<slint::SharedString> {
     vec![
         "None".into(),
@@ -3247,13 +3254,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     ui.on_commit_layout_splitter_ratio(move |split_id, ratio| {
         let (workspace_width_px, workspace_height_px) =
             workspace_size_snapshot(&layout_workspace_size_clone);
+        let quantized_ratio = quantize_splitter_ratio_to_precision(ratio);
         let previous = {
             let state = config_state_clone
                 .lock()
                 .expect("config state lock poisoned");
             state.clone()
         };
-        let Some(updated_layout) = set_split_ratio(&previous.ui.layout, &split_id, ratio) else {
+        let Some(updated_layout) = set_split_ratio(&previous.ui.layout, &split_id, quantized_ratio)
+        else {
             return;
         };
         let next = with_updated_layout(&previous, updated_layout);
@@ -4221,10 +4230,10 @@ mod tests {
         default_album_art_column_width_bounds, default_button_cluster_actions_by_index,
         is_album_art_builtin_column, is_supported_audio_file, playlist_column_key_at_visible_index,
         playlist_column_width_bounds, playlist_column_width_bounds_with_album_art,
-        reorder_visible_playlist_columns, resolve_playlist_header_column_from_x,
-        resolve_playlist_header_divider_from_x, resolve_playlist_header_gap_from_x,
-        resolve_runtime_config, sanitize_config, sanitize_playlist_columns,
-        select_output_option_index_u16, select_output_option_index_u32,
+        quantize_splitter_ratio_to_precision, reorder_visible_playlist_columns,
+        resolve_playlist_header_column_from_x, resolve_playlist_header_divider_from_x,
+        resolve_playlist_header_gap_from_x, resolve_runtime_config, sanitize_config,
+        sanitize_playlist_columns, select_output_option_index_u16, select_output_option_index_u32,
         serialize_config_with_preserved_comments, should_apply_custom_column_delete,
         sidebar_width_from_window, update_or_replace_vec_model, visible_playlist_column_kinds,
         OutputSettingsOptions,
@@ -4323,6 +4332,20 @@ mod tests {
         assert_eq!(updated_model.row_count(), 2);
         assert_eq!(updated_model.row_data(0), Some(4));
         assert_eq!(updated_model.row_data(1), Some(3));
+    }
+
+    #[test]
+    fn test_quantize_splitter_ratio_to_precision_rounds_to_two_decimals() {
+        assert_eq!(quantize_splitter_ratio_to_precision(0.1234), 0.12);
+        assert_eq!(quantize_splitter_ratio_to_precision(0.1251), 0.13);
+        assert_eq!(quantize_splitter_ratio_to_precision(0.9999), 1.0);
+    }
+
+    #[test]
+    fn test_quantize_splitter_ratio_to_precision_keeps_non_finite_values() {
+        assert!(quantize_splitter_ratio_to_precision(f32::INFINITY).is_infinite());
+        assert!(quantize_splitter_ratio_to_precision(f32::NEG_INFINITY).is_infinite());
+        assert!(quantize_splitter_ratio_to_precision(f32::NAN).is_nan());
     }
 
     #[test]
