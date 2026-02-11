@@ -17,7 +17,7 @@ version = 1
 node_type = "split"
 id = "n17"
 axis = "horizontal"
-ratio = 0.09322033822536469
+ratio = 0.09
 min_first_px = 64
 min_second_px = 120
 
@@ -25,7 +25,7 @@ min_second_px = 120
 node_type = "split"
 id = "n16"
 axis = "horizontal"
-ratio = 0.28828829526901245
+ratio = 0.29
 min_first_px = 32
 min_second_px = 28
 
@@ -33,7 +33,7 @@ min_second_px = 28
 node_type = "split"
 id = "n15"
 axis = "vertical"
-ratio = 0.07999999821186066
+ratio = 0.08
 min_first_px = 32
 min_second_px = 240
 
@@ -46,7 +46,7 @@ panel = "button_cluster"
 node_type = "split"
 id = "n14"
 axis = "vertical"
-ratio = 0.6200000047683716
+ratio = 0.62
 min_first_px = 180
 min_second_px = 110
 
@@ -59,7 +59,7 @@ panel = "button_cluster"
 node_type = "split"
 id = "n13"
 axis = "vertical"
-ratio = 0.699999988079071
+ratio = 0.70
 min_first_px = 120
 min_second_px = 90
 
@@ -82,7 +82,7 @@ panel = "seek_bar"
 node_type = "split"
 id = "n18"
 axis = "horizontal"
-ratio = 0.949999988079071
+ratio = 0.95
 min_first_px = 120
 min_second_px = 20
 
@@ -90,7 +90,7 @@ min_second_px = 20
 node_type = "split"
 id = "n4"
 axis = "vertical"
-ratio = 0.22053973376750946
+ratio = 0.22
 min_first_px = 140
 min_second_px = 220
 
@@ -98,7 +98,7 @@ min_second_px = 220
 node_type = "split"
 id = "s2"
 axis = "horizontal"
-ratio = 0.37614890933036804
+ratio = 0.38
 min_first_px = 24
 min_second_px = 24
 
@@ -111,7 +111,7 @@ panel = "playlist_switcher"
 node_type = "split"
 id = "s3"
 axis = "horizontal"
-ratio = 0.29165545105934143
+ratio = 0.29
 min_first_px = 24
 min_second_px = 24
 
