@@ -90,7 +90,7 @@ pub struct UiManager {
     library_view_indices: Vec<usize>,
     library_selected_indices: Vec<usize>,
     library_selection_anchor: Option<usize>,
-    library_last_primary_click_index: Option<usize>,
+    library_last_primary_click_key: Option<String>,
     library_last_primary_click_at: Option<Instant>,
     library_cover_art_paths: HashMap<PathBuf, Option<PathBuf>>,
     library_search_query: String,
@@ -498,7 +498,7 @@ impl UiManager {
             library_view_indices: Vec::new(),
             library_selected_indices: Vec::new(),
             library_selection_anchor: None,
-            library_last_primary_click_index: None,
+            library_last_primary_click_key: None,
             library_last_primary_click_at: None,
             library_cover_art_paths: HashMap::new(),
             library_search_query: String::new(),
@@ -1849,6 +1849,7 @@ impl UiManager {
         self.library_search_visible = false;
         if !self.library_search_query.is_empty() {
             self.library_search_query.clear();
+            self.reset_library_primary_click_tracking();
             self.sync_library_ui();
         } else {
             self.sync_library_search_state_to_ui();
@@ -1856,6 +1857,9 @@ impl UiManager {
     }
 
     fn set_library_search_query(&mut self, query: String) {
+        if self.library_search_query != query {
+            self.reset_library_primary_click_tracking();
+        }
         self.library_search_visible = true;
         self.library_search_query = query;
         self.sync_library_ui();
@@ -2210,13 +2214,25 @@ impl UiManager {
     }
 
     fn reset_library_primary_click_tracking(&mut self) {
-        self.library_last_primary_click_index = None;
+        self.library_last_primary_click_key = None;
         self.library_last_primary_click_at = None;
+    }
+
+    fn library_activation_key_for_entry(entry: &LibraryEntry) -> String {
+        match entry {
+            LibraryEntry::Song(song) => format!("song:{}", song.path.to_string_lossy()),
+            LibraryEntry::Artist(artist) => format!("artist:{}", artist.artist),
+            LibraryEntry::Album(album) => {
+                format!("album:{}\u{001f}{}", album.album, album.album_artist)
+            }
+            LibraryEntry::Genre(genre) => format!("genre:{}", genre.genre),
+            LibraryEntry::Decade(decade) => format!("decade:{}", decade.decade),
+        }
     }
 
     fn should_activate_library_item_on_click(
         &mut self,
-        index: usize,
+        source_index: usize,
         ctrl: bool,
         shift: bool,
         context_click: bool,
@@ -2226,9 +2242,18 @@ impl UiManager {
             return false;
         }
 
+        let Some(entry) = self.library_entries.get(source_index) else {
+            self.reset_library_primary_click_tracking();
+            return false;
+        };
+        let click_key = Self::library_activation_key_for_entry(entry);
         let now = Instant::now();
         let threshold = Duration::from_millis(LIBRARY_DOUBLE_CLICK_THRESHOLD_MS);
-        let is_double_click = self.library_last_primary_click_index == Some(index)
+        let is_double_click = self
+            .library_last_primary_click_key
+            .as_ref()
+            .map(|previous| previous == &click_key)
+            .unwrap_or(false)
             && self
                 .library_last_primary_click_at
                 .map(|last| now.saturating_duration_since(last) <= threshold)
@@ -2238,7 +2263,7 @@ impl UiManager {
             self.reset_library_primary_click_tracking();
             true
         } else {
-            self.library_last_primary_click_index = Some(index);
+            self.library_last_primary_click_key = Some(click_key);
             self.library_last_primary_click_at = Some(now);
             false
         }
