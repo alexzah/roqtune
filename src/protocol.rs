@@ -177,6 +177,9 @@ pub enum LibraryMessage {
     ToggleAddToPlaylist(usize),
     ConfirmAddToPlaylists,
     CancelAddToPlaylists,
+    OpenSearch,
+    CloseSearch,
+    SetSearchQuery(String),
     AddSelectionToPlaylists {
         selections: Vec<LibrarySelectionSpec>,
         playlist_ids: Vec<String>,

@@ -27,7 +27,11 @@ export component AppWindow inherits Window {
                 return accept;
             }
             if ((event.text == "f" || event.text == "F") && event.modifiers.control) {
-                root.open_playlist_search();
+                if (root.collection_mode == 1) {
+                    root.open_library_search();
+                } else {
+                    root.open_playlist_search();
+                }
                 return accept;
             }
             if ((event.text == "z" || event.text == "Z") && event.modifiers.control) {
@@ -85,6 +89,11 @@ export component AppWindow inherits Window {
                 root.open_layout_editor();
                 return accept;
             }
+            if (event.text == Key.Escape && root.library_search_visible) {
+                root.close_library_search();
+                key-handler.focus();
+                return accept;
+            }
             if (event.text == Key.Escape && root.playlist_search_visible) {
                 root.close_playlist_search();
                 key-handler.focus();
@@ -122,6 +131,10 @@ export component AppWindow inherits Window {
     
     public function refocus_main() {
         key-handler.focus();
+    }
+
+    public function focus_library_search_input() {
+        root.library_search_focus_token += 1;
     }
 
     public function confirm_delete_playlist(index: int) {
@@ -1313,6 +1326,52 @@ export component AppWindow inherits Window {
                         }
                     }
 
+                    library-search-container := Rectangle {
+                        height: root.library_search_visible ? 30px : 0px;
+                        visible: root.library_search_visible;
+                        property <int> focus-token: root.library_search_focus_token;
+                        changed focus-token => {
+                            if (root.library_search_visible) {
+                                library-search-input.focus();
+                            }
+                        }
+                        border-radius: 4px;
+                        background: #1c1c1cec;
+                        border-width: 1px;
+                        border-color: #3f3f3f;
+
+                        HorizontalLayout {
+                            spacing: 6px;
+                            padding-left: 8px;
+                            padding-right: 6px;
+
+                            library-search-input := LineEdit {
+                                placeholder-text: "Search this library view...";
+                                horizontal-stretch: 1;
+                                edited(text) => {
+                                    root.library_search_query_edited(text);
+                                }
+                            }
+                            Text {
+                                text: root.library_search_result_text;
+                                color: #a5a5a5;
+                                font-size: 11px;
+                                width: 54px;
+                                horizontal-alignment: right;
+                                vertical-alignment: center;
+                            }
+
+                            PlayerButton {
+                                icon-text: "✕";
+                                font-size: 12px;
+                                clicked => {
+                                    root.close_library_search();
+                                    root.refocus_main();
+                                }
+                            }
+                        }
+                    }
+
                     Rectangle { height: 1px; background: #333; }
 
                         ScrollView {
@@ -1321,7 +1380,9 @@ export component AppWindow inherits Window {
                                 alignment: start;
                                 for item[row] in root.library_model : Rectangle {
                                     horizontal-stretch: 1;
-                                    height: 34px;
+                                    height: item.item_kind == 2 ? 38px
+                                        : item.item_kind == 0 ? 32px
+                                        : 34px;
                                     LibraryRow {
                                         width: parent.width;
                                         height: parent.height;
@@ -2973,6 +3034,9 @@ export component AppWindow inherits Window {
     in-out property <bool> playlist_search_visible: false;
     in-out property <string> playlist_search_query: "";
     in-out property <string> playlist_search_result_text: "0/0";
+    in-out property <bool> library_search_visible: false;
+    in-out property <int> library_search_focus_token: 0;
+    in-out property <string> library_search_result_text: "0/0";
     in-out property <string> playlist_filter_summary: "";
     in-out property <[int]> playlist_column_sort_states: [];
 
@@ -3103,6 +3167,9 @@ export component AppWindow inherits Window {
     callback open_playlist_search();
     callback close_playlist_search();
     callback set_playlist_search_query(string);
+    callback open_library_search();
+    callback close_library_search();
+    callback library_search_query_edited(string);
     callback clear_playlist_filter_view();
     callback cycle_playlist_sort_by_column(int);
     callback apply_filter_view_to_playlist();

@@ -2474,6 +2474,23 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     });
 
     let bus_sender_clone = bus_sender.clone();
+    ui.on_open_library_search(move || {
+        let _ = bus_sender_clone.send(Message::Library(protocol::LibraryMessage::OpenSearch));
+    });
+
+    let bus_sender_clone = bus_sender.clone();
+    ui.on_close_library_search(move || {
+        let _ = bus_sender_clone.send(Message::Library(protocol::LibraryMessage::CloseSearch));
+    });
+
+    let bus_sender_clone = bus_sender.clone();
+    ui.on_library_search_query_edited(move |query| {
+        let _ = bus_sender_clone.send(Message::Library(protocol::LibraryMessage::SetSearchQuery(
+            query.to_string(),
+        )));
+    });
+
+    let bus_sender_clone = bus_sender.clone();
     ui.on_clear_playlist_filter_view(move || {
         let _ = bus_sender_clone.send(Message::Playlist(PlaylistMessage::ClearPlaylistFilterView));
     });
@@ -4734,8 +4751,24 @@ mod tests {
         );
         assert!(
             slint_ui.contains("(event.text == \"f\" || event.text == \"F\")")
+                && slint_ui.contains("root.open_library_search();")
                 && slint_ui.contains("root.open_playlist_search();"),
-            "Playlist search should be reachable via Ctrl+F"
+            "Ctrl+F should route to library or playlist search by active mode"
+        );
+        assert!(
+            slint_ui.contains("callback library_search_query_edited(string);")
+                && !slint_ui.contains("callback set_library_search_query(string);"),
+            "Library search should expose edited callback naming"
+        );
+        assert!(
+            slint_ui.contains("library-search-input := LineEdit {")
+                && slint_ui.contains("edited(text) => {")
+                && slint_ui.contains("root.library_search_query_edited(text);"),
+            "Library search input should use the edited(text) callback form"
+        );
+        assert!(
+            !slint_ui.contains("library-search-input := LineEdit {\n                                placeholder-text: \"Search this library view...\";\n                                horizontal-stretch: 1;\n                                init => { self.focus(); }"),
+            "Library search input should not request focus in init"
         );
         assert!(
             slint_ui.contains("(event.text == \"c\" || event.text == \"C\")")
