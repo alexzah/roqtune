@@ -10,9 +10,6 @@
 - Beautiful library mode that scans and sorts your collection for easy browsing and listening
 - Custom column support in the track list, based on metadata format strings
 - Fully user customizable UI with layout editor based on modular panels
-- Broad format support: `mp3`, `wav`, `ogg`, `flac`, `aac`, `m4a`, `mp4`
-- Adaptive transparent output with verified per-track auto sample-rate matching
-- Improved output-path reporting (source vs active output format)
 
 ## Quick Start
 
