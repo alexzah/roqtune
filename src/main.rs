@@ -2959,13 +2959,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let bus_sender_clone = bus_sender.clone();
     ui.on_library_viewport_changed(move |first_row, row_count| {
-        if first_row < 0 || row_count <= 0 {
+        if first_row < 0 {
             return;
         }
         let _ = bus_sender_clone.send(Message::Library(
             protocol::LibraryMessage::LibraryViewportChanged {
                 first_row: first_row as usize,
-                row_count: row_count as usize,
+                row_count: row_count.max(0) as usize,
             },
         ));
     });

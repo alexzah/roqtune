@@ -1498,7 +1498,17 @@ export component AppWindow inherits Window {
                                 let row-height-px = root.library_root_index == 2 ? 38
                                     : root.library_root_index == 0 ? 32
                                     : 34;
-                                let first-row = max(0, floor(self.viewport-y / (row-height-px * 1px)));
+                                let scroll-offset-y = max(0px, -self.viewport-y);
+                                let first-row = max(0, floor(scroll-offset-y / (row-height-px * 1px)));
+                                let visible-rows = max(1, floor(self.height / (row-height-px * 1px)) + 2);
+                                root.library_viewport_changed(first-row, visible-rows);
+                            }
+                            changed height => {
+                                let row-height-px = root.library_root_index == 2 ? 38
+                                    : root.library_root_index == 0 ? 32
+                                    : 34;
+                                let scroll-offset-y = max(0px, -self.viewport-y);
+                                let first-row = max(0, floor(scroll-offset-y / (row-height-px * 1px)));
                                 let visible-rows = max(1, floor(self.height / (row-height-px * 1px)) + 2);
                                 root.library_viewport_changed(first-row, visible-rows);
                             }

@@ -1818,13 +1818,18 @@ impl LibraryEnrichmentManager {
 
         let normalized_artist = Self::normalize_text(&cleaned_artist);
         let compact_artist = normalized_artist.replace(' ', "");
+        let query_candidates = if initial_priority == LibraryEnrichmentPriority::Interactive {
+            vec![
+                cleaned_artist.clone(),
+                Self::title_case_words(&cleaned_artist),
+                compact_artist,
+            ]
+        } else {
+            vec![cleaned_artist.clone()]
+        };
         let mut queries = Vec::new();
         let mut seen_queries = HashSet::new();
-        for query in [
-            cleaned_artist.clone(),
-            Self::title_case_words(&cleaned_artist),
-            compact_artist,
-        ] {
+        for query in query_candidates {
             let key = query.to_ascii_lowercase();
             if !query.trim().is_empty() && seen_queries.insert(key) {
                 queries.push(query);
@@ -3063,6 +3068,11 @@ impl LibraryEnrichmentManager {
         }
         if audiodb_outcome.payload.status == LibraryEnrichmentStatus::Error {
             best_error = Some(audiodb_outcome.clone());
+        }
+        if priority == LibraryEnrichmentPriority::Prefetch
+            && matches!(entity, LibraryEnrichmentEntity::Artist { .. })
+        {
+            return audiodb_outcome;
         }
         let wiki_outcome = self.fetch_wikipedia_outcome_for_entity(entity, priority, started_at);
         if wiki_outcome.payload.status == LibraryEnrichmentStatus::Ready {

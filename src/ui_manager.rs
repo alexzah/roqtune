@@ -212,6 +212,8 @@ const LIBRARY_ITEM_KIND_ALBUM: i32 = 2;
 const LIBRARY_ITEM_KIND_GENRE: i32 = 3;
 const LIBRARY_ITEM_KIND_DECADE: i32 = 4;
 const DETAIL_ENRICHMENT_RETRY_INTERVAL: Duration = Duration::from_secs(2);
+const PREFETCH_RETRY_MAX_ATTEMPTS: u32 = 3;
+const PREFETCH_RATE_LIMIT_RETRY_DELAY: Duration = Duration::from_secs(20);
 
 thread_local! {
     static TRACK_ROW_COVER_ART_IMAGE_CACHE: RefCell<HashMap<PathBuf, Image>> =
@@ -2948,7 +2950,26 @@ impl UiManager {
         self.library_enrichment_retry_not_before.remove(entity);
     }
 
-    fn schedule_enrichment_retry_backoff(&mut self, entity: &protocol::LibraryEnrichmentEntity) {
+    fn is_rate_limit_enrichment_error(payload: &protocol::LibraryEnrichmentPayload) -> bool {
+        payload.status == protocol::LibraryEnrichmentStatus::Error
+            && payload.blurb.to_ascii_lowercase().contains("rate limit")
+    }
+
+    fn schedule_enrichment_retry_backoff(
+        &mut self,
+        entity: &protocol::LibraryEnrichmentEntity,
+        payload: &protocol::LibraryEnrichmentPayload,
+    ) {
+        if Self::is_rate_limit_enrichment_error(payload) {
+            // Rate limiting is global/transient; do not burn per-artist retry budget.
+            self.library_enrichment_retry_counts.remove(entity);
+            self.library_enrichment_retry_not_before.insert(
+                entity.clone(),
+                Instant::now() + PREFETCH_RATE_LIMIT_RETRY_DELAY,
+            );
+            return;
+        }
+
         let attempt = self
             .library_enrichment_retry_counts
             .entry(entity.clone())
@@ -2975,11 +2996,23 @@ impl UiManager {
         let Some(existing) = self.library_enrichment.get(entity).cloned() else {
             return true;
         };
-        if Self::is_retryable_enrichment_error(&existing)
-            && self.enrichment_retry_backoff_elapsed(entity)
-        {
-            self.library_enrichment.remove(entity);
-            return true;
+        if Self::is_retryable_enrichment_error(&existing) {
+            let attempts = self
+                .library_enrichment_retry_counts
+                .get(entity)
+                .copied()
+                .unwrap_or(0);
+            if attempts >= PREFETCH_RETRY_MAX_ATTEMPTS {
+                debug!(
+                    "Enrichment prefetch retry capped for {:?} after {} attempts",
+                    entity, attempts
+                );
+                return false;
+            }
+            if self.enrichment_retry_backoff_elapsed(entity) {
+                self.library_enrichment.remove(entity);
+                return true;
+            }
         }
         false
     }
@@ -3114,8 +3147,8 @@ impl UiManager {
             return;
         }
         if row_count == 0 {
-            self.retain_pending_detail_entity_only();
-            self.replace_prefetch_queue_if_changed(Vec::new());
+            // Viewport row count can transiently report zero during list/model churn.
+            // Keep the last prefetch queue instead of clearing it, so loading keeps progressing.
             return;
         }
 
@@ -3125,6 +3158,7 @@ impl UiManager {
             .min(self.library_view_indices.len());
         let mut prefetch_entities = Vec::new();
         let mut seen_entities = HashSet::new();
+        let mut visible_artist_entities = HashSet::new();
         for row in start..end {
             let Some(source_index) = self.library_view_indices.get(row).copied() else {
                 continue;
@@ -3138,10 +3172,28 @@ impl UiManager {
             if !seen_entities.insert(entity.clone()) {
                 continue;
             }
+            visible_artist_entities.insert(entity.clone());
             if self.should_request_prefetch_for_entity(&entity) {
                 prefetch_entities.push(entity);
             }
         }
+
+        self.library_enrichment_retry_counts
+            .retain(|entity, _| match entity {
+                protocol::LibraryEnrichmentEntity::Artist { .. } => {
+                    visible_artist_entities.contains(entity)
+                        || self.library_last_detail_enrichment_entity.as_ref() == Some(entity)
+                }
+                protocol::LibraryEnrichmentEntity::Album { .. } => true,
+            });
+        self.library_enrichment_retry_not_before
+            .retain(|entity, _| match entity {
+                protocol::LibraryEnrichmentEntity::Artist { .. } => {
+                    visible_artist_entities.contains(entity)
+                        || self.library_last_detail_enrichment_entity.as_ref() == Some(entity)
+                }
+                protocol::LibraryEnrichmentEntity::Album { .. } => true,
+            });
 
         self.retain_pending_detail_entity_only();
         self.replace_prefetch_queue_if_changed(prefetch_entities);
@@ -3158,9 +3210,10 @@ impl UiManager {
             self.current_library_view(),
             LibraryViewState::ArtistsRoot | LibraryViewState::GlobalSearch
         ) {
+            let prefetch_row_count = self.library_artist_prefetch_row_count.max(12);
             self.prefetch_artist_enrichment_window(
                 self.library_artist_prefetch_first_row,
-                self.library_artist_prefetch_row_count,
+                prefetch_row_count,
             );
         } else {
             self.prefetch_artist_enrichment_window(0, 0);
@@ -4316,9 +4369,23 @@ impl UiManager {
                                 first_row,
                                 row_count,
                             } => {
+                                debug!(
+                                    "Library viewport changed: first_row={}, row_count={}",
+                                    first_row, row_count
+                                );
                                 self.library_artist_prefetch_first_row = first_row;
-                                self.library_artist_prefetch_row_count = row_count;
-                                self.prefetch_artist_enrichment_window(first_row, row_count);
+                                if row_count > 0 {
+                                    self.library_artist_prefetch_row_count = row_count;
+                                }
+                                let effective_row_count = if row_count > 0 {
+                                    row_count
+                                } else {
+                                    self.library_artist_prefetch_row_count.max(12)
+                                };
+                                self.prefetch_artist_enrichment_window(
+                                    first_row,
+                                    effective_row_count,
+                                );
                             }
                             protocol::LibraryMessage::EnrichmentPrefetchTick => {
                                 self.on_enrichment_prefetch_tick();
@@ -4487,8 +4554,20 @@ impl UiManager {
                                 self.library_enrichment_last_request_at
                                     .remove(&payload.entity);
                                 let entity = payload.entity.clone();
-                                if Self::is_retryable_enrichment_error(&payload) {
-                                    self.schedule_enrichment_retry_backoff(&entity);
+                                let view = self.current_library_view();
+                                let is_current_detail_entity =
+                                    Self::detail_enrichment_entity_for_view(&view)
+                                        .as_ref()
+                                        .is_some_and(|current| current == &entity);
+                                let is_visible_prefetch_artist =
+                                    matches!(
+                                        &entity,
+                                        protocol::LibraryEnrichmentEntity::Artist { .. }
+                                    ) && self.library_last_prefetch_entities.contains(&entity);
+                                if Self::is_retryable_enrichment_error(&payload)
+                                    && (is_current_detail_entity || is_visible_prefetch_artist)
+                                {
+                                    self.schedule_enrichment_retry_backoff(&entity, &payload);
                                 } else {
                                     self.clear_enrichment_retry_state(&entity);
                                 }
@@ -4501,7 +4580,6 @@ impl UiManager {
                                     updated = self.refresh_visible_artist_rows(artist);
                                 }
 
-                                let view = self.current_library_view();
                                 if Self::detail_enrichment_entity_for_view(&view)
                                     .as_ref()
                                     .is_some_and(|current| current == &entity)
