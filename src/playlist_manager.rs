@@ -7,10 +7,14 @@ use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 
 use log::{debug, error, info, trace};
+use symphonia::core::{
+    formats::FormatOptions, io::MediaSourceStream, meta::MetadataOptions, probe::Hint,
+};
 use tokio::sync::broadcast::{Receiver, Sender};
 use uuid::Uuid;
 
 use crate::{
+    config::Config,
     db_manager::DbManager,
     playlist::{Playlist, Track},
     protocol::{self, TrackIdentifier},
@@ -40,6 +44,12 @@ pub struct PlaylistManager {
     requested_track_offsets: HashMap<String, u64>, // id -> requested start_offset_ms
     pending_start_track_id: Option<String>,
     pending_order_change: Option<protocol::PlaybackOrder>,
+    track_sample_rate_cache: HashMap<PathBuf, Option<u32>>,
+    pending_rate_switch: Option<u32>,
+    pending_rate_switch_play_immediately: bool,
+    current_output_rate_hz: Option<u32>,
+    verified_output_rates: Vec<u32>,
+    sample_rate_auto_enabled: bool,
     max_num_cached_tracks: usize,
     current_track_duration_ms: u64,
     last_seek_ms: u64,
@@ -71,6 +81,12 @@ impl PlaylistManager {
             requested_track_offsets: HashMap::new(),
             pending_start_track_id: None,
             pending_order_change: None,
+            track_sample_rate_cache: HashMap::new(),
+            pending_rate_switch: None,
+            pending_rate_switch_play_immediately: false,
+            current_output_rate_hz: None,
+            verified_output_rates: Vec::new(),
+            sample_rate_auto_enabled: true,
             max_num_cached_tracks: 2,
             current_track_duration_ms: 0,
             last_seek_ms: u64::MAX,
@@ -88,6 +104,8 @@ impl PlaylistManager {
 
         self.pending_start_track_id = None;
         self.started_track_id = None;
+        self.pending_rate_switch = None;
+        self.pending_rate_switch_play_immediately = false;
         self.playback_playlist.set_playing(true);
         self.playback_playlist.set_playing_track_index(Some(index));
 
@@ -111,6 +129,103 @@ impl PlaylistManager {
             self.cache_tracks(true);
         }
         self.broadcast_playlist_changed();
+    }
+
+    fn update_runtime_policy_from_config(&mut self, config: &Config) {
+        self.sample_rate_auto_enabled = config.output.sample_rate_auto;
+        if !self.sample_rate_auto_enabled {
+            self.pending_rate_switch = None;
+            self.pending_rate_switch_play_immediately = false;
+        }
+    }
+
+    fn update_verified_output_rates(&mut self, mut rates: Vec<u32>) {
+        rates.sort_unstable();
+        rates.dedup();
+        self.verified_output_rates = rates;
+    }
+
+    fn probe_track_sample_rate(path: &PathBuf) -> Option<u32> {
+        let file = std::fs::File::open(path).ok()?;
+        let mss = MediaSourceStream::new(Box::new(file), Default::default());
+        let hint = Hint::new();
+        let probed = symphonia::default::get_probe()
+            .format(
+                &hint,
+                mss,
+                &FormatOptions::default(),
+                &MetadataOptions::default(),
+            )
+            .ok()?;
+        let format = probed.format;
+        let track = format.default_track()?;
+        track.codec_params.sample_rate
+    }
+
+    fn track_sample_rate_hz(&mut self, track: &Track) -> Option<u32> {
+        if let Some(cached) = self.track_sample_rate_cache.get(&track.path) {
+            return *cached;
+        }
+        let probed = Self::probe_track_sample_rate(&track.path);
+        if let Some(rate) = probed {
+            debug!(
+                "PlaylistManager: Probed source sample-rate {} Hz for {}",
+                rate,
+                track.path.display()
+            );
+        } else {
+            debug!(
+                "PlaylistManager: Failed to probe source sample-rate for {}",
+                track.path.display()
+            );
+        }
+        self.track_sample_rate_cache
+            .insert(track.path.clone(), probed);
+        probed
+    }
+
+    fn desired_output_rate_for_track(&mut self, track: &Track) -> Option<u32> {
+        if !self.sample_rate_auto_enabled {
+            return self.current_output_rate_hz;
+        }
+        if self.verified_output_rates.is_empty() {
+            return self.current_output_rate_hz;
+        }
+
+        let source_rate = self
+            .track_sample_rate_hz(track)
+            .or_else(|| self.verified_output_rates.last().copied())?;
+        if self.verified_output_rates.contains(&source_rate) {
+            return Some(source_rate);
+        }
+        self.verified_output_rates
+            .iter()
+            .copied()
+            .find(|rate| *rate > source_rate)
+            .or_else(|| self.verified_output_rates.last().copied())
+    }
+
+    fn request_runtime_output_rate_switch(&mut self, sample_rate_hz: u32, play_immediately: bool) {
+        let _ = self.bus_producer.send(protocol::Message::Config(
+            protocol::ConfigMessage::SetRuntimeOutputRate {
+                sample_rate_hz,
+                reason: "playlist_rate_segment".to_string(),
+            },
+        ));
+        self.pending_rate_switch = Some(sample_rate_hz);
+        self.pending_rate_switch_play_immediately = play_immediately;
+        debug!(
+            "PlaylistManager: Requested runtime output-rate switch to {} Hz",
+            sample_rate_hz
+        );
+    }
+
+    fn maybe_start_pending_after_rate_switch(&mut self) {
+        if self.pending_rate_switch.is_some() {
+            return;
+        }
+        let play_immediately = std::mem::take(&mut self.pending_rate_switch_play_immediately);
+        self.cache_tracks(play_immediately);
     }
 
     fn broadcast_active_playlist_column_order(&self) {
@@ -545,6 +660,66 @@ impl PlaylistManager {
                             self.cache_tracks(false);
                         }
                     }
+                    protocol::Message::Config(protocol::ConfigMessage::ConfigChanged(config)) => {
+                        self.update_runtime_policy_from_config(&config);
+                        if self.playback_playlist.is_playing() {
+                            self.cache_tracks(false);
+                        }
+                    }
+                    protocol::Message::Config(
+                        protocol::ConfigMessage::OutputDeviceCapabilitiesChanged {
+                            verified_sample_rates,
+                        },
+                    ) => {
+                        self.update_verified_output_rates(verified_sample_rates);
+                        if self.playback_playlist.is_playing() {
+                            self.cache_tracks(false);
+                        }
+                    }
+                    protocol::Message::Config(protocol::ConfigMessage::AudioDeviceOpened {
+                        stream_info,
+                    }) => {
+                        self.current_output_rate_hz = Some(stream_info.sample_rate_hz);
+                        if let Some(expected_rate) = self.pending_rate_switch {
+                            if stream_info.sample_rate_hz == expected_rate {
+                                debug!(
+                                    "PlaylistManager: Output-rate switch acknowledged at {} Hz",
+                                    stream_info.sample_rate_hz
+                                );
+                                self.pending_rate_switch = None;
+                                self.maybe_start_pending_after_rate_switch();
+                            } else {
+                                let fallback_rate = self
+                                    .verified_output_rates
+                                    .last()
+                                    .copied()
+                                    .unwrap_or(stream_info.sample_rate_hz);
+                                if fallback_rate == stream_info.sample_rate_hz
+                                    || fallback_rate == expected_rate
+                                {
+                                    debug!(
+                                        "PlaylistManager: Rate switch fallback accepted at {} Hz (requested {} Hz, fallback {} Hz)",
+                                        stream_info.sample_rate_hz, expected_rate, fallback_rate
+                                    );
+                                    self.pending_rate_switch = None;
+                                    self.maybe_start_pending_after_rate_switch();
+                                } else {
+                                    debug!(
+                                        "PlaylistManager: Requested {} Hz but device opened {} Hz. Falling back to {} Hz",
+                                        expected_rate, stream_info.sample_rate_hz, fallback_rate
+                                    );
+                                    self.request_runtime_output_rate_switch(
+                                        fallback_rate,
+                                        self.pending_rate_switch_play_immediately,
+                                    );
+                                }
+                            }
+                        }
+                    }
+                    protocol::Message::Config(
+                        protocol::ConfigMessage::SetRuntimeOutputRate { .. }
+                        | protocol::ConfigMessage::ClearRuntimeOutputRateOverride,
+                    ) => {}
                     protocol::Message::Playback(protocol::PlaybackMessage::Play) => {
                         debug!("PlaylistManager: Received play command");
                         let has_paused_track = !self.playback_playlist.is_playing()
@@ -604,6 +779,9 @@ impl PlaylistManager {
                         self.playback_playlist_id = None;
                         self.clear_cached_tracks();
                         self.cache_tracks(false);
+                        let _ = self.bus_producer.send(protocol::Message::Config(
+                            protocol::ConfigMessage::ClearRuntimeOutputRateOverride,
+                        ));
 
                         // Notify other components about the selection and playing change
                         self.broadcast_playlist_changed();
@@ -1486,13 +1664,29 @@ impl PlaylistManager {
         if self.playback_playlist.num_tracks() == 0 {
             return;
         }
+        if self.pending_rate_switch.is_some() {
+            self.pending_rate_switch_play_immediately |= play_immediately;
+            return;
+        }
 
         let first_index = self
             .playback_playlist
             .get_playing_track_index()
             .unwrap_or(0);
+        let first_track = self.playback_playlist.get_track(first_index).clone();
+        let desired_first_rate = self
+            .desired_output_rate_for_track(&first_track)
+            .or(self.current_output_rate_hz);
+        if let Some(desired_first_rate) = desired_first_rate {
+            if self.current_output_rate_hz != Some(desired_first_rate) {
+                self.request_runtime_output_rate_switch(desired_first_rate, play_immediately);
+                return;
+            }
+        }
+
         let mut current_index = first_index;
         let mut track_paths = Vec::new();
+        let mut segment_rate: Option<u32> = desired_first_rate;
 
         for _ in 0..self.max_num_cached_tracks {
             if current_index < self.playback_playlist.num_tracks() {
@@ -1515,9 +1709,21 @@ impl PlaylistManager {
                     continue;
                 }
 
+                let track = self.playback_playlist.get_track(current_index).clone();
+                let desired_rate = self
+                    .desired_output_rate_for_track(&track)
+                    .or(self.current_output_rate_hz);
+                if let Some(required_segment_rate) = segment_rate {
+                    if desired_rate != Some(required_segment_rate) {
+                        break;
+                    }
+                } else {
+                    segment_rate = desired_rate;
+                }
+
                 track_paths.push(TrackIdentifier {
                     id: track_id,
-                    path: self.playback_playlist.get_track(current_index).path.clone(),
+                    path: track.path.clone(),
                     play_immediately: play_immediately && current_index == first_index,
                     start_offset_ms: 0,
                 });
@@ -1549,6 +1755,8 @@ impl PlaylistManager {
     fn clear_cached_tracks(&mut self) {
         self.pending_start_track_id = None;
         self.started_track_id = None;
+        self.pending_rate_switch = None;
+        self.pending_rate_switch_play_immediately = false;
         self.cached_track_ids.clear();
         self.fully_cached_track_ids.clear();
         self.requested_track_offsets.clear();
@@ -1562,6 +1770,8 @@ impl PlaylistManager {
 
     fn stop_decoding(&mut self) {
         self.pending_start_track_id = None;
+        self.pending_rate_switch = None;
+        self.pending_rate_switch_play_immediately = false;
         self.requested_track_offsets.clear();
         let _ = self.bus_producer.send(protocol::Message::Audio(
             protocol::AudioMessage::StopDecoding,
@@ -2853,6 +3063,7 @@ mod tests {
                 format: "MP3".to_string(),
                 bitrate_kbps: 320,
                 sample_rate_hz: 44_100,
+                channel_count: 2,
                 duration_ms: 100_000,
             }),
         ));
@@ -2949,5 +3160,124 @@ mod tests {
                     _ => false,
                 },
             );
+    }
+
+    fn make_direct_manager() -> (PlaylistManager, Receiver<protocol::Message>) {
+        let (bus_sender, _) = broadcast::channel(256);
+        let receiver = bus_sender.subscribe();
+        let manager_receiver = bus_sender.subscribe();
+        let db_manager = DbManager::new_in_memory().expect("failed to create in-memory db");
+        let manager =
+            PlaylistManager::new(Playlist::new(), manager_receiver, bus_sender, db_manager);
+        (manager, receiver)
+    }
+
+    #[test]
+    fn test_desired_output_rate_match_track_prefers_exact_then_above_then_below() {
+        let (mut manager, _receiver) = make_direct_manager();
+        manager.sample_rate_auto_enabled = true;
+        manager.verified_output_rates = vec![44_100, 48_000, 96_000];
+
+        let track = Track {
+            id: "rate_track".to_string(),
+            path: PathBuf::from("/tmp/rate_track.flac"),
+        };
+
+        manager
+            .track_sample_rate_cache
+            .insert(track.path.clone(), Some(48_000));
+        assert_eq!(manager.desired_output_rate_for_track(&track), Some(48_000));
+
+        manager
+            .track_sample_rate_cache
+            .insert(track.path.clone(), Some(50_000));
+        assert_eq!(manager.desired_output_rate_for_track(&track), Some(96_000));
+
+        manager
+            .track_sample_rate_cache
+            .insert(track.path.clone(), Some(192_000));
+        assert_eq!(manager.desired_output_rate_for_track(&track), Some(96_000));
+    }
+
+    #[test]
+    fn test_cache_tracks_splits_decode_batches_at_rate_boundaries() {
+        let (mut manager, mut receiver) = make_direct_manager();
+        manager.sample_rate_auto_enabled = true;
+        manager.verified_output_rates = vec![44_100, 48_000];
+        manager.current_output_rate_hz = Some(44_100);
+        manager.playback_playlist = Playlist::new();
+        manager.playback_playlist.add_track(Track {
+            id: "t0".to_string(),
+            path: PathBuf::from("/tmp/t0.flac"),
+        });
+        manager.playback_playlist.add_track(Track {
+            id: "t1".to_string(),
+            path: PathBuf::from("/tmp/t1.flac"),
+        });
+        manager.playback_playlist.set_playing_track_index(Some(0));
+        manager.playback_playlist.set_playing(true);
+        manager
+            .track_sample_rate_cache
+            .insert(PathBuf::from("/tmp/t0.flac"), Some(44_100));
+        manager
+            .track_sample_rate_cache
+            .insert(PathBuf::from("/tmp/t1.flac"), Some(48_000));
+
+        manager.cache_tracks(false);
+
+        let message = wait_for_message(&mut receiver, Duration::from_secs(1), |message| {
+            matches!(message, protocol::Message::Audio(_))
+        });
+        let protocol::Message::Audio(protocol::AudioMessage::DecodeTracks(tracks)) = message else {
+            panic!("expected DecodeTracks message");
+        };
+        assert_eq!(tracks.len(), 1);
+        assert_eq!(tracks[0].id, "t0");
+    }
+
+    #[test]
+    fn test_cache_tracks_requests_runtime_switch_before_decoding_when_needed() {
+        let (mut manager, mut receiver) = make_direct_manager();
+        manager.sample_rate_auto_enabled = true;
+        manager.verified_output_rates = vec![44_100, 48_000];
+        manager.current_output_rate_hz = Some(44_100);
+        manager.playback_playlist = Playlist::new();
+        manager.playback_playlist.add_track(Track {
+            id: "t0".to_string(),
+            path: PathBuf::from("/tmp/t0_48.flac"),
+        });
+        manager.playback_playlist.set_playing_track_index(Some(0));
+        manager.playback_playlist.set_playing(true);
+        manager
+            .track_sample_rate_cache
+            .insert(PathBuf::from("/tmp/t0_48.flac"), Some(48_000));
+
+        manager.cache_tracks(true);
+
+        let message = wait_for_message(&mut receiver, Duration::from_secs(1), |message| {
+            matches!(
+                message,
+                protocol::Message::Config(protocol::ConfigMessage::SetRuntimeOutputRate { .. })
+            )
+        });
+        let protocol::Message::Config(protocol::ConfigMessage::SetRuntimeOutputRate {
+            sample_rate_hz,
+            ..
+        }) = message
+        else {
+            panic!("expected runtime output-rate switch request");
+        };
+        assert_eq!(sample_rate_hz, 48_000);
+        assert_eq!(manager.pending_rate_switch, Some(48_000));
+        assert!(
+            !receiver
+                .try_recv()
+                .map(|message| matches!(
+                    message,
+                    protocol::Message::Audio(protocol::AudioMessage::DecodeTracks(_))
+                ))
+                .unwrap_or(false),
+            "DecodeTracks should not be queued before output-rate switch ack"
+        );
     }
 }

@@ -4,7 +4,7 @@
 //! decode worker thread that performs file decode, optional seek, resampling,
 //! and packet emission.
 
-use crate::config::{BufferingConfig, Config, LibraryConfig, OutputConfig, UiConfig};
+use crate::config::{BufferingConfig, Config, ResamplerQuality};
 use crate::protocol::{self, AudioMessage, AudioPacket, ConfigMessage, Message, TrackIdentifier};
 use log::{debug, error, warn};
 use rubato::{
@@ -43,6 +43,9 @@ enum DecodeWorkItem {
         generation: u64,
     },
     ConfigChanged(Config),
+    AudioDeviceOpened {
+        stream_info: protocol::OutputStreamInfo,
+    },
 }
 
 /// Decoder state for the track currently being produced.
@@ -53,6 +56,7 @@ struct ActiveDecodeTrack {
     format_reader: Box<dyn FormatReader>,
     decoder: Box<dyn Decoder>,
     source_sample_rate: u32,
+    source_channels: u16,
     input_exhausted: bool,
     consecutive_decode_errors: u32,
 }
@@ -66,10 +70,13 @@ struct DecodeWorker {
     pending_tracks: VecDeque<TrackIdentifier>,
     active_track: Option<ActiveDecodeTrack>,
     resampler: Option<SincFixedIn<f32>>,
+    resampler_flushed: bool,
     resample_buffer: VecDeque<f32>,
     target_sample_rate: u32,
     target_channels: u16,
     target_bits_per_sample: u16,
+    resampler_quality: ResamplerQuality,
+    dither_on_bitdepth_reduce: bool,
     decoder_request_chunk_ms: u32,
     decode_generation: u64,
 }
@@ -89,10 +96,13 @@ impl DecodeWorker {
             pending_tracks: VecDeque::new(),
             active_track: None,
             resampler: None,
+            resampler_flushed: false,
             resample_buffer: VecDeque::new(),
             target_sample_rate: 44100,
             target_channels: 2,
             target_bits_per_sample: 16,
+            resampler_quality: ResamplerQuality::High,
+            dither_on_bitdepth_reduce: true,
             decoder_request_chunk_ms: BufferingConfig::default().decoder_request_chunk_ms,
             decode_generation: 0,
         }
@@ -172,8 +182,19 @@ impl DecodeWorker {
                 self.target_sample_rate = config.output.sample_rate_khz;
                 self.target_channels = config.output.channel_count;
                 self.target_bits_per_sample = config.output.bits_per_sample;
+                self.resampler_quality = config.output.resampler_quality;
+                self.dither_on_bitdepth_reduce = config.output.dither_on_bitdepth_reduce;
                 self.decoder_request_chunk_ms = config.buffering.decoder_request_chunk_ms;
                 self.resampler = None;
+                self.resampler_flushed = false;
+                self.resample_buffer.clear();
+            }
+            DecodeWorkItem::AudioDeviceOpened { stream_info } => {
+                self.target_sample_rate = stream_info.sample_rate_hz;
+                self.target_channels = stream_info.channel_count;
+                self.target_bits_per_sample = stream_info.bits_per_sample;
+                self.resampler = None;
+                self.resampler_flushed = false;
                 self.resample_buffer.clear();
             }
         }
@@ -184,24 +205,38 @@ impl DecodeWorker {
         self.active_track = None;
         self.resample_buffer.clear();
         self.resampler = None;
+        self.resampler_flushed = false;
     }
 
-    fn create_resampler(&mut self, source_sample_rate: u32, chunk_size: usize) -> SincFixedIn<f32> {
-        let params = SincInterpolationParameters {
-            sinc_len: 256,
-            f_cutoff: 0.95,
-            interpolation: SincInterpolationType::Linear,
-            oversampling_factor: 256,
-            window: WindowFunction::BlackmanHarris2,
+    fn create_resampler(
+        &self,
+        source_sample_rate: u32,
+        chunk_size: usize,
+    ) -> Result<SincFixedIn<f32>, String> {
+        let params = match self.resampler_quality {
+            ResamplerQuality::High => SincInterpolationParameters {
+                sinc_len: 256,
+                f_cutoff: 0.95,
+                interpolation: SincInterpolationType::Linear,
+                oversampling_factor: 256,
+                window: WindowFunction::BlackmanHarris2,
+            },
+            ResamplerQuality::Highest => SincInterpolationParameters {
+                sinc_len: 512,
+                f_cutoff: 0.97,
+                interpolation: SincInterpolationType::Cubic,
+                oversampling_factor: 256,
+                window: WindowFunction::BlackmanHarris2,
+            },
         };
         SincFixedIn::<f32>::new(
             self.target_sample_rate as f64 / source_sample_rate as f64,
             2.0,
             params,
             chunk_size,
-            self.target_channels as usize,
+            self.target_channels.max(1) as usize,
         )
-        .unwrap()
+        .map_err(|err| format!("Failed to create resampler: {err}"))
     }
 
     fn deinterleave(samples: &[f32], channels: usize) -> Vec<Vec<f32>> {
@@ -213,6 +248,9 @@ impl DecodeWorker {
     }
 
     fn interleave(samples: &[Vec<f32>]) -> Vec<f32> {
+        if samples.is_empty() {
+            return Vec::new();
+        }
         let mut interleaved = Vec::new();
         for i in 0..samples[0].len() {
             for sample in samples {
@@ -223,59 +261,122 @@ impl DecodeWorker {
     }
 
     fn resampler_input_chunk_size(&mut self, source_sample_rate: u32) -> usize {
+        if source_sample_rate == self.target_sample_rate {
+            return 2048 * self.target_channels.max(1) as usize;
+        }
         if self.resampler.is_none() {
-            self.resampler = Some(self.create_resampler(source_sample_rate, 2048));
+            match self.create_resampler(source_sample_rate, 2048) {
+                Ok(resampler) => self.resampler = Some(resampler),
+                Err(err) => {
+                    error!("{err}");
+                    return 2048 * self.target_channels.max(1) as usize;
+                }
+            }
+            self.resampler_flushed = false;
         }
 
         let channels = self.target_channels.max(1) as usize;
         self.resampler
             .as_ref()
-            .expect("resampler initialized")
-            .input_frames_next()
-            * channels
+            .map(|resampler| resampler.input_frames_next() * channels)
+            .unwrap_or(2048 * channels)
     }
 
-    fn resample_next_frame(&mut self, sample_rate: u32) -> Vec<f32> {
+    fn pop_passthrough_chunk(&mut self, max_samples: usize) -> Vec<f32> {
+        let take = max_samples.min(self.resample_buffer.len());
+        if take == 0 {
+            return Vec::new();
+        }
+        let mut out = Vec::with_capacity(take);
+        for _ in 0..take {
+            if let Some(sample) = self.resample_buffer.pop_front() {
+                out.push(sample);
+            }
+        }
+        out
+    }
+
+    fn resample_next_frame(&mut self, source_sample_rate: u32, input_exhausted: bool) -> Vec<f32> {
+        if source_sample_rate == self.target_sample_rate {
+            return self.pop_passthrough_chunk(2048 * self.target_channels.max(1) as usize);
+        }
+
         let mut samples = Vec::new();
         if self.resampler.is_none() {
-            self.resampler = Some(self.create_resampler(sample_rate, 2048));
+            match self.create_resampler(source_sample_rate, 2048) {
+                Ok(resampler) => {
+                    self.resampler = Some(resampler);
+                    self.resampler_flushed = false;
+                }
+                Err(err) => {
+                    error!("{err}");
+                    return self.pop_passthrough_chunk(2048 * self.target_channels.max(1) as usize);
+                }
+            }
         }
 
         let channels: usize = self.target_channels.max(1) as usize;
-        let mut result: Vec<f32> = Vec::new();
         if let Some(resampler) = &mut self.resampler {
-            for _ in 0..min(
-                resampler.input_frames_next() * channels,
-                self.resample_buffer.len(),
-            ) {
+            let input_frames_next = resampler.input_frames_next();
+            for _ in 0..min(input_frames_next * channels, self.resample_buffer.len()) {
                 if let Some(sample) = self.resample_buffer.pop_front() {
                     samples.push(sample);
                 }
             }
 
-            // No need to resample
-            if sample_rate == self.target_sample_rate {
-                return samples;
+            if samples.is_empty() {
+                if input_exhausted && !self.resampler_flushed {
+                    match resampler.process_partial::<&[f32]>(None, None) {
+                        Ok(flush_result) => {
+                            self.resampler_flushed = true;
+                            return Self::interleave(&flush_result);
+                        }
+                        Err(err) => {
+                            warn!("DecodeWorker: resampler flush failed: {}", err);
+                            self.resampler_flushed = true;
+                        }
+                    }
+                }
+                return Vec::new();
             }
 
             let deinterleaved = Self::deinterleave(&samples, channels);
-            let mut waves_out = vec![vec![]; channels];
-            if deinterleaved[0].len() == resampler.input_frames_next() {
-                waves_out = resampler.process(&deinterleaved, None).unwrap();
+            let mut waves_out = if deinterleaved[0].len() == input_frames_next {
+                match resampler.process(&deinterleaved, None) {
+                    Ok(waves_out) => waves_out,
+                    Err(err) => {
+                        warn!("DecodeWorker: resample failed: {}", err);
+                        return samples;
+                    }
+                }
             } else {
-                waves_out = resampler
-                    .process_partial(Some(&deinterleaved), None)
-                    .unwrap();
-                if let Ok(flush_result) = resampler.process_partial::<&[f32]>(None, None) {
-                    for i in 0..channels {
-                        waves_out[i].extend(flush_result[i].iter());
+                match resampler.process_partial(Some(&deinterleaved), None) {
+                    Ok(waves_out) => waves_out,
+                    Err(err) => {
+                        warn!("DecodeWorker: partial resample failed: {}", err);
+                        return samples;
+                    }
+                }
+            };
+
+            if input_exhausted && self.resample_buffer.is_empty() && !self.resampler_flushed {
+                match resampler.process_partial::<&[f32]>(None, None) {
+                    Ok(flush_result) => {
+                        for i in 0..channels {
+                            waves_out[i].extend(flush_result[i].iter().copied());
+                        }
+                        self.resampler_flushed = true;
+                    }
+                    Err(err) => {
+                        warn!("DecodeWorker: trailing resampler flush failed: {}", err);
+                        self.resampler_flushed = true;
                     }
                 }
             }
-            result = Self::interleave(&waves_out);
+            return Self::interleave(&waves_out);
         }
 
-        result
+        Vec::new()
     }
 
     fn ms_to_samples(&self, milliseconds: u32) -> usize {
@@ -308,14 +409,20 @@ impl DecodeWorker {
             let chunk_size = self.resampler_input_chunk_size(source_sample_rate);
             self.fill_resample_buffer(chunk_size);
 
-            if self.resample_buffer.is_empty() {
+            let input_exhausted = self
+                .active_track
+                .as_ref()
+                .map(|track| track.input_exhausted)
+                .unwrap_or(false);
+
+            if self.resample_buffer.is_empty() && !input_exhausted {
                 if self.finish_active_track_if_complete() {
                     continue;
                 }
                 break;
             }
 
-            let resampled_samples = self.resample_next_frame(source_sample_rate);
+            let resampled_samples = self.resample_next_frame(source_sample_rate, input_exhausted);
             if resampled_samples.is_empty() {
                 if self.finish_active_track_if_complete() {
                     continue;
@@ -352,9 +459,43 @@ impl DecodeWorker {
         }
     }
 
+    fn remap_channels(samples: &[f32], source_channels: usize, target_channels: usize) -> Vec<f32> {
+        if source_channels == 0 || target_channels == 0 {
+            return Vec::new();
+        }
+        if source_channels == target_channels {
+            return samples.to_vec();
+        }
+
+        let frame_count = samples.len() / source_channels;
+        let mut remapped = Vec::with_capacity(frame_count * target_channels);
+
+        for frame_index in 0..frame_count {
+            let frame_start = frame_index * source_channels;
+            let frame = &samples[frame_start..frame_start + source_channels];
+            for out_channel in 0..target_channels {
+                let sample = if target_channels == 1 {
+                    let sum = frame.iter().copied().sum::<f32>();
+                    sum / source_channels as f32
+                } else if source_channels == 1 {
+                    frame[0]
+                } else if out_channel < source_channels {
+                    frame[out_channel]
+                } else {
+                    let index = out_channel % source_channels;
+                    frame[index]
+                };
+                remapped.push(sample);
+            }
+        }
+
+        remapped
+    }
+
     fn decode_one_packet_into_buffer(&mut self) -> bool {
         let mut decoded_samples: Option<Vec<f32>> = None;
         let mut exhausted_input = false;
+        let target_channels = self.target_channels.max(1) as usize;
 
         {
             let active = match self.active_track.as_mut() {
@@ -375,7 +516,12 @@ impl DecodeWorker {
                             let duration = decoded.capacity() as u64;
                             let mut sample_buffer = SampleBuffer::<f32>::new(duration, *spec);
                             sample_buffer.copy_interleaved_ref(decoded);
-                            decoded_samples = Some(sample_buffer.samples().to_vec());
+                            let mapped = Self::remap_channels(
+                                sample_buffer.samples(),
+                                active.source_channels.max(1) as usize,
+                                target_channels,
+                            );
+                            decoded_samples = Some(mapped);
                         }
                         Err(Error::DecodeError(msg)) => {
                             warn!("Decode error (skipping frame): {}", msg);
@@ -432,10 +578,19 @@ impl DecodeWorker {
     }
 
     fn finish_active_track_if_complete(&mut self) -> bool {
+        let requires_resampling = self
+            .active_track
+            .as_ref()
+            .map(|active| active.source_sample_rate != self.target_sample_rate)
+            .unwrap_or(false);
         let should_finish = self
             .active_track
             .as_ref()
-            .map(|active| active.input_exhausted && self.resample_buffer.is_empty())
+            .map(|active| {
+                active.input_exhausted
+                    && self.resample_buffer.is_empty()
+                    && (!requires_resampling || self.resampler_flushed)
+            })
             .unwrap_or(false);
 
         if !should_finish {
@@ -461,6 +616,7 @@ impl DecodeWorker {
             )));
 
         self.resampler = None;
+        self.resampler_flushed = false;
         true
     }
 
@@ -470,6 +626,7 @@ impl DecodeWorker {
                 Some(active_track) => {
                     self.active_track = Some(active_track);
                     self.resampler = None;
+                    self.resampler_flushed = false;
                     self.resample_buffer.clear();
                     return true;
                 }
@@ -518,7 +675,7 @@ impl DecodeWorker {
         };
 
         let source_sample_rate = codec_params.sample_rate.unwrap_or(44100);
-        let source_channels = codec_params.channels.map(|c| c.count()).unwrap_or(2);
+        let source_channels = codec_params.channels.map(|c| c.count() as u16).unwrap_or(2);
         if source_channels == 0 {
             error!("Unsupported channel count 0 in {:?}", input_track.path);
             return None;
@@ -573,6 +730,7 @@ impl DecodeWorker {
             format_reader,
             decoder,
             source_sample_rate,
+            source_channels,
             input_exhausted: false,
             consecutive_decode_errors: 0,
         })
@@ -616,6 +774,10 @@ impl DecodeWorker {
             format: format_name,
             bitrate_kbps: (bitrate as f32 / 1000.0).round() as u32,
             sample_rate_hz: sample_rate,
+            channel_count: codec_params
+                .channels
+                .map(|channels| channels.count() as u16)
+                .unwrap_or(2),
             duration_ms: duration_ms as u64,
         }
     }
@@ -714,31 +876,15 @@ impl AudioDecoder {
                             .blocking_send(DecodeWorkItem::ConfigChanged(config))
                             .unwrap();
                     }
-                    Message::Config(ConfigMessage::AudioDeviceOpened {
-                        sample_rate,
-                        channels,
-                    }) => {
+                    Message::Config(ConfigMessage::AudioDeviceOpened { stream_info }) => {
                         debug!(
-                            "AudioDecoder: Syncing with actual device config: sr={}, channels={}",
-                            sample_rate, channels
+                            "AudioDecoder: Syncing with actual device config: sr={}, channels={}, bits={}",
+                            stream_info.sample_rate_hz,
+                            stream_info.channel_count,
+                            stream_info.bits_per_sample
                         );
-                        let dummy_config = Config {
-                            output: OutputConfig {
-                                output_device_name: String::new(),
-                                output_device_auto: true,
-                                channel_count: channels,
-                                sample_rate_khz: sample_rate,
-                                bits_per_sample: 32,
-                                channel_count_auto: false,
-                                sample_rate_auto: false,
-                                bits_per_sample_auto: false,
-                            },
-                            ui: UiConfig::default(),
-                            library: LibraryConfig::default(),
-                            buffering: BufferingConfig::default(),
-                        };
                         self.worker_sender
-                            .blocking_send(DecodeWorkItem::ConfigChanged(dummy_config))
+                            .blocking_send(DecodeWorkItem::AudioDeviceOpened { stream_info })
                             .unwrap();
                     }
                     _ => {}

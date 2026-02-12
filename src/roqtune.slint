@@ -2972,136 +2972,158 @@ export component AppWindow inherits Window {
                 }
             }
         }
-    }
 
-    if root.show_properties_dialog : Rectangle {
-        z: 112;
-        width: min(root.width - 40px, 760px);
-        height: min(root.height - 40px, 560px);
-        x: (root.width - self.width) / 2;
-        y: (root.height - self.height) / 2;
-        border-radius: 6px;
-        background: #242424;
-        border-width: 1px;
-        border-color: #3b3b3b;
+        properties-dialog-panel := Rectangle {
+            z: 1;
+            width: min(root.width - 40px, 760px);
+            height: min(root.height - 40px, 560px);
+            x: (parent.width - self.width) / 2;
+            y: (parent.height - self.height) / 2;
+            border-radius: 6px;
+            background: #242424;
+            border-width: 1px;
+            border-color: #3b3b3b;
 
-        VerticalLayout {
-            padding: 16px;
-            spacing: 10px;
+            // Consume clicks in the panel body so backdrop click handling only applies outside.
+            TouchArea {}
 
-            HorizontalLayout {
-                Text {
-                    text: "Properties";
-                    color: #eee;
-                    font-size: 16px;
-                    font-weight: 700;
-                }
-                Rectangle { horizontal-stretch: 1; }
-                if root.properties_busy : Text {
-                    text: "Working...";
-                    color: #9ab1ce;
-                    font-size: 11px;
-                    vertical-alignment: center;
-                }
-            }
+            VerticalLayout {
+                padding: 16px;
+                spacing: 10px;
 
-            Text {
-                text: root.properties_target_title;
-                color: #aeb7c2;
-                font-size: 12px;
-                overflow: elide;
-            }
-
-            Rectangle {
-                height: 28px;
-                border-radius: 4px;
-                background: #2c2c2c;
                 HorizontalLayout {
-                    padding-left: 8px;
-                    padding-right: 10px;
-                    spacing: 8px;
                     Text {
-                        width: 220px;
-                        text: "Field";
-                        color: #cfd8e5;
-                        font-size: 12px;
+                        text: "Properties";
+                        color: #eee;
+                        font-size: 16px;
                         font-weight: 700;
-                        vertical-alignment: center;
-                        overflow: elide;
                     }
-                    Text {
-                        text: "Value";
-                        color: #cfd8e5;
-                        font-size: 12px;
-                        font-weight: 700;
-                        horizontal-stretch: 1;
+                    Rectangle { horizontal-stretch: 1; }
+                    if root.properties_busy : Text {
+                        text: "Working...";
+                        color: #9ab1ce;
+                        font-size: 11px;
                         vertical-alignment: center;
-                        overflow: elide;
                     }
                 }
-            }
 
-            ScrollView {
-                vertical-stretch: 1;
-                VerticalLayout {
-                    spacing: 2px;
-                    for field[index] in root.properties_fields : Rectangle {
-                        height: 30px;
-                        border-radius: 3px;
-                        background: Math.mod(index, 2) == 0 ? transparent : #2a2a2a80;
+                Text {
+                    text: root.properties_target_title;
+                    color: #aeb7c2;
+                    font-size: 12px;
+                    overflow: elide;
+                }
 
-                        HorizontalLayout {
-                            padding-left: 8px;
-                            padding-right: 8px;
-                            spacing: 8px;
+                Rectangle {
+                    height: 28px;
+                    border-radius: 4px;
+                    background: #2c2c2c;
+                    HorizontalLayout {
+                        padding-left: 8px;
+                        padding-right: 10px;
+                        spacing: 8px;
+                        Text {
+                            width: 220px;
+                            text: "Field";
+                            color: #cfd8e5;
+                            font-size: 12px;
+                            font-weight: 700;
+                            vertical-alignment: center;
+                            overflow: elide;
+                        }
+                        Text {
+                            text: "Value";
+                            color: #cfd8e5;
+                            font-size: 12px;
+                            font-weight: 700;
+                            horizontal-stretch: 1;
+                            vertical-alignment: center;
+                            overflow: elide;
+                        }
+                    }
+                }
 
-                            Text {
-                                width: 220px;
-                                text: field.field_name;
-                                color: field.common ? #d8deea : #bec6d1;
-                                font-size: 12px;
-                                vertical-alignment: center;
-                                overflow: elide;
-                            }
+                ScrollView {
+                    vertical-stretch: 1;
+                    VerticalLayout {
+                        spacing: 2px;
+                        for field[index] in root.properties_fields : Rectangle {
+                            height: 30px;
+                            border-radius: 3px;
+                            background: Math.mod(index, 2) == 0 ? transparent : #2a2a2a80;
 
-                            LineEdit {
-                                text: field.value;
-                                horizontal-stretch: 1;
-                                enabled: !root.properties_busy;
-                                edited(text) => {
-                                    root.properties_save_enabled = true;
-                                    root.properties_field_edited(index, text);
+                            HorizontalLayout {
+                                padding-left: 8px;
+                                padding-right: 8px;
+                                spacing: 8px;
+
+                                Text {
+                                    width: 220px;
+                                    text: field.field_name;
+                                    color: field.common ? #d8deea : #bec6d1;
+                                    font-size: 12px;
+                                    vertical-alignment: center;
+                                    overflow: elide;
+                                }
+
+                                value-input-frame := Rectangle {
+                                    horizontal-stretch: 1;
+                                    height: 24px;
+                                    border-radius: 4px;
+                                    border-width: 1px;
+                                    border-color: value-input.has-focus ? #5da8ff : #3b3b3b;
+                                    background: value-input.has-focus ? #1f2a36 : #202020;
+
+                                    TouchArea {
+                                        clicked => {
+                                            if (!root.properties_busy) {
+                                                value-input.focus();
+                                            }
+                                        }
+                                    }
+
+                                    value-input := LineEdit {
+                                        x: 1px;
+                                        y: 1px;
+                                        width: max(0px, parent.width - 2px);
+                                        height: max(0px, parent.height - 2px);
+                                        text: field.value;
+                                        enabled: !root.properties_busy;
+                                        edited(text) => {
+                                            root.properties_field_edited(index, text);
+                                        }
+                                    }
                                 }
                             }
                         }
                     }
                 }
-            }
 
-            if root.properties_error_text != "" : Text {
-                text: root.properties_error_text;
-                color: #f08f8f;
-                font-size: 11px;
-                wrap: word-wrap;
-            }
-
-            HorizontalLayout {
-                spacing: 10px;
-                Rectangle { horizontal-stretch: 1; }
-                Button {
-                    text: "Cancel";
-                    enabled: !root.properties_busy;
-                    clicked => {
-                        root.properties_cancel();
-                    }
+                if root.properties_error_text != "" : Text {
+                    text: root.properties_error_text;
+                    color: #f08f8f;
+                    font-size: 11px;
+                    wrap: word-wrap;
                 }
-                Button {
-                    text: "Save";
-                    primary: true;
-                    enabled: !root.properties_busy;
-                    clicked => {
-                        if (root.properties_save_enabled) {
-                            root.properties_save();
+
+                HorizontalLayout {
+                    spacing: 10px;
+                    Rectangle { horizontal-stretch: 1; }
+                    Button {
+                        text: "Cancel";
+                        enabled: !root.properties_busy;
+                        clicked => {
+                            root.properties_cancel();
+                        }
+                    }
+                    Button {
+                        text: "Save";
+                        primary: true;
+                        enabled: !root.properties_busy;
+                        clicked => {
+                            if (root.properties_save_enabled) {
+                                root.properties_save();
+                            }
                         }
                     }
                 }
@@ -3129,6 +3151,7 @@ export component AppWindow inherits Window {
             property <length> control_max_width: 270px;
             property <length> button_height: 30px;
             property <length> button_width: 104px;
+            property <length> settings_row_width: self.label_column_width + self.control_max_width + 10px;
 
             VerticalLayout {
                 padding: 16px;
@@ -3170,127 +3193,260 @@ export component AppWindow inherits Window {
                     vertical-stretch: 1;
                     clip: true;
 
-                    if root.settings_dialog_tab_index == 0 : VerticalLayout {
-                        spacing: 8px;
+                    if root.settings_dialog_tab_index == 0 : ScrollView {
+                        width: parent.width;
+                        height: parent.height;
 
-                        SettingsDropdownControl {
-                            label: "Output Device";
-                            options: root.settings_output_device_options;
-                            selected_index <=> root.settings_output_device_index;
-                            custom_value <=> root.settings_output_device_custom_value;
-                            custom_placeholder: "Enter output device name";
-                            label_width: settings-dialog-panel.label_column_width;
-                            control_min_width: settings-dialog-panel.control_min_width;
-                            control_max_width: settings-dialog-panel.control_max_width;
-                        }
+                        VerticalLayout {
+                            alignment: start;
+                            spacing: 8px;
 
-                        SettingsDropdownControl {
-                            label: "Output Channels";
-                            options: root.settings_channel_options;
-                            selected_index <=> root.settings_channel_index;
-                            custom_value <=> root.settings_channel_custom_value;
-                            custom_placeholder: "Enter channel count";
-                            label_width: settings-dialog-panel.label_column_width;
-                            control_min_width: settings-dialog-panel.control_min_width;
-                            control_max_width: settings-dialog-panel.control_max_width;
-                        }
-
-                        SettingsDropdownControl {
-                            label: "Output Sample Rate";
-                            options: root.settings_sample_rate_options;
-                            selected_index <=> root.settings_sample_rate_index;
-                            custom_value <=> root.settings_sample_rate_custom_value;
-                            custom_placeholder: "Enter sample rate in Hz";
-                            label_width: settings-dialog-panel.label_column_width;
-                            control_min_width: settings-dialog-panel.control_min_width;
-                            control_max_width: settings-dialog-panel.control_max_width;
-                        }
-
-                        SettingsDropdownControl {
-                            label: "Output Bits Per Sample";
-                            options: root.settings_bits_per_sample_options;
-                            selected_index <=> root.settings_bits_per_sample_index;
-                            custom_value <=> root.settings_bits_per_sample_custom_value;
-                            custom_placeholder: "Enter bit depth";
-                            label_width: settings-dialog-panel.label_column_width;
-                            control_min_width: settings-dialog-panel.control_min_width;
-                            control_max_width: settings-dialog-panel.control_max_width;
-                        }
-
-                        Rectangle { height: 1px; background: #343434; }
-
-                        Rectangle {
-                            height: 32px;
-                            background: settings-layout-intro-toggle-ta.has-hover ? #2d2d2d : transparent;
-                            border-radius: 4px;
-                            HorizontalLayout {
-                                spacing: 10px;
-                                Text {
-                                    text: "Show layout editing mode tutorial";
-                                    color: #ddd;
-                                    font-size: 12px;
-                                    width: settings-dialog-panel.label_column_width + 24px;
-                                    vertical-alignment: center;
-                                    horizontal-alignment: left;
+                            SettingsDropdownControl {
+                                width: settings-dialog-panel.settings_row_width;
+                                label: "Output Device";
+                                tooltip_text: "Select which audio output device roqtune uses. Auto follows your system default.";
+                                options: root.settings_output_device_options;
+                                selected_index <=> root.settings_output_device_index;
+                                custom_value <=> root.settings_output_device_custom_value;
+                                custom_placeholder: "Enter output device name";
+                                allow_custom_input: true;
+                                label_width: settings-dialog-panel.label_column_width;
+                                control_min_width: settings-dialog-panel.control_min_width;
+                                control_max_width: settings-dialog-panel.control_max_width;
+                                tooltip_hover_changed(is-hovered, tooltip, anchor-x-px, anchor-y-px) => {
+                                    root.tooltip_hover_changed(is-hovered, tooltip, anchor-x-px, anchor-y-px);
                                 }
-                                Rectangle {
-                                    width: settings-dialog-panel.control_max_width;
-                                    height: parent.height;
-                                    background: transparent;
-                                    settings-layout-intro-toggle := Switch {
-                                        x: parent.width - self.width - 8px;
-                                        y: (parent.height - self.height) / 2;
-                                        width: 18px;
-                                        text: "";
-                                        checked <=> root.settings_show_layout_edit_tutorial;
+                            }
+
+                            SettingsDropdownControl {
+                                width: settings-dialog-panel.settings_row_width;
+                                label: "Output Channels";
+                                tooltip_text: "Choose output channel layout. Auto uses the best verified channel count for your device.";
+                                options: root.settings_channel_options;
+                                selected_index <=> root.settings_channel_index;
+                                custom_value <=> root.settings_channel_custom_value;
+                                custom_placeholder: "Enter channel count";
+                                allow_custom_input: true;
+                                label_width: settings-dialog-panel.label_column_width;
+                                control_min_width: settings-dialog-panel.control_min_width;
+                                control_max_width: settings-dialog-panel.control_max_width;
+                                tooltip_hover_changed(is-hovered, tooltip, anchor-x-px, anchor-y-px) => {
+                                    root.tooltip_hover_changed(is-hovered, tooltip, anchor-x-px, anchor-y-px);
+                                }
+                            }
+
+                            SettingsDropdownControl {
+                                width: settings-dialog-panel.settings_row_width;
+                                label: "Output Sample Rate";
+                                tooltip_text: "Match Content switches output rate per track when supported. Manual keeps one fixed output rate.";
+                                options: root.settings_sample_rate_mode_options;
+                                selected_index <=> root.settings_sample_rate_mode_index;
+                                custom_value: "";
+                                custom_placeholder: "";
+                                allow_custom_input: false;
+                                label_width: settings-dialog-panel.label_column_width;
+                                control_min_width: settings-dialog-panel.control_min_width;
+                                control_max_width: settings-dialog-panel.control_max_width;
+                                tooltip_hover_changed(is-hovered, tooltip, anchor-x-px, anchor-y-px) => {
+                                    root.tooltip_hover_changed(is-hovered, tooltip, anchor-x-px, anchor-y-px);
+                                }
+                            }
+
+                            Text {
+                                width: settings-dialog-panel.settings_row_width;
+                                text: root.settings_verified_sample_rates_summary;
+                                color: #b8c8d6;
+                                font-size: 11px;
+                                wrap: no-wrap;
+                                overflow: elide;
+                            }
+
+                            if root.settings_sample_rate_mode_index == 1 : SettingsDropdownControl {
+                                width: settings-dialog-panel.settings_row_width;
+                                label: "Output Sample Rate";
+                                tooltip_text: "Only used in Manual mode. Match Content ignores this and switches based on track/sample support.";
+                                options: root.settings_sample_rate_options;
+                                selected_index <=> root.settings_sample_rate_index;
+                                custom_value <=> root.settings_sample_rate_custom_value;
+                                custom_placeholder: "Enter sample rate in Hz";
+                                allow_custom_input: true;
+                                label_width: settings-dialog-panel.label_column_width;
+                                control_min_width: settings-dialog-panel.control_min_width;
+                                control_max_width: settings-dialog-panel.control_max_width;
+                                tooltip_hover_changed(is-hovered, tooltip, anchor-x-px, anchor-y-px) => {
+                                    root.tooltip_hover_changed(is-hovered, tooltip, anchor-x-px, anchor-y-px);
+                                }
+                            }
+
+                            SettingsDropdownControl {
+                                width: settings-dialog-panel.settings_row_width;
+                                label: "Output Bits Per Sample";
+                                tooltip_text: "Preferred output bit depth. Auto picks the most compatible high-quality format.";
+                                options: root.settings_bits_per_sample_options;
+                                selected_index <=> root.settings_bits_per_sample_index;
+                                custom_value <=> root.settings_bits_per_sample_custom_value;
+                                custom_placeholder: "Enter bit depth";
+                                allow_custom_input: true;
+                                label_width: settings-dialog-panel.label_column_width;
+                                control_min_width: settings-dialog-panel.control_min_width;
+                                control_max_width: settings-dialog-panel.control_max_width;
+                                tooltip_hover_changed(is-hovered, tooltip, anchor-x-px, anchor-y-px) => {
+                                    root.tooltip_hover_changed(is-hovered, tooltip, anchor-x-px, anchor-y-px);
+                                }
+                            }
+
+                            SettingsDropdownControl {
+                                width: settings-dialog-panel.settings_row_width;
+                                label: "Resampler Quality";
+                                tooltip_text: "Used only when sample rate conversion is required. High uses sinc linear; Highest uses sinc cubic.";
+                                options: root.settings_resampler_quality_options;
+                                selected_index <=> root.settings_resampler_quality_index;
+                                custom_value: "";
+                                custom_placeholder: "";
+                                allow_custom_input: false;
+                                label_width: settings-dialog-panel.label_column_width;
+                                control_min_width: settings-dialog-panel.control_min_width;
+                                control_max_width: settings-dialog-panel.control_max_width;
+                                tooltip_hover_changed(is-hovered, tooltip, anchor-x-px, anchor-y-px) => {
+                                    root.tooltip_hover_changed(is-hovered, tooltip, anchor-x-px, anchor-y-px);
+                                }
+                            }
+
+                            Rectangle {
+                                height: 32px;
+                                background: settings-dither-toggle-ta.has-hover ? #2d2d2d : transparent;
+                                border-radius: 4px;
+                                HorizontalLayout {
+                                    spacing: 10px;
+                                    dither-label-host := Rectangle {
+                                        width: settings-dialog-panel.label_column_width + 24px;
+                                        height: parent.height;
+                                        background: transparent;
+                                        Text {
+                                            text: "Dither bit-depth conversion";
+                                            color: #ddd;
+                                            font-size: 12px;
+                                            vertical-alignment: center;
+                                            horizontal-alignment: left;
+                                        }
+                                        settings-dither-label-tooltip-ta := TouchArea {
+                                            changed has-hover => {
+                                                root.tooltip_hover_changed(
+                                                    self.has-hover,
+                                                    "Adds low-level noise when reducing bit depth to reduce quantization distortion.",
+                                                    floor((dither-label-host.absolute-position.x + dither-label-host.width / 2) / 1px),
+                                                    floor((dither-label-host.absolute-position.y + dither-label-host.height) / 1px)
+                                                );
+                                            }
+                                        }
+                                    }
+                                    Rectangle {
+                                        width: settings-dialog-panel.control_max_width;
+                                        height: parent.height;
+                                        background: transparent;
+                                        settings-dither-toggle := Switch {
+                                            x: parent.width - self.width - 8px;
+                                            y: (parent.height - self.height) / 2;
+                                            width: 18px;
+                                            text: "";
+                                            checked <=> root.settings_dither_on_bitdepth_reduce;
+                                        }
+                                    }
+                                    Rectangle { horizontal-stretch: 1; }
+                                }
+                                settings-dither-toggle-ta := TouchArea {
+                                    changed has-hover => {
+                                        root.tooltip_hover_changed(
+                                            self.has-hover,
+                                            "Adds low-level noise when reducing bit depth to reduce quantization distortion.",
+                                            floor((dither-label-host.absolute-position.x + dither-label-host.width / 2) / 1px),
+                                            floor((dither-label-host.absolute-position.y + dither-label-host.height) / 1px)
+                                        );
+                                    }
+                                    clicked => {
+                                        settings-dither-toggle.checked = !settings-dither-toggle.checked;
                                     }
                                 }
-                                Rectangle { horizontal-stretch: 1; }
                             }
-                            settings-layout-intro-toggle-ta := TouchArea {
-                                clicked => {
-                                    settings-layout-intro-toggle.checked = !settings-layout-intro-toggle.checked;
-                                }
-                            }
-                        }
 
-                        Rectangle {
-                            height: 32px;
-                            background: settings-tooltips-toggle-ta.has-hover ? #2d2d2d : transparent;
-                            border-radius: 4px;
-                            HorizontalLayout {
-                                spacing: 10px;
-                                Text {
-                                    text: "Show tooltips";
-                                    color: #ddd;
-                                    font-size: 12px;
-                                    width: settings-dialog-panel.label_column_width + 24px;
-                                    vertical-alignment: center;
-                                    horizontal-alignment: left;
+                            Rectangle { height: 1px; background: #343434; }
+
+                            Rectangle {
+                                height: 32px;
+                                background: settings-layout-intro-toggle-ta.has-hover ? #2d2d2d : transparent;
+                                border-radius: 4px;
+                                HorizontalLayout {
+                                    spacing: 10px;
+                                    Text {
+                                        text: "Show layout editing mode tutorial";
+                                        color: #ddd;
+                                        font-size: 12px;
+                                        width: settings-dialog-panel.label_column_width + 24px;
+                                        vertical-alignment: center;
+                                        horizontal-alignment: left;
+                                    }
+                                    Rectangle {
+                                        width: settings-dialog-panel.control_max_width;
+                                        height: parent.height;
+                                        background: transparent;
+                                        settings-layout-intro-toggle := Switch {
+                                            x: parent.width - self.width - 8px;
+                                            y: (parent.height - self.height) / 2;
+                                            width: 18px;
+                                            text: "";
+                                            checked <=> root.settings_show_layout_edit_tutorial;
+                                        }
+                                    }
+                                    Rectangle { horizontal-stretch: 1; }
                                 }
-                                Rectangle {
-                                    width: settings-dialog-panel.control_max_width;
-                                    height: parent.height;
-                                    background: transparent;
-                                    settings-tooltips-toggle := Switch {
-                                        x: parent.width - self.width - 8px;
-                                        y: (parent.height - self.height) / 2;
-                                        width: 18px;
-                                        text: "";
-                                        checked <=> root.settings_show_tooltips;
+                                settings-layout-intro-toggle-ta := TouchArea {
+                                    clicked => {
+                                        settings-layout-intro-toggle.checked = !settings-layout-intro-toggle.checked;
                                     }
                                 }
-                                Rectangle { horizontal-stretch: 1; }
                             }
-                            settings-tooltips-toggle-ta := TouchArea {
-                                clicked => {
-                                    settings-tooltips-toggle.checked = !settings-tooltips-toggle.checked;
+
+                            Rectangle {
+                                height: 32px;
+                                background: settings-tooltips-toggle-ta.has-hover ? #2d2d2d : transparent;
+                                border-radius: 4px;
+                                HorizontalLayout {
+                                    spacing: 10px;
+                                    Text {
+                                        text: "Show tooltips";
+                                        color: #ddd;
+                                        font-size: 12px;
+                                        width: settings-dialog-panel.label_column_width + 24px;
+                                        vertical-alignment: center;
+                                        horizontal-alignment: left;
+                                    }
+                                    Rectangle {
+                                        width: settings-dialog-panel.control_max_width;
+                                        height: parent.height;
+                                        background: transparent;
+                                        settings-tooltips-toggle := Switch {
+                                            x: parent.width - self.width - 8px;
+                                            y: (parent.height - self.height) / 2;
+                                            width: 18px;
+                                            text: "";
+                                            checked <=> root.settings_show_tooltips;
+                                        }
+                                    }
+                                    Rectangle { horizontal-stretch: 1; }
+                                }
+                                settings-tooltips-toggle-ta := TouchArea {
+                                    clicked => {
+                                        settings-tooltips-toggle.checked = !settings-tooltips-toggle.checked;
+                                    }
                                 }
                             }
                         }
                     }
 
                     if root.settings_dialog_tab_index == 1 : VerticalLayout {
+                        width: parent.width;
+                        height: parent.height;
+                        alignment: start;
                         spacing: 8px;
 
                         Text {
@@ -3361,45 +3517,48 @@ export component AppWindow inherits Window {
                             }
                         }
                     }
-                }
+            }
 
-                Rectangle { height: 1px; background: #343434; }
+            Rectangle { height: 1px; background: #343434; }
 
-                HorizontalLayout {
-                    spacing: 10px;
-                    Rectangle { horizontal-stretch: 1; }
-                    Button {
-                        text: "Cancel";
-                        width: settings-dialog-panel.button_width;
-                        height: settings-dialog-panel.button_height;
-                        clicked => {
-                            root.show_settings_dialog = false;
-                        }
+            HorizontalLayout {
+                spacing: 10px;
+                Rectangle { horizontal-stretch: 1; }
+                Button {
+                    text: "Cancel";
+                    width: settings-dialog-panel.button_width;
+                    height: settings-dialog-panel.button_height;
+                    clicked => {
+                        root.show_settings_dialog = false;
                     }
-                    Button {
-                        text: "Apply";
-                        primary: true;
-                        width: settings-dialog-panel.button_width;
-                        height: settings-dialog-panel.button_height;
-                        clicked => {
-                            root.apply_settings(
-                                root.settings_output_device_index,
-                                root.settings_channel_index,
-                                root.settings_sample_rate_index,
-                                root.settings_bits_per_sample_index,
-                                root.settings_output_device_custom_value,
-                                root.settings_channel_custom_value,
-                                root.settings_sample_rate_custom_value,
-                                root.settings_bits_per_sample_custom_value,
-                                root.settings_show_layout_edit_tutorial,
-                                root.settings_show_tooltips
-                            );
-                            root.show_settings_dialog = false;
-                        }
+                }
+                Button {
+                    text: "Apply";
+                    primary: true;
+                    width: settings-dialog-panel.button_width;
+                    height: settings-dialog-panel.button_height;
+                    clicked => {
+                        root.apply_settings(
+                            root.settings_output_device_index,
+                            root.settings_channel_index,
+                            root.settings_sample_rate_index,
+                            root.settings_bits_per_sample_index,
+                            root.settings_output_device_custom_value,
+                            root.settings_channel_custom_value,
+                            root.settings_sample_rate_custom_value,
+                            root.settings_bits_per_sample_custom_value,
+                            root.settings_show_layout_edit_tutorial,
+                            root.settings_show_tooltips,
+                            root.settings_sample_rate_mode_index,
+                            root.settings_resampler_quality_index,
+                            root.settings_dither_on_bitdepth_reduce
+                        );
+                        root.show_settings_dialog = false;
                     }
                 }
             }
         }
+    }
     }
 
     if root.show_tooltip
@@ -3410,7 +3569,6 @@ export component AppWindow inherits Window {
             && !root.show_library_context_menu
             && !root.show_playlist_track_context_menu
             && !root.show_properties_dialog
-            && !root.show_settings_dialog
             && !root.show_control_cluster_menu : Rectangle {
         z: 120;
         property <length> tooltip-max-width: min(360px, root.width - 16px);
@@ -3433,8 +3591,8 @@ export component AppWindow inherits Window {
             text: root.tooltip_text;
             color: #dedede;
             font-size: 11px;
-            wrap: no-wrap;
-            overflow: elide;
+            wrap: word-wrap;
+            overflow: clip;
         }
     }
 
@@ -3495,16 +3653,22 @@ export component AppWindow inherits Window {
     in-out property <[string]> settings_channel_options: [];
     in-out property <[string]> settings_sample_rate_options: [];
     in-out property <[string]> settings_bits_per_sample_options: [];
+    in-out property <[string]> settings_sample_rate_mode_options: [];
+    in-out property <[string]> settings_resampler_quality_options: [];
     in-out property <int> settings_output_device_index: 0;
     in-out property <int> settings_channel_index: 0;
     in-out property <int> settings_sample_rate_index: 0;
     in-out property <int> settings_bits_per_sample_index: 0;
+    in-out property <int> settings_sample_rate_mode_index: 0;
+    in-out property <int> settings_resampler_quality_index: 0;
     in-out property <string> settings_output_device_custom_value: "";
     in-out property <string> settings_channel_custom_value: "";
     in-out property <string> settings_sample_rate_custom_value: "";
     in-out property <string> settings_bits_per_sample_custom_value: "";
+    in-out property <string> settings_verified_sample_rates_summary: "Verified rates: (none)";
     in-out property <bool> settings_show_layout_edit_tutorial: true;
     in-out property <bool> settings_show_tooltips: true;
+    in-out property <bool> settings_dither_on_bitdepth_reduce: true;
     in-out property <bool> show_tooltips_enabled: true;
     in-out property <int> settings_dialog_tab_index: 0;
     in-out property <bool> show_tooltip: false;
@@ -3624,5 +3788,5 @@ export component AppWindow inherits Window {
     callback reset_layout_default();
     callback open_settings();
     callback tooltip_hover_changed(bool, string, int, int);
-    callback apply_settings(int, int, int, int, string, string, string, string, bool, bool);
+    callback apply_settings(int, int, int, int, string, string, string, string, bool, bool, int, int, bool);
 }

@@ -10,7 +10,7 @@
 - Beautiful library mode that scans and sorts your collection for easy browsing and listening
 - Custom column support in the track list, based on metadata format strings
 - Fully user customizable UI with layout editor based on modular panels
-- Broad format support: `mp3`, `wav`, `ogg`, `flac`, `aac`, `m4a`, `mp4`
+- Broad format compatibility with [symphonia](https://crates.io/crates/symphonia)
 
 ## Quick Start
 
@@ -61,6 +61,7 @@ The app is organized into cooperating runtime components connected through an ev
 - Layout file: `<config_dir>/roqtune/layout.toml`
 - Playlist database: `<data_dir>/roqtune/playlist.db`
 - Cover art cache: `<cache_dir>/roqtune/covers/`
+- Output probe cache: `<cache_dir>/roqtune/output_probe_cache.json`
 
 Common Linux defaults:
 
@@ -73,6 +74,13 @@ System templates in this repo:
 
 - `config/config.system.toml` (copy to `~/.config/roqtune/config.toml` and edit)
 - `config/layout.system.toml` (copy to `~/.config/roqtune/layout.toml` and edit)
+
+## Audio Output Behavior
+
+- Match Content mode (default): probes and caches verified device rates, then switches output rate per track boundary when supported.
+- Manual mode: keeps one fixed output sample rate (`sample_rate_auto = false` and `sample_rate_khz`).
+- Output conversion quality is configurable via `resampler_quality` (`high`/`highest`).
+- Optional dither is available for float-to-integer output conversion (`dither_on_bitdepth_reduce`).
 
 ## UI Development
 

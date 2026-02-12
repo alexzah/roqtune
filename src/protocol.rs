@@ -383,8 +383,40 @@ pub struct TechnicalMetadata {
     pub bitrate_kbps: u32,
     /// Effective sample rate in Hz.
     pub sample_rate_hz: u32,
+    /// Channel count detected from the source track.
+    pub channel_count: u16,
     /// Estimated duration in milliseconds.
     pub duration_ms: u64,
+}
+
+/// Concrete output stream sample type selected by the audio backend.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OutputSampleFormat {
+    F32,
+    I16,
+    U16,
+    Unknown,
+}
+
+/// Actual output stream profile opened by the audio backend.
+#[derive(Debug, Clone)]
+pub struct OutputStreamInfo {
+    pub device_name: String,
+    pub sample_rate_hz: u32,
+    pub channel_count: u16,
+    pub bits_per_sample: u16,
+    pub sample_format: OutputSampleFormat,
+}
+
+/// Playback path info describing how source audio maps to output stream settings.
+#[derive(Debug, Clone)]
+pub struct OutputPathInfo {
+    pub source_sample_rate_hz: u32,
+    pub source_channel_count: u16,
+    pub output_stream: OutputStreamInfo,
+    pub resampled: bool,
+    pub remixed_channels: bool,
+    pub dithered: bool,
 }
 
 /// Audio payload delivered from decoder to player.
@@ -446,6 +478,7 @@ pub enum PlaybackMessage {
     Seek(f32),
     SetVolume(f32),
     TechnicalMetadataChanged(TechnicalMetadata),
+    OutputPathChanged(OutputPathInfo),
     PlaybackProgress { elapsed_ms: u64, total_ms: u64 },
     CoverArtChanged(Option<PathBuf>),
     MetadataDisplayChanged(Option<DetailedMetadata>),
@@ -497,5 +530,8 @@ pub struct TrackMetadataSummary {
 #[allow(clippy::large_enum_variant)]
 pub enum ConfigMessage {
     ConfigChanged(Config),
-    AudioDeviceOpened { sample_rate: u32, channels: u16 },
+    AudioDeviceOpened { stream_info: OutputStreamInfo },
+    SetRuntimeOutputRate { sample_rate_hz: u32, reason: String },
+    ClearRuntimeOutputRateOverride,
+    OutputDeviceCapabilitiesChanged { verified_sample_rates: Vec<u32> },
 }

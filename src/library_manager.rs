@@ -8,11 +8,11 @@ use std::hash::{Hash, Hasher};
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use id3::{Tag, TagLike};
 use log::{debug, error, info, warn};
 use tokio::sync::broadcast::{Receiver, Sender};
 
 use crate::db_manager::DbManager;
+use crate::metadata_tags;
 use crate::protocol::{self, LibraryMessage, Message};
 
 const SUPPORTED_AUDIO_EXTENSIONS: [&str; 7] = ["mp3", "wav", "ogg", "flac", "aac", "m4a", "mp4"];
@@ -153,162 +153,38 @@ impl LibraryManager {
             track_number: String::new(),
         };
 
-        if let Ok(tag) = Tag::read_from_path(path) {
-            if let Some(title) = tag.title().filter(|value| !value.trim().is_empty()) {
-                metadata.title = title.to_string();
-            }
-            if let Some(artist) = tag.artist().filter(|value| !value.trim().is_empty()) {
-                metadata.artist = artist.to_string();
-            }
-            if let Some(album) = tag.album().filter(|value| !value.trim().is_empty()) {
-                metadata.album = album.to_string();
-            }
-            if let Some(album_artist) = tag.album_artist().filter(|value| !value.trim().is_empty())
-            {
-                metadata.album_artist = album_artist.to_string();
-            }
-            if let Some(genre) = tag.genre().filter(|value| !value.trim().is_empty()) {
-                metadata.genre = genre.to_string();
-            }
-            if let Some(year) = tag.year() {
-                metadata.year = year.to_string();
-            }
-            if let Some(track_number) = tag.track() {
-                metadata.track_number = track_number.to_string();
-            }
-            if !metadata.album_artist.is_empty() {
-                return metadata;
-            }
-            metadata.album_artist = metadata.artist.clone();
-            return metadata;
-        }
+        if let Some(parsed) = metadata_tags::read_common_track_metadata(path) {
+            let metadata_tags::CommonTrackMetadata {
+                title,
+                artist,
+                album,
+                album_artist,
+                date: _,
+                year,
+                genre,
+                track_number,
+            } = parsed;
 
-        if let Ok(ape_tag) = ape::read_from_path(path) {
-            if let Some(title) = ape_tag.item("title").and_then(|item| {
-                let value: Result<&str, _> = item.try_into();
-                value.ok()
-            }) {
-                if !title.trim().is_empty() {
-                    metadata.title = title.to_string();
-                }
+            if !title.is_empty() {
+                metadata.title = title;
             }
-            if let Some(artist) = ape_tag.item("artist").and_then(|item| {
-                let value: Result<&str, _> = item.try_into();
-                value.ok()
-            }) {
-                if !artist.trim().is_empty() {
-                    metadata.artist = artist.to_string();
-                }
+            if !artist.is_empty() {
+                metadata.artist = artist;
             }
-            if let Some(album) = ape_tag.item("album").and_then(|item| {
-                let value: Result<&str, _> = item.try_into();
-                value.ok()
-            }) {
-                if !album.trim().is_empty() {
-                    metadata.album = album.to_string();
-                }
+            if !album.is_empty() {
+                metadata.album = album;
             }
-            if let Some(album_artist) = ape_tag
-                .item("album artist")
-                .or_else(|| ape_tag.item("albumartist"))
-                .and_then(|item| {
-                    let value: Result<&str, _> = item.try_into();
-                    value.ok()
-                })
-            {
-                if !album_artist.trim().is_empty() {
-                    metadata.album_artist = album_artist.to_string();
-                }
+            if !album_artist.is_empty() {
+                metadata.album_artist = album_artist;
             }
-            if let Some(year) = ape_tag
-                .item("year")
-                .or_else(|| ape_tag.item("date"))
-                .and_then(|item| {
-                    let value: Result<&str, _> = item.try_into();
-                    value.ok()
-                })
-            {
-                if !year.trim().is_empty() {
-                    metadata.year = year.to_string();
-                }
+            if !genre.is_empty() {
+                metadata.genre = genre;
             }
-            if let Some(genre) = ape_tag.item("genre").and_then(|item| {
-                let value: Result<&str, _> = item.try_into();
-                value.ok()
-            }) {
-                if !genre.trim().is_empty() {
-                    metadata.genre = genre.to_string();
-                }
+            if !year.is_empty() {
+                metadata.year = year;
             }
-            if let Some(track_number) = ape_tag
-                .item("track")
-                .or_else(|| ape_tag.item("tracknumber"))
-                .and_then(|item| {
-                    let value: Result<&str, _> = item.try_into();
-                    value.ok()
-                })
-            {
-                if !track_number.trim().is_empty() {
-                    metadata.track_number = track_number.to_string();
-                }
-            }
-            if metadata.album_artist.is_empty() {
-                metadata.album_artist = metadata.artist.clone();
-            }
-            return metadata;
-        }
-
-        if let Ok(flac_tag) = metaflac::Tag::read_from_path(path) {
-            if let Some(title) = flac_tag.get_vorbis("title").and_then(|mut it| it.next()) {
-                if !title.trim().is_empty() {
-                    metadata.title = title.to_string();
-                }
-            }
-            if let Some(artist) = flac_tag.get_vorbis("artist").and_then(|mut it| it.next()) {
-                if !artist.trim().is_empty() {
-                    metadata.artist = artist.to_string();
-                }
-            }
-            if let Some(album) = flac_tag.get_vorbis("album").and_then(|mut it| it.next()) {
-                if !album.trim().is_empty() {
-                    metadata.album = album.to_string();
-                }
-            }
-            if let Some(album_artist) = flac_tag
-                .get_vorbis("albumartist")
-                .and_then(|mut it| it.next())
-                .or_else(|| {
-                    flac_tag
-                        .get_vorbis("album artist")
-                        .and_then(|mut it| it.next())
-                })
-            {
-                if !album_artist.trim().is_empty() {
-                    metadata.album_artist = album_artist.to_string();
-                }
-            }
-            if let Some(year) = flac_tag
-                .get_vorbis("year")
-                .and_then(|mut it| it.next())
-                .or_else(|| flac_tag.get_vorbis("date").and_then(|mut it| it.next()))
-            {
-                if !year.trim().is_empty() {
-                    metadata.year = year.to_string();
-                }
-            }
-            if let Some(genre) = flac_tag.get_vorbis("genre").and_then(|mut it| it.next()) {
-                if !genre.trim().is_empty() {
-                    metadata.genre = genre.to_string();
-                }
-            }
-            if let Some(track_number) = flac_tag
-                .get_vorbis("tracknumber")
-                .and_then(|mut it| it.next())
-                .or_else(|| flac_tag.get_vorbis("track").and_then(|mut it| it.next()))
-            {
-                if !track_number.trim().is_empty() {
-                    metadata.track_number = track_number.to_string();
-                }
+            if !track_number.is_empty() {
+                metadata.track_number = track_number;
             }
         }
 
