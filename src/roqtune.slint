@@ -3237,7 +3237,7 @@ export component AppWindow inherits Window {
 
                             SettingsDropdownControl {
                                 width: settings-dialog-panel.settings_row_width;
-                                label: "Auto Sample-Rate";
+                                label: "Output Sample Rate";
                                 tooltip_text: "Match Content switches output rate per track when supported. Manual keeps one fixed output rate.";
                                 options: root.settings_sample_rate_mode_options;
                                 selected_index <=> root.settings_sample_rate_mode_index;
@@ -3250,6 +3250,15 @@ export component AppWindow inherits Window {
                                 tooltip_hover_changed(is-hovered, tooltip, anchor-x-px, anchor-y-px) => {
                                     root.tooltip_hover_changed(is-hovered, tooltip, anchor-x-px, anchor-y-px);
                                 }
+                            }
+
+                            Text {
+                                width: settings-dialog-panel.settings_row_width;
+                                text: root.settings_verified_sample_rates_summary;
+                                color: #b8c8d6;
+                                font-size: 11px;
+                                wrap: no-wrap;
+                                overflow: elide;
                             }
 
                             if root.settings_sample_rate_mode_index == 1 : SettingsDropdownControl {
@@ -3289,7 +3298,7 @@ export component AppWindow inherits Window {
                             SettingsDropdownControl {
                                 width: settings-dialog-panel.settings_row_width;
                                 label: "Resampler Quality";
-                                tooltip_text: "Controls conversion quality when sample-rate conversion is required. Highest uses more CPU.";
+                                tooltip_text: "Used only when sample rate conversion is required. High uses sinc linear; Highest uses sinc cubic.";
                                 options: root.settings_resampler_quality_options;
                                 selected_index <=> root.settings_resampler_quality_index;
                                 custom_value: "";
@@ -3301,14 +3310,6 @@ export component AppWindow inherits Window {
                                 tooltip_hover_changed(is-hovered, tooltip, anchor-x-px, anchor-y-px) => {
                                     root.tooltip_hover_changed(is-hovered, tooltip, anchor-x-px, anchor-y-px);
                                 }
-                            }
-
-                            Text {
-                                text: root.settings_verified_sample_rates_summary;
-                                color: #b8c8d6;
-                                font-size: 11px;
-                                wrap: no-wrap;
-                                overflow: elide;
                             }
 
                             Rectangle {
@@ -3442,23 +3443,21 @@ export component AppWindow inherits Window {
                         }
                     }
 
-                    if root.settings_dialog_tab_index == 1 : ScrollView {
+                    if root.settings_dialog_tab_index == 1 : VerticalLayout {
                         width: parent.width;
                         height: parent.height;
+                        alignment: start;
+                        spacing: 8px;
 
-                        VerticalLayout {
-                            alignment: start;
-                            spacing: 8px;
-
-                            Text {
-                                text: "Library Folders";
-                                color: #ddd;
-                                font-size: 12px;
-                                font-weight: 700;
-                            }
+                        Text {
+                            text: "Library Folders";
+                            color: #ddd;
+                            font-size: 12px;
+                            font-weight: 700;
+                        }
 
                         Rectangle {
-                            height: 220px;
+                            vertical-stretch: 1;
                             border-width: 1px;
                             border-color: #3a3a3a;
                             border-radius: 4px;
@@ -3518,8 +3517,6 @@ export component AppWindow inherits Window {
                             }
                         }
                     }
-                }
-
             }
 
             Rectangle { height: 1px; background: #343434; }

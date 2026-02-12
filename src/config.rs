@@ -47,8 +47,9 @@ pub enum ResamplerQuality {
     /// Good quality with lower CPU usage.
     #[default]
     High,
-    /// Higher quality with higher CPU usage.
-    VeryHigh,
+    /// Highest quality with higher CPU usage.
+    #[serde(alias = "very_high")]
+    Highest,
 }
 
 /// UI preferences persisted between sessions.

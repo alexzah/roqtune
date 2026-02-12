@@ -221,7 +221,7 @@ impl DecodeWorker {
                 oversampling_factor: 256,
                 window: WindowFunction::BlackmanHarris2,
             },
-            ResamplerQuality::VeryHigh => SincInterpolationParameters {
+            ResamplerQuality::Highest => SincInterpolationParameters {
                 sinc_len: 512,
                 f_cutoff: 0.97,
                 interpolation: SincInterpolationType::Cubic,

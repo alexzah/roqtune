@@ -314,7 +314,7 @@ fn select_manual_output_option_index_u32(value: u32, values: &[u32], custom_inde
 fn resampler_quality_to_str(value: ResamplerQuality) -> &'static str {
     match value {
         ResamplerQuality::High => "high",
-        ResamplerQuality::VeryHigh => "very_high",
+        ResamplerQuality::Highest => "highest",
     }
 }
 
@@ -1950,7 +1950,7 @@ fn apply_config_to_ui(
     let sample_rate_mode_index = if config.output.sample_rate_auto { 0 } else { 1 };
     let resampler_quality_index = match config.output.resampler_quality {
         ResamplerQuality::High => 0,
-        ResamplerQuality::VeryHigh => 1,
+        ResamplerQuality::Highest => 1,
     };
 
     ui.set_settings_output_device_index(device_index as i32);
@@ -3787,7 +3787,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     .unwrap_or(previous_config.output.bits_per_sample)
             };
             let resampler_quality = match resampler_idx {
-                1 => ResamplerQuality::VeryHigh,
+                1 => ResamplerQuality::Highest,
                 _ => ResamplerQuality::High,
             };
 
@@ -4675,9 +4675,8 @@ mod tests {
         resolve_playlist_header_gap_from_x, resolve_runtime_config, sanitize_config,
         sanitize_playlist_columns, select_manual_output_option_index_u32,
         select_output_option_index_u16, serialize_config_with_preserved_comments,
-        should_apply_custom_column_delete, sidebar_width_from_window,
-        update_or_replace_vec_model, visible_playlist_column_kinds, OutputSettingsOptions,
-        RuntimeOutputOverride,
+        should_apply_custom_column_delete, sidebar_width_from_window, update_or_replace_vec_model,
+        visible_playlist_column_kinds, OutputSettingsOptions, RuntimeOutputOverride,
     };
 
     fn unique_temp_directory(test_name: &str) -> PathBuf {
@@ -4863,7 +4862,7 @@ mod tests {
             "General tab tutorial row should keep compact right-aligned switch binding"
         );
         assert!(
-            slint_ui.contains("if root.settings_dialog_tab_index == 1 : ScrollView {")
+            slint_ui.contains("if root.settings_dialog_tab_index == 1 : VerticalLayout {")
                 && slint_ui.contains("text: \"Library Folders\"")
                 && slint_ui.contains("text: \"Add Folder\"")
                 && slint_ui.contains("text: \"Rescan\""),
@@ -4885,7 +4884,7 @@ mod tests {
             "Apply settings callback should include sample-rate mode, resampler quality, and dither controls"
         );
         assert!(
-            slint_ui.contains("label: \"Auto Sample-Rate\"")
+            slint_ui.contains("label: \"Output Sample Rate\"")
                 && slint_ui.contains("options: root.settings_sample_rate_mode_options;")
                 && slint_ui.contains("selected_index <=> root.settings_sample_rate_mode_index;"),
             "General tab should expose Match Content and Manual sample-rate mode selector"

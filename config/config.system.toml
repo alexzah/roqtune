@@ -27,7 +27,9 @@ bits_per_sample_auto = true
 # - `sample_rate_auto = false`: Manual, fixed to `sample_rate_khz`
 
 # Resampler profile used only when sample-rate conversion is needed.
-# Options: "high", "very_high"
+# Options: "high", "highest"
+# - high: Rubato SincFixedIn, linear interpolation, sinc_len=256
+# - highest: Rubato SincFixedIn, cubic interpolation, sinc_len=512
 resampler_quality = "high"
 
 # Apply TPDF dither when converting float output to lower bit-depth integer formats.

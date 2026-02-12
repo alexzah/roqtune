@@ -81,7 +81,7 @@ System templates in this repo:
 
 - Match Content mode (default): probes and caches verified device rates, then switches output rate per track boundary when supported.
 - Manual mode: keeps one fixed output sample rate (`sample_rate_auto = false` and `sample_rate_khz`).
-- Output conversion quality is configurable via `resampler_quality` (`high`/`very_high`).
+- Output conversion quality is configurable via `resampler_quality` (`high`/`highest`).
 - Optional dither is available for float-to-integer output conversion (`dither_on_bitdepth_reduce`).
 
 ## UI Development
