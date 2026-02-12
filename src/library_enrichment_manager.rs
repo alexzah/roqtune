@@ -8,9 +8,12 @@ use std::collections::{HashMap, HashSet, VecDeque};
 use std::fs;
 use std::hash::{Hash, Hasher};
 use std::io::Read;
+use std::num::NonZeroU32;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
+use governor::state::NotKeyed;
+use governor::{Quota, RateLimiter};
 use log::{debug, info, warn};
 use serde_json::Value;
 use tokio::sync::broadcast::{
@@ -20,36 +23,42 @@ use tokio::sync::broadcast::{
 
 use crate::db_manager::DbManager;
 use crate::protocol::{
-    LibraryEnrichmentEntity, LibraryEnrichmentPayload, LibraryEnrichmentPriority,
-    LibraryEnrichmentStatus, LibraryMessage, Message,
+    LibraryEnrichmentAttemptKind, LibraryEnrichmentEntity, LibraryEnrichmentErrorKind,
+    LibraryEnrichmentPayload, LibraryEnrichmentPriority, LibraryEnrichmentStatus, LibraryMessage,
+    Message,
 };
 
 const WIKIPEDIA_ACTION_API_URL: &str = "https://en.wikipedia.org/w/api.php";
 const WIKIPEDIA_REST_BASE_URL: &str = "https://en.wikipedia.org/w/rest.php/v1";
-const WIKIDATA_ACTION_API_URL: &str = "https://www.wikidata.org/w/api.php";
 const THEAUDIODB_BASE_URL: &str = "https://www.theaudiodb.com/api/v1/json/2";
 const WIKIPEDIA_SOURCE_NAME: &str = "Wikipedia";
 const THEAUDIODB_SOURCE_NAME: &str = "TheAudioDB";
 const IMAGE_CACHE_DIR_NAME: &str = "library_enrichment/images";
 const READY_METADATA_TTL_DAYS: u32 = 30;
-const NOT_FOUND_TTL_DAYS: u32 = 7;
-const ERROR_TTL_DAYS: u32 = 1;
+const CONCLUSIVE_NOT_FOUND_TTL: Duration = Duration::from_secs(24 * 60 * 60);
+const HARD_ERROR_TTL: Duration = Duration::from_secs(30 * 60);
 const MAX_CANDIDATES: usize = 12;
 const MAX_SUMMARY_FETCHES: usize = 10;
 const MAX_BLURB_CHARS: usize = 360;
 const MAX_PENDING_PREFETCH_REQUESTS: usize = 64;
-const PREFETCH_FETCH_BUDGET: Duration = Duration::from_millis(1800);
-const INTERACTIVE_FETCH_BUDGET: Duration = Duration::from_millis(4500);
-const THEAUDIODB_RATE_LIMIT_WINDOW: Duration = Duration::from_secs(60);
-const THEAUDIODB_RATE_LIMIT_MAX_REQUESTS: usize = 30;
-const THEAUDIODB_RATE_LIMIT_PREFETCH_BUDGET: usize = 20;
+const DETAIL_FETCH_BUDGET: Duration = Duration::from_secs(6);
+const VISIBLE_PREFETCH_FETCH_BUDGET: Duration = Duration::from_millis(2500);
+const BACKGROUND_WARM_FETCH_BUDGET: Duration = Duration::from_millis(1200);
+const THEAUDIODB_DETAIL_WAIT_LIMIT: Duration = Duration::from_millis(800);
+const BACKGROUND_WARM_INTERVAL: Duration = Duration::from_secs(30);
+const NON_DETAIL_RATE_LIMIT_REQUEUE_DELAY: Duration = Duration::from_secs(2);
+const DETAIL_REQUEST_TIMEOUT: Duration = Duration::from_millis(2500);
+const VISIBLE_REQUEST_TIMEOUT: Duration = Duration::from_millis(1200);
+const BACKGROUND_REQUEST_TIMEOUT: Duration = Duration::from_millis(900);
 const THEAUDIODB_RATE_LIMIT_DEFERRED: &str = "TheAudioDB rate limit saturated";
 const RETRY_REASON_TIMEOUT_PREFIX: &str = "timeout:";
 const RETRY_REASON_HARD_PREFIX: &str = "hard:";
 const RETRY_REASON_RATE_LIMIT_PREFIX: &str = "rate_limit:";
+const RETRY_REASON_BUDGET_PREFIX: &str = "budget_exhausted:";
 const RETRY_REASON_NOT_FOUND_PREFIX: &str = "not_found:";
 const RETRYABLE_TIMEOUT_BLURB: &str = "Internet metadata request timed out.";
 const RETRYABLE_RATE_LIMIT_BLURB: &str = "Internet metadata request hit a provider rate limit.";
+const RETRYABLE_BUDGET_BLURB: &str = "Internet metadata lookup is still in progress.";
 const HARD_ERROR_BLURB: &str = "Internet metadata provider returned an error.";
 const WIKIMEDIA_USER_AGENT: &str =
     "roqtune/0.1.0 (https://github.com/roqtune/roqtune; contact: metadata enrichment)";
@@ -79,6 +88,14 @@ struct RankedSummaryCandidate {
     requested_title: String,
     summary: WikiSummary,
     deterministic_score: i32,
+}
+
+#[derive(Debug, Clone, Default)]
+struct CandidateTitleSearchOutcome {
+    titles: Vec<String>,
+    saw_timeout: Option<String>,
+    saw_hard_error: Option<String>,
+    saw_budget: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -115,14 +132,6 @@ struct WikiSummary {
     canonical_url: String,
     image_url: Option<String>,
     page_type: String,
-    wikidata_item_id: Option<String>,
-}
-
-#[derive(Debug, Clone)]
-struct WikidataCandidate {
-    id: String,
-    label: String,
-    description: String,
 }
 
 #[derive(Debug, Clone)]
@@ -130,6 +139,7 @@ struct FetchOutcome {
     payload: LibraryEnrichmentPayload,
     image_url: Option<String>,
     last_error: Option<String>,
+    conclusive: bool,
 }
 
 /// Fetches and caches artist/album enrichment payloads for library views.
@@ -140,12 +150,15 @@ pub struct LibraryEnrichmentManager {
     online_metadata_enabled: bool,
     artist_image_cache_ttl_days: u32,
     artist_image_cache_max_size_mb: u32,
-    queued_priorities: HashMap<LibraryEnrichmentEntity, LibraryEnrichmentPriority>,
-    queued_interactive: VecDeque<LibraryEnrichmentEntity>,
-    queued_prefetch: VecDeque<LibraryEnrichmentEntity>,
-    in_flight_priorities: HashMap<LibraryEnrichmentEntity, LibraryEnrichmentPriority>,
-    wikidata_alias_cache: HashMap<String, HashSet<String>>,
-    audiodb_request_timestamps: VecDeque<Instant>,
+    queued_attempts: HashMap<LibraryEnrichmentEntity, LibraryEnrichmentAttemptKind>,
+    detail_queue: VecDeque<LibraryEnrichmentEntity>,
+    visible_artist_queue: VecDeque<LibraryEnrichmentEntity>,
+    background_artist_queue: VecDeque<LibraryEnrichmentEntity>,
+    in_flight_attempts: HashMap<LibraryEnrichmentEntity, LibraryEnrichmentAttemptKind>,
+    deferred_not_before: HashMap<LibraryEnrichmentEntity, Instant>,
+    last_background_dispatch_at: Option<Instant>,
+    audiodb_limiter:
+        RateLimiter<NotKeyed, governor::state::InMemoryState, governor::clock::DefaultClock>,
     http_client: ureq::Agent,
 }
 
@@ -169,12 +182,18 @@ impl LibraryEnrichmentManager {
             online_metadata_enabled: false,
             artist_image_cache_ttl_days: 30,
             artist_image_cache_max_size_mb: 256,
-            queued_priorities: HashMap::new(),
-            queued_interactive: VecDeque::new(),
-            queued_prefetch: VecDeque::new(),
-            in_flight_priorities: HashMap::new(),
-            wikidata_alias_cache: HashMap::new(),
-            audiodb_request_timestamps: VecDeque::new(),
+            queued_attempts: HashMap::new(),
+            detail_queue: VecDeque::new(),
+            visible_artist_queue: VecDeque::new(),
+            background_artist_queue: VecDeque::new(),
+            in_flight_attempts: HashMap::new(),
+            deferred_not_before: HashMap::new(),
+            last_background_dispatch_at: None,
+            audiodb_limiter: RateLimiter::direct(
+                Quota::with_period(Duration::from_secs(2))
+                    .expect("valid limiter period")
+                    .allow_burst(NonZeroU32::new(1).expect("non-zero limiter burst")),
+            ),
             http_client,
         }
     }
@@ -193,6 +212,22 @@ impl LibraryEnrichmentManager {
                 album,
                 album_artist,
             } => format!("album:{album}\u{001f}{album_artist}"),
+        }
+    }
+
+    fn lane_priority(kind: LibraryEnrichmentAttemptKind) -> u8 {
+        match kind {
+            LibraryEnrichmentAttemptKind::Detail => 3,
+            LibraryEnrichmentAttemptKind::VisiblePrefetch => 2,
+            LibraryEnrichmentAttemptKind::BackgroundWarm => 1,
+        }
+    }
+
+    fn priority_for_attempt(kind: LibraryEnrichmentAttemptKind) -> LibraryEnrichmentPriority {
+        match kind {
+            LibraryEnrichmentAttemptKind::Detail => LibraryEnrichmentPriority::Interactive,
+            LibraryEnrichmentAttemptKind::VisiblePrefetch
+            | LibraryEnrichmentAttemptKind::BackgroundWarm => LibraryEnrichmentPriority::Prefetch,
         }
     }
 
@@ -224,6 +259,10 @@ impl LibraryEnrichmentManager {
         format!("{RETRY_REASON_RATE_LIMIT_PREFIX}{}", message.into())
     }
 
+    fn build_budget_reason(message: impl Into<String>) -> String {
+        format!("{RETRY_REASON_BUDGET_PREFIX}{}", message.into())
+    }
+
     fn build_not_found_reason(message: impl Into<String>) -> String {
         format!("{RETRY_REASON_NOT_FOUND_PREFIX}{}", message.into())
     }
@@ -238,6 +277,10 @@ impl LibraryEnrichmentManager {
 
     fn is_rate_limit_reason(reason: &str) -> bool {
         reason.starts_with(RETRY_REASON_RATE_LIMIT_PREFIX)
+    }
+
+    fn is_budget_reason(reason: &str) -> bool {
+        reason.starts_with(RETRY_REASON_BUDGET_PREFIX)
     }
 
     fn classify_ureq_failure(error: &ureq::Error) -> HttpFailureKind {
@@ -304,6 +347,15 @@ impl LibraryEnrichmentManager {
 
     fn collapse_whitespace(value: &str) -> String {
         value.split_whitespace().collect::<Vec<_>>().join(" ")
+    }
+
+    fn looks_like_noncanonical_artist_name(value: &str) -> bool {
+        let lowered = value.to_ascii_lowercase();
+        lowered.contains(" feat ")
+            || lowered.contains(" feat.")
+            || lowered.contains(" featuring ")
+            || lowered.contains(" ft ")
+            || lowered.contains(" ft.")
     }
 
     fn normalize_text(value: &str) -> String {
@@ -568,6 +620,7 @@ impl LibraryEnrichmentManager {
         }
     }
 
+    #[cfg(test)]
     fn push_name_identity_variants(variants: &mut HashSet<String>, value: &str) {
         let normalized = Self::normalize_text(&Self::collapse_whitespace(value));
         if normalized.is_empty() {
@@ -580,6 +633,7 @@ impl LibraryEnrichmentManager {
         }
     }
 
+    #[cfg(test)]
     fn name_matches_identity_variants(name: &str, variants: &HashSet<String>) -> bool {
         let normalized = Self::normalize_text(&Self::collapse_whitespace(name));
         if normalized.is_empty() {
@@ -590,17 +644,6 @@ impl LibraryEnrichmentManager {
         }
         let compact = Self::compact_text(&normalized);
         !compact.is_empty() && variants.contains(&compact)
-    }
-
-    fn artist_wikidata_alias_match_allowed(summary: &WikiSummary) -> bool {
-        if Self::looks_disambiguation(summary)
-            || Self::looks_discography_or_list(summary)
-            || Self::looks_album_entity(summary)
-        {
-            return false;
-        }
-        Self::has_artist_person_context(summary)
-            || Self::title_has_artist_disambiguator(&summary.title)
     }
 
     fn direct_lookup_titles_for_entity(entity: &LibraryEnrichmentEntity) -> Vec<String> {
@@ -898,12 +941,13 @@ impl LibraryEnrichmentManager {
         titles
     }
 
-    fn http_get_json_once(&self, url: &str) -> Result<Value, String> {
+    fn http_get_json_once(&self, url: &str, timeout: Duration) -> Result<Value, String> {
         let response = self
             .http_client
             .get(url)
             .set("User-Agent", WIKIMEDIA_USER_AGENT)
             .set("Accept", "application/json")
+            .timeout(timeout)
             .call()
             .map_err(|error| {
                 let classified = Self::classify_ureq_failure(&error);
@@ -918,7 +962,11 @@ impl LibraryEnrichmentManager {
             .into_reader()
             .read_to_string(&mut body)
             .map_err(|error| {
-                Self::build_hard_reason(format!("Failed to read response: {error}"))
+                if Self::classify_io_timeout(&error) {
+                    Self::build_timeout_reason(format!("Failed to read response: {error}"))
+                } else {
+                    Self::build_hard_reason(format!("Failed to read response: {error}"))
+                }
             })?;
         serde_json::from_str(&body)
             .map_err(|error| Self::build_hard_reason(format!("Invalid JSON response: {error}")))
@@ -928,12 +976,15 @@ impl LibraryEnrichmentManager {
         &mut self,
         url: &str,
         entity: &LibraryEnrichmentEntity,
-        priority: LibraryEnrichmentPriority,
+        default_attempt: LibraryEnrichmentAttemptKind,
         verbose_log: bool,
         label: &str,
     ) -> Result<Value, String> {
+        let effective_attempt = self.effective_attempt_for_entity(entity, default_attempt);
+        let priority = Self::priority_for_attempt(effective_attempt);
+        let timeout = Self::request_timeout_for_attempt(effective_attempt);
         self.execute_with_timeout_backoff(entity, priority, verbose_log, label, |manager| {
-            manager.http_get_json_once(url)
+            manager.http_get_json_once(url, timeout)
         })
     }
 
@@ -958,59 +1009,40 @@ impl LibraryEnrichmentManager {
     fn wait_for_audiodb_rate_limit_slot(
         &mut self,
         entity: &LibraryEnrichmentEntity,
-        default_priority: LibraryEnrichmentPriority,
+        default_attempt: LibraryEnrichmentAttemptKind,
         verbose_log: bool,
     ) -> bool {
-        loop {
-            let now = Instant::now();
-            while self
-                .audiodb_request_timestamps
-                .front()
-                .is_some_and(|timestamp| {
-                    now.duration_since(*timestamp) >= THEAUDIODB_RATE_LIMIT_WINDOW
-                })
-            {
-                self.audiodb_request_timestamps.pop_front();
-            }
+        if self.audiodb_limiter.check().is_ok() {
+            return true;
+        }
 
-            let effective_priority = self.effective_priority_for_entity(entity, default_priority);
-            let request_budget = if effective_priority == LibraryEnrichmentPriority::Prefetch {
-                THEAUDIODB_RATE_LIMIT_PREFETCH_BUDGET
-            } else {
-                THEAUDIODB_RATE_LIMIT_MAX_REQUESTS
-            };
-
-            if self.audiodb_request_timestamps.len() < request_budget {
-                self.audiodb_request_timestamps.push_back(now);
-                return true;
-            }
-
-            if effective_priority == LibraryEnrichmentPriority::Prefetch {
-                if verbose_log {
-                    info!(
-                        "Enrichment[{}]: deferring prefetch request due to TheAudioDB rate limit saturation",
-                        Self::source_entity_label(entity)
-                    );
-                }
-                return false;
-            }
-
-            let Some(oldest) = self.audiodb_request_timestamps.front().copied() else {
-                continue;
-            };
-            let elapsed = now.duration_since(oldest);
-            let wait_duration = THEAUDIODB_RATE_LIMIT_WINDOW.saturating_sub(elapsed);
+        let effective_attempt = self.effective_attempt_for_entity(entity, default_attempt);
+        if effective_attempt != LibraryEnrichmentAttemptKind::Detail {
             if verbose_log {
                 info!(
-                    "Enrichment[{}]: waiting {:?} for TheAudioDB rate limit",
-                    Self::source_entity_label(entity),
-                    wait_duration
+                    "Enrichment[{}]: deferring non-detail request due to TheAudioDB rate limit saturation",
+                    Self::source_entity_label(entity)
                 );
             }
-            let sleep_duration = wait_duration.min(Duration::from_millis(250));
-            std::thread::sleep(sleep_duration);
-            self.drain_bus_messages_nonblocking();
+            return false;
         }
+
+        let deadline = Instant::now() + THEAUDIODB_DETAIL_WAIT_LIMIT;
+        while Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(100));
+            self.drain_bus_messages_nonblocking();
+            if self.audiodb_limiter.check().is_ok() {
+                return true;
+            }
+        }
+
+        if verbose_log {
+            info!(
+                "Enrichment[{}]: detail request hit TheAudioDB rate limit wait cap; continuing with fallback",
+                Self::source_entity_label(entity)
+            );
+        }
+        false
     }
 
     fn audiodb_get_json(
@@ -1018,28 +1050,32 @@ impl LibraryEnrichmentManager {
         endpoint: &str,
         params: &[(&str, &str)],
         entity: &LibraryEnrichmentEntity,
-        default_priority: LibraryEnrichmentPriority,
+        default_attempt: LibraryEnrichmentAttemptKind,
         verbose_log: bool,
     ) -> Result<(Value, String), String> {
         let url = Self::audiodb_request_url(endpoint, params);
+        let default_priority = Self::priority_for_attempt(default_attempt);
         self.execute_with_timeout_backoff(
             entity,
             default_priority,
             verbose_log,
             "TheAudioDB request",
             |manager| {
-                if !manager.wait_for_audiodb_rate_limit_slot(entity, default_priority, verbose_log)
-                {
+                if !manager.wait_for_audiodb_rate_limit_slot(entity, default_attempt, verbose_log) {
                     return Err(Self::build_rate_limit_reason(
                         THEAUDIODB_RATE_LIMIT_DEFERRED,
                     ));
                 }
+                let effective_attempt =
+                    manager.effective_attempt_for_entity(entity, default_attempt);
+                let timeout = Self::request_timeout_for_attempt(effective_attempt);
 
                 let response = manager
                     .http_client
                     .get(&url)
                     .set("User-Agent", WIKIMEDIA_USER_AGENT)
                     .set("Accept", "application/json")
+                    .timeout(timeout)
                     .call()
                     .map_err(|error| {
                         let classified = Self::classify_ureq_failure(&error);
@@ -1327,7 +1363,7 @@ impl LibraryEnrichmentManager {
         &mut self,
         query: &str,
         entity: &LibraryEnrichmentEntity,
-        priority: LibraryEnrichmentPriority,
+        attempt_kind: LibraryEnrichmentAttemptKind,
         verbose_log: bool,
     ) -> Result<Vec<String>, String> {
         let encoded_query = urlencoding::encode(query);
@@ -1338,7 +1374,7 @@ impl LibraryEnrichmentManager {
         let parsed = self.http_get_json(
             &url,
             entity,
-            priority,
+            attempt_kind,
             verbose_log,
             "Wikipedia search/action",
         )?;
@@ -1349,7 +1385,7 @@ impl LibraryEnrichmentManager {
         &mut self,
         query: &str,
         entity: &LibraryEnrichmentEntity,
-        priority: LibraryEnrichmentPriority,
+        attempt_kind: LibraryEnrichmentAttemptKind,
         verbose_log: bool,
     ) -> Result<Vec<String>, String> {
         let encoded_query = urlencoding::encode(query);
@@ -1360,7 +1396,7 @@ impl LibraryEnrichmentManager {
         let parsed = self.http_get_json(
             &url,
             entity,
-            priority,
+            attempt_kind,
             verbose_log,
             "Wikipedia search/nearmatch",
         )?;
@@ -1372,7 +1408,7 @@ impl LibraryEnrichmentManager {
         endpoint: &str,
         query: &str,
         entity: &LibraryEnrichmentEntity,
-        priority: LibraryEnrichmentPriority,
+        attempt_kind: LibraryEnrichmentAttemptKind,
         verbose_log: bool,
     ) -> Result<Vec<String>, String> {
         let encoded_query = urlencoding::encode(query);
@@ -1380,8 +1416,13 @@ impl LibraryEnrichmentManager {
             "{}/{}?q={}&limit={}",
             WIKIPEDIA_REST_BASE_URL, endpoint, encoded_query, MAX_CANDIDATES
         );
-        let parsed =
-            self.http_get_json(&url, entity, priority, verbose_log, "Wikipedia search/rest")?;
+        let parsed = self.http_get_json(
+            &url,
+            entity,
+            attempt_kind,
+            verbose_log,
+            "Wikipedia search/rest",
+        )?;
         Ok(Self::extract_title_strings(&parsed))
     }
 
@@ -1389,7 +1430,7 @@ impl LibraryEnrichmentManager {
         &mut self,
         title: &str,
         entity: &LibraryEnrichmentEntity,
-        priority: LibraryEnrichmentPriority,
+        attempt_kind: LibraryEnrichmentAttemptKind,
         verbose_log: bool,
     ) -> Result<WikiSummary, String> {
         let encoded_title = urlencoding::encode(title);
@@ -1400,7 +1441,7 @@ impl LibraryEnrichmentManager {
             WIKIPEDIA_ACTION_API_URL, encoded_title
         );
         let parsed =
-            self.http_get_json(&url, entity, priority, verbose_log, "Wikipedia summary")?;
+            self.http_get_json(&url, entity, attempt_kind, verbose_log, "Wikipedia summary")?;
         let pages = parsed["query"]["pages"].as_object().ok_or_else(|| {
             Self::build_not_found_reason("Wikipedia summary response missing pages")
         })?;
@@ -1443,12 +1484,6 @@ impl LibraryEnrichmentManager {
             } else {
                 String::new()
             };
-            let wikidata_item_id = page_value["pageprops"]["wikibase_item"]
-                .as_str()
-                .map(str::trim)
-                .filter(|value| !value.is_empty())
-                .map(str::to_string);
-
             return Ok(WikiSummary {
                 title,
                 description,
@@ -1456,7 +1491,6 @@ impl LibraryEnrichmentManager {
                 canonical_url,
                 image_url,
                 page_type,
-                wikidata_item_id,
             });
         }
 
@@ -1480,41 +1514,104 @@ impl LibraryEnrichmentManager {
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn append_titles_for_query(
         &mut self,
         entity: &LibraryEnrichmentEntity,
-        priority: LibraryEnrichmentPriority,
+        attempt_kind: LibraryEnrichmentAttemptKind,
+        start: Instant,
         verbose_log: bool,
         query: &str,
         titles: &mut Vec<String>,
         seen_titles: &mut HashSet<String>,
+        saw_timeout: &mut Option<String>,
+        saw_hard_error: &mut Option<String>,
+        saw_budget: &mut bool,
     ) {
         if query.trim().is_empty() {
             return;
         }
-        for found_titles in [
-            self.search_wikipedia_titles_action_nearmatch(query, entity, priority, verbose_log),
-            self.search_wikipedia_titles_action(query, entity, priority, verbose_log),
-            self.search_wikipedia_titles_rest("search/title", query, entity, priority, verbose_log),
-            self.search_wikipedia_titles_rest("search/page", query, entity, priority, verbose_log),
-        ]
-        .into_iter()
-        .flatten()
-        {
-            for title in found_titles {
-                Self::push_unique_title(titles, seen_titles, title);
+        let mut handle_result = |search_result: Result<Vec<String>, String>| match search_result {
+            Ok(found_titles) => {
+                for title in found_titles {
+                    Self::push_unique_title(titles, seen_titles, title);
+                }
             }
+            Err(error) => {
+                if Self::is_timeout_reason(&error) {
+                    if saw_timeout.is_none() {
+                        *saw_timeout = Some(error.clone());
+                    }
+                } else if Self::is_hard_reason(&error) && saw_hard_error.is_none() {
+                    *saw_hard_error = Some(error.clone());
+                }
+                if verbose_log {
+                    info!(
+                        "Enrichment[{}]: candidate discovery query '{}' failed: {}",
+                        Self::source_entity_label(entity),
+                        query,
+                        error
+                    );
+                }
+            }
+        };
+
+        if self.budget_exceeded(entity, start, attempt_kind) {
+            *saw_budget = true;
+            return;
         }
+        handle_result(self.search_wikipedia_titles_action_nearmatch(
+            query,
+            entity,
+            attempt_kind,
+            verbose_log,
+        ));
+        if self.budget_exceeded(entity, start, attempt_kind) {
+            *saw_budget = true;
+            return;
+        }
+        handle_result(self.search_wikipedia_titles_action(
+            query,
+            entity,
+            attempt_kind,
+            verbose_log,
+        ));
+        if self.budget_exceeded(entity, start, attempt_kind) {
+            *saw_budget = true;
+            return;
+        }
+        handle_result(self.search_wikipedia_titles_rest(
+            "search/title",
+            query,
+            entity,
+            attempt_kind,
+            verbose_log,
+        ));
+        if self.budget_exceeded(entity, start, attempt_kind) {
+            *saw_budget = true;
+            return;
+        }
+        handle_result(self.search_wikipedia_titles_rest(
+            "search/page",
+            query,
+            entity,
+            attempt_kind,
+            verbose_log,
+        ));
     }
 
     fn candidate_titles_for_entity(
         &mut self,
         entity: &LibraryEnrichmentEntity,
-        priority: LibraryEnrichmentPriority,
+        attempt_kind: LibraryEnrichmentAttemptKind,
+        start: Instant,
         verbose_log: bool,
-    ) -> Vec<String> {
+    ) -> CandidateTitleSearchOutcome {
         let mut titles = Vec::new();
         let mut seen_titles = HashSet::new();
+        let mut saw_timeout = None;
+        let mut saw_hard_error = None;
+        let mut saw_budget = false;
 
         match entity {
             LibraryEnrichmentEntity::Artist { artist } => {
@@ -1523,7 +1620,7 @@ impl LibraryEnrichmentManager {
                 let compact_artist = normalized_artist.replace(' ', "");
                 let title_case_artist = Self::title_case_words(&cleaned_artist);
                 if cleaned_artist.is_empty() {
-                    return Vec::new();
+                    return CandidateTitleSearchOutcome::default();
                 }
 
                 Self::push_unique_title(&mut titles, &mut seen_titles, cleaned_artist.clone());
@@ -1563,24 +1660,36 @@ impl LibraryEnrichmentManager {
                 ] {
                     self.append_titles_for_query(
                         entity,
-                        priority,
+                        attempt_kind,
+                        start,
                         verbose_log,
                         &query,
                         &mut titles,
                         &mut seen_titles,
+                        &mut saw_timeout,
+                        &mut saw_hard_error,
+                        &mut saw_budget,
                     );
+                    if saw_budget {
+                        break;
+                    }
                 }
                 if !compact_artist.is_empty()
                     && compact_artist != normalized_artist
                     && compact_artist != cleaned_artist.to_ascii_lowercase()
+                    && !saw_budget
                 {
                     self.append_titles_for_query(
                         entity,
-                        priority,
+                        attempt_kind,
+                        start,
                         verbose_log,
                         &compact_artist,
                         &mut titles,
                         &mut seen_titles,
+                        &mut saw_timeout,
+                        &mut saw_hard_error,
+                        &mut saw_budget,
                     );
                 }
             }
@@ -1595,7 +1704,7 @@ impl LibraryEnrichmentManager {
                 let title_case_album = Self::title_case_words(&cleaned_album);
                 let title_case_artist = Self::title_case_words(&cleaned_artist);
                 if cleaned_album.is_empty() {
-                    return Vec::new();
+                    return CandidateTitleSearchOutcome::default();
                 }
 
                 Self::push_unique_title(&mut titles, &mut seen_titles, cleaned_album.clone());
@@ -1639,24 +1748,36 @@ impl LibraryEnrichmentManager {
                 for query in query_bundle {
                     self.append_titles_for_query(
                         entity,
-                        priority,
+                        attempt_kind,
+                        start,
                         verbose_log,
                         &query,
                         &mut titles,
                         &mut seen_titles,
+                        &mut saw_timeout,
+                        &mut saw_hard_error,
+                        &mut saw_budget,
                     );
+                    if saw_budget {
+                        break;
+                    }
                 }
                 if !compact_album.is_empty()
                     && compact_album != normalized_album
                     && compact_album != cleaned_album.to_ascii_lowercase()
+                    && !saw_budget
                 {
                     self.append_titles_for_query(
                         entity,
-                        priority,
+                        attempt_kind,
+                        start,
                         verbose_log,
                         &compact_album,
                         &mut titles,
                         &mut seen_titles,
+                        &mut saw_timeout,
+                        &mut saw_hard_error,
+                        &mut saw_budget,
                     );
                 }
             }
@@ -1665,35 +1786,49 @@ impl LibraryEnrichmentManager {
         if titles.len() > MAX_CANDIDATES * 4 {
             titles.truncate(MAX_CANDIDATES * 4);
         }
-        titles
-    }
-
-    fn lookup_budget_for_priority(priority: LibraryEnrichmentPriority) -> Duration {
-        match priority {
-            LibraryEnrichmentPriority::Interactive => INTERACTIVE_FETCH_BUDGET,
-            LibraryEnrichmentPriority::Prefetch => PREFETCH_FETCH_BUDGET,
+        CandidateTitleSearchOutcome {
+            titles,
+            saw_timeout,
+            saw_hard_error,
+            saw_budget,
         }
     }
 
-    fn effective_priority_for_entity(
+    fn lookup_budget_for_attempt(attempt_kind: LibraryEnrichmentAttemptKind) -> Duration {
+        match attempt_kind {
+            LibraryEnrichmentAttemptKind::Detail => DETAIL_FETCH_BUDGET,
+            LibraryEnrichmentAttemptKind::VisiblePrefetch => VISIBLE_PREFETCH_FETCH_BUDGET,
+            LibraryEnrichmentAttemptKind::BackgroundWarm => BACKGROUND_WARM_FETCH_BUDGET,
+        }
+    }
+
+    fn request_timeout_for_attempt(attempt_kind: LibraryEnrichmentAttemptKind) -> Duration {
+        match attempt_kind {
+            LibraryEnrichmentAttemptKind::Detail => DETAIL_REQUEST_TIMEOUT,
+            LibraryEnrichmentAttemptKind::VisiblePrefetch => VISIBLE_REQUEST_TIMEOUT,
+            LibraryEnrichmentAttemptKind::BackgroundWarm => BACKGROUND_REQUEST_TIMEOUT,
+        }
+    }
+
+    fn effective_attempt_for_entity(
         &self,
         entity: &LibraryEnrichmentEntity,
-        default_priority: LibraryEnrichmentPriority,
-    ) -> LibraryEnrichmentPriority {
-        self.in_flight_priorities
+        default_attempt: LibraryEnrichmentAttemptKind,
+    ) -> LibraryEnrichmentAttemptKind {
+        self.in_flight_attempts
             .get(entity)
             .copied()
-            .unwrap_or(default_priority)
+            .unwrap_or(default_attempt)
     }
 
     fn budget_exceeded(
         &self,
         entity: &LibraryEnrichmentEntity,
         start: Instant,
-        default_priority: LibraryEnrichmentPriority,
+        default_attempt: LibraryEnrichmentAttemptKind,
     ) -> bool {
-        let effective_priority = self.effective_priority_for_entity(entity, default_priority);
-        start.elapsed() >= Self::lookup_budget_for_priority(effective_priority)
+        let effective_attempt = self.effective_attempt_for_entity(entity, default_attempt);
+        start.elapsed() >= Self::lookup_budget_for_attempt(effective_attempt)
     }
 
     fn truncate_blurb(value: &str, max_chars: usize) -> String {
@@ -1728,9 +1863,12 @@ impl LibraryEnrichmentManager {
                 image_path,
                 source_name: source.source_name().to_string(),
                 source_url,
+                error_kind: None,
+                attempt_kind: LibraryEnrichmentAttemptKind::VisiblePrefetch,
             },
             image_url,
             last_error,
+            conclusive: true,
         }
     }
 
@@ -1744,10 +1882,12 @@ impl LibraryEnrichmentManager {
             RETRYABLE_TIMEOUT_BLURB
         } else if Self::is_rate_limit_reason(&reason) {
             RETRYABLE_RATE_LIMIT_BLURB
+        } else if Self::is_budget_reason(&reason) {
+            RETRYABLE_BUDGET_BLURB
         } else {
             HARD_ERROR_BLURB
         };
-        Self::build_outcome(
+        let mut outcome = Self::build_outcome(
             entity,
             LibraryEnrichmentStatus::Error,
             blurb.to_string(),
@@ -1756,7 +1896,24 @@ impl LibraryEnrichmentManager {
             source,
             source_url,
             Some(reason),
-        )
+        );
+        outcome.payload.error_kind = Some(
+            if Self::is_timeout_reason(outcome.last_error.as_deref().unwrap_or_default()) {
+                LibraryEnrichmentErrorKind::Timeout
+            } else if Self::is_rate_limit_reason(outcome.last_error.as_deref().unwrap_or_default())
+            {
+                LibraryEnrichmentErrorKind::RateLimited
+            } else if Self::is_budget_reason(outcome.last_error.as_deref().unwrap_or_default()) {
+                LibraryEnrichmentErrorKind::BudgetExhausted
+            } else {
+                LibraryEnrichmentErrorKind::Hard
+            },
+        );
+        outcome.conclusive = matches!(
+            outcome.payload.error_kind,
+            Some(LibraryEnrichmentErrorKind::Hard)
+        );
+        outcome
     }
 
     fn drain_bus_messages_nonblocking(&mut self) {
@@ -1773,23 +1930,17 @@ impl LibraryEnrichmentManager {
     fn fetch_audiodb_outcome_for_entity(
         &mut self,
         entity: &LibraryEnrichmentEntity,
-        initial_priority: LibraryEnrichmentPriority,
+        attempt_kind: LibraryEnrichmentAttemptKind,
         start: Instant,
     ) -> FetchOutcome {
         match entity {
             LibraryEnrichmentEntity::Artist { artist } => {
-                self.fetch_audiodb_artist_outcome(entity, artist, initial_priority, start)
+                self.fetch_audiodb_artist_outcome(entity, artist, attempt_kind, start)
             }
             LibraryEnrichmentEntity::Album {
                 album,
                 album_artist,
-            } => self.fetch_audiodb_album_outcome(
-                entity,
-                album,
-                album_artist,
-                initial_priority,
-                start,
-            ),
+            } => self.fetch_audiodb_album_outcome(entity, album, album_artist, attempt_kind, start),
         }
     }
 
@@ -1797,11 +1948,11 @@ impl LibraryEnrichmentManager {
         &mut self,
         entity: &LibraryEnrichmentEntity,
         artist: &str,
-        initial_priority: LibraryEnrichmentPriority,
+        attempt_kind: LibraryEnrichmentAttemptKind,
         start: Instant,
     ) -> FetchOutcome {
         let entity_label = Self::source_entity_label(entity);
-        let verbose_log = initial_priority == LibraryEnrichmentPriority::Interactive;
+        let verbose_log = attempt_kind == LibraryEnrichmentAttemptKind::Detail;
         let cleaned_artist = Self::collapse_whitespace(artist);
         if cleaned_artist.is_empty() {
             return Self::build_outcome(
@@ -1815,10 +1966,24 @@ impl LibraryEnrichmentManager {
                 None,
             );
         }
+        if attempt_kind != LibraryEnrichmentAttemptKind::Detail
+            && Self::looks_like_noncanonical_artist_name(&cleaned_artist)
+        {
+            return Self::build_outcome(
+                entity,
+                LibraryEnrichmentStatus::NotFound,
+                String::new(),
+                None,
+                None,
+                EnrichmentSource::TheAudioDB,
+                String::new(),
+                Some(Self::build_not_found_reason("noncanonical_artist_tag")),
+            );
+        }
 
         let normalized_artist = Self::normalize_text(&cleaned_artist);
         let compact_artist = normalized_artist.replace(' ', "");
-        let query_candidates = if initial_priority == LibraryEnrichmentPriority::Interactive {
+        let query_candidates = if attempt_kind == LibraryEnrichmentAttemptKind::Detail {
             vec![
                 cleaned_artist.clone(),
                 Self::title_case_words(&cleaned_artist),
@@ -1849,9 +2014,11 @@ impl LibraryEnrichmentManager {
         let mut saw_timeout: Option<String> = None;
         let mut saw_hard_error: Option<String> = None;
         let mut saw_rate_limit: Option<String> = None;
+        let mut saw_budget = false;
         for query in queries {
             self.drain_bus_messages_nonblocking();
-            if self.budget_exceeded(entity, start, initial_priority) {
+            if self.budget_exceeded(entity, start, attempt_kind) {
+                saw_budget = true;
                 if verbose_log {
                     info!(
                         "Enrichment[{}]: TheAudioDB artist stage stopped due to budget timeout",
@@ -1864,7 +2031,7 @@ impl LibraryEnrichmentManager {
                 "search.php",
                 &[("s", query.as_str())],
                 entity,
-                initial_priority,
+                attempt_kind,
                 verbose_log,
             ) {
                 Ok(response) => response,
@@ -1920,6 +2087,14 @@ impl LibraryEnrichmentManager {
         }
 
         let Some(best_candidate) = best_candidate else {
+            if saw_budget {
+                return Self::build_error_outcome(
+                    entity,
+                    EnrichmentSource::TheAudioDB,
+                    String::new(),
+                    Self::build_budget_reason("TheAudioDB artist budget exhausted"),
+                );
+            }
             if let Some(reason) = saw_rate_limit {
                 return Self::build_error_outcome(
                     entity,
@@ -1991,7 +2166,7 @@ impl LibraryEnrichmentManager {
         let image_path = best_candidate
             .image_url
             .as_ref()
-            .and_then(|url| self.download_artist_image(entity, url, initial_priority, verbose_log));
+            .and_then(|url| self.download_artist_image(entity, url, attempt_kind, verbose_log));
         Self::build_outcome(
             entity,
             LibraryEnrichmentStatus::Ready,
@@ -2009,11 +2184,11 @@ impl LibraryEnrichmentManager {
         entity: &LibraryEnrichmentEntity,
         album: &str,
         album_artist: &str,
-        initial_priority: LibraryEnrichmentPriority,
+        attempt_kind: LibraryEnrichmentAttemptKind,
         start: Instant,
     ) -> FetchOutcome {
         let entity_label = Self::source_entity_label(entity);
-        let verbose_log = initial_priority == LibraryEnrichmentPriority::Interactive;
+        let verbose_log = attempt_kind == LibraryEnrichmentAttemptKind::Detail;
         let cleaned_album = Self::collapse_whitespace(album);
         let cleaned_artist = Self::collapse_whitespace(album_artist);
         if cleaned_album.is_empty() {
@@ -2044,10 +2219,12 @@ impl LibraryEnrichmentManager {
         let mut saw_timeout: Option<String> = None;
         let mut saw_hard_error: Option<String> = None;
         let mut saw_rate_limit: Option<String> = None;
+        let mut saw_budget = false;
         let mut seen_candidates = HashSet::new();
         for params in request_specs {
             self.drain_bus_messages_nonblocking();
-            if self.budget_exceeded(entity, start, initial_priority) {
+            if self.budget_exceeded(entity, start, attempt_kind) {
+                saw_budget = true;
                 if verbose_log {
                     info!(
                         "Enrichment[{}]: TheAudioDB album stage stopped due to budget timeout",
@@ -2064,7 +2241,7 @@ impl LibraryEnrichmentManager {
                 "searchalbum.php",
                 &borrowed_params,
                 entity,
-                initial_priority,
+                attempt_kind,
                 verbose_log,
             ) {
                 Ok(response) => response,
@@ -2118,6 +2295,14 @@ impl LibraryEnrichmentManager {
         }
 
         let Some(best_candidate) = best_candidate else {
+            if saw_budget {
+                return Self::build_error_outcome(
+                    entity,
+                    EnrichmentSource::TheAudioDB,
+                    String::new(),
+                    Self::build_budget_reason("TheAudioDB album budget exhausted"),
+                );
+            }
             if let Some(reason) = saw_rate_limit {
                 return Self::build_error_outcome(
                     entity,
@@ -2201,13 +2386,30 @@ impl LibraryEnrichmentManager {
     fn fetch_wikipedia_outcome_for_entity(
         &mut self,
         entity: &LibraryEnrichmentEntity,
-        initial_priority: LibraryEnrichmentPriority,
+        attempt_kind: LibraryEnrichmentAttemptKind,
         start: Instant,
     ) -> FetchOutcome {
         let entity_label = Self::source_entity_label(entity);
-        let verbose_log = initial_priority == LibraryEnrichmentPriority::Interactive;
+        let verbose_log = attempt_kind == LibraryEnrichmentAttemptKind::Detail;
         let mut saw_timeout: Option<String> = None;
         let mut saw_hard_error: Option<String> = None;
+        let mut saw_budget = false;
+        if let LibraryEnrichmentEntity::Artist { artist } = entity {
+            if attempt_kind != LibraryEnrichmentAttemptKind::Detail
+                && Self::looks_like_noncanonical_artist_name(artist)
+            {
+                return Self::build_outcome(
+                    entity,
+                    LibraryEnrichmentStatus::NotFound,
+                    String::new(),
+                    None,
+                    None,
+                    EnrichmentSource::Wikipedia,
+                    String::new(),
+                    Some(Self::build_not_found_reason("noncanonical_artist_tag")),
+                );
+            }
+        }
         let direct_titles = Self::direct_lookup_titles_for_entity(entity);
         if verbose_log {
             info!(
@@ -2220,7 +2422,8 @@ impl LibraryEnrichmentManager {
 
         for direct_title in direct_titles.into_iter().take(6) {
             self.drain_bus_messages_nonblocking();
-            if self.budget_exceeded(entity, start, initial_priority) {
+            if self.budget_exceeded(entity, start, attempt_kind) {
+                saw_budget = true;
                 if verbose_log {
                     info!(
                         "Enrichment[{}]: direct-title stage stopped due to budget timeout",
@@ -2232,7 +2435,7 @@ impl LibraryEnrichmentManager {
             let summary = match self.fetch_wikipedia_summary(
                 &direct_title,
                 entity,
-                initial_priority,
+                attempt_kind,
                 verbose_log,
             ) {
                 Ok(summary) => summary,
@@ -2252,32 +2455,13 @@ impl LibraryEnrichmentManager {
                 }
             };
             if let Some(reason) = Self::direct_summary_rejection_reason(entity, &summary) {
-                let alias_override = match entity {
-                    LibraryEnrichmentEntity::Artist { artist } => self
-                        .artist_matches_summary_via_wikidata_alias(
-                            artist,
-                            &summary,
-                            entity,
-                            initial_priority,
-                            verbose_log,
-                        ),
-                    LibraryEnrichmentEntity::Album { .. } => false,
-                };
-                if !alias_override {
-                    if verbose_log {
-                        info!(
-                            "Enrichment[{}]: direct-title '{}' resolved to '{}' but rejected: {}",
-                            entity_label, direct_title, summary.title, reason
-                        );
-                    }
-                    continue;
-                }
                 if verbose_log {
                     info!(
-                        "Enrichment[{}]: direct-title '{}' accepted by Wikidata alias evidence for '{}'",
-                        entity_label, direct_title, summary.title
+                        "Enrichment[{}]: direct-title '{}' resolved to '{}' but rejected: {}",
+                        entity_label, direct_title, summary.title, reason
                     );
                 }
+                continue;
             }
 
             let blurb = Self::truncate_blurb(&summary.extract, MAX_BLURB_CHARS);
@@ -2293,7 +2477,7 @@ impl LibraryEnrichmentManager {
             let image_path = match entity {
                 LibraryEnrichmentEntity::Artist { .. } => {
                     summary.image_url.as_ref().and_then(|url| {
-                        self.download_artist_image(entity, url, initial_priority, verbose_log)
+                        self.download_artist_image(entity, url, attempt_kind, verbose_log)
                     })
                 }
                 LibraryEnrichmentEntity::Album { .. } => None,
@@ -2314,9 +2498,81 @@ impl LibraryEnrichmentManager {
             );
         }
 
-        let titles = self.candidate_titles_for_entity(entity, initial_priority, verbose_log);
+        if attempt_kind != LibraryEnrichmentAttemptKind::Detail {
+            if saw_budget {
+                return Self::build_error_outcome(
+                    entity,
+                    EnrichmentSource::Wikipedia,
+                    String::new(),
+                    Self::build_budget_reason("Wikipedia direct lookup budget exhausted"),
+                );
+            }
+            if let Some(reason) = saw_timeout {
+                return Self::build_error_outcome(
+                    entity,
+                    EnrichmentSource::Wikipedia,
+                    String::new(),
+                    reason,
+                );
+            }
+            if let Some(reason) = saw_hard_error {
+                return Self::build_error_outcome(
+                    entity,
+                    EnrichmentSource::Wikipedia,
+                    String::new(),
+                    reason,
+                );
+            }
+            return Self::build_outcome(
+                entity,
+                LibraryEnrichmentStatus::NotFound,
+                String::new(),
+                None,
+                None,
+                EnrichmentSource::Wikipedia,
+                String::new(),
+                None,
+            );
+        }
+
+        let title_search_outcome =
+            self.candidate_titles_for_entity(entity, attempt_kind, start, verbose_log);
+        if title_search_outcome.saw_budget {
+            saw_budget = true;
+        }
+        if saw_timeout.is_none() {
+            saw_timeout = title_search_outcome.saw_timeout.clone();
+        }
+        if saw_hard_error.is_none() {
+            saw_hard_error = title_search_outcome.saw_hard_error.clone();
+        }
+        let titles = title_search_outcome.titles;
 
         if titles.is_empty() {
+            if saw_budget {
+                return Self::build_error_outcome(
+                    entity,
+                    EnrichmentSource::Wikipedia,
+                    String::new(),
+                    Self::build_budget_reason("Wikipedia title discovery budget exhausted"),
+                );
+            }
+            if let Some(reason) = saw_timeout {
+                return Self::build_error_outcome(
+                    entity,
+                    EnrichmentSource::Wikipedia,
+                    String::new(),
+                    reason,
+                );
+            }
+            if let Some(reason) = saw_hard_error {
+                return Self::build_error_outcome(
+                    entity,
+                    EnrichmentSource::Wikipedia,
+                    String::new(),
+                    reason,
+                );
+            }
             if verbose_log {
                 info!(
                     "Enrichment[{}]: search stage produced no candidate titles",
@@ -2351,7 +2607,8 @@ impl LibraryEnrichmentManager {
 
         for title in titles.into_iter().take(MAX_SUMMARY_FETCHES) {
             self.drain_bus_messages_nonblocking();
-            if self.budget_exceeded(entity, start, initial_priority) {
+            if self.budget_exceeded(entity, start, attempt_kind) {
+                saw_budget = true;
                 if verbose_log {
                     info!(
                         "Enrichment[{}]: scored-search stopped due to budget timeout",
@@ -2362,7 +2619,7 @@ impl LibraryEnrichmentManager {
             }
 
             let summary =
-                match self.fetch_wikipedia_summary(&title, entity, initial_priority, verbose_log) {
+                match self.fetch_wikipedia_summary(&title, entity, attempt_kind, verbose_log) {
                     Ok(summary) => summary,
                     Err(error) => {
                         if Self::is_timeout_reason(&error) {
@@ -2396,6 +2653,14 @@ impl LibraryEnrichmentManager {
         }
 
         if ranked_candidates.is_empty() {
+            if saw_budget {
+                return Self::build_error_outcome(
+                    entity,
+                    EnrichmentSource::Wikipedia,
+                    String::new(),
+                    Self::build_budget_reason("Wikipedia lookup budget exhausted"),
+                );
+            }
             if let Some(reason) = saw_timeout {
                 return Self::build_error_outcome(
                     entity,
@@ -2433,34 +2698,13 @@ impl LibraryEnrichmentManager {
         let mut best_score = -10_001;
         let mut best_candidate_index = 0usize;
         for (index, candidate) in ranked_candidates.iter().enumerate() {
-            let alias_bonus = match entity {
-                LibraryEnrichmentEntity::Artist { artist } => {
-                    let needs_help = candidate.deterministic_score < min_threshold;
-                    if needs_help
-                        && self.artist_matches_summary_via_wikidata_alias(
-                            artist,
-                            &candidate.summary,
-                            entity,
-                            initial_priority,
-                            verbose_log,
-                        )
-                    {
-                        110
-                    } else {
-                        0
-                    }
-                }
-                LibraryEnrichmentEntity::Album { .. } => 0,
-            };
-            let combined_score = candidate.deterministic_score.saturating_add(alias_bonus);
+            let combined_score = candidate.deterministic_score;
             if verbose_log {
                 info!(
-                    "Enrichment[{}]: candidate '{}' -> resolved '{}' deterministic={} alias_bonus={} combined={}",
+                    "Enrichment[{}]: candidate '{}' -> resolved '{}' score={}",
                     entity_label,
                     candidate.requested_title,
                     candidate.summary.title,
-                    candidate.deterministic_score,
-                    alias_bonus,
                     combined_score
                 );
             }
@@ -2512,11 +2756,10 @@ impl LibraryEnrichmentManager {
         }
 
         let image_path = match entity {
-            LibraryEnrichmentEntity::Artist { .. } => {
-                best_summary.image_url.as_ref().and_then(|url| {
-                    self.download_artist_image(entity, url, initial_priority, verbose_log)
-                })
-            }
+            LibraryEnrichmentEntity::Artist { .. } => best_summary
+                .image_url
+                .as_ref()
+                .and_then(|url| self.download_artist_image(entity, url, attempt_kind, verbose_log)),
             LibraryEnrichmentEntity::Album { .. } => None,
         };
         if verbose_log {
@@ -2538,525 +2781,17 @@ impl LibraryEnrichmentManager {
         )
     }
 
-    fn search_wikidata_entities(
-        &mut self,
-        query: &str,
-        entity: &LibraryEnrichmentEntity,
-        priority: LibraryEnrichmentPriority,
-        verbose_log: bool,
-    ) -> Result<Vec<WikidataCandidate>, String> {
-        let encoded_query = urlencoding::encode(query);
-        let url = format!(
-            "{}?action=wbsearchentities&search={}&language=en&uselang=en&type=item&\
-             limit={}&format=json",
-            WIKIDATA_ACTION_API_URL, encoded_query, MAX_CANDIDATES
-        );
-        let parsed = self.http_get_json(&url, entity, priority, verbose_log, "Wikidata search")?;
-        let mut out = Vec::new();
-        if let Some(items) = parsed["search"].as_array() {
-            for item in items {
-                let id = item["id"].as_str().unwrap_or_default().trim().to_string();
-                let label = item["label"]
-                    .as_str()
-                    .unwrap_or_default()
-                    .trim()
-                    .to_string();
-                if id.is_empty() || label.is_empty() {
-                    continue;
-                }
-                let description = item["description"]
-                    .as_str()
-                    .unwrap_or_default()
-                    .trim()
-                    .to_string();
-                out.push(WikidataCandidate {
-                    id,
-                    label,
-                    description,
-                });
-            }
-        }
-        Ok(out)
-    }
-
-    fn fetch_wikidata_entity_details(
-        &mut self,
-        entity_id: &str,
-        entity: &LibraryEnrichmentEntity,
-        priority: LibraryEnrichmentPriority,
-        verbose_log: bool,
-    ) -> Result<Value, String> {
-        let encoded_id = urlencoding::encode(entity_id);
-        let url = format!(
-            "{}?action=wbgetentities&ids={}&props=labels|descriptions|aliases|sitelinks&\
-             languages=en&sitefilter=enwiki&format=json",
-            WIKIDATA_ACTION_API_URL, encoded_id
-        );
-        self.http_get_json(&url, entity, priority, verbose_log, "Wikidata details")
-    }
-
-    fn score_wikidata_candidate(
-        entity: &LibraryEnrichmentEntity,
-        candidate: &WikidataCandidate,
-    ) -> i32 {
-        let normalized_label = Self::normalize_text(&candidate.label);
-        let normalized_description = Self::normalize_text(&candidate.description);
-        let compact_label = Self::compact_text(&normalized_label);
-
-        match entity {
-            LibraryEnrichmentEntity::Artist { artist } => {
-                let normalized_artist = Self::normalize_text(&Self::collapse_whitespace(artist));
-                let compact_artist = Self::compact_text(&normalized_artist);
-                if normalized_artist.is_empty() {
-                    return -10_000;
-                }
-
-                let mut score = 0;
-                if normalized_label == normalized_artist
-                    || (!compact_artist.is_empty() && compact_artist == compact_label)
-                {
-                    score += 120;
-                } else if normalized_label.starts_with(&normalized_artist)
-                    || normalized_artist.starts_with(&normalized_label)
-                {
-                    score += 70;
-                } else if normalized_label.contains(&normalized_artist) {
-                    score += 45;
-                }
-
-                if Self::contains_any(&normalized_description, Self::music_artist_keywords()) {
-                    score += 30;
-                }
-
-                let overlap = Self::word_overlap_ratio(&normalized_artist, &normalized_label);
-                score += (overlap * 35.0).round() as i32;
-                let is_single_token_query = normalized_artist.split_whitespace().count() == 1;
-                let has_music_context =
-                    Self::contains_any(&normalized_description, Self::music_artist_keywords());
-                if is_single_token_query && !has_music_context {
-                    let exactish_match = normalized_label == normalized_artist
-                        || (!compact_artist.is_empty() && compact_artist == compact_label);
-                    if exactish_match {
-                        score -= 240;
-                    } else {
-                        score -= 40;
-                    }
-                }
-
-                score
-            }
-            LibraryEnrichmentEntity::Album {
-                album,
-                album_artist,
-            } => {
-                let normalized_album = Self::normalize_text(&Self::collapse_whitespace(album));
-                let compact_album = Self::compact_text(&normalized_album);
-                let normalized_artist =
-                    Self::normalize_text(&Self::collapse_whitespace(album_artist));
-                if normalized_album.is_empty() {
-                    return -10_000;
-                }
-
-                let mut score = 0;
-                if normalized_label == normalized_album
-                    || (!compact_album.is_empty() && compact_album == compact_label)
-                {
-                    score += 110;
-                } else if normalized_label.starts_with(&normalized_album)
-                    || normalized_album.starts_with(&normalized_label)
-                {
-                    score += 60;
-                } else if normalized_label.contains(&normalized_album) {
-                    score += 35;
-                }
-                if Self::contains_any(&normalized_description, Self::album_keywords()) {
-                    score += 26;
-                }
-                if !normalized_artist.is_empty()
-                    && normalized_description.contains(&normalized_artist)
-                {
-                    score += 20;
-                }
-                score
-            }
-        }
-    }
-
-    fn wikidata_enwiki_title(details: &Value, entity_id: &str) -> Option<String> {
-        details["entities"][entity_id]["sitelinks"]["enwiki"]["title"]
-            .as_str()
-            .map(str::trim)
-            .filter(|value| !value.is_empty())
-            .map(str::to_string)
-    }
-
-    fn wikidata_alias_variants_from_details(details: &Value, entity_id: &str) -> HashSet<String> {
-        let mut variants = HashSet::new();
-        if let Some(label) = details["entities"][entity_id]["labels"]["en"]["value"].as_str() {
-            Self::push_name_identity_variants(&mut variants, label);
-        }
-        if let Some(alias_list) = details["entities"][entity_id]["aliases"]["en"].as_array() {
-            for alias in alias_list {
-                if let Some(value) = alias["value"].as_str() {
-                    Self::push_name_identity_variants(&mut variants, value);
-                }
-            }
-        }
-        if let Some(enwiki_title) = Self::wikidata_enwiki_title(details, entity_id) {
-            Self::push_name_identity_variants(&mut variants, &enwiki_title);
-        }
-        variants
-    }
-
-    fn wikidata_alias_variants_for_item(
-        &mut self,
-        item_id: &str,
-        entity: &LibraryEnrichmentEntity,
-        priority: LibraryEnrichmentPriority,
-        verbose_log: bool,
-    ) -> Option<HashSet<String>> {
-        if let Some(cached) = self.wikidata_alias_cache.get(item_id) {
-            return Some(cached.clone());
-        }
-        let details = self
-            .fetch_wikidata_entity_details(item_id, entity, priority, verbose_log)
-            .ok()?;
-        let variants = Self::wikidata_alias_variants_from_details(&details, item_id);
-        if variants.is_empty() {
-            return None;
-        }
-        self.wikidata_alias_cache
-            .insert(item_id.to_string(), variants.clone());
-        Some(variants)
-    }
-
-    fn artist_matches_summary_via_wikidata_alias(
-        &mut self,
-        artist: &str,
-        summary: &WikiSummary,
-        entity: &LibraryEnrichmentEntity,
-        priority: LibraryEnrichmentPriority,
-        verbose_log: bool,
-    ) -> bool {
-        if !Self::artist_wikidata_alias_match_allowed(summary) {
-            return false;
-        }
-        let Some(item_id) = summary.wikidata_item_id.as_deref() else {
-            return false;
-        };
-        let Some(variants) =
-            self.wikidata_alias_variants_for_item(item_id, entity, priority, verbose_log)
-        else {
-            return false;
-        };
-        Self::name_matches_identity_variants(artist, &variants)
-    }
-
-    fn fetch_wikidata_fallback(
-        &mut self,
-        entity: &LibraryEnrichmentEntity,
-        initial_priority: LibraryEnrichmentPriority,
-        start: Instant,
-    ) -> Option<FetchOutcome> {
-        let entity_label = Self::source_entity_label(entity);
-        let verbose_log = initial_priority == LibraryEnrichmentPriority::Interactive;
-        let mut saw_timeout: Option<String> = None;
-        let mut saw_hard_error: Option<String> = None;
-        let mut query_candidates = Vec::new();
-        match entity {
-            LibraryEnrichmentEntity::Artist { artist } => {
-                let cleaned_artist = Self::collapse_whitespace(artist);
-                let compact_artist = Self::compact_text(&cleaned_artist);
-                query_candidates.push(cleaned_artist.clone());
-                query_candidates.push(Self::title_case_words(&cleaned_artist));
-                if !compact_artist.is_empty() {
-                    query_candidates.push(compact_artist);
-                }
-            }
-            LibraryEnrichmentEntity::Album {
-                album,
-                album_artist,
-            } => {
-                let cleaned_album = Self::collapse_whitespace(album);
-                let cleaned_artist = Self::collapse_whitespace(album_artist);
-                let compact_album = Self::compact_text(&cleaned_album);
-                query_candidates.push(cleaned_album.clone());
-                query_candidates.push(format!("{cleaned_album} album"));
-                if !cleaned_artist.is_empty() {
-                    query_candidates.push(format!("{cleaned_album} {cleaned_artist} album"));
-                }
-                if !compact_album.is_empty() {
-                    query_candidates.push(compact_album);
-                }
-            }
-        }
-
-        let mut seen_ids = HashSet::new();
-        let mut scored_candidates: Vec<(WikidataCandidate, i32)> = Vec::new();
-        if verbose_log {
-            info!(
-                "Enrichment[{}]: Wikidata fallback starting with queries {:?}",
-                entity_label, query_candidates
-            );
-        }
-
-        for query in query_candidates {
-            self.drain_bus_messages_nonblocking();
-            if self.budget_exceeded(entity, start, initial_priority) {
-                if verbose_log {
-                    info!(
-                        "Enrichment[{}]: Wikidata fallback stopped due to budget timeout",
-                        entity_label
-                    );
-                }
-                break;
-            }
-            let candidates = match self.search_wikidata_entities(
-                &query,
-                entity,
-                initial_priority,
-                verbose_log,
-            ) {
-                Ok(candidates) => candidates,
-                Err(error) => {
-                    if Self::is_timeout_reason(&error) {
-                        saw_timeout = Some(error.clone());
-                    } else if Self::is_hard_reason(&error) {
-                        saw_hard_error = Some(error.clone());
-                    }
-                    if verbose_log {
-                        info!(
-                            "Enrichment[{}]: Wikidata query '{}' failed: {}",
-                            entity_label, query, error
-                        );
-                    }
-                    continue;
-                }
-            };
-            if candidates.is_empty() {
-                if verbose_log {
-                    info!(
-                        "Enrichment[{}]: Wikidata query '{}' returned no candidates",
-                        entity_label, query
-                    );
-                }
-                continue;
-            }
-            for candidate in candidates {
-                if !seen_ids.insert(candidate.id.clone()) {
-                    continue;
-                }
-                let score = Self::score_wikidata_candidate(entity, &candidate);
-                if verbose_log {
-                    info!(
-                        "Enrichment[{}]: Wikidata candidate '{}' ({}) scored {}",
-                        entity_label, candidate.label, candidate.id, score
-                    );
-                }
-                scored_candidates.push((candidate, score));
-            }
-        }
-
-        if scored_candidates.is_empty() {
-            if let Some(reason) = saw_timeout {
-                return Some(Self::build_error_outcome(
-                    entity,
-                    EnrichmentSource::Wikipedia,
-                    String::new(),
-                    reason,
-                ));
-            }
-            if let Some(reason) = saw_hard_error {
-                return Some(Self::build_error_outcome(
-                    entity,
-                    EnrichmentSource::Wikipedia,
-                    String::new(),
-                    reason,
-                ));
-            }
-            return None;
-        }
-        scored_candidates.sort_by(|left, right| right.1.cmp(&left.1));
-        let query_name = match entity {
-            LibraryEnrichmentEntity::Artist { artist } => artist.as_str(),
-            LibraryEnrichmentEntity::Album { album, .. } => album.as_str(),
-        };
-        let min_candidate_score = match entity {
-            LibraryEnrichmentEntity::Artist { .. } => 70,
-            LibraryEnrichmentEntity::Album { .. } => 65,
-        };
-        let summary_threshold = match entity {
-            LibraryEnrichmentEntity::Artist { .. } => 92,
-            LibraryEnrichmentEntity::Album { .. } => 88,
-        };
-
-        for (candidate, deterministic_score) in
-            scored_candidates.into_iter().take(MAX_SUMMARY_FETCHES)
-        {
-            self.drain_bus_messages_nonblocking();
-            if self.budget_exceeded(entity, start, initial_priority) {
-                if verbose_log {
-                    info!(
-                        "Enrichment[{}]: Wikidata details stage timed out by budget",
-                        entity_label
-                    );
-                }
-                break;
-            }
-
-            let details = match self.fetch_wikidata_entity_details(
-                &candidate.id,
-                entity,
-                initial_priority,
-                verbose_log,
-            ) {
-                Ok(details) => details,
-                Err(error) => {
-                    if Self::is_timeout_reason(&error) {
-                        saw_timeout = Some(error.clone());
-                    } else if Self::is_hard_reason(&error) {
-                        saw_hard_error = Some(error.clone());
-                    }
-                    if verbose_log {
-                        info!(
-                            "Enrichment[{}]: Wikidata details fetch failed for {}: {}",
-                            entity_label, candidate.id, error
-                        );
-                    }
-                    continue;
-                }
-            };
-            let alias_variants =
-                Self::wikidata_alias_variants_from_details(&details, &candidate.id);
-            if !alias_variants.is_empty() {
-                self.wikidata_alias_cache
-                    .insert(candidate.id.clone(), alias_variants.clone());
-            }
-            let alias_match = Self::name_matches_identity_variants(query_name, &alias_variants);
-            let effective_score = deterministic_score + if alias_match { 120 } else { 0 };
-            if verbose_log {
-                info!(
-                    "Enrichment[{}]: Wikidata candidate '{}' ({}) deterministic={} alias_match={} effective={}",
-                    entity_label,
-                    candidate.label,
-                    candidate.id,
-                    deterministic_score,
-                    alias_match,
-                    effective_score
-                );
-            }
-            if effective_score < min_candidate_score {
-                continue;
-            }
-
-            let Some(enwiki_title) = Self::wikidata_enwiki_title(&details, &candidate.id) else {
-                continue;
-            };
-            let summary = match self.fetch_wikipedia_summary(
-                &enwiki_title,
-                entity,
-                initial_priority,
-                verbose_log,
-            ) {
-                Ok(summary) => summary,
-                Err(error) => {
-                    if Self::is_timeout_reason(&error) {
-                        saw_timeout = Some(error.clone());
-                    } else if Self::is_hard_reason(&error) {
-                        saw_hard_error = Some(error.clone());
-                    }
-                    if verbose_log {
-                        info!(
-                            "Enrichment[{}]: Wikidata enwiki '{}' fetch failed: {}",
-                            entity_label, enwiki_title, error
-                        );
-                    }
-                    continue;
-                }
-            };
-            let mut score = match entity {
-                LibraryEnrichmentEntity::Artist { artist } => {
-                    Self::score_artist_summary(artist, &summary)
-                }
-                LibraryEnrichmentEntity::Album {
-                    album,
-                    album_artist,
-                } => Self::score_album_summary(album, album_artist, &summary),
-            };
-            if alias_match
-                && matches!(entity, LibraryEnrichmentEntity::Artist { .. })
-                && Self::artist_wikidata_alias_match_allowed(&summary)
-            {
-                score += 110;
-            }
-            if verbose_log {
-                info!(
-                    "Enrichment[{}]: Wikidata enwiki '{}' resolved '{}' scored {} (threshold {})",
-                    entity_label, enwiki_title, summary.title, score, summary_threshold
-                );
-            }
-            if score < summary_threshold {
-                continue;
-            }
-            let blurb = Self::truncate_blurb(&summary.extract, MAX_BLURB_CHARS);
-            if blurb.trim().is_empty() {
-                if verbose_log {
-                    info!(
-                        "Enrichment[{}]: Wikidata enwiki '{}' had empty blurb",
-                        entity_label, enwiki_title
-                    );
-                }
-                continue;
-            }
-            let image_path = match entity {
-                LibraryEnrichmentEntity::Artist { .. } => {
-                    summary.image_url.as_ref().and_then(|url| {
-                        self.download_artist_image(entity, url, initial_priority, verbose_log)
-                    })
-                }
-                LibraryEnrichmentEntity::Album { .. } => None,
-            };
-            return Some(Self::build_outcome(
-                entity,
-                LibraryEnrichmentStatus::Ready,
-                blurb,
-                image_path,
-                summary.image_url,
-                EnrichmentSource::Wikipedia,
-                summary.canonical_url,
-                None,
-            ));
-        }
-
-        if let Some(reason) = saw_timeout {
-            return Some(Self::build_error_outcome(
-                entity,
-                EnrichmentSource::Wikipedia,
-                String::new(),
-                reason,
-            ));
-        }
-        if let Some(reason) = saw_hard_error {
-            return Some(Self::build_error_outcome(
-                entity,
-                EnrichmentSource::Wikipedia,
-                String::new(),
-                reason,
-            ));
-        }
-        None
-    }
-
     fn fetch_outcome_for_entity(
         &mut self,
         entity: &LibraryEnrichmentEntity,
-        priority: LibraryEnrichmentPriority,
+        attempt_kind: LibraryEnrichmentAttemptKind,
     ) -> FetchOutcome {
         let entity_label = Self::source_entity_label(entity);
-        let verbose_log = priority == LibraryEnrichmentPriority::Interactive;
+        let verbose_log = attempt_kind == LibraryEnrichmentAttemptKind::Detail;
         let started_at = Instant::now();
         let mut best_error: Option<FetchOutcome> = None;
-        let audiodb_outcome = self.fetch_audiodb_outcome_for_entity(entity, priority, started_at);
+        let audiodb_outcome =
+            self.fetch_audiodb_outcome_for_entity(entity, attempt_kind, started_at);
         if audiodb_outcome.payload.status == LibraryEnrichmentStatus::Ready {
             if verbose_log {
                 info!(
@@ -3064,17 +2799,23 @@ impl LibraryEnrichmentManager {
                     entity_label
                 );
             }
-            return audiodb_outcome;
+            let mut ready_outcome = audiodb_outcome;
+            ready_outcome.payload.attempt_kind = attempt_kind;
+            return ready_outcome;
         }
         if audiodb_outcome.payload.status == LibraryEnrichmentStatus::Error {
+            if attempt_kind != LibraryEnrichmentAttemptKind::Detail
+                && audiodb_outcome.payload.error_kind
+                    == Some(LibraryEnrichmentErrorKind::RateLimited)
+            {
+                let mut deferred_outcome = audiodb_outcome;
+                deferred_outcome.payload.attempt_kind = attempt_kind;
+                return deferred_outcome;
+            }
             best_error = Some(audiodb_outcome.clone());
         }
-        if priority == LibraryEnrichmentPriority::Prefetch
-            && matches!(entity, LibraryEnrichmentEntity::Artist { .. })
-        {
-            return audiodb_outcome;
-        }
-        let wiki_outcome = self.fetch_wikipedia_outcome_for_entity(entity, priority, started_at);
+        let wiki_outcome =
+            self.fetch_wikipedia_outcome_for_entity(entity, attempt_kind, started_at);
         if wiki_outcome.payload.status == LibraryEnrichmentStatus::Ready {
             if verbose_log {
                 info!(
@@ -3082,32 +2823,16 @@ impl LibraryEnrichmentManager {
                     entity_label
                 );
             }
-            return wiki_outcome;
+            let mut ready_outcome = wiki_outcome;
+            ready_outcome.payload.attempt_kind = attempt_kind;
+            return ready_outcome;
         }
         if wiki_outcome.payload.status == LibraryEnrichmentStatus::Error {
             best_error = Some(wiki_outcome.clone());
         }
-        if verbose_log {
-            info!(
-                "Enrichment[{}]: Wikipedia stage returned {:?}, trying Wikidata fallback",
-                entity_label, wiki_outcome.payload.status
-            );
-        }
-        if let Some(wikidata_outcome) = self.fetch_wikidata_fallback(entity, priority, started_at) {
-            if verbose_log {
-                info!(
-                    "Enrichment[{}]: Wikidata fallback returned {:?}",
-                    entity_label, wikidata_outcome.payload.status
-                );
-            }
-            if wikidata_outcome.payload.status == LibraryEnrichmentStatus::Error {
-                best_error = Some(wikidata_outcome.clone());
-            } else {
-                return wikidata_outcome;
-            }
-        }
 
-        if let Some(error_outcome) = best_error {
+        if let Some(mut error_outcome) = best_error {
+            error_outcome.payload.attempt_kind = attempt_kind;
             if verbose_log {
                 info!(
                     "Enrichment[{}]: final outcome {:?}",
@@ -3116,13 +2841,15 @@ impl LibraryEnrichmentManager {
             }
             return error_outcome;
         }
+        let mut outcome = wiki_outcome;
+        outcome.payload.attempt_kind = attempt_kind;
         if verbose_log {
             info!(
                 "Enrichment[{}]: final outcome {:?}",
-                entity_label, wiki_outcome.payload.status
+                entity_label, outcome.payload.status
             );
         }
-        wiki_outcome
+        outcome
     }
 
     fn image_cache_dir() -> Option<PathBuf> {
@@ -3183,10 +2910,13 @@ impl LibraryEnrichmentManager {
         &mut self,
         entity: &LibraryEnrichmentEntity,
         image_url: &str,
-        priority: LibraryEnrichmentPriority,
+        default_attempt: LibraryEnrichmentAttemptKind,
         verbose_log: bool,
     ) -> Option<PathBuf> {
         let cache_dir = Self::image_cache_dir()?;
+        let effective_attempt = self.effective_attempt_for_entity(entity, default_attempt);
+        let priority = Self::priority_for_attempt(effective_attempt);
+        let timeout = Self::request_timeout_for_attempt(effective_attempt);
         let bytes = match self.execute_with_timeout_backoff(
             entity,
             priority,
@@ -3197,6 +2927,7 @@ impl LibraryEnrichmentManager {
                     .http_client
                     .get(image_url)
                     .set("User-Agent", WIKIMEDIA_USER_AGENT)
+                    .timeout(timeout)
                     .call()
                     .map_err(|error| {
                         let classified = Self::classify_ureq_failure(&error);
@@ -3263,25 +2994,33 @@ impl LibraryEnrichmentManager {
         Some(image_path)
     }
 
-    fn ttl_days_for_payload(&self, payload: &LibraryEnrichmentPayload) -> u32 {
-        let ready_ttl_days = if matches!(payload.entity, LibraryEnrichmentEntity::Artist { .. }) {
-            self.artist_image_cache_ttl_days.max(1)
-        } else {
-            READY_METADATA_TTL_DAYS
-        };
-        match payload.status {
-            LibraryEnrichmentStatus::Ready => ready_ttl_days,
-            LibraryEnrichmentStatus::NotFound => NOT_FOUND_TTL_DAYS,
-            LibraryEnrichmentStatus::Disabled => 1,
-            LibraryEnrichmentStatus::Error => {
-                let lowered = payload.blurb.to_ascii_lowercase();
-                if lowered.contains("timed out") || lowered.contains("rate limit") {
-                    0
+    fn cache_expiry_for_outcome_unix_ms(&self, outcome: &FetchOutcome, now_unix_ms: i64) -> i64 {
+        if !outcome.conclusive {
+            return now_unix_ms.saturating_add(1);
+        }
+
+        let ttl = match outcome.payload.status {
+            LibraryEnrichmentStatus::Ready => {
+                if matches!(
+                    outcome.payload.entity,
+                    LibraryEnrichmentEntity::Artist { .. }
+                ) {
+                    Duration::from_secs(
+                        u64::from(self.artist_image_cache_ttl_days.max(1)) * 24 * 60 * 60,
+                    )
                 } else {
-                    ERROR_TTL_DAYS
+                    Duration::from_secs(u64::from(READY_METADATA_TTL_DAYS) * 24 * 60 * 60)
                 }
             }
-        }
+            LibraryEnrichmentStatus::NotFound => CONCLUSIVE_NOT_FOUND_TTL,
+            LibraryEnrichmentStatus::Disabled => Duration::from_secs(60),
+            LibraryEnrichmentStatus::Error => match outcome.payload.error_kind {
+                Some(LibraryEnrichmentErrorKind::Hard) => HARD_ERROR_TTL,
+                _ => Duration::from_millis(1),
+            },
+        };
+
+        now_unix_ms.saturating_add(ttl.as_millis() as i64)
     }
 
     fn emit_enrichment_result(&self, payload: LibraryEnrichmentPayload) {
@@ -3390,11 +3129,13 @@ impl LibraryEnrichmentManager {
             }
         };
         let deleted_images = self.clear_artist_image_cache_files();
-        self.queued_priorities.clear();
-        self.queued_interactive.clear();
-        self.queued_prefetch.clear();
-        self.in_flight_priorities.clear();
-        self.wikidata_alias_cache.clear();
+        self.queued_attempts.clear();
+        self.detail_queue.clear();
+        self.visible_artist_queue.clear();
+        self.background_artist_queue.clear();
+        self.in_flight_attempts.clear();
+        self.deferred_not_before.clear();
+        self.last_background_dispatch_at = None;
         let _ = self
             .bus_producer
             .send(Message::Library(LibraryMessage::EnrichmentCacheCleared {
@@ -3406,38 +3147,56 @@ impl LibraryEnrichmentManager {
     fn enqueue_enrichment_request(
         &mut self,
         entity: LibraryEnrichmentEntity,
-        priority: LibraryEnrichmentPriority,
+        attempt_kind: LibraryEnrichmentAttemptKind,
     ) {
-        if let Some(in_flight_priority) = self.in_flight_priorities.get_mut(&entity) {
-            if *in_flight_priority == LibraryEnrichmentPriority::Prefetch
-                && priority == LibraryEnrichmentPriority::Interactive
-            {
-                *in_flight_priority = LibraryEnrichmentPriority::Interactive;
+        if attempt_kind == LibraryEnrichmentAttemptKind::Detail {
+            self.deferred_not_before.remove(&entity);
+        }
+        if let Some(in_flight_attempt) = self.in_flight_attempts.get_mut(&entity) {
+            if Self::lane_priority(attempt_kind) > Self::lane_priority(*in_flight_attempt) {
+                *in_flight_attempt = attempt_kind;
             }
             return;
         }
 
-        if let Some(existing_priority) = self.queued_priorities.get(&entity).copied() {
-            if existing_priority == LibraryEnrichmentPriority::Prefetch
-                && priority == LibraryEnrichmentPriority::Interactive
-            {
-                self.queued_priorities
-                    .insert(entity.clone(), LibraryEnrichmentPriority::Interactive);
-                self.queued_interactive.push_back(entity);
+        if let Some(existing_attempt) = self.queued_attempts.get(&entity).copied() {
+            if Self::lane_priority(attempt_kind) > Self::lane_priority(existing_attempt) {
+                self.queued_attempts.insert(entity.clone(), attempt_kind);
+                match attempt_kind {
+                    LibraryEnrichmentAttemptKind::Detail => self.detail_queue.push_back(entity),
+                    LibraryEnrichmentAttemptKind::VisiblePrefetch => {
+                        self.visible_artist_queue.push_back(entity)
+                    }
+                    LibraryEnrichmentAttemptKind::BackgroundWarm => {
+                        self.background_artist_queue.push_back(entity)
+                    }
+                }
             }
             return;
         }
 
-        if priority == LibraryEnrichmentPriority::Prefetch
-            && self.queued_prefetch.len() >= MAX_PENDING_PREFETCH_REQUESTS
-        {
+        let queue_too_large = match attempt_kind {
+            LibraryEnrichmentAttemptKind::Detail => false,
+            LibraryEnrichmentAttemptKind::VisiblePrefetch => {
+                self.visible_artist_queue.len() >= MAX_PENDING_PREFETCH_REQUESTS
+            }
+            LibraryEnrichmentAttemptKind::BackgroundWarm => {
+                self.background_artist_queue.len() >= MAX_PENDING_PREFETCH_REQUESTS
+            }
+        };
+        if queue_too_large {
             return;
         }
 
-        self.queued_priorities.insert(entity.clone(), priority);
-        match priority {
-            LibraryEnrichmentPriority::Interactive => self.queued_interactive.push_back(entity),
-            LibraryEnrichmentPriority::Prefetch => self.queued_prefetch.push_back(entity),
+        self.queued_attempts.insert(entity.clone(), attempt_kind);
+        match attempt_kind {
+            LibraryEnrichmentAttemptKind::Detail => self.detail_queue.push_back(entity),
+            LibraryEnrichmentAttemptKind::VisiblePrefetch => {
+                self.visible_artist_queue.push_back(entity)
+            }
+            LibraryEnrichmentAttemptKind::BackgroundWarm => {
+                self.background_artist_queue.push_back(entity)
+            }
         }
     }
 
@@ -3450,48 +3209,171 @@ impl LibraryEnrichmentManager {
             }
         }
 
-        self.queued_priorities.retain(|entity, priority| {
-            *priority == LibraryEnrichmentPriority::Interactive || desired_set.contains(entity)
+        self.queued_attempts.retain(|entity, attempt_kind| {
+            *attempt_kind == LibraryEnrichmentAttemptKind::Detail
+                || *attempt_kind == LibraryEnrichmentAttemptKind::BackgroundWarm
+                || desired_set.contains(entity)
         });
-        self.queued_prefetch.clear();
+        let queued_attempts_snapshot = self.queued_attempts.clone();
+        let in_flight_entities: HashSet<LibraryEnrichmentEntity> =
+            self.in_flight_attempts.keys().cloned().collect();
+        self.deferred_not_before.retain(|entity, _| {
+            queued_attempts_snapshot
+                .get(entity)
+                .is_some_and(|attempt_kind| {
+                    *attempt_kind != LibraryEnrichmentAttemptKind::BackgroundWarm
+                })
+                || desired_set.contains(entity)
+                || in_flight_entities.contains(entity)
+        });
+        self.visible_artist_queue.clear();
 
         for entity in ordered {
-            if self.queued_prefetch.len() >= MAX_PENDING_PREFETCH_REQUESTS {
+            if self.visible_artist_queue.len() >= MAX_PENDING_PREFETCH_REQUESTS {
                 break;
             }
             if matches!(
-                self.queued_priorities.get(&entity),
-                Some(LibraryEnrichmentPriority::Interactive)
+                self.queued_attempts.get(&entity),
+                Some(LibraryEnrichmentAttemptKind::Detail)
             ) {
                 continue;
             }
-            if self.in_flight_priorities.contains_key(&entity) {
+            if let Some(in_flight_attempt) = self.in_flight_attempts.get_mut(&entity) {
+                if Self::lane_priority(LibraryEnrichmentAttemptKind::VisiblePrefetch)
+                    > Self::lane_priority(*in_flight_attempt)
+                {
+                    *in_flight_attempt = LibraryEnrichmentAttemptKind::VisiblePrefetch;
+                }
                 continue;
             }
-            self.queued_priorities
-                .insert(entity.clone(), LibraryEnrichmentPriority::Prefetch);
-            self.queued_prefetch.push_back(entity);
+            self.queued_attempts.insert(
+                entity.clone(),
+                LibraryEnrichmentAttemptKind::VisiblePrefetch,
+            );
+            self.visible_artist_queue.push_back(entity);
+        }
+    }
+
+    fn replace_background_queue(&mut self, entities: Vec<LibraryEnrichmentEntity>) {
+        let mut ordered = Vec::new();
+        let mut desired_set = HashSet::new();
+        for entity in entities {
+            if desired_set.insert(entity.clone()) {
+                ordered.push(entity);
+            }
+        }
+
+        self.queued_attempts.retain(|entity, attempt_kind| {
+            *attempt_kind == LibraryEnrichmentAttemptKind::Detail
+                || *attempt_kind == LibraryEnrichmentAttemptKind::VisiblePrefetch
+                || desired_set.contains(entity)
+        });
+        let queued_attempts_snapshot = self.queued_attempts.clone();
+        let in_flight_entities: HashSet<LibraryEnrichmentEntity> =
+            self.in_flight_attempts.keys().cloned().collect();
+        self.deferred_not_before.retain(|entity, _| {
+            queued_attempts_snapshot
+                .get(entity)
+                .is_some_and(|attempt_kind| {
+                    *attempt_kind != LibraryEnrichmentAttemptKind::VisiblePrefetch
+                })
+                || desired_set.contains(entity)
+                || in_flight_entities.contains(entity)
+        });
+        self.background_artist_queue.clear();
+
+        for entity in ordered {
+            if self.background_artist_queue.len() >= MAX_PENDING_PREFETCH_REQUESTS {
+                break;
+            }
+            if matches!(
+                self.queued_attempts.get(&entity),
+                Some(
+                    LibraryEnrichmentAttemptKind::Detail
+                        | LibraryEnrichmentAttemptKind::VisiblePrefetch
+                )
+            ) {
+                continue;
+            }
+            if let Some(in_flight_attempt) = self.in_flight_attempts.get_mut(&entity) {
+                if Self::lane_priority(LibraryEnrichmentAttemptKind::BackgroundWarm)
+                    > Self::lane_priority(*in_flight_attempt)
+                {
+                    *in_flight_attempt = LibraryEnrichmentAttemptKind::BackgroundWarm;
+                }
+                continue;
+            }
+            self.queued_attempts
+                .insert(entity.clone(), LibraryEnrichmentAttemptKind::BackgroundWarm);
+            self.background_artist_queue.push_back(entity);
         }
     }
 
     fn dequeue_enrichment_request(
         &mut self,
-    ) -> Option<(LibraryEnrichmentEntity, LibraryEnrichmentPriority)> {
-        while let Some(entity) = self.queued_interactive.pop_front() {
-            match self.queued_priorities.get(&entity).copied() {
-                Some(LibraryEnrichmentPriority::Interactive) => {
-                    self.queued_priorities.remove(&entity);
-                    return Some((entity, LibraryEnrichmentPriority::Interactive));
+    ) -> Option<(LibraryEnrichmentEntity, LibraryEnrichmentAttemptKind)> {
+        while let Some(entity) = self.detail_queue.pop_front() {
+            match self.queued_attempts.get(&entity).copied() {
+                Some(LibraryEnrichmentAttemptKind::Detail) => {
+                    self.queued_attempts.remove(&entity);
+                    return Some((entity, LibraryEnrichmentAttemptKind::Detail));
                 }
-                Some(LibraryEnrichmentPriority::Prefetch) | None => {}
+                Some(LibraryEnrichmentAttemptKind::VisiblePrefetch)
+                | Some(LibraryEnrichmentAttemptKind::BackgroundWarm)
+                | None => {}
             }
         }
 
-        while let Some(entity) = self.queued_prefetch.pop_front() {
-            let Some(priority) = self.queued_priorities.remove(&entity) else {
+        let visible_queue_len = self.visible_artist_queue.len();
+        for _ in 0..visible_queue_len {
+            let Some(entity) = self.visible_artist_queue.pop_front() else {
+                break;
+            };
+            let Some(attempt_kind) = self.queued_attempts.get(&entity).copied() else {
                 continue;
             };
-            return Some((entity, priority));
+            if self
+                .deferred_not_before
+                .get(&entity)
+                .is_some_and(|deadline| Instant::now() < *deadline)
+            {
+                self.visible_artist_queue.push_back(entity);
+                continue;
+            }
+            self.deferred_not_before.remove(&entity);
+            self.queued_attempts.remove(&entity);
+            return Some((entity, attempt_kind));
+        }
+
+        if self
+            .last_background_dispatch_at
+            .is_some_and(|last| last.elapsed() < BACKGROUND_WARM_INTERVAL)
+        {
+            return None;
+        }
+        let background_queue_len = self.background_artist_queue.len();
+        for _ in 0..background_queue_len {
+            let Some(entity) = self.background_artist_queue.pop_front() else {
+                break;
+            };
+            let Some(attempt_kind) = self.queued_attempts.get(&entity).copied() else {
+                continue;
+            };
+            if self
+                .deferred_not_before
+                .get(&entity)
+                .is_some_and(|deadline| Instant::now() < *deadline)
+            {
+                self.background_artist_queue.push_back(entity);
+                continue;
+            }
+            self.deferred_not_before.remove(&entity);
+            self.queued_attempts.remove(&entity);
+            if attempt_kind != LibraryEnrichmentAttemptKind::BackgroundWarm {
+                return Some((entity, attempt_kind));
+            }
+            self.last_background_dispatch_at = Some(Instant::now());
+            return Some((entity, attempt_kind));
         }
         None
     }
@@ -3502,19 +3384,35 @@ impl LibraryEnrichmentManager {
                 self.online_metadata_enabled = config.library.online_metadata_enabled;
                 self.artist_image_cache_ttl_days = config.library.artist_image_cache_ttl_days;
                 self.artist_image_cache_max_size_mb = config.library.artist_image_cache_max_size_mb;
+                if !self.online_metadata_enabled {
+                    self.queued_attempts.clear();
+                    self.detail_queue.clear();
+                    self.visible_artist_queue.clear();
+                    self.background_artist_queue.clear();
+                    self.deferred_not_before.clear();
+                }
                 self.prune_enrichment_cache();
                 self.prune_artist_image_cache_by_size();
             }
             Message::Library(LibraryMessage::RequestEnrichment { entity, priority }) => {
+                let attempt_kind = match priority {
+                    LibraryEnrichmentPriority::Interactive => LibraryEnrichmentAttemptKind::Detail,
+                    LibraryEnrichmentPriority::Prefetch => {
+                        LibraryEnrichmentAttemptKind::VisiblePrefetch
+                    }
+                };
                 debug!(
                     "Enrichment request queued for {} ({:?})",
                     Self::source_entity_label(&entity),
-                    priority
+                    attempt_kind
                 );
-                self.enqueue_enrichment_request(entity, priority);
+                self.enqueue_enrichment_request(entity, attempt_kind);
             }
             Message::Library(LibraryMessage::ReplaceEnrichmentPrefetchQueue { entities }) => {
                 self.replace_prefetch_queue(entities);
+            }
+            Message::Library(LibraryMessage::ReplaceEnrichmentBackgroundQueue { entities }) => {
+                self.replace_background_queue(entities);
             }
             Message::Library(LibraryMessage::ClearEnrichmentCache) => {
                 self.clear_enrichment_cache();
@@ -3526,10 +3424,10 @@ impl LibraryEnrichmentManager {
     fn handle_enrichment_request(
         &mut self,
         entity: LibraryEnrichmentEntity,
-        priority: LibraryEnrichmentPriority,
+        attempt_kind: LibraryEnrichmentAttemptKind,
     ) {
         if !self.online_metadata_enabled {
-            if priority == LibraryEnrichmentPriority::Interactive {
+            if attempt_kind == LibraryEnrichmentAttemptKind::Detail {
                 self.emit_enrichment_result(LibraryEnrichmentPayload {
                     entity,
                     status: LibraryEnrichmentStatus::Disabled,
@@ -3537,6 +3435,8 @@ impl LibraryEnrichmentManager {
                     image_path: None,
                     source_name: THEAUDIODB_SOURCE_NAME.to_string(),
                     source_url: String::new(),
+                    error_kind: None,
+                    attempt_kind,
                 });
             }
             return;
@@ -3549,21 +3449,20 @@ impl LibraryEnrichmentManager {
             .get_library_enrichment_cache(&entity, now_unix_ms)
         {
             Ok(Some(mut cached)) => {
-                let bypass_cached_for_interactive = priority
-                    == LibraryEnrichmentPriority::Interactive
-                    && matches!(
+                let bypass_cached_for_interactive = attempt_kind
+                    == LibraryEnrichmentAttemptKind::Detail
+                    && (matches!(
                         cached.status,
-                        LibraryEnrichmentStatus::NotFound
-                            | LibraryEnrichmentStatus::Error
-                            | LibraryEnrichmentStatus::Disabled
-                    );
+                        LibraryEnrichmentStatus::Error | LibraryEnrichmentStatus::Disabled
+                    ) || (cached.status == LibraryEnrichmentStatus::NotFound
+                        && cached.attempt_kind != LibraryEnrichmentAttemptKind::Detail));
                 if bypass_cached_for_interactive {
                     info!(
                         "Enrichment[{}]: interactive request bypassing cached {:?} result",
                         Self::source_entity_label(&entity),
                         cached.status
                     );
-                } else if priority == LibraryEnrichmentPriority::Interactive {
+                } else if attempt_kind == LibraryEnrichmentAttemptKind::Detail {
                     info!(
                         "Enrichment[{}]: interactive request satisfied from cache ({:?})",
                         Self::source_entity_label(&entity),
@@ -3590,6 +3489,7 @@ impl LibraryEnrichmentManager {
                             cached.image_path = None;
                         }
                     }
+                    cached.attempt_kind = attempt_kind;
                     self.emit_enrichment_result(cached);
                     return;
                 }
@@ -3604,18 +3504,31 @@ impl LibraryEnrichmentManager {
             }
         }
 
-        self.in_flight_priorities.insert(entity.clone(), priority);
-        let outcome = self.fetch_outcome_for_entity(&entity, priority);
-        self.in_flight_priorities.remove(&entity);
+        self.in_flight_attempts.insert(entity.clone(), attempt_kind);
+        let mut outcome = self.fetch_outcome_for_entity(&entity, attempt_kind);
+        self.in_flight_attempts.remove(&entity);
 
-        let ttl_days = self.ttl_days_for_payload(&outcome.payload);
-        let expires_unix_ms = now_unix_ms.saturating_add(i64::from(ttl_days) * 24 * 60 * 60 * 1000);
+        outcome.payload.attempt_kind = attempt_kind;
+        if attempt_kind != LibraryEnrichmentAttemptKind::Detail
+            && outcome.payload.status == LibraryEnrichmentStatus::Error
+            && outcome.payload.error_kind == Some(LibraryEnrichmentErrorKind::RateLimited)
+            && outcome.payload.source_name == THEAUDIODB_SOURCE_NAME
+        {
+            self.deferred_not_before.insert(
+                entity.clone(),
+                Instant::now() + NON_DETAIL_RATE_LIMIT_REQUEUE_DELAY,
+            );
+            self.enqueue_enrichment_request(entity, attempt_kind);
+            return;
+        }
+        let expires_unix_ms = self.cache_expiry_for_outcome_unix_ms(&outcome, now_unix_ms);
         if let Err(error) = self.db_manager.upsert_library_enrichment_cache(
             &outcome.payload,
             outcome.image_url.as_deref(),
             now_unix_ms,
             expires_unix_ms,
             outcome.last_error.as_deref(),
+            outcome.conclusive,
         ) {
             warn!(
                 "Failed to persist enrichment cache for {}: {}",
@@ -3639,13 +3552,18 @@ impl LibraryEnrichmentManager {
                 }
             }
 
-            if let Some((entity, priority)) = self.dequeue_enrichment_request() {
+            if let Some((entity, attempt_kind)) = self.dequeue_enrichment_request() {
                 debug!(
                     "Enrichment request processing for {} ({:?})",
                     Self::source_entity_label(&entity),
-                    priority
+                    attempt_kind
                 );
-                self.handle_enrichment_request(entity, priority);
+                self.handle_enrichment_request(entity, attempt_kind);
+                continue;
+            }
+
+            if !self.queued_attempts.is_empty() {
+                std::thread::sleep(Duration::from_millis(100));
                 continue;
             }
 
@@ -3664,7 +3582,7 @@ mod tests {
 
     use super::{
         AudioDbAlbumCandidate, AudioDbArtistCandidate, LibraryEnrichmentManager, TitleMatchTier,
-        WikiSummary, WikidataCandidate,
+        WikiSummary,
     };
 
     fn sample_summary(title: &str, description: &str, extract: &str) -> WikiSummary {
@@ -3675,7 +3593,6 @@ mod tests {
             canonical_url: String::new(),
             image_url: None,
             page_type: String::new(),
-            wikidata_item_id: None,
         }
     }
 
@@ -3693,6 +3610,21 @@ mod tests {
             LibraryEnrichmentManager::compact_text("Sample Group!"),
             "samplegroup"
         );
+    }
+
+    #[test]
+    fn test_looks_like_noncanonical_artist_name_detects_feat_tags() {
+        assert!(
+            LibraryEnrichmentManager::looks_like_noncanonical_artist_name(
+                "Sample Artist feat. Guest"
+            )
+        );
+        assert!(
+            LibraryEnrichmentManager::looks_like_noncanonical_artist_name(
+                "Sample Artist featuring Guest"
+            )
+        );
+        assert!(!LibraryEnrichmentManager::looks_like_noncanonical_artist_name("Sample Artist"));
     }
 
     #[test]
@@ -3891,22 +3823,6 @@ mod tests {
                 &summary
             ) >= 110
         );
-    }
-
-    #[test]
-    fn test_score_wikidata_candidate_rejects_non_music_single_token_artist() {
-        let candidate = WikidataCandidate {
-            id: "Q1".to_string(),
-            label: "Sample".to_string(),
-            description: "mythological figure".to_string(),
-        };
-        let score = LibraryEnrichmentManager::score_wikidata_candidate(
-            &crate::protocol::LibraryEnrichmentEntity::Artist {
-                artist: "Sample".to_string(),
-            },
-            &candidate,
-        );
-        assert!(score < 0);
     }
 
     #[test]

@@ -1,7 +1,8 @@
 //! SQLite-backed persistence for playlists, library index data, and playlist-scoped UI metadata.
 
 use crate::protocol::{
-    LibraryAlbum, LibraryArtist, LibraryDecade, LibraryEnrichmentEntity, LibraryEnrichmentPayload,
+    LibraryAlbum, LibraryArtist, LibraryDecade, LibraryEnrichmentAttemptKind,
+    LibraryEnrichmentEntity, LibraryEnrichmentErrorKind, LibraryEnrichmentPayload,
     LibraryEnrichmentStatus, LibraryGenre, LibrarySong, PlaylistColumnWidthOverride, PlaylistInfo,
     RestoredTrack, TrackMetadataSummary,
 };
@@ -44,6 +45,42 @@ impl DbManager {
             "disabled" => LibraryEnrichmentStatus::Disabled,
             "error" => LibraryEnrichmentStatus::Error,
             _ => LibraryEnrichmentStatus::Error,
+        }
+    }
+
+    fn enrichment_error_kind_to_str(kind: Option<LibraryEnrichmentErrorKind>) -> &'static str {
+        match kind {
+            Some(LibraryEnrichmentErrorKind::Timeout) => "timeout",
+            Some(LibraryEnrichmentErrorKind::RateLimited) => "rate_limited",
+            Some(LibraryEnrichmentErrorKind::BudgetExhausted) => "budget_exhausted",
+            Some(LibraryEnrichmentErrorKind::Hard) => "hard",
+            None => "",
+        }
+    }
+
+    fn enrichment_error_kind_from_str(value: &str) -> Option<LibraryEnrichmentErrorKind> {
+        match value {
+            "timeout" => Some(LibraryEnrichmentErrorKind::Timeout),
+            "rate_limited" => Some(LibraryEnrichmentErrorKind::RateLimited),
+            "budget_exhausted" => Some(LibraryEnrichmentErrorKind::BudgetExhausted),
+            "hard" => Some(LibraryEnrichmentErrorKind::Hard),
+            _ => None,
+        }
+    }
+
+    fn enrichment_attempt_kind_to_str(kind: LibraryEnrichmentAttemptKind) -> &'static str {
+        match kind {
+            LibraryEnrichmentAttemptKind::Detail => "detail",
+            LibraryEnrichmentAttemptKind::VisiblePrefetch => "visible_prefetch",
+            LibraryEnrichmentAttemptKind::BackgroundWarm => "background_warm",
+        }
+    }
+
+    fn enrichment_attempt_kind_from_str(value: &str) -> LibraryEnrichmentAttemptKind {
+        match value {
+            "detail" => LibraryEnrichmentAttemptKind::Detail,
+            "background_warm" => LibraryEnrichmentAttemptKind::BackgroundWarm,
+            _ => LibraryEnrichmentAttemptKind::VisiblePrefetch,
         }
     }
 
@@ -177,6 +214,9 @@ impl DbManager {
                 fetched_unix_ms INTEGER NOT NULL DEFAULT 0,
                 expires_unix_ms INTEGER NOT NULL DEFAULT 0,
                 last_error TEXT NOT NULL DEFAULT '',
+                error_kind TEXT NOT NULL DEFAULT '',
+                attempt_kind TEXT NOT NULL DEFAULT '',
+                conclusive INTEGER NOT NULL DEFAULT 1,
                 PRIMARY KEY(entity_type, entity_key)
             )",
             [],
@@ -253,6 +293,40 @@ impl DbManager {
         if !has_genre {
             self.conn.execute(
                 "ALTER TABLE library_tracks ADD COLUMN genre TEXT NOT NULL DEFAULT ''",
+                [],
+            )?;
+        }
+
+        let mut enrichment_stmt = self
+            .conn
+            .prepare("PRAGMA table_info(library_enrichment_cache)")?;
+        let enrichment_columns = enrichment_stmt.query_map([], |row| row.get::<_, String>(1))?;
+        let mut has_error_kind = false;
+        let mut has_attempt_kind = false;
+        let mut has_conclusive = false;
+        for col in enrichment_columns {
+            match col?.as_str() {
+                "error_kind" => has_error_kind = true,
+                "attempt_kind" => has_attempt_kind = true,
+                "conclusive" => has_conclusive = true,
+                _ => {}
+            }
+        }
+        if !has_error_kind {
+            self.conn.execute(
+                "ALTER TABLE library_enrichment_cache ADD COLUMN error_kind TEXT NOT NULL DEFAULT ''",
+                [],
+            )?;
+        }
+        if !has_attempt_kind {
+            self.conn.execute(
+                "ALTER TABLE library_enrichment_cache ADD COLUMN attempt_kind TEXT NOT NULL DEFAULT ''",
+                [],
+            )?;
+        }
+        if !has_conclusive {
+            self.conn.execute(
+                "ALTER TABLE library_enrichment_cache ADD COLUMN conclusive INTEGER NOT NULL DEFAULT 1",
                 [],
             )?;
         }
@@ -911,7 +985,8 @@ impl DbManager {
         let result = self
             .conn
             .query_row(
-                "SELECT entity_type, entity_key, status, blurb, image_path, source_name, source_url, expires_unix_ms
+                "SELECT entity_type, entity_key, status, blurb, image_path, source_name, source_url,
+                        expires_unix_ms, error_kind, attempt_kind
                  FROM library_enrichment_cache
                  WHERE entity_type = ?1 AND entity_key = ?2",
                 params![entity_type, entity_key],
@@ -924,6 +999,8 @@ impl DbManager {
                     let source_name: String = row.get(5)?;
                     let source_url: String = row.get(6)?;
                     let expires_unix_ms: i64 = row.get(7)?;
+                    let error_kind: String = row.get(8)?;
+                    let attempt_kind: String = row.get(9)?;
                     Ok((
                         row_entity_type,
                         row_entity_key,
@@ -933,6 +1010,8 @@ impl DbManager {
                         source_name,
                         source_url,
                         expires_unix_ms,
+                        error_kind,
+                        attempt_kind,
                     ))
                 },
             )
@@ -947,6 +1026,8 @@ impl DbManager {
             source_name,
             source_url,
             expires_unix_ms,
+            error_kind,
+            attempt_kind,
         )) = result
         else {
             return Ok(None);
@@ -963,6 +1044,8 @@ impl DbManager {
             image_path: image_path.map(PathBuf::from),
             source_name,
             source_url,
+            error_kind: Self::enrichment_error_kind_from_str(&error_kind),
+            attempt_kind: Self::enrichment_attempt_kind_from_str(&attempt_kind),
         }))
     }
 
@@ -974,13 +1057,15 @@ impl DbManager {
         fetched_unix_ms: i64,
         expires_unix_ms: i64,
         last_error: Option<&str>,
+        conclusive: bool,
     ) -> Result<(), rusqlite::Error> {
         let (entity_type, entity_key) = Self::enrichment_entity_parts(&payload.entity);
         self.conn.execute(
             "INSERT INTO library_enrichment_cache (
                 entity_type, entity_key, status, blurb, image_path, image_url,
-                source_name, source_url, fetched_unix_ms, expires_unix_ms, last_error
-            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)
+                source_name, source_url, fetched_unix_ms, expires_unix_ms, last_error,
+                error_kind, attempt_kind, conclusive
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)
             ON CONFLICT(entity_type, entity_key) DO UPDATE SET
                 status = excluded.status,
                 blurb = excluded.blurb,
@@ -990,7 +1075,10 @@ impl DbManager {
                 source_url = excluded.source_url,
                 fetched_unix_ms = excluded.fetched_unix_ms,
                 expires_unix_ms = excluded.expires_unix_ms,
-                last_error = excluded.last_error",
+                last_error = excluded.last_error,
+                error_kind = excluded.error_kind,
+                attempt_kind = excluded.attempt_kind,
+                conclusive = excluded.conclusive",
             params![
                 entity_type,
                 entity_key,
@@ -1006,6 +1094,9 @@ impl DbManager {
                 fetched_unix_ms,
                 expires_unix_ms,
                 last_error.unwrap_or_default(),
+                Self::enrichment_error_kind_to_str(payload.error_kind),
+                Self::enrichment_attempt_kind_to_str(payload.attempt_kind),
+                i64::from(conclusive),
             ],
         )?;
         Ok(())

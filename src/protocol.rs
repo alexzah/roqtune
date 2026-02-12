@@ -213,6 +213,9 @@ pub enum LibraryMessage {
     ReplaceEnrichmentPrefetchQueue {
         entities: Vec<LibraryEnrichmentEntity>,
     },
+    ReplaceEnrichmentBackgroundQueue {
+        entities: Vec<LibraryEnrichmentEntity>,
+    },
     EnrichmentPrefetchTick,
     ClearEnrichmentCache,
     LibraryViewportChanged {
@@ -281,6 +284,24 @@ pub enum LibraryEnrichmentPriority {
     Prefetch,
 }
 
+/// Classification of enrichment failures for retry/backoff behavior.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+pub enum LibraryEnrichmentErrorKind {
+    Timeout,
+    RateLimited,
+    BudgetExhausted,
+    Hard,
+}
+
+/// Scheduler lane used for one enrichment attempt/result.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Deserialize, serde::Serialize)]
+pub enum LibraryEnrichmentAttemptKind {
+    Detail,
+    #[default]
+    VisiblePrefetch,
+    BackgroundWarm,
+}
+
 /// Result state for one enrichment lookup.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
 pub enum LibraryEnrichmentStatus {
@@ -299,6 +320,10 @@ pub struct LibraryEnrichmentPayload {
     pub image_path: Option<PathBuf>,
     pub source_name: String,
     pub source_url: String,
+    #[serde(default)]
+    pub error_kind: Option<LibraryEnrichmentErrorKind>,
+    #[serde(default)]
+    pub attempt_kind: LibraryEnrichmentAttemptKind,
 }
 
 /// Metadata editor commands and notifications.

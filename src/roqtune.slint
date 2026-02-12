@@ -1492,75 +1492,79 @@ export component AppWindow inherits Window {
 
                     Rectangle { height: 1px; background: #333; }
 
-                        library-list-scroll := ScrollView {
+                        library-list-view := ListView {
                             vertical-stretch: 1;
+                            property <int> row-height-px: root.library_root_index == 2 ? 38
+                                : root.library_root_index == 0 ? 32
+                                : 34;
                             changed viewport-y => {
-                                let row-height-px = root.library_root_index == 2 ? 38
-                                    : root.library_root_index == 0 ? 32
-                                    : 34;
                                 let scroll-offset-y = max(0px, -self.viewport-y);
-                                let first-row = max(0, floor(scroll-offset-y / (row-height-px * 1px)));
-                                let visible-rows = max(1, floor(self.height / (row-height-px * 1px)) + 2);
+                                let first-row = max(0, floor(scroll-offset-y / (self.row-height-px * 1px)));
+                                let visible-rows = max(1, floor(self.height / (self.row-height-px * 1px)) + 6);
                                 root.library_viewport_changed(first-row, visible-rows);
                             }
                             changed height => {
-                                let row-height-px = root.library_root_index == 2 ? 38
-                                    : root.library_root_index == 0 ? 32
-                                    : 34;
                                 let scroll-offset-y = max(0px, -self.viewport-y);
-                                let first-row = max(0, floor(scroll-offset-y / (row-height-px * 1px)));
-                                let visible-rows = max(1, floor(self.height / (row-height-px * 1px)) + 2);
+                                let first-row = max(0, floor(scroll-offset-y / (self.row-height-px * 1px)));
+                                let visible-rows = max(1, floor(self.height / (self.row-height-px * 1px)) + 6);
                                 root.library_viewport_changed(first-row, visible-rows);
                             }
-                            VerticalLayout {
-                                alignment: start;
-                                for item[row] in root.library_model : Rectangle {
-                                    horizontal-stretch: 1;
-                                    height: item.item_kind == 2 ? 38px
-                                        : item.item_kind == 0 ? 32px
-                                        : 34px;
-                                    LibraryRow {
-                                        width: parent.width;
-                                        height: parent.height;
-                                        data: item;
-                                        is-hover: library-list-row-ta.has-hover;
-                                    }
-                                    library-list-row-ta := TouchArea {
-                                        pointer-event(event) => {
-                                            if (event.kind == PointerEventKind.down && event.button == PointerEventButton.left) {
-                                                root.show_library_context_menu = false;
-                                                root.show_playlist_track_context_menu = false;
-                                                root.sidebar_has_focus = false;
-                                                key-handler.focus();
-                                                root.library_select_list_item(
-                                                    row,
-                                                    event.modifiers.control,
-                                                    event.modifiers.shift,
-                                                    false
-                                                );
-                                            } else if (event.kind == PointerEventKind.down && event.button == PointerEventButton.right) {
-                                                root.show_playlist_track_context_menu = false;
-                                                root.sidebar_has_focus = false;
-                                                key-handler.focus();
-                                                root.library_select_list_item(
-                                                    row,
-                                                    event.modifiers.control,
-                                                    event.modifiers.shift,
-                                                    true
-                                                );
-                                                let click-x = root.layout-region-x(i) + parent.x + self.x + self.mouse-x;
-                                                let click-y = root.layout-region-y(i) + parent.y + self.y + self.mouse-y;
-                                                root.library_context_menu_x = min(root.width - 170px, max(8px, click-x));
-                                                root.library_context_menu_y = min(root.height - 70px, max(8px, click-y));
-                                                root.show_library_context_menu = true;
-                                            }
-                                        }
-                                        double-clicked => {
+                            changed row-height-px => {
+                                let scroll-offset-y = max(0px, -self.viewport-y);
+                                let first-row = max(0, floor(scroll-offset-y / (self.row-height-px * 1px)));
+                                let visible-rows = max(1, floor(self.height / (self.row-height-px * 1px)) + 6);
+                                root.library_viewport_changed(first-row, visible-rows);
+                            }
+                            init => {
+                                let visible-rows = max(1, floor(self.height / (self.row-height-px * 1px)) + 6);
+                                root.library_viewport_changed(0, visible-rows);
+                            }
+                            for item[row] in root.library_model : Rectangle {
+                                horizontal-stretch: 1;
+                                height: item.item_kind == 2 ? 38px
+                                    : item.item_kind == 0 ? 32px
+                                    : 34px;
+                                LibraryRow {
+                                    width: parent.width;
+                                    height: parent.height;
+                                    data: item;
+                                    is-hover: library-list-row-ta.has-hover;
+                                }
+                                library-list-row-ta := TouchArea {
+                                    pointer-event(event) => {
+                                        if (event.kind == PointerEventKind.down && event.button == PointerEventButton.left) {
                                             root.show_library_context_menu = false;
+                                            root.show_playlist_track_context_menu = false;
                                             root.sidebar_has_focus = false;
                                             key-handler.focus();
-                                            root.library_item_activated(row);
+                                            root.library_select_list_item(
+                                                row,
+                                                event.modifiers.control,
+                                                event.modifiers.shift,
+                                                false
+                                            );
+                                        } else if (event.kind == PointerEventKind.down && event.button == PointerEventButton.right) {
+                                            root.show_playlist_track_context_menu = false;
+                                            root.sidebar_has_focus = false;
+                                            key-handler.focus();
+                                            root.library_select_list_item(
+                                                row,
+                                                event.modifiers.control,
+                                                event.modifiers.shift,
+                                                true
+                                            );
+                                            let click-x = root.layout-region-x(i) + parent.x + self.x + self.mouse-x;
+                                            let click-y = root.layout-region-y(i) + parent.y + self.y + self.mouse-y;
+                                            root.library_context_menu_x = min(root.width - 170px, max(8px, click-x));
+                                            root.library_context_menu_y = min(root.height - 70px, max(8px, click-y));
+                                            root.show_library_context_menu = true;
                                         }
+                                    }
+                                    double-clicked => {
+                                        root.show_library_context_menu = false;
+                                        root.sidebar_has_focus = false;
+                                        key-handler.focus();
+                                        root.library_item_activated(row);
                                     }
                                 }
                             }
