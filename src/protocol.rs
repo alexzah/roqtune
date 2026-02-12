@@ -46,7 +46,14 @@ pub struct TrackStarted {
 /// Playlist-domain commands and notifications.
 #[derive(Debug, Clone)]
 pub enum PlaylistMessage {
+    #[allow(dead_code)]
     LoadTrack(PathBuf),
+    DrainBulkImportQueue,
+    #[allow(dead_code)]
+    LoadTracksBatch {
+        paths: Vec<PathBuf>,
+        source: ImportSource,
+    },
     DeleteTracks(Vec<usize>),
     DeleteSelected,
     /// UI requested playback for a currently rendered track row.
@@ -90,6 +97,13 @@ pub enum PlaylistMessage {
     TracksInserted {
         tracks: Vec<RestoredTrack>,
         insert_at: usize,
+    },
+    TracksInsertedBatch {
+        tracks: Vec<RestoredTrack>,
+        insert_at: usize,
+    },
+    TrackMetadataBatchUpdated {
+        updates: Vec<TrackMetadataPatch>,
     },
     OpenPlaylistSearch,
     ClosePlaylistSearch,
@@ -187,24 +201,42 @@ pub enum LibraryMessage {
         playlist_ids: Vec<String>,
     },
     RequestScan,
+    #[allow(dead_code)]
     RequestSongs,
+    #[allow(dead_code)]
     RequestArtists,
+    #[allow(dead_code)]
     RequestAlbums,
+    #[allow(dead_code)]
     RequestGenres,
+    #[allow(dead_code)]
     RequestDecades,
+    #[allow(dead_code)]
     RequestGlobalSearchData,
+    #[allow(dead_code)]
     RequestArtistDetail {
         artist: String,
     },
+    #[allow(dead_code)]
     RequestAlbumSongs {
         album: String,
         album_artist: String,
     },
+    #[allow(dead_code)]
     RequestGenreSongs {
         genre: String,
     },
+    #[allow(dead_code)]
     RequestDecadeSongs {
         decade: String,
+    },
+    DrainScanProgressQueue,
+    RequestLibraryPage {
+        request_id: u64,
+        view: LibraryViewQuery,
+        offset: usize,
+        limit: usize,
+        query: String,
     },
     RequestEnrichment {
         entity: LibraryEnrichmentEntity,
@@ -223,8 +255,17 @@ pub enum LibraryMessage {
         row_count: usize,
     },
     ScanStarted,
+    ScanProgress {
+        discovered: usize,
+        indexed: usize,
+        metadata_pending: usize,
+    },
     ScanCompleted {
         indexed_tracks: usize,
+    },
+    MetadataBackfillProgress {
+        updated: usize,
+        remaining: usize,
     },
     ScanFailed(String),
     SongsResult(Vec<LibrarySong>),
@@ -254,6 +295,11 @@ pub enum LibraryMessage {
     DecadeSongsResult {
         decade: String,
         songs: Vec<LibrarySong>,
+    },
+    LibraryPageResult {
+        request_id: u64,
+        total: usize,
+        entries: Vec<LibraryEntryPayload>,
     },
     EnrichmentResult(LibraryEnrichmentPayload),
     EnrichmentCacheCleared {
@@ -379,6 +425,20 @@ pub enum LibrarySelectionSpec {
     Decade { decade: String },
 }
 
+/// Source hint for track ingest operations.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ImportSource {
+    AddFilesDialog,
+    AddFolderDialog,
+}
+
+/// Metadata patch keyed by stable track id.
+#[derive(Debug, Clone)]
+pub struct TrackMetadataPatch {
+    pub track_id: String,
+    pub summary: TrackMetadataSummary,
+}
+
 /// Persisted per-column width override for one playlist.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
 pub struct PlaylistColumnWidthOverride {
@@ -395,6 +455,13 @@ pub struct RestoredTrack {
     pub id: String,
     /// File path on disk.
     pub path: PathBuf,
+}
+
+/// Dedicated high-volume payload for playlist bulk-import queues.
+#[derive(Debug, Clone)]
+pub struct PlaylistBulkImportRequest {
+    pub paths: Vec<PathBuf>,
+    pub source: ImportSource,
 }
 
 /// Minimal playlist metadata restored from storage.
@@ -418,6 +485,21 @@ pub struct LibrarySong {
     pub genre: String,
     pub year: String,
     pub track_number: String,
+}
+
+/// Paged library query selector.
+#[derive(Debug, Clone)]
+pub enum LibraryViewQuery {
+    Songs,
+    Artists,
+    Albums,
+    Genres,
+    Decades,
+    GlobalSearch,
+    ArtistDetail { artist: String },
+    AlbumDetail { album: String, album_artist: String },
+    GenreDetail { genre: String },
+    DecadeDetail { decade: String },
 }
 
 /// One album aggregate entry in the indexed music library.
@@ -449,6 +531,16 @@ pub struct LibraryGenre {
 pub struct LibraryDecade {
     pub decade: String,
     pub song_count: u32,
+}
+
+/// Generic paged-entry payload for library pagination requests.
+#[derive(Debug, Clone)]
+pub enum LibraryEntryPayload {
+    Song(LibrarySong),
+    Artist(LibraryArtist),
+    Album(LibraryAlbum),
+    Genre(LibraryGenre),
+    Decade(LibraryDecade),
 }
 
 /// Technical metadata emitted for the currently active track.

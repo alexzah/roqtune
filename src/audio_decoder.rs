@@ -889,7 +889,12 @@ impl AudioDecoder {
                     }
                     _ => {}
                 },
-                Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {}
+                Err(tokio::sync::broadcast::error::RecvError::Lagged(skipped)) => {
+                    log::warn!(
+                        "AudioDecoder lagged on control bus, skipped {} message(s)",
+                        skipped
+                    );
+                }
                 Err(tokio::sync::broadcast::error::RecvError::Closed) => {
                     error!("AudioDecoder: bus closed");
                     break;

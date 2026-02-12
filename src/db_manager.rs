@@ -7,12 +7,64 @@ use crate::protocol::{
     RestoredTrack, TrackMetadataSummary,
 };
 use rusqlite::{params, Connection, OptionalExtension};
-use std::{collections::HashSet, path::PathBuf};
+use std::{
+    collections::{HashMap, HashSet},
+    path::PathBuf,
+};
 use uuid::Uuid;
 
 /// Database gateway for playlist and track persistence.
 pub struct DbManager {
     conn: Connection,
+}
+
+/// Lightweight scan-side state used for change detection.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct LibraryScanState {
+    pub modified_unix_ms: i64,
+    pub file_size_bytes: i64,
+    pub metadata_ready: bool,
+}
+
+/// Phase-A scan upsert payload.
+#[derive(Debug, Clone)]
+pub struct LibraryTrackScanStub {
+    pub song_id: String,
+    pub path: String,
+    pub title: String,
+    pub artist: String,
+    pub album: String,
+    pub album_artist: String,
+    pub genre: String,
+    pub year: String,
+    pub track_number: String,
+    pub sort_title: String,
+    pub sort_artist: String,
+    pub sort_album: String,
+    pub modified_unix_ms: i64,
+    pub file_size_bytes: i64,
+    pub metadata_ready: bool,
+    pub last_scanned_unix_ms: i64,
+}
+
+/// Phase-B metadata backfill update payload.
+#[derive(Debug, Clone)]
+pub struct LibraryTrackMetadataUpdate {
+    pub path: String,
+    pub title: String,
+    pub artist: String,
+    pub album: String,
+    pub album_artist: String,
+    pub genre: String,
+    pub year: String,
+    pub track_number: String,
+    pub sort_title: String,
+    pub sort_artist: String,
+    pub sort_album: String,
+    pub modified_unix_ms: i64,
+    pub file_size_bytes: i64,
+    pub metadata_ready: bool,
+    pub last_scanned_unix_ms: i64,
 }
 
 impl DbManager {
@@ -115,6 +167,14 @@ impl DbManager {
         trimmed.to_ascii_lowercase()
     }
 
+    fn configure_connection_pragmas(conn: &Connection) {
+        let _ = conn.pragma_update(None, "journal_mode", "WAL");
+        let _ = conn.pragma_update(None, "synchronous", "NORMAL");
+        let _ = conn.pragma_update(None, "temp_store", "MEMORY");
+        let _ = conn.pragma_update(None, "foreign_keys", "ON");
+        let _ = conn.pragma_update(None, "busy_timeout", 5000i64);
+    }
+
     /// Opens the on-disk database, initializes schema, and applies migrations.
     pub fn new() -> Result<Self, rusqlite::Error> {
         let data_dir = dirs::data_dir()
@@ -127,6 +187,7 @@ impl DbManager {
 
         let db_path = data_dir.join("playlist.db");
         let conn = Connection::open(db_path)?;
+        Self::configure_connection_pragmas(&conn);
 
         let db_manager = Self { conn };
         db_manager.initialize_schema()?;
@@ -138,6 +199,7 @@ impl DbManager {
     /// Creates an in-memory database instance for tests.
     pub fn new_in_memory() -> Result<Self, rusqlite::Error> {
         let conn = Connection::open_in_memory()?;
+        Self::configure_connection_pragmas(&conn);
         let db_manager = Self { conn };
         db_manager.initialize_schema()?;
         db_manager.migrate()?;
@@ -185,7 +247,10 @@ impl DbManager {
                 sort_title TEXT NOT NULL,
                 sort_artist TEXT NOT NULL,
                 sort_album TEXT NOT NULL,
-                modified_unix_ms INTEGER NOT NULL DEFAULT 0
+                modified_unix_ms INTEGER NOT NULL DEFAULT 0,
+                file_size_bytes INTEGER NOT NULL DEFAULT 0,
+                metadata_ready INTEGER NOT NULL DEFAULT 0,
+                last_scanned_unix_ms INTEGER NOT NULL DEFAULT 0
             )",
             [],
         )?;
@@ -199,6 +264,22 @@ impl DbManager {
         )?;
         self.conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_library_tracks_sort_album ON library_tracks(sort_album, sort_title, path)",
+            [],
+        )?;
+        self.conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_library_tracks_artist ON library_tracks(artist, sort_album, sort_title, path)",
+            [],
+        )?;
+        self.conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_library_tracks_album_artist ON library_tracks(album, album_artist, sort_title, path)",
+            [],
+        )?;
+        self.conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_library_tracks_genre ON library_tracks(genre, sort_artist, sort_album, sort_title, path)",
+            [],
+        )?;
+        self.conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_library_tracks_year ON library_tracks(year, sort_artist, sort_album, sort_title, path)",
             [],
         )?;
         self.conn.execute(
@@ -284,15 +365,39 @@ impl DbManager {
         let mut library_stmt = self.conn.prepare("PRAGMA table_info(library_tracks)")?;
         let library_columns = library_stmt.query_map([], |row| row.get::<_, String>(1))?;
         let mut has_genre = false;
+        let mut has_file_size_bytes = false;
+        let mut has_metadata_ready = false;
+        let mut has_last_scanned_unix_ms = false;
         for col in library_columns {
-            if col? == "genre" {
-                has_genre = true;
-                break;
+            match col?.as_str() {
+                "genre" => has_genre = true,
+                "file_size_bytes" => has_file_size_bytes = true,
+                "metadata_ready" => has_metadata_ready = true,
+                "last_scanned_unix_ms" => has_last_scanned_unix_ms = true,
+                _ => {}
             }
         }
         if !has_genre {
             self.conn.execute(
                 "ALTER TABLE library_tracks ADD COLUMN genre TEXT NOT NULL DEFAULT ''",
+                [],
+            )?;
+        }
+        if !has_file_size_bytes {
+            self.conn.execute(
+                "ALTER TABLE library_tracks ADD COLUMN file_size_bytes INTEGER NOT NULL DEFAULT 0",
+                [],
+            )?;
+        }
+        if !has_metadata_ready {
+            self.conn.execute(
+                "ALTER TABLE library_tracks ADD COLUMN metadata_ready INTEGER NOT NULL DEFAULT 0",
+                [],
+            )?;
+        }
+        if !has_last_scanned_unix_ms {
+            self.conn.execute(
+                "ALTER TABLE library_tracks ADD COLUMN last_scanned_unix_ms INTEGER NOT NULL DEFAULT 0",
                 [],
             )?;
         }
@@ -396,6 +501,44 @@ impl DbManager {
         Ok(())
     }
 
+    /// Persists many track rows for one playlist in one transaction.
+    pub fn save_tracks_batch(
+        &self,
+        playlist_id: &str,
+        tracks: &[(String, PathBuf)],
+        base_position: usize,
+    ) -> Result<(), rusqlite::Error> {
+        if tracks.is_empty() {
+            return Ok(());
+        }
+        self.conn.execute("BEGIN IMMEDIATE TRANSACTION", [])?;
+        let mut stmt = match self
+            .conn
+            .prepare("INSERT INTO tracks (id, playlist_id, path, position) VALUES (?1, ?2, ?3, ?4)")
+        {
+            Ok(stmt) => stmt,
+            Err(err) => {
+                let _ = self.conn.execute("ROLLBACK", []);
+                return Err(err);
+            }
+        };
+        for (offset, (id, path)) in tracks.iter().enumerate() {
+            if let Err(err) = stmt.execute(params![
+                id,
+                playlist_id,
+                path.to_string_lossy().to_string(),
+                (base_position + offset) as i64
+            ]) {
+                drop(stmt);
+                let _ = self.conn.execute("ROLLBACK", []);
+                return Err(err);
+            }
+        }
+        drop(stmt);
+        self.conn.execute("COMMIT", [])?;
+        Ok(())
+    }
+
     /// Deletes one track by id.
     pub fn delete_track(&self, id: &str) -> Result<(), rusqlite::Error> {
         self.conn
@@ -437,12 +580,29 @@ impl DbManager {
 
     /// Rewrites positional ordering for the supplied track ids.
     pub fn update_positions(&self, ids: Vec<String>) -> Result<(), rusqlite::Error> {
-        let mut stmt = self
-            .conn
-            .prepare("UPDATE tracks SET position = ?1 WHERE id = ?2")?;
-        for (i, id) in ids.iter().enumerate() {
-            stmt.execute(params![i as i64, id])?;
+        if ids.is_empty() {
+            return Ok(());
         }
+        self.conn.execute("BEGIN IMMEDIATE TRANSACTION", [])?;
+        let mut stmt = match self
+            .conn
+            .prepare("UPDATE tracks SET position = ?1 WHERE id = ?2")
+        {
+            Ok(stmt) => stmt,
+            Err(err) => {
+                let _ = self.conn.execute("ROLLBACK", []);
+                return Err(err);
+            }
+        };
+        for (i, id) in ids.iter().enumerate() {
+            if let Err(err) = stmt.execute(params![i as i64, id]) {
+                drop(stmt);
+                let _ = self.conn.execute("ROLLBACK", []);
+                return Err(err);
+            }
+        }
+        drop(stmt);
+        self.conn.execute("COMMIT", [])?;
         Ok(())
     }
 
@@ -571,29 +731,21 @@ impl DbManager {
         self.set_playlist_column_width_overrides(playlist_id, &overrides)
     }
 
-    /// Inserts or updates one indexed library track entry.
-    #[allow(clippy::too_many_arguments)]
-    pub fn upsert_library_track(
+    /// Batch upserts many scan stubs in one transaction.
+    pub fn upsert_library_track_scan_stub_batch(
         &self,
-        song_id: &str,
-        path: &str,
-        title: &str,
-        artist: &str,
-        album: &str,
-        album_artist: &str,
-        genre: &str,
-        year: &str,
-        track_number: &str,
-        sort_title: &str,
-        sort_artist: &str,
-        sort_album: &str,
-        modified_unix_ms: i64,
+        stubs: &[LibraryTrackScanStub],
     ) -> Result<(), rusqlite::Error> {
-        self.conn.execute(
+        if stubs.is_empty() {
+            return Ok(());
+        }
+        self.conn.execute("BEGIN IMMEDIATE TRANSACTION", [])?;
+        let mut stmt = match self.conn.prepare(
             "INSERT INTO library_tracks (
                 song_id, path, title, artist, album, album_artist, genre, year, track_number,
-                sort_title, sort_artist, sort_album, modified_unix_ms
-            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)
+                sort_title, sort_artist, sort_album, modified_unix_ms, file_size_bytes,
+                metadata_ready, last_scanned_unix_ms
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16)
             ON CONFLICT(path) DO UPDATE SET
                 song_id = excluded.song_id,
                 title = excluded.title,
@@ -606,23 +758,129 @@ impl DbManager {
                 sort_title = excluded.sort_title,
                 sort_artist = excluded.sort_artist,
                 sort_album = excluded.sort_album,
-                modified_unix_ms = excluded.modified_unix_ms",
-            params![
-                song_id,
-                path,
-                title,
-                artist,
-                album,
-                album_artist,
-                genre,
-                year,
-                track_number,
-                sort_title,
-                sort_artist,
-                sort_album,
-                modified_unix_ms,
-            ],
+                modified_unix_ms = excluded.modified_unix_ms,
+                file_size_bytes = excluded.file_size_bytes,
+                metadata_ready = excluded.metadata_ready,
+                last_scanned_unix_ms = excluded.last_scanned_unix_ms",
+        ) {
+            Ok(stmt) => stmt,
+            Err(err) => {
+                let _ = self.conn.execute("ROLLBACK", []);
+                return Err(err);
+            }
+        };
+        for stub in stubs {
+            if let Err(err) = stmt.execute(params![
+                stub.song_id,
+                stub.path,
+                stub.title,
+                stub.artist,
+                stub.album,
+                stub.album_artist,
+                stub.genre,
+                stub.year,
+                stub.track_number,
+                stub.sort_title,
+                stub.sort_artist,
+                stub.sort_album,
+                stub.modified_unix_ms,
+                stub.file_size_bytes,
+                i64::from(stub.metadata_ready),
+                stub.last_scanned_unix_ms,
+            ]) {
+                drop(stmt);
+                let _ = self.conn.execute("ROLLBACK", []);
+                return Err(err);
+            }
+        }
+        drop(stmt);
+        self.conn.execute("COMMIT", [])?;
+        Ok(())
+    }
+
+    /// Loads lightweight scan state for all indexed library tracks.
+    pub fn get_library_scan_states_by_path(
+        &self,
+    ) -> Result<HashMap<String, LibraryScanState>, rusqlite::Error> {
+        let mut stmt = self.conn.prepare(
+            "SELECT path, modified_unix_ms, file_size_bytes, metadata_ready FROM library_tracks",
         )?;
+        let iter = stmt.query_map([], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                LibraryScanState {
+                    modified_unix_ms: row.get(1)?,
+                    file_size_bytes: row.get(2)?,
+                    metadata_ready: row.get::<_, i64>(3)? != 0,
+                },
+            ))
+        })?;
+        let mut map = HashMap::new();
+        for item in iter {
+            let (path, state) = item?;
+            map.insert(path, state);
+        }
+        Ok(map)
+    }
+
+    /// Batch-updates rich metadata for scanned tracks.
+    pub fn update_library_track_metadata_batch(
+        &self,
+        updates: &[LibraryTrackMetadataUpdate],
+    ) -> Result<(), rusqlite::Error> {
+        if updates.is_empty() {
+            return Ok(());
+        }
+        self.conn.execute("BEGIN IMMEDIATE TRANSACTION", [])?;
+        let mut stmt = match self.conn.prepare(
+            "UPDATE library_tracks
+             SET title = ?1,
+                 artist = ?2,
+                 album = ?3,
+                 album_artist = ?4,
+                 genre = ?5,
+                 year = ?6,
+                 track_number = ?7,
+                 sort_title = ?8,
+                 sort_artist = ?9,
+                 sort_album = ?10,
+                 modified_unix_ms = ?11,
+                 file_size_bytes = ?12,
+                 metadata_ready = ?13,
+                 last_scanned_unix_ms = ?14
+             WHERE path = ?15",
+        ) {
+            Ok(stmt) => stmt,
+            Err(err) => {
+                let _ = self.conn.execute("ROLLBACK", []);
+                return Err(err);
+            }
+        };
+        for update in updates {
+            if let Err(err) = stmt.execute(params![
+                update.title,
+                update.artist,
+                update.album,
+                update.album_artist,
+                update.genre,
+                update.year,
+                update.track_number,
+                update.sort_title,
+                update.sort_artist,
+                update.sort_album,
+                update.modified_unix_ms,
+                update.file_size_bytes,
+                i64::from(update.metadata_ready),
+                update.last_scanned_unix_ms,
+                update.path,
+            ]) {
+                drop(stmt);
+                let _ = self.conn.execute("ROLLBACK", []);
+                return Err(err);
+            }
+        }
+        drop(stmt);
+        self.conn.execute("COMMIT", [])?;
         Ok(())
     }
 
@@ -652,8 +910,10 @@ impl DbManager {
                  sort_title = ?8,
                  sort_artist = ?9,
                  sort_album = ?10,
-                 modified_unix_ms = ?11
-             WHERE path = ?12",
+                 modified_unix_ms = ?11,
+                 metadata_ready = 1,
+                 last_scanned_unix_ms = ?12
+             WHERE path = ?13",
             params![
                 summary.title,
                 summary.artist,
@@ -666,21 +926,11 @@ impl DbManager {
                 sort_artist,
                 sort_album,
                 modified_unix_ms,
+                modified_unix_ms,
                 path
             ],
         )?;
         Ok(updated > 0)
-    }
-
-    /// Returns all indexed library paths.
-    pub fn get_all_library_paths(&self) -> Result<Vec<String>, rusqlite::Error> {
-        let mut stmt = self.conn.prepare("SELECT path FROM library_tracks")?;
-        let iter = stmt.query_map([], |row| row.get::<_, String>(0))?;
-        let mut paths = Vec::new();
-        for item in iter {
-            paths.push(item?);
-        }
-        Ok(paths)
     }
 
     /// Deletes indexed library rows that are no longer present in scanned paths.
@@ -688,13 +938,49 @@ impl DbManager {
         &self,
         keep_paths: &HashSet<String>,
     ) -> Result<(), rusqlite::Error> {
-        let existing_paths = self.get_all_library_paths()?;
-        for path in existing_paths {
-            if !keep_paths.contains(&path) {
-                self.conn
-                    .execute("DELETE FROM library_tracks WHERE path = ?1", params![path])?;
+        self.conn.execute("BEGIN IMMEDIATE TRANSACTION", [])?;
+        if let Err(err) = self.conn.execute(
+            "CREATE TEMP TABLE IF NOT EXISTS tmp_seen_library_paths (path TEXT PRIMARY KEY)",
+            [],
+        ) {
+            let _ = self.conn.execute("ROLLBACK", []);
+            return Err(err);
+        }
+        if let Err(err) = self.conn.execute("DELETE FROM tmp_seen_library_paths", []) {
+            let _ = self.conn.execute("ROLLBACK", []);
+            return Err(err);
+        }
+        let mut insert_stmt = match self
+            .conn
+            .prepare("INSERT OR IGNORE INTO tmp_seen_library_paths (path) VALUES (?1)")
+        {
+            Ok(stmt) => stmt,
+            Err(err) => {
+                let _ = self.conn.execute("ROLLBACK", []);
+                return Err(err);
+            }
+        };
+        for path in keep_paths {
+            if let Err(err) = insert_stmt.execute(params![path]) {
+                drop(insert_stmt);
+                let _ = self.conn.execute("ROLLBACK", []);
+                return Err(err);
             }
         }
+        drop(insert_stmt);
+        if let Err(err) = self.conn.execute(
+            "DELETE FROM library_tracks
+             WHERE path NOT IN (SELECT path FROM tmp_seen_library_paths)",
+            [],
+        ) {
+            let _ = self.conn.execute("ROLLBACK", []);
+            return Err(err);
+        }
+        if let Err(err) = self.conn.execute("DROP TABLE tmp_seen_library_paths", []) {
+            let _ = self.conn.execute("ROLLBACK", []);
+            return Err(err);
+        }
+        self.conn.execute("COMMIT", [])?;
         Ok(())
     }
 
@@ -725,6 +1011,47 @@ impl DbManager {
         Ok(songs)
     }
 
+    /// Loads one songs page and total row count.
+    pub fn get_library_songs_page(
+        &self,
+        offset: usize,
+        limit: usize,
+    ) -> Result<(Vec<LibrarySong>, usize), rusqlite::Error> {
+        let total = self.get_library_songs_count()?;
+        let mut stmt = self.conn.prepare(
+            "SELECT song_id, path, title, artist, album, album_artist, genre, year, track_number
+             FROM library_tracks
+             ORDER BY sort_title ASC, path ASC
+             LIMIT ?1 OFFSET ?2",
+        )?;
+        let iter = stmt.query_map(params![limit as i64, offset as i64], |row| {
+            Ok(LibrarySong {
+                id: row.get(0)?,
+                path: PathBuf::from(row.get::<_, String>(1)?),
+                title: row.get(2)?,
+                artist: row.get(3)?,
+                album: row.get(4)?,
+                album_artist: row.get(5)?,
+                genre: row.get(6)?,
+                year: row.get(7)?,
+                track_number: row.get(8)?,
+            })
+        })?;
+        let mut rows = Vec::new();
+        for item in iter {
+            rows.push(item?);
+        }
+        Ok((rows, total))
+    }
+
+    /// Returns total indexed song count.
+    pub fn get_library_songs_count(&self) -> Result<usize, rusqlite::Error> {
+        let count: i64 = self
+            .conn
+            .query_row("SELECT COUNT(*) FROM library_tracks", [], |row| row.get(0))?;
+        Ok(count.max(0) as usize)
+    }
+
     /// Loads all unique artists with album/song counts.
     pub fn get_library_artists(&self) -> Result<Vec<LibraryArtist>, rusqlite::Error> {
         let mut stmt = self.conn.prepare(
@@ -745,6 +1072,44 @@ impl DbManager {
             artists.push(item?);
         }
         Ok(artists)
+    }
+
+    /// Loads one artists page and total row count.
+    pub fn get_library_artists_page(
+        &self,
+        offset: usize,
+        limit: usize,
+    ) -> Result<(Vec<LibraryArtist>, usize), rusqlite::Error> {
+        let total = self.get_library_artists_count()?;
+        let mut stmt = self.conn.prepare(
+            "SELECT artist, COUNT(DISTINCT album || '|' || album_artist) AS album_count, COUNT(*) AS song_count
+             FROM library_tracks
+             GROUP BY artist
+             ORDER BY sort_artist ASC, artist ASC
+             LIMIT ?1 OFFSET ?2",
+        )?;
+        let iter = stmt.query_map(params![limit as i64, offset as i64], |row| {
+            Ok(LibraryArtist {
+                artist: row.get(0)?,
+                album_count: row.get::<_, i64>(1)?.max(0) as u32,
+                song_count: row.get::<_, i64>(2)?.max(0) as u32,
+            })
+        })?;
+        let mut rows = Vec::new();
+        for item in iter {
+            rows.push(item?);
+        }
+        Ok((rows, total))
+    }
+
+    /// Returns total artist aggregate row count.
+    pub fn get_library_artists_count(&self) -> Result<usize, rusqlite::Error> {
+        let count: i64 = self.conn.query_row(
+            "SELECT COUNT(*) FROM (SELECT artist FROM library_tracks GROUP BY artist)",
+            [],
+            |row| row.get(0),
+        )?;
+        Ok(count.max(0) as usize)
     }
 
     /// Loads all unique albums with song counts.
@@ -768,6 +1133,45 @@ impl DbManager {
             albums.push(item?);
         }
         Ok(albums)
+    }
+
+    /// Loads one albums page and total row count.
+    pub fn get_library_albums_page(
+        &self,
+        offset: usize,
+        limit: usize,
+    ) -> Result<(Vec<LibraryAlbum>, usize), rusqlite::Error> {
+        let total = self.get_library_albums_count()?;
+        let mut stmt = self.conn.prepare(
+            "SELECT album, album_artist, COUNT(*) AS song_count, MIN(path) AS representative_track_path
+             FROM library_tracks
+             GROUP BY album, album_artist
+             ORDER BY sort_album ASC, album ASC, album_artist ASC
+             LIMIT ?1 OFFSET ?2",
+        )?;
+        let iter = stmt.query_map(params![limit as i64, offset as i64], |row| {
+            Ok(LibraryAlbum {
+                album: row.get(0)?,
+                album_artist: row.get(1)?,
+                song_count: row.get::<_, i64>(2)?.max(0) as u32,
+                representative_track_path: row.get::<_, Option<String>>(3)?.map(PathBuf::from),
+            })
+        })?;
+        let mut rows = Vec::new();
+        for item in iter {
+            rows.push(item?);
+        }
+        Ok((rows, total))
+    }
+
+    /// Returns total album aggregate row count.
+    pub fn get_library_albums_count(&self) -> Result<usize, rusqlite::Error> {
+        let count: i64 = self.conn.query_row(
+            "SELECT COUNT(*) FROM (SELECT album, album_artist FROM library_tracks GROUP BY album, album_artist)",
+            [],
+            |row| row.get(0),
+        )?;
+        Ok(count.max(0) as usize)
     }
 
     /// Loads all unique genres with song counts.
@@ -796,6 +1200,51 @@ impl DbManager {
         Ok(genres)
     }
 
+    /// Loads one genres page and total row count.
+    pub fn get_library_genres_page(
+        &self,
+        offset: usize,
+        limit: usize,
+    ) -> Result<(Vec<LibraryGenre>, usize), rusqlite::Error> {
+        let total = self.get_library_genres_count()?;
+        let mut stmt = self.conn.prepare(
+            "SELECT
+                CASE
+                    WHEN TRIM(genre) = '' THEN 'Unknown Genre'
+                    ELSE TRIM(genre)
+                END AS display_genre,
+                COUNT(*) AS song_count
+             FROM library_tracks
+             GROUP BY display_genre
+             ORDER BY LOWER(display_genre) ASC
+             LIMIT ?1 OFFSET ?2",
+        )?;
+        let iter = stmt.query_map(params![limit as i64, offset as i64], |row| {
+            Ok(LibraryGenre {
+                genre: row.get(0)?,
+                song_count: row.get::<_, i64>(1)?.max(0) as u32,
+            })
+        })?;
+        let mut rows = Vec::new();
+        for item in iter {
+            rows.push(item?);
+        }
+        Ok((rows, total))
+    }
+
+    /// Returns total genre aggregate row count.
+    pub fn get_library_genres_count(&self) -> Result<usize, rusqlite::Error> {
+        let count: i64 = self.conn.query_row(
+            "SELECT COUNT(*) FROM (
+                SELECT CASE WHEN TRIM(genre) = '' THEN 'Unknown Genre' ELSE TRIM(genre) END AS display_genre
+                FROM library_tracks GROUP BY display_genre
+            )",
+            [],
+            |row| row.get(0),
+        )?;
+        Ok(count.max(0) as usize)
+    }
+
     /// Loads all unique decades with song counts.
     pub fn get_library_decades(&self) -> Result<Vec<LibraryDecade>, rusqlite::Error> {
         let mut stmt = self.conn.prepare(
@@ -821,6 +1270,56 @@ impl DbManager {
             decades.push(item?);
         }
         Ok(decades)
+    }
+
+    /// Loads one decades page and total row count.
+    pub fn get_library_decades_page(
+        &self,
+        offset: usize,
+        limit: usize,
+    ) -> Result<(Vec<LibraryDecade>, usize), rusqlite::Error> {
+        let total = self.get_library_decades_count()?;
+        let mut stmt = self.conn.prepare(
+            "SELECT
+                CASE
+                    WHEN SUBSTR(TRIM(year), 1, 3) GLOB '[0-9][0-9][0-9]'
+                        THEN SUBSTR(TRIM(year), 1, 3) || '0s'
+                    ELSE 'Unknown Decade'
+                END AS display_decade,
+                COUNT(*) AS song_count
+             FROM library_tracks
+             GROUP BY display_decade
+             ORDER BY display_decade ASC
+             LIMIT ?1 OFFSET ?2",
+        )?;
+        let iter = stmt.query_map(params![limit as i64, offset as i64], |row| {
+            Ok(LibraryDecade {
+                decade: row.get(0)?,
+                song_count: row.get::<_, i64>(1)?.max(0) as u32,
+            })
+        })?;
+        let mut rows = Vec::new();
+        for item in iter {
+            rows.push(item?);
+        }
+        Ok((rows, total))
+    }
+
+    /// Returns total decade aggregate row count.
+    pub fn get_library_decades_count(&self) -> Result<usize, rusqlite::Error> {
+        let count: i64 = self.conn.query_row(
+            "SELECT COUNT(*) FROM (
+                SELECT CASE
+                    WHEN SUBSTR(TRIM(year), 1, 3) GLOB '[0-9][0-9][0-9]'
+                        THEN SUBSTR(TRIM(year), 1, 3) || '0s'
+                    ELSE 'Unknown Decade'
+                END AS display_decade
+                FROM library_tracks GROUP BY display_decade
+            )",
+            [],
+            |row| row.get(0),
+        )?;
+        Ok(count.max(0) as usize)
     }
 
     /// Loads songs for one album+album-artist pair sorted by track number then title.

@@ -5,6 +5,7 @@
 
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
+use std::sync::mpsc::Receiver as StdReceiver;
 
 use log::{debug, error, info, trace};
 use symphonia::core::{
@@ -39,6 +40,7 @@ pub struct PlaylistManager {
     bus_consumer: Receiver<protocol::Message>,
     bus_producer: Sender<protocol::Message>,
     db_manager: DbManager,
+    bulk_import_rx: StdReceiver<protocol::PlaylistBulkImportRequest>,
     cached_track_ids: HashMap<String, u64>, // id -> start_offset_ms
     fully_cached_track_ids: HashSet<String>,
     requested_track_offsets: HashMap<String, u64>, // id -> requested start_offset_ms
@@ -65,6 +67,7 @@ impl PlaylistManager {
         bus_consumer: Receiver<protocol::Message>,
         bus_producer: Sender<protocol::Message>,
         db_manager: DbManager,
+        bulk_import_rx: StdReceiver<protocol::PlaylistBulkImportRequest>,
     ) -> Self {
         Self {
             editing_playlist: playlist.clone(),
@@ -76,6 +79,7 @@ impl PlaylistManager {
             bus_consumer,
             bus_producer,
             db_manager,
+            bulk_import_rx,
             cached_track_ids: HashMap::new(),
             fully_cached_track_ids: HashSet::new(),
             requested_track_offsets: HashMap::new(),
@@ -324,25 +328,26 @@ impl PlaylistManager {
             .map(|tracks| tracks.len())
             .unwrap_or(0);
 
-        let mut inserted = Vec::new();
-        for (offset, path) in paths.iter().enumerate() {
-            let id = Uuid::new_v4().to_string();
-            let position = existing_len + offset;
-            if let Err(err) =
-                self.db_manager
-                    .save_track(&id, playlist_id, path.to_str().unwrap_or(""), position)
-            {
-                error!(
-                    "Failed to append track to playlist {} at position {}: {}",
-                    playlist_id, position, err
-                );
-                continue;
-            }
-            inserted.push(protocol::RestoredTrack {
-                id,
-                path: path.clone(),
-            });
+        let pending: Vec<(String, PathBuf)> = paths
+            .iter()
+            .map(|path| (Uuid::new_v4().to_string(), path.clone()))
+            .collect();
+        if let Err(err) = self
+            .db_manager
+            .save_tracks_batch(playlist_id, &pending, existing_len)
+        {
+            error!(
+                "Failed to append {} track(s) to playlist {} in batch: {}",
+                pending.len(),
+                playlist_id,
+                err
+            );
+            return Vec::new();
         }
+        let inserted: Vec<protocol::RestoredTrack> = pending
+            .into_iter()
+            .map(|(id, path)| protocol::RestoredTrack { id, path })
+            .collect();
         inserted
     }
 
@@ -496,6 +501,66 @@ impl PlaylistManager {
         self.broadcast_selection_changed();
     }
 
+    fn import_tracks_batch(&mut self, paths: Vec<PathBuf>, source: protocol::ImportSource) {
+        if paths.is_empty() {
+            return;
+        }
+        debug!(
+            "PlaylistManager: importing {} track(s) from {:?}",
+            paths.len(),
+            source
+        );
+        let previous_track_list = self.capture_track_list_snapshot();
+        let insert_at = self.editing_playlist.num_tracks();
+        let pending: Vec<(String, PathBuf)> = paths
+            .into_iter()
+            .map(|path| (Uuid::new_v4().to_string(), path))
+            .collect();
+        if let Err(err) =
+            self.db_manager
+                .save_tracks_batch(&self.active_playlist_id, &pending, insert_at)
+        {
+            error!(
+                "Failed to persist {} batched imported track(s): {}",
+                pending.len(),
+                err
+            );
+            return;
+        }
+        let mut inserted_tracks = Vec::with_capacity(pending.len());
+        for (id, path) in pending {
+            let track = Track {
+                path: path.clone(),
+                id: id.clone(),
+            };
+            self.editing_playlist.add_track(track.clone());
+            if Some(&self.active_playlist_id) == self.playback_playlist_id.as_ref() {
+                self.playback_playlist.add_track(track);
+            }
+            inserted_tracks.push(protocol::RestoredTrack { id, path });
+        }
+        let _ = self.bus_producer.send(protocol::Message::Playlist(
+            protocol::PlaylistMessage::TracksInsertedBatch {
+                tracks: inserted_tracks,
+                insert_at,
+            },
+        ));
+        if Self::track_list_changed(&previous_track_list, &self.capture_track_list_snapshot()) {
+            self.push_track_list_undo_snapshot(previous_track_list);
+        }
+        self.broadcast_playlist_changed();
+        self.broadcast_selection_changed();
+        if Some(&self.active_playlist_id) == self.playback_playlist_id.as_ref() {
+            self.cache_tracks(false);
+        }
+    }
+
+    fn drain_bulk_import_queue(&mut self) {
+        while let Ok(request) = self.bulk_import_rx.try_recv() {
+            self.import_tracks_batch(request.paths, request.source);
+        }
+    }
+
     /// Starts the blocking event loop for playlist messages and playback coordination.
     pub fn run(&mut self) {
         // Restore playlists from database
@@ -547,6 +612,7 @@ impl PlaylistManager {
         }
 
         loop {
+            self.drain_bulk_import_queue();
             match self.bus_consumer.blocking_recv() {
                 Ok(message) => match message {
                     protocol::Message::Playlist(protocol::PlaylistMessage::LoadTrack(path)) => {
@@ -586,6 +652,17 @@ impl PlaylistManager {
                         ) {
                             self.push_track_list_undo_snapshot(previous_track_list);
                         }
+                    }
+                    protocol::Message::Playlist(
+                        protocol::PlaylistMessage::DrainBulkImportQueue,
+                    ) => {
+                        self.drain_bulk_import_queue();
+                    }
+                    protocol::Message::Playlist(protocol::PlaylistMessage::LoadTracksBatch {
+                        paths,
+                        source,
+                    }) => {
+                        self.import_tracks_batch(paths, source);
                     }
                     protocol::Message::Playlist(
                         protocol::PlaylistMessage::AddTracksToPlaylists {
@@ -638,7 +715,7 @@ impl PlaylistManager {
                             .num_tracks()
                             .saturating_sub(inserted_active_tracks.len());
                         let _ = self.bus_producer.send(protocol::Message::Playlist(
-                            protocol::PlaylistMessage::TracksInserted {
+                            protocol::PlaylistMessage::TracksInsertedBatch {
                                 tracks: inserted_active_tracks,
                                 insert_at,
                             },
@@ -1624,8 +1701,11 @@ impl PlaylistManager {
                     }
                     _ => trace!("PlaylistManager: ignoring unsupported message"),
                 },
-                Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
-                    // Ignore lag as we've increased the bus capacity
+                Err(tokio::sync::broadcast::error::RecvError::Lagged(skipped)) => {
+                    log::warn!(
+                        "PlaylistManager lagged on control bus, skipped {} message(s)",
+                        skipped
+                    );
                 }
                 Err(tokio::sync::broadcast::error::RecvError::Closed) => {
                     error!("PlaylistManager: bus closed");
@@ -1829,6 +1909,8 @@ mod tests {
             let (bus_sender, _) = broadcast::channel(4096);
             let manager_bus_sender = bus_sender.clone();
             let manager_receiver = bus_sender.subscribe();
+            let (_bulk_import_tx, bulk_import_rx) =
+                std::sync::mpsc::sync_channel::<protocol::PlaylistBulkImportRequest>(64);
             let db_manager = DbManager::new_in_memory().expect("failed to create in-memory db");
 
             thread::spawn(move || {
@@ -1837,6 +1919,7 @@ mod tests {
                     manager_receiver,
                     manager_bus_sender,
                     db_manager,
+                    bulk_import_rx,
                 );
                 manager.run();
             });
@@ -2169,14 +2252,14 @@ mod tests {
             wait_for_message(&mut harness.receiver, Duration::from_secs(1), |message| {
                 matches!(
                     message,
-                    protocol::Message::Playlist(protocol::PlaylistMessage::TracksInserted {
+                    protocol::Message::Playlist(protocol::PlaylistMessage::TracksInsertedBatch {
                         tracks,
                         ..
                     }) if tracks.len() == 2
                 )
             });
         let inserted_paths =
-            if let protocol::Message::Playlist(protocol::PlaylistMessage::TracksInserted {
+            if let protocol::Message::Playlist(protocol::PlaylistMessage::TracksInsertedBatch {
                 tracks,
                 ..
             }) = inserted_message
@@ -2186,7 +2269,7 @@ mod tests {
                     .map(|track| track.path)
                     .collect::<Vec<_>>()
             } else {
-                panic!("expected TracksInserted message");
+                panic!("expected TracksInsertedBatch message");
             };
         assert_eq!(inserted_paths, added_paths);
         harness.drain_messages();
@@ -2254,7 +2337,9 @@ mod tests {
             |message| {
                 matches!(
                     message,
-                    protocol::Message::Playlist(protocol::PlaylistMessage::TracksInserted { .. })
+                    protocol::Message::Playlist(
+                        protocol::PlaylistMessage::TracksInsertedBatch { .. }
+                    )
                 )
             },
         );
@@ -3166,9 +3251,16 @@ mod tests {
         let (bus_sender, _) = broadcast::channel(256);
         let receiver = bus_sender.subscribe();
         let manager_receiver = bus_sender.subscribe();
+        let (_bulk_import_tx, bulk_import_rx) =
+            std::sync::mpsc::sync_channel::<protocol::PlaylistBulkImportRequest>(64);
         let db_manager = DbManager::new_in_memory().expect("failed to create in-memory db");
-        let manager =
-            PlaylistManager::new(Playlist::new(), manager_receiver, bus_sender, db_manager);
+        let manager = PlaylistManager::new(
+            Playlist::new(),
+            manager_receiver,
+            bus_sender,
+            db_manager,
+            bulk_import_rx,
+        );
         (manager, receiver)
     }
 

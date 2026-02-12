@@ -3,19 +3,25 @@
 //! This manager maintains a lightweight metadata index for Library mode,
 //! handles manual scans, and serves pre-sorted query results over the bus.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::hash::{Hash, Hasher};
 use std::path::{Path, PathBuf};
+use std::sync::mpsc::{SyncSender, TrySendError};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use log::{debug, error, info, warn};
+use log::{debug, info, warn};
 use tokio::sync::broadcast::{Receiver, Sender};
 
-use crate::db_manager::DbManager;
+use crate::db_manager::{
+    DbManager, LibraryScanState, LibraryTrackMetadataUpdate, LibraryTrackScanStub,
+};
 use crate::metadata_tags;
 use crate::protocol::{self, LibraryMessage, Message};
 
 const SUPPORTED_AUDIO_EXTENSIONS: [&str; 7] = ["mp3", "wav", "ogg", "flac", "aac", "m4a", "mp4"];
+const LIBRARY_SCAN_UPSERT_BATCH_SIZE: usize = 256;
+const LIBRARY_SCAN_METADATA_BATCH_SIZE: usize = 128;
+const LIBRARY_SCAN_PROGRESS_INTERVAL: usize = 256;
 
 struct LibraryTrackMetadata {
     title: String,
@@ -33,6 +39,7 @@ pub struct LibraryManager {
     bus_producer: Sender<Message>,
     db_manager: DbManager,
     library_folders: Vec<String>,
+    scan_progress_tx: SyncSender<LibraryMessage>,
 }
 
 impl LibraryManager {
@@ -41,12 +48,14 @@ impl LibraryManager {
         bus_consumer: Receiver<Message>,
         bus_producer: Sender<Message>,
         db_manager: DbManager,
+        scan_progress_tx: SyncSender<LibraryMessage>,
     ) -> Self {
         Self {
             bus_consumer,
             bus_producer,
             db_manager,
             library_folders: Vec::new(),
+            scan_progress_tx,
         }
     }
 
@@ -194,18 +203,129 @@ impl LibraryManager {
         metadata
     }
 
+    fn file_scan_state(path: &Path) -> (i64, i64) {
+        match std::fs::metadata(path) {
+            Ok(meta) => {
+                let modified_unix_ms = meta
+                    .modified()
+                    .ok()
+                    .and_then(|modified| {
+                        modified
+                            .duration_since(UNIX_EPOCH)
+                            .ok()
+                            .map(|duration| duration.as_millis() as i64)
+                    })
+                    .unwrap_or(0);
+                (modified_unix_ms, meta.len() as i64)
+            }
+            Err(_) => (0, 0),
+        }
+    }
+
+    fn fallback_scan_stub(
+        file_path: &Path,
+        path_string: String,
+        song_id: String,
+        modified_unix_ms: i64,
+        file_size_bytes: i64,
+        scan_started_unix_ms: i64,
+    ) -> LibraryTrackScanStub {
+        let title = Self::fallback_title_from_path(file_path);
+        let artist = "Unknown Artist".to_string();
+        let album = "Unknown Album".to_string();
+        let album_artist = artist.clone();
+        LibraryTrackScanStub {
+            song_id,
+            path: path_string,
+            title: title.clone(),
+            artist: artist.clone(),
+            album: album.clone(),
+            album_artist,
+            genre: String::new(),
+            year: String::new(),
+            track_number: String::new(),
+            sort_title: Self::normalize_sort_key(&title, "unknown title"),
+            sort_artist: Self::normalize_sort_key(&artist, "unknown artist"),
+            sort_album: Self::normalize_sort_key(&album, "unknown album"),
+            modified_unix_ms,
+            file_size_bytes,
+            metadata_ready: false,
+            last_scanned_unix_ms: scan_started_unix_ms,
+        }
+    }
+
+    fn metadata_update_from_file(
+        file_path: &Path,
+        path_string: String,
+        modified_unix_ms: i64,
+        file_size_bytes: i64,
+        scan_started_unix_ms: i64,
+    ) -> LibraryTrackMetadataUpdate {
+        let metadata = Self::read_library_track_metadata(file_path);
+        LibraryTrackMetadataUpdate {
+            path: path_string,
+            title: metadata.title.clone(),
+            artist: metadata.artist.clone(),
+            album: metadata.album.clone(),
+            album_artist: metadata.album_artist.clone(),
+            genre: metadata.genre.clone(),
+            year: metadata.year.clone(),
+            track_number: metadata.track_number.clone(),
+            sort_title: Self::normalize_sort_key(&metadata.title, "unknown title"),
+            sort_artist: Self::normalize_sort_key(&metadata.artist, "unknown artist"),
+            sort_album: Self::normalize_sort_key(&metadata.album, "unknown album"),
+            modified_unix_ms,
+            file_size_bytes,
+            metadata_ready: true,
+            last_scanned_unix_ms: scan_started_unix_ms,
+        }
+    }
+
     fn send_scan_failed(&self, error_text: String) {
         let _ = self
             .bus_producer
             .send(Message::Library(LibraryMessage::ScanFailed(error_text)));
     }
 
-    fn scan_library(&mut self) {
-        let _ = self
-            .bus_producer
-            .send(Message::Library(LibraryMessage::ScanStarted));
+    fn push_scan_progress_update(&self, message: LibraryMessage, allow_drop_when_full: bool) {
+        let queued = if allow_drop_when_full {
+            match self.scan_progress_tx.try_send(message) {
+                Ok(()) => true,
+                Err(TrySendError::Full(_)) => false,
+                Err(TrySendError::Disconnected(_)) => false,
+            }
+        } else {
+            self.scan_progress_tx.send(message).is_ok()
+        };
+        if queued {
+            let _ = self
+                .bus_producer
+                .send(Message::Library(LibraryMessage::DrainScanProgressQueue));
+        }
+    }
 
-        let mut scanned_paths: HashSet<String> = HashSet::new();
+    fn scan_library(&mut self) {
+        self.push_scan_progress_update(LibraryMessage::ScanStarted, false);
+
+        let scan_started_unix_ms = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|duration| duration.as_millis() as i64)
+            .unwrap_or(0);
+        let existing_scan_states: HashMap<String, LibraryScanState> = match self
+            .db_manager
+            .get_library_scan_states_by_path()
+        {
+            Ok(states) => states,
+            Err(err) => {
+                self.push_scan_progress_update(
+                    LibraryMessage::ScanFailed(format!("Failed to load scan baseline: {}", err)),
+                    false,
+                );
+                return;
+            }
+        };
+
+        let mut all_files = Vec::new();
         for folder in &self.library_folders {
             if folder.trim().is_empty() {
                 continue;
@@ -219,52 +339,98 @@ impl LibraryManager {
                 continue;
             }
             let files = Self::collect_audio_files_from_folder(&folder_path);
-            for file_path in files {
-                let metadata = Self::read_library_track_metadata(&file_path);
-                let path_string = file_path.to_string_lossy().to_string();
-                let song_id = Self::stable_library_song_id(&file_path);
-                let sort_title = Self::normalize_sort_key(&metadata.title, "unknown title");
-                let sort_artist = Self::normalize_sort_key(&metadata.artist, "unknown artist");
-                let sort_album = Self::normalize_sort_key(&metadata.album, "unknown album");
-                let modified_unix_ms = std::fs::metadata(&file_path)
-                    .ok()
-                    .and_then(|meta| meta.modified().ok())
-                    .and_then(|modified| {
-                        modified
-                            .duration_since(UNIX_EPOCH)
-                            .ok()
-                            .map(|duration| duration.as_millis() as i64)
-                    })
-                    .unwrap_or_else(|| {
-                        SystemTime::now()
-                            .duration_since(UNIX_EPOCH)
-                            .map(|duration| duration.as_millis() as i64)
-                            .unwrap_or(0)
-                    });
+            all_files.extend(files);
+        }
+        all_files.sort_unstable();
 
-                if let Err(err) = self.db_manager.upsert_library_track(
-                    &song_id,
-                    &path_string,
-                    &metadata.title,
-                    &metadata.artist,
-                    &metadata.album,
-                    &metadata.album_artist,
-                    &metadata.genre,
-                    &metadata.year,
-                    &metadata.track_number,
-                    &sort_title,
-                    &sort_artist,
-                    &sort_album,
+        let mut scanned_paths: HashSet<String> = HashSet::new();
+        let mut scan_stubs_batch: Vec<LibraryTrackScanStub> =
+            Vec::with_capacity(LIBRARY_SCAN_UPSERT_BATCH_SIZE);
+        let mut metadata_backfill_targets: Vec<(PathBuf, String, i64, i64)> = Vec::new();
+        let mut discovered = 0usize;
+        let mut indexed = 0usize;
+        let mut metadata_pending = 0usize;
+
+        for file_path in all_files {
+            let path_string = file_path.to_string_lossy().to_string();
+            let (modified_unix_ms, file_size_bytes) = Self::file_scan_state(&file_path);
+            let song_id = Self::stable_library_song_id(&file_path);
+            scanned_paths.insert(path_string.clone());
+            discovered = discovered.saturating_add(1);
+
+            let needs_metadata = existing_scan_states
+                .get(&path_string)
+                .map(|state| {
+                    state.modified_unix_ms != modified_unix_ms
+                        || state.file_size_bytes != file_size_bytes
+                        || !state.metadata_ready
+                })
+                .unwrap_or(true);
+
+            if needs_metadata {
+                scan_stubs_batch.push(Self::fallback_scan_stub(
+                    &file_path,
+                    path_string.clone(),
+                    song_id,
                     modified_unix_ms,
-                ) {
-                    error!(
-                        "Library scan: failed to upsert track {}: {}",
-                        file_path.display(),
-                        err
-                    );
-                } else {
-                    scanned_paths.insert(path_string);
+                    file_size_bytes,
+                    scan_started_unix_ms,
+                ));
+                metadata_backfill_targets.push((
+                    file_path,
+                    path_string,
+                    modified_unix_ms,
+                    file_size_bytes,
+                ));
+                metadata_pending = metadata_pending.saturating_add(1);
+                if scan_stubs_batch.len() >= LIBRARY_SCAN_UPSERT_BATCH_SIZE {
+                    if let Err(err) = self
+                        .db_manager
+                        .upsert_library_track_scan_stub_batch(&scan_stubs_batch)
+                    {
+                        self.push_scan_progress_update(
+                            LibraryMessage::ScanFailed(format!(
+                                "Failed to upsert scan batch ({} rows): {}",
+                                scan_stubs_batch.len(),
+                                err
+                            )),
+                            false,
+                        );
+                        return;
+                    }
+                    indexed = indexed.saturating_add(scan_stubs_batch.len());
+                    scan_stubs_batch.clear();
                 }
+            } else {
+                indexed = indexed.saturating_add(1);
+            }
+
+            if discovered.is_multiple_of(LIBRARY_SCAN_PROGRESS_INTERVAL) {
+                self.push_scan_progress_update(
+                    LibraryMessage::ScanProgress {
+                        discovered,
+                        indexed,
+                        metadata_pending,
+                    },
+                    true,
+                );
+            }
+        }
+
+        if !scan_stubs_batch.is_empty() {
+            if let Err(err) = self
+                .db_manager
+                .upsert_library_track_scan_stub_batch(&scan_stubs_batch)
+            {
+                self.push_scan_progress_update(
+                    LibraryMessage::ScanFailed(format!(
+                        "Failed to upsert final scan batch ({} rows): {}",
+                        scan_stubs_batch.len(),
+                        err
+                    )),
+                    false,
+                );
+                return;
             }
         }
 
@@ -272,19 +438,95 @@ impl LibraryManager {
             .db_manager
             .delete_library_paths_not_in_set(&scanned_paths)
         {
-            self.send_scan_failed(format!("Failed to prune removed library files: {}", err));
+            self.push_scan_progress_update(
+                LibraryMessage::ScanFailed(format!(
+                    "Failed to prune removed library files: {}",
+                    err
+                )),
+                false,
+            );
             return;
         }
 
-        info!(
-            "Library scan completed: indexed {} track(s)",
-            scanned_paths.len()
-        );
-        let _ = self
-            .bus_producer
-            .send(Message::Library(LibraryMessage::ScanCompleted {
+        self.push_scan_progress_update(
+            LibraryMessage::ScanCompleted {
                 indexed_tracks: scanned_paths.len(),
-            }));
+            },
+            false,
+        );
+
+        let mut metadata_batch: Vec<LibraryTrackMetadataUpdate> =
+            Vec::with_capacity(LIBRARY_SCAN_METADATA_BATCH_SIZE);
+        let mut metadata_updated = 0usize;
+        let total_pending = metadata_backfill_targets.len();
+        for (file_path, path_string, modified_unix_ms, file_size_bytes) in metadata_backfill_targets
+        {
+            metadata_batch.push(Self::metadata_update_from_file(
+                &file_path,
+                path_string,
+                modified_unix_ms,
+                file_size_bytes,
+                scan_started_unix_ms,
+            ));
+            if metadata_batch.len() >= LIBRARY_SCAN_METADATA_BATCH_SIZE {
+                if let Err(err) = self
+                    .db_manager
+                    .update_library_track_metadata_batch(&metadata_batch)
+                {
+                    self.push_scan_progress_update(
+                        LibraryMessage::ScanFailed(format!(
+                            "Failed metadata backfill batch ({} rows): {}",
+                            metadata_batch.len(),
+                            err
+                        )),
+                        false,
+                    );
+                    return;
+                }
+                metadata_updated = metadata_updated.saturating_add(metadata_batch.len());
+                metadata_batch.clear();
+                self.push_scan_progress_update(
+                    LibraryMessage::MetadataBackfillProgress {
+                        updated: metadata_updated,
+                        remaining: total_pending.saturating_sub(metadata_updated),
+                    },
+                    true,
+                );
+            }
+        }
+
+        if !metadata_batch.is_empty() {
+            if let Err(err) = self
+                .db_manager
+                .update_library_track_metadata_batch(&metadata_batch)
+            {
+                self.push_scan_progress_update(
+                    LibraryMessage::ScanFailed(format!(
+                        "Failed final metadata backfill batch ({} rows): {}",
+                        metadata_batch.len(),
+                        err
+                    )),
+                    false,
+                );
+                return;
+            }
+            metadata_updated = metadata_updated.saturating_add(metadata_batch.len());
+        }
+        if total_pending > 0 {
+            self.push_scan_progress_update(
+                LibraryMessage::MetadataBackfillProgress {
+                    updated: metadata_updated,
+                    remaining: total_pending.saturating_sub(metadata_updated),
+                },
+                true,
+            );
+        }
+
+        info!(
+            "Library scan completed: indexed {} track(s), metadata backfill {} track(s)",
+            scanned_paths.len(),
+            total_pending
+        );
     }
 
     fn publish_songs(&self) {
@@ -432,6 +674,225 @@ impl LibraryManager {
                         }));
             }
             Err(err) => self.send_scan_failed(format!("Failed to load decade songs: {}", err)),
+        }
+    }
+
+    fn publish_library_page(
+        &self,
+        request_id: u64,
+        view: protocol::LibraryViewQuery,
+        offset: usize,
+        limit: usize,
+        _query: String,
+    ) {
+        let limit = limit.max(1);
+        let result: Result<(usize, Vec<protocol::LibraryEntryPayload>), String> = match view {
+            protocol::LibraryViewQuery::Songs => self
+                .db_manager
+                .get_library_songs_page(offset, limit)
+                .map(|(rows, total)| {
+                    (
+                        total,
+                        rows.into_iter()
+                            .map(protocol::LibraryEntryPayload::Song)
+                            .collect(),
+                    )
+                })
+                .map_err(|err| format!("Failed to load songs page: {}", err)),
+            protocol::LibraryViewQuery::Artists => self
+                .db_manager
+                .get_library_artists_page(offset, limit)
+                .map(|(rows, total)| {
+                    (
+                        total,
+                        rows.into_iter()
+                            .map(protocol::LibraryEntryPayload::Artist)
+                            .collect(),
+                    )
+                })
+                .map_err(|err| format!("Failed to load artists page: {}", err)),
+            protocol::LibraryViewQuery::Albums => self
+                .db_manager
+                .get_library_albums_page(offset, limit)
+                .map(|(rows, total)| {
+                    (
+                        total,
+                        rows.into_iter()
+                            .map(protocol::LibraryEntryPayload::Album)
+                            .collect(),
+                    )
+                })
+                .map_err(|err| format!("Failed to load albums page: {}", err)),
+            protocol::LibraryViewQuery::Genres => self
+                .db_manager
+                .get_library_genres_page(offset, limit)
+                .map(|(rows, total)| {
+                    (
+                        total,
+                        rows.into_iter()
+                            .map(protocol::LibraryEntryPayload::Genre)
+                            .collect(),
+                    )
+                })
+                .map_err(|err| format!("Failed to load genres page: {}", err)),
+            protocol::LibraryViewQuery::Decades => self
+                .db_manager
+                .get_library_decades_page(offset, limit)
+                .map(|(rows, total)| {
+                    (
+                        total,
+                        rows.into_iter()
+                            .map(protocol::LibraryEntryPayload::Decade)
+                            .collect(),
+                    )
+                })
+                .map_err(|err| format!("Failed to load decades page: {}", err)),
+            protocol::LibraryViewQuery::GlobalSearch => self
+                .db_manager
+                .get_library_songs()
+                .and_then(|songs| {
+                    let artists = self.db_manager.get_library_artists()?;
+                    let albums = self.db_manager.get_library_albums()?;
+                    let mut entries: Vec<protocol::LibraryEntryPayload> =
+                        Vec::with_capacity(songs.len() + artists.len() + albums.len());
+                    entries.extend(songs.into_iter().map(protocol::LibraryEntryPayload::Song));
+                    entries.extend(
+                        artists
+                            .into_iter()
+                            .map(protocol::LibraryEntryPayload::Artist),
+                    );
+                    entries.extend(albums.into_iter().map(protocol::LibraryEntryPayload::Album));
+                    entries.sort_by(|left, right| {
+                        let left_key = match left {
+                            protocol::LibraryEntryPayload::Song(song) => {
+                                song.title.to_ascii_lowercase()
+                            }
+                            protocol::LibraryEntryPayload::Artist(artist) => {
+                                artist.artist.to_ascii_lowercase()
+                            }
+                            protocol::LibraryEntryPayload::Album(album) => {
+                                album.album.to_ascii_lowercase()
+                            }
+                            protocol::LibraryEntryPayload::Genre(genre) => {
+                                genre.genre.to_ascii_lowercase()
+                            }
+                            protocol::LibraryEntryPayload::Decade(decade) => {
+                                decade.decade.to_ascii_lowercase()
+                            }
+                        };
+                        let right_key = match right {
+                            protocol::LibraryEntryPayload::Song(song) => {
+                                song.title.to_ascii_lowercase()
+                            }
+                            protocol::LibraryEntryPayload::Artist(artist) => {
+                                artist.artist.to_ascii_lowercase()
+                            }
+                            protocol::LibraryEntryPayload::Album(album) => {
+                                album.album.to_ascii_lowercase()
+                            }
+                            protocol::LibraryEntryPayload::Genre(genre) => {
+                                genre.genre.to_ascii_lowercase()
+                            }
+                            protocol::LibraryEntryPayload::Decade(decade) => {
+                                decade.decade.to_ascii_lowercase()
+                            }
+                        };
+                        let left_kind_rank = match left {
+                            protocol::LibraryEntryPayload::Artist(_) => 0,
+                            protocol::LibraryEntryPayload::Album(_) => 1,
+                            protocol::LibraryEntryPayload::Song(_) => 2,
+                            protocol::LibraryEntryPayload::Genre(_) => 3,
+                            protocol::LibraryEntryPayload::Decade(_) => 4,
+                        };
+                        let right_kind_rank = match right {
+                            protocol::LibraryEntryPayload::Artist(_) => 0,
+                            protocol::LibraryEntryPayload::Album(_) => 1,
+                            protocol::LibraryEntryPayload::Song(_) => 2,
+                            protocol::LibraryEntryPayload::Genre(_) => 3,
+                            protocol::LibraryEntryPayload::Decade(_) => 4,
+                        };
+                        left_key
+                            .cmp(&right_key)
+                            .then_with(|| left_kind_rank.cmp(&right_kind_rank))
+                    });
+                    let total = entries.len();
+                    let rows = entries.into_iter().skip(offset).take(limit).collect();
+                    Ok((rows, total))
+                })
+                .map(|(rows, total)| (total, rows))
+                .map_err(|err| format!("Failed to load global search page: {}", err)),
+            protocol::LibraryViewQuery::ArtistDetail { artist } => self
+                .db_manager
+                .get_library_artist_detail(&artist)
+                .map(|(_albums, songs)| {
+                    let total = songs.len();
+                    let rows = songs
+                        .into_iter()
+                        .skip(offset)
+                        .take(limit)
+                        .map(protocol::LibraryEntryPayload::Song)
+                        .collect();
+                    (total, rows)
+                })
+                .map_err(|err| format!("Failed to load artist detail page: {}", err)),
+            protocol::LibraryViewQuery::AlbumDetail {
+                album,
+                album_artist,
+            } => self
+                .db_manager
+                .get_library_album_songs(&album, &album_artist)
+                .map(|songs| {
+                    let total = songs.len();
+                    let rows = songs
+                        .into_iter()
+                        .skip(offset)
+                        .take(limit)
+                        .map(protocol::LibraryEntryPayload::Song)
+                        .collect();
+                    (total, rows)
+                })
+                .map_err(|err| format!("Failed to load album detail page: {}", err)),
+            protocol::LibraryViewQuery::GenreDetail { genre } => self
+                .db_manager
+                .get_library_genre_songs(&genre)
+                .map(|songs| {
+                    let total = songs.len();
+                    let rows = songs
+                        .into_iter()
+                        .skip(offset)
+                        .take(limit)
+                        .map(protocol::LibraryEntryPayload::Song)
+                        .collect();
+                    (total, rows)
+                })
+                .map_err(|err| format!("Failed to load genre detail page: {}", err)),
+            protocol::LibraryViewQuery::DecadeDetail { decade } => self
+                .db_manager
+                .get_library_decade_songs(&decade)
+                .map(|songs| {
+                    let total = songs.len();
+                    let rows = songs
+                        .into_iter()
+                        .skip(offset)
+                        .take(limit)
+                        .map(protocol::LibraryEntryPayload::Song)
+                        .collect();
+                    (total, rows)
+                })
+                .map_err(|err| format!("Failed to load decade detail page: {}", err)),
+        };
+
+        match result {
+            Ok((total, entries)) => {
+                let _ =
+                    self.bus_producer
+                        .send(Message::Library(LibraryMessage::LibraryPageResult {
+                            request_id,
+                            total,
+                            entries,
+                        }));
+            }
+            Err(error_text) => self.send_scan_failed(error_text),
         }
     }
 
@@ -611,10 +1072,22 @@ impl LibraryManager {
                     Message::Library(LibraryMessage::RequestDecadeSongs { decade }) => {
                         self.publish_decade_songs(decade);
                     }
+                    Message::Library(LibraryMessage::DrainScanProgressQueue) => {}
+                    Message::Library(LibraryMessage::RequestLibraryPage {
+                        request_id,
+                        view,
+                        offset,
+                        limit,
+                        query,
+                    }) => {
+                        self.publish_library_page(request_id, view, offset, limit, query);
+                    }
                     Message::Library(LibraryMessage::RequestEnrichment { .. }) => {}
                     Message::Library(LibraryMessage::ReplaceEnrichmentPrefetchQueue { .. }) => {}
                     Message::Library(LibraryMessage::EnrichmentPrefetchTick) => {}
                     Message::Library(LibraryMessage::LibraryViewportChanged { .. }) => {}
+                    Message::Library(LibraryMessage::ScanProgress { .. }) => {}
+                    Message::Library(LibraryMessage::MetadataBackfillProgress { .. }) => {}
                     Message::Library(LibraryMessage::AddSelectionToPlaylists {
                         selections,
                         playlist_ids,
@@ -623,7 +1096,12 @@ impl LibraryManager {
                     }
                     _ => {}
                 },
-                Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {}
+                Err(tokio::sync::broadcast::error::RecvError::Lagged(skipped)) => {
+                    warn!(
+                        "LibraryManager lagged on control bus, skipped {} message(s)",
+                        skipped
+                    );
+                }
                 Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
             }
         }

@@ -18,7 +18,10 @@ use std::{
     collections::{BTreeSet, HashMap, HashSet},
     path::{Path, PathBuf},
     rc::Rc,
-    sync::{Arc, Mutex},
+    sync::{
+        mpsc::{self, RecvTimeoutError},
+        Arc, Mutex,
+    },
     thread,
     time::Duration,
 };
@@ -83,6 +86,32 @@ fn flash_read_only_view_indicator(ui_handle: slint::Weak<AppWindow>) {
             ui.set_playlist_filter_blocked_feedback(false);
         }
     });
+}
+
+fn spawn_debounced_query_dispatcher(
+    debounce_delay: Duration,
+    mut dispatch: impl FnMut(String) + Send + 'static,
+) -> mpsc::Sender<String> {
+    let (tx, rx) = mpsc::channel::<String>();
+    thread::spawn(move || {
+        while let Ok(initial_query) = rx.recv() {
+            let mut pending_query = initial_query;
+            loop {
+                match rx.recv_timeout(debounce_delay) {
+                    Ok(next_query) => pending_query = next_query,
+                    Err(RecvTimeoutError::Timeout) => {
+                        dispatch(pending_query);
+                        break;
+                    }
+                    Err(RecvTimeoutError::Disconnected) => {
+                        dispatch(pending_query);
+                        return;
+                    }
+                }
+            }
+        }
+    });
+    tx
 }
 
 /// Detected and filtered output-setting choices presented in the settings dialog.
@@ -2208,8 +2237,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     )));
 
     // Bus for communication between components
-    let (bus_sender, _) = broadcast::channel(1024);
+    let (bus_sender, _) = broadcast::channel(8192);
+    let (playlist_bulk_import_tx, playlist_bulk_import_rx) =
+        mpsc::sync_channel::<protocol::PlaylistBulkImportRequest>(64);
+    let (library_scan_progress_tx, library_scan_progress_rx) =
+        mpsc::sync_channel::<protocol::LibraryMessage>(512);
 
+    let playlist_bulk_import_tx_clone = playlist_bulk_import_tx.clone();
     let bus_sender_clone = bus_sender.clone();
 
     // Setup import dialogs
@@ -2219,30 +2253,46 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             .add_filter("Audio Files", &SUPPORTED_AUDIO_EXTENSIONS)
             .pick_files()
         {
-            let mut import_count = 0usize;
-            for path in paths {
-                if !is_supported_audio_file(&path) {
-                    debug!(
-                        "Skipping unsupported file from import dialog: {}",
-                        path.display()
-                    );
-                    continue;
-                }
-                debug!("Sending load track message for {:?}", path);
-                let _ = bus_sender_clone.send(protocol::Message::Playlist(
-                    protocol::PlaylistMessage::LoadTrack(path),
-                ));
-                import_count += 1;
+            let filtered_paths: Vec<PathBuf> = paths
+                .into_iter()
+                .filter(|path| {
+                    if is_supported_audio_file(path) {
+                        true
+                    } else {
+                        debug!(
+                            "Skipping unsupported file from import dialog: {}",
+                            path.display()
+                        );
+                        false
+                    }
+                })
+                .collect();
+            if filtered_paths.is_empty() {
+                return;
             }
-            debug!("Queued {} track(s) from Add files", import_count);
+            if let Err(err) =
+                playlist_bulk_import_tx_clone.send(protocol::PlaylistBulkImportRequest {
+                    paths: filtered_paths.clone(),
+                    source: protocol::ImportSource::AddFilesDialog,
+                })
+            {
+                warn!("Failed to enqueue file import batch: {}", err);
+                return;
+            }
+            let _ = bus_sender_clone.send(protocol::Message::Playlist(
+                protocol::PlaylistMessage::DrainBulkImportQueue,
+            ));
+            debug!("Queued {} track(s) from Add files", filtered_paths.len());
         }
     });
 
+    let playlist_bulk_import_tx_clone = playlist_bulk_import_tx.clone();
     let bus_sender_clone = bus_sender.clone();
     ui.on_open_folder(move || {
         debug!("Opening folder dialog");
         if let Some(folder_path) = rfd::FileDialog::new().pick_folder() {
             let bus_sender_for_scan = bus_sender_clone.clone();
+            let bulk_import_tx = playlist_bulk_import_tx_clone.clone();
             thread::spawn(move || {
                 let tracks = collect_audio_files_from_folder(&folder_path);
                 debug!(
@@ -2250,10 +2300,20 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     tracks.len(),
                     folder_path.display()
                 );
-                for path in tracks {
-                    debug!("Sending load track message for {:?}", path);
+                for chunk in tracks.chunks(512) {
+                    if let Err(err) = bulk_import_tx.send(protocol::PlaylistBulkImportRequest {
+                        paths: chunk.to_vec(),
+                        source: protocol::ImportSource::AddFolderDialog,
+                    }) {
+                        warn!(
+                            "Failed to enqueue folder-import batch ({} track(s)): {}",
+                            chunk.len(),
+                            err
+                        );
+                        break;
+                    }
                     let _ = bus_sender_for_scan.send(protocol::Message::Playlist(
-                        protocol::PlaylistMessage::LoadTrack(path),
+                        protocol::PlaylistMessage::DrainBulkImportQueue,
                     ));
                 }
             });
@@ -2942,11 +3002,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let _ = bus_sender_clone.send(Message::Playlist(PlaylistMessage::ClosePlaylistSearch));
     });
 
-    let bus_sender_clone = bus_sender.clone();
+    let playlist_search_bus_sender = bus_sender.clone();
+    let playlist_search_query_tx =
+        spawn_debounced_query_dispatcher(Duration::from_millis(120), move |query| {
+            let _ = playlist_search_bus_sender.send(Message::Playlist(
+                PlaylistMessage::SetPlaylistSearchQuery(query),
+            ));
+        });
     ui.on_set_playlist_search_query(move |query| {
-        let _ = bus_sender_clone.send(Message::Playlist(PlaylistMessage::SetPlaylistSearchQuery(
-            query.to_string(),
-        )));
+        let _ = playlist_search_query_tx.send(query.to_string());
     });
 
     let bus_sender_clone = bus_sender.clone();
@@ -2959,11 +3023,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let _ = bus_sender_clone.send(Message::Library(protocol::LibraryMessage::CloseSearch));
     });
 
-    let bus_sender_clone = bus_sender.clone();
+    let library_search_bus_sender = bus_sender.clone();
+    let library_search_query_tx =
+        spawn_debounced_query_dispatcher(Duration::from_millis(120), move |query| {
+            let _ = library_search_bus_sender.send(Message::Library(
+                protocol::LibraryMessage::SetSearchQuery(query),
+            ));
+        });
     ui.on_library_search_query_edited(move |query| {
-        let _ = bus_sender_clone.send(Message::Library(protocol::LibraryMessage::SetSearchQuery(
-            query.to_string(),
-        )));
+        let _ = library_search_query_tx.send(query.to_string());
     });
 
     let bus_sender_clone = bus_sender.clone();
@@ -4577,6 +4645,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             playlist_manager_bus_receiver,
             playlist_manager_bus_sender,
             db_manager,
+            playlist_bulk_import_rx,
         );
         playlist_manager.run();
     });
@@ -4590,6 +4659,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             library_manager_bus_receiver,
             library_manager_bus_sender,
             db_manager,
+            library_scan_progress_tx,
         );
         library_manager.run();
     });
@@ -4642,6 +4712,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 ui_manager_bus_sender.clone(),
                 initial_online_metadata_enabled,
                 initial_online_metadata_prompt_pending,
+                library_scan_progress_rx,
             );
             ui_manager.run();
         }));
@@ -4912,7 +4983,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 });
             }
             Ok(_) => {}
-            Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {}
+            Err(tokio::sync::broadcast::error::RecvError::Lagged(skipped)) => {
+                warn!(
+                    "Main device-event listener lagged on control bus, skipped {} message(s)",
+                    skipped
+                );
+            }
             Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
         }
     });

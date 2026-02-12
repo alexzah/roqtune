@@ -25,6 +25,7 @@ pub struct Playlist {
     playback_order: PlaybackOrder,
     repeat_mode: RepeatMode,
     shuffled_indices: Vec<usize>,
+    shuffle_rank_by_track_index: Vec<usize>,
     // Use StdRng instead of ThreadRng for thread safety
     rng_seed: [u8; 32],
 }
@@ -45,6 +46,7 @@ impl Playlist {
             playback_order: PlaybackOrder::Default,
             repeat_mode: RepeatMode::Off,
             shuffled_indices: Vec::new(),
+            shuffle_rank_by_track_index: Vec::new(),
             rng_seed: seed,
         }
     }
@@ -54,7 +56,7 @@ impl Playlist {
         self.tracks.push(track);
         // Update shuffled indices when adding a new track
         if self.playback_order == PlaybackOrder::Shuffle {
-            self.generate_shuffle_order(
+            self.insert_new_track_into_shuffle_order(
                 self.playing_track_index
                     .or(self.selected_indices.first().copied()),
             );
@@ -192,6 +194,9 @@ impl Playlist {
                     self.shuffled_indices[i] -= 1;
                 }
             }
+            self.rebuild_shuffle_rank_index();
+        } else {
+            self.shuffle_rank_by_track_index.clear();
         }
 
         debug!(
@@ -271,6 +276,7 @@ impl Playlist {
             );
         } else {
             self.shuffled_indices.clear();
+            self.shuffle_rank_by_track_index.clear();
         }
     }
 
@@ -334,6 +340,7 @@ impl Playlist {
             for shuffle_idx in &mut self.shuffled_indices {
                 *shuffle_idx = Self::compute_new_index(*shuffle_idx, &indices, insert_at);
             }
+            self.rebuild_shuffle_rank_index();
         }
 
         debug!(
@@ -395,27 +402,29 @@ impl Playlist {
                 if self.shuffled_indices.is_empty() {
                     self.generate_shuffle_order(Some(current_index));
                 }
-
-                if let Some(position) = self
-                    .shuffled_indices
-                    .iter()
-                    .position(|&i| i == current_index)
-                {
-                    if position + 1 < self.shuffled_indices.len() {
-                        Some(self.shuffled_indices[position + 1])
-                    } else if self.repeat_mode == RepeatMode::Playlist {
-                        self.shuffled_indices.first().copied()
-                    } else {
-                        None
-                    }
-                } else {
+                if self.shuffle_rank_by_track_index.len() != self.tracks.len() {
+                    self.rebuild_shuffle_rank_index();
+                }
+                let position = self
+                    .shuffle_rank_by_track_index
+                    .get(current_index)
+                    .copied()
+                    .unwrap_or(usize::MAX);
+                if position == usize::MAX {
                     self.generate_shuffle_order(Some(current_index));
-                    self.get_next_track_index(current_index)
+                    return self.get_next_track_index(current_index);
+                }
+                if position + 1 < self.shuffled_indices.len() {
+                    Some(self.shuffled_indices[position + 1])
+                } else if self.repeat_mode == RepeatMode::Playlist {
+                    self.shuffled_indices.first().copied()
+                } else {
+                    None
                 }
             }
             PlaybackOrder::Random => {
                 if self.tracks.len() > 1 {
-                    let mut rng = StdRng::from_seed(self.rng_seed);
+                    let mut rng = self.next_rng();
                     let mut next_index;
                     loop {
                         next_index = rng.random_range(0..self.tracks.len());
@@ -423,11 +432,6 @@ impl Playlist {
                             break;
                         }
                     }
-                    let mut new_seed = [0u8; 32];
-                    for (i, val) in new_seed.iter_mut().enumerate() {
-                        *val = self.rng_seed[i].wrapping_add(1);
-                    }
-                    self.rng_seed = new_seed;
                     Some(next_index)
                 } else {
                     // Random is infinite even if repeat is off, but if there's only one track
@@ -462,27 +466,29 @@ impl Playlist {
                 if self.shuffled_indices.is_empty() {
                     self.generate_shuffle_order(Some(current_index));
                 }
-
-                if let Some(position) = self
-                    .shuffled_indices
-                    .iter()
-                    .position(|&i| i == current_index)
-                {
-                    if position > 0 {
-                        Some(self.shuffled_indices[position - 1])
-                    } else if self.repeat_mode == RepeatMode::Playlist {
-                        self.shuffled_indices.last().copied()
-                    } else {
-                        None
-                    }
-                } else {
+                if self.shuffle_rank_by_track_index.len() != self.tracks.len() {
+                    self.rebuild_shuffle_rank_index();
+                }
+                let position = self
+                    .shuffle_rank_by_track_index
+                    .get(current_index)
+                    .copied()
+                    .unwrap_or(usize::MAX);
+                if position == usize::MAX {
                     self.generate_shuffle_order(Some(current_index));
-                    self.get_previous_track_index(current_index)
+                    return self.get_previous_track_index(current_index);
+                }
+                if position > 0 {
+                    Some(self.shuffled_indices[position - 1])
+                } else if self.repeat_mode == RepeatMode::Playlist {
+                    self.shuffled_indices.last().copied()
+                } else {
+                    None
                 }
             }
             PlaybackOrder::Random => {
                 if self.tracks.len() > 1 {
-                    let mut rng = StdRng::from_seed(self.rng_seed);
+                    let mut rng = self.next_rng();
                     let mut next_index;
                     loop {
                         next_index = rng.random_range(0..self.tracks.len());
@@ -505,18 +511,63 @@ impl Playlist {
         }
     }
 
+    fn bump_rng_seed(&mut self) {
+        for byte in &mut self.rng_seed {
+            *byte = byte.wrapping_add(1);
+        }
+    }
+
+    fn next_rng(&mut self) -> StdRng {
+        let rng = StdRng::from_seed(self.rng_seed);
+        self.bump_rng_seed();
+        rng
+    }
+
+    fn rebuild_shuffle_rank_index(&mut self) {
+        self.shuffle_rank_by_track_index = vec![usize::MAX; self.tracks.len()];
+        for (rank, track_index) in self.shuffled_indices.iter().copied().enumerate() {
+            if track_index < self.shuffle_rank_by_track_index.len() {
+                self.shuffle_rank_by_track_index[track_index] = rank;
+            }
+        }
+    }
+
+    fn insert_new_track_into_shuffle_order(&mut self, first_track_index: Option<usize>) {
+        let new_index = self.tracks.len().saturating_sub(1);
+        if self.shuffled_indices.is_empty() {
+            self.generate_shuffle_order(first_track_index);
+            return;
+        }
+
+        let mut rng = self.next_rng();
+        let min_insert = match first_track_index {
+            Some(first_track)
+                if self.shuffled_indices.first().copied() == Some(first_track)
+                    && !self.shuffled_indices.is_empty() =>
+            {
+                1
+            }
+            _ => 0,
+        };
+        let insert_at = if min_insert >= self.shuffled_indices.len() {
+            self.shuffled_indices.len()
+        } else {
+            rng.random_range(min_insert..=self.shuffled_indices.len())
+        };
+        self.shuffled_indices.insert(insert_at, new_index);
+        self.rebuild_shuffle_rank_index();
+    }
+
     fn generate_shuffle_order(&mut self, first_track_index: Option<usize>) {
         let track_count = self.tracks.len();
         if track_count == 0 {
             self.shuffled_indices = Vec::new();
+            self.shuffle_rank_by_track_index.clear();
             return;
         }
 
         let mut indices: Vec<usize> = (0..track_count).collect();
-        let mut seed = [0u8; 32];
-        getrandom::fill(&mut seed).expect("Failed to generate random seed");
-        self.rng_seed = seed;
-        let mut rng = StdRng::from_seed(self.rng_seed);
+        let mut rng = self.next_rng();
 
         for i in (1..track_count).rev() {
             let j = rng.random_range(0..=i);
@@ -532,6 +583,7 @@ impl Playlist {
 
         debug!("Playlist: New shuffle sequence: {:?}", indices);
         self.shuffled_indices = indices;
+        self.rebuild_shuffle_rank_index();
     }
 
     /// Sets playback order and initializes shuffle sequence when entering shuffle mode.
@@ -543,6 +595,9 @@ impl Playlist {
                     self.playing_track_index
                         .or(self.selected_indices.first().copied()),
                 );
+            } else {
+                self.shuffled_indices.clear();
+                self.shuffle_rank_by_track_index.clear();
             }
         }
     }

@@ -9,7 +9,7 @@ use std::time::{Duration, Instant};
 use std::{
     cell::RefCell,
     collections::hash_map::DefaultHasher,
-    collections::{HashMap, HashSet},
+    collections::{HashMap, HashSet, VecDeque},
     path::{Path, PathBuf},
     rc::Rc,
     sync::mpsc::{self, Receiver as StdReceiver, Sender as StdSender},
@@ -39,7 +39,9 @@ pub struct UiManager {
     ui: slint::Weak<AppWindow>,
     bus_receiver: Receiver<protocol::Message>,
     bus_sender: Sender<protocol::Message>,
+    library_scan_progress_rx: StdReceiver<protocol::LibraryMessage>,
     cover_art_lookup_tx: StdSender<CoverArtLookupRequest>,
+    metadata_lookup_tx: StdSender<MetadataLookupRequest>,
     last_cover_art_lookup_path: Option<PathBuf>,
     active_playlist_id: String,
     playlist_ids: Vec<String>,
@@ -112,6 +114,12 @@ pub struct UiManager {
     library_last_prefetch_entities: Vec<protocol::LibraryEnrichmentEntity>,
     library_last_background_entities: Vec<protocol::LibraryEnrichmentEntity>,
     library_search_query: String,
+    library_page_request_id: u64,
+    library_page_view: Option<protocol::LibraryViewQuery>,
+    library_page_next_offset: usize,
+    library_page_total: usize,
+    library_page_entries: Vec<protocol::LibraryEntryPayload>,
+    library_page_query: String,
     library_search_visible: bool,
     library_scan_in_progress: bool,
     library_status_text: String,
@@ -157,6 +165,13 @@ struct ColumnWidthProfile {
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct CoverArtLookupRequest {
     track_path: Option<PathBuf>,
+}
+
+/// Deferred metadata-lookup request payload used by the internal worker thread.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct MetadataLookupRequest {
+    track_id: String,
+    track_path: PathBuf,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -233,12 +248,93 @@ const LIBRARY_PREFETCH_FALLBACK_VISIBLE_ROWS: usize = 24;
 const LIBRARY_PREFETCH_TOP_OVERSCAN_ROWS: usize = 2;
 const LIBRARY_PREFETCH_BOTTOM_OVERSCAN_ROWS: usize = 10;
 const LIBRARY_BACKGROUND_WARM_QUEUE_SIZE: usize = 6;
+const COVER_ART_IMAGE_CACHE_MAX_BYTES: u64 = 128 * 1024 * 1024;
+const COVER_ART_IMAGE_CACHE_MAX_ENTRIES: usize = 4096;
+const COVER_ART_FAILED_PATHS_MAX_ENTRIES: usize = 4096;
+const LIBRARY_PAGE_FETCH_LIMIT: usize = 512;
+
+#[derive(Default)]
+struct CoverArtImageCache {
+    entries: HashMap<PathBuf, (Image, u64)>,
+    lru: VecDeque<PathBuf>,
+    total_bytes: u64,
+}
+
+impl CoverArtImageCache {
+    fn touch_lru(&mut self, path: &PathBuf) {
+        if let Some(position) = self.lru.iter().position(|candidate| candidate == path) {
+            let _ = self.lru.remove(position);
+        }
+        self.lru.push_back(path.clone());
+    }
+
+    fn get(&mut self, path: &PathBuf) -> Option<Image> {
+        let cached = self.entries.get(path).map(|(image, _)| image.clone())?;
+        self.touch_lru(path);
+        Some(cached)
+    }
+
+    fn insert(&mut self, path: PathBuf, image: Image, approx_bytes: u64) {
+        if let Some((_, existing_bytes)) = self.entries.remove(&path) {
+            self.total_bytes = self.total_bytes.saturating_sub(existing_bytes);
+        }
+        self.touch_lru(&path);
+        self.total_bytes = self.total_bytes.saturating_add(approx_bytes);
+        self.entries.insert(path, (image, approx_bytes));
+
+        while self.total_bytes > COVER_ART_IMAGE_CACHE_MAX_BYTES
+            || self.entries.len() > COVER_ART_IMAGE_CACHE_MAX_ENTRIES
+        {
+            let Some(evicted_path) = self.lru.pop_front() else {
+                break;
+            };
+            if let Some((_, bytes)) = self.entries.remove(&evicted_path) {
+                self.total_bytes = self.total_bytes.saturating_sub(bytes);
+            }
+        }
+    }
+
+    fn clear(&mut self) {
+        self.entries.clear();
+        self.lru.clear();
+        self.total_bytes = 0;
+    }
+}
+
+#[derive(Default)]
+struct FailedCoverPathCache {
+    paths: HashSet<PathBuf>,
+    order: VecDeque<PathBuf>,
+}
+
+impl FailedCoverPathCache {
+    fn contains(&self, path: &Path) -> bool {
+        self.paths.contains(path)
+    }
+
+    fn insert(&mut self, path: PathBuf) {
+        if self.paths.insert(path.clone()) {
+            self.order.push_back(path);
+            while self.paths.len() > COVER_ART_FAILED_PATHS_MAX_ENTRIES {
+                let Some(evicted) = self.order.pop_front() else {
+                    break;
+                };
+                self.paths.remove(&evicted);
+            }
+        }
+    }
+
+    fn clear(&mut self) {
+        self.paths.clear();
+        self.order.clear();
+    }
+}
 
 thread_local! {
-    static TRACK_ROW_COVER_ART_IMAGE_CACHE: RefCell<HashMap<PathBuf, Image>> =
-        RefCell::new(HashMap::new());
-    static TRACK_ROW_COVER_ART_FAILED_PATHS: RefCell<HashSet<PathBuf>> =
-        RefCell::new(HashSet::new());
+    static TRACK_ROW_COVER_ART_IMAGE_CACHE: RefCell<CoverArtImageCache> =
+        RefCell::new(CoverArtImageCache::default());
+    static TRACK_ROW_COVER_ART_FAILED_PATHS: RefCell<FailedCoverPathCache> =
+        RefCell::new(FailedCoverPathCache::default());
 }
 
 fn fit_column_widths_to_available_space(
@@ -642,6 +738,20 @@ impl UiManager {
         latest
     }
 
+    fn drain_metadata_lookup_requests(
+        first: MetadataLookupRequest,
+        request_rx: &StdReceiver<MetadataLookupRequest>,
+    ) -> Vec<MetadataLookupRequest> {
+        let mut pending = vec![first];
+        while let Ok(next) = request_rx.try_recv() {
+            pending.push(next);
+            if pending.len() >= 256 {
+                break;
+            }
+        }
+        pending
+    }
+
     /// Creates a UI manager and starts an internal cover-art lookup worker thread.
     pub fn new(
         ui: slint::Weak<AppWindow>,
@@ -649,6 +759,7 @@ impl UiManager {
         bus_sender: Sender<protocol::Message>,
         initial_online_metadata_enabled: bool,
         initial_online_metadata_prompt_pending: bool,
+        library_scan_progress_rx: StdReceiver<protocol::LibraryMessage>,
     ) -> Self {
         let (cover_art_lookup_tx, cover_art_lookup_rx) = mpsc::channel::<CoverArtLookupRequest>();
         let cover_art_bus_sender = bus_sender.clone();
@@ -662,6 +773,31 @@ impl UiManager {
                     .and_then(|path| UiManager::find_cover_art(path.as_path()));
                 let _ = cover_art_bus_sender.send(protocol::Message::Playback(
                     protocol::PlaybackMessage::CoverArtChanged(cover_art_path),
+                ));
+            }
+        });
+        let (metadata_lookup_tx, metadata_lookup_rx) = mpsc::channel::<MetadataLookupRequest>();
+        let metadata_bus_sender = bus_sender.clone();
+        thread::spawn(move || {
+            while let Ok(request) = metadata_lookup_rx.recv() {
+                let pending =
+                    UiManager::drain_metadata_lookup_requests(request, &metadata_lookup_rx);
+                let mut latest_by_track_id: HashMap<String, PathBuf> = HashMap::new();
+                for item in pending {
+                    latest_by_track_id.insert(item.track_id, item.track_path);
+                }
+                let mut updates = Vec::with_capacity(latest_by_track_id.len());
+                for (track_id, track_path) in latest_by_track_id {
+                    updates.push(protocol::TrackMetadataPatch {
+                        track_id,
+                        summary: UiManager::read_track_metadata_summary(track_path.as_path()),
+                    });
+                }
+                if updates.is_empty() {
+                    continue;
+                }
+                let _ = metadata_bus_sender.send(protocol::Message::Playlist(
+                    protocol::PlaylistMessage::TrackMetadataBatchUpdated { updates },
                 ));
             }
         });
@@ -683,7 +819,9 @@ impl UiManager {
             ui: ui.clone(),
             bus_receiver,
             bus_sender,
+            library_scan_progress_rx,
             cover_art_lookup_tx,
+            metadata_lookup_tx,
             last_cover_art_lookup_path: None,
             active_playlist_id: String::new(),
             playlist_ids: Vec::new(),
@@ -755,6 +893,12 @@ impl UiManager {
             library_last_prefetch_entities: Vec::new(),
             library_last_background_entities: Vec::new(),
             library_search_query: String::new(),
+            library_page_request_id: 0,
+            library_page_view: None,
+            library_page_next_offset: 0,
+            library_page_total: 0,
+            library_page_entries: Vec::new(),
+            library_page_query: String::new(),
             library_search_visible: false,
             library_scan_in_progress: false,
             library_status_text: String::new(),
@@ -783,13 +927,13 @@ impl UiManager {
         self.last_message_at = now;
     }
 
-    fn on_message_lagged(&mut self) {
-        self.lagged_message_count = self.lagged_message_count.saturating_add(1);
+    fn on_message_lagged(&mut self, skipped: u64) {
+        self.lagged_message_count = self.lagged_message_count.saturating_add(skipped.max(1));
         let now = Instant::now();
         if now.duration_since(self.last_health_log_at) >= Duration::from_secs(5) {
             warn!(
-                "UiManager: bus lagged. total_lagged={}, processed={}",
-                self.lagged_message_count, self.processed_message_count
+                "UiManager lagged on control bus, skipped={} total_lagged={} processed={}",
+                skipped, self.lagged_message_count, self.processed_message_count
             );
             self.last_health_log_at = now;
         }
@@ -984,22 +1128,31 @@ impl UiManager {
         self.resolve_track_cover_art_path(source_index)
     }
 
+    fn approximate_cover_art_size_bytes(path: &Path) -> u64 {
+        std::fs::metadata(path)
+            .map(|meta| meta.len().max(1))
+            .unwrap_or(256 * 1024)
+    }
+
     fn try_load_cover_art_image(path: &Path) -> Option<Image> {
         if Self::failed_cover_path(path) {
             return None;
         }
 
+        let image_path = path.to_path_buf();
         if let Some(cached) =
-            TRACK_ROW_COVER_ART_IMAGE_CACHE.with(|cache| cache.borrow().get(path).cloned())
+            TRACK_ROW_COVER_ART_IMAGE_CACHE.with(|cache| cache.borrow_mut().get(&image_path))
         {
             return Some(cached);
         }
 
-        let image_path = path.to_path_buf();
         match Image::load_from_path(path) {
             Ok(image) => {
+                let approx_bytes = Self::approximate_cover_art_size_bytes(path);
                 TRACK_ROW_COVER_ART_IMAGE_CACHE.with(|cache| {
-                    cache.borrow_mut().insert(image_path, image.clone());
+                    cache
+                        .borrow_mut()
+                        .insert(image_path.clone(), image.clone(), approx_bytes);
                 });
                 Some(image)
             }
@@ -2516,27 +2669,18 @@ impl UiManager {
             .collect();
 
         let _ = self.ui.upgrade_in_event_loop(move |ui| {
-            let track_model_strong = ui.get_track_model();
-            let track_model = track_model_strong
-                .as_any()
-                .downcast_ref::<VecModel<TrackRowData>>()
-                .expect("VecModel<TrackRowData> expected");
-
-            while track_model.row_count() > 0 {
-                track_model.remove(0);
-            }
-
+            let mut rows = Vec::with_capacity(row_data.len());
             for (values, album_art_path, selected, status) in row_data {
                 let values_shared: Vec<slint::SharedString> =
                     values.into_iter().map(Into::into).collect();
-                let album_art = UiManager::load_track_row_cover_art_image(album_art_path.as_ref());
-                track_model.push(TrackRowData {
+                rows.push(TrackRowData {
                     status: status.into(),
                     values: ModelRc::from(values_shared.as_slice()),
-                    album_art,
+                    album_art: UiManager::load_track_row_cover_art_image(album_art_path.as_ref()),
                     selected,
                 });
             }
+            UiManager::update_or_replace_track_model(&ui, rows);
 
             ui.set_selected_track_index(selected_view_index);
             ui.set_playing_track_index(playing_view_index);
@@ -2563,6 +2707,10 @@ impl UiManager {
 
     fn set_playlist_search_query(&mut self, query: String) {
         self.filter_search_visible = true;
+        if self.filter_search_query == query {
+            self.sync_filter_state_to_ui();
+            return;
+        }
         self.filter_search_query = query;
         self.rebuild_track_model();
     }
@@ -2590,7 +2738,11 @@ impl UiManager {
         self.library_search_visible = false;
         if !self.library_search_query.is_empty() {
             self.library_search_query.clear();
-            self.sync_library_ui();
+            if matches!(self.current_library_view(), LibraryViewState::GlobalSearch) {
+                self.request_library_view_data();
+            } else {
+                self.sync_library_ui();
+            }
         } else {
             self.sync_library_search_state_to_ui();
         }
@@ -2598,8 +2750,19 @@ impl UiManager {
 
     fn set_library_search_query(&mut self, query: String) {
         self.library_search_visible = true;
+        if self.library_search_query == query {
+            self.sync_library_search_state_to_ui();
+            return;
+        }
         self.library_search_query = query;
-        self.sync_library_ui();
+        if matches!(self.current_library_view(), LibraryViewState::GlobalSearch)
+            && !self.library_search_query.trim().is_empty()
+            && self.library_entries.is_empty()
+        {
+            self.request_library_view_data();
+        } else {
+            self.sync_library_ui();
+        }
     }
 
     fn open_global_library_search(&mut self) {
@@ -3487,6 +3650,18 @@ impl UiManager {
         resolved
     }
 
+    fn update_or_replace_track_model(ui: &AppWindow, rows: Vec<TrackRowData>) {
+        let current_model = ui.get_track_model();
+        if let Some(vec_model) = current_model
+            .as_any()
+            .downcast_ref::<VecModel<TrackRowData>>()
+        {
+            vec_model.set_vec(rows);
+            return;
+        }
+        ui.set_track_model(ModelRc::from(Rc::new(VecModel::from(rows))));
+    }
+
     fn reset_library_selection(&mut self) {
         self.library_selected_indices.clear();
         self.library_selection_anchor = None;
@@ -4194,6 +4369,7 @@ impl UiManager {
     fn prepare_library_view_transition(&mut self) {
         self.library_entries.clear();
         self.library_view_indices.clear();
+        self.reset_library_page_state();
         self.library_artist_row_indices.clear();
         self.reset_library_selection();
         self.library_add_to_dialog_visible = false;
@@ -4269,32 +4445,115 @@ impl UiManager {
         self.sync_library_ui();
     }
 
-    fn request_library_view_data(&mut self) {
-        let message = match self.current_library_view() {
-            LibraryViewState::SongsRoot => protocol::LibraryMessage::RequestSongs,
-            LibraryViewState::ArtistsRoot => protocol::LibraryMessage::RequestArtists,
-            LibraryViewState::AlbumsRoot => protocol::LibraryMessage::RequestAlbums,
-            LibraryViewState::GenresRoot => protocol::LibraryMessage::RequestGenres,
-            LibraryViewState::DecadesRoot => protocol::LibraryMessage::RequestDecades,
-            LibraryViewState::GlobalSearch => protocol::LibraryMessage::RequestGlobalSearchData,
-            LibraryViewState::ArtistDetail { artist } => {
-                protocol::LibraryMessage::RequestArtistDetail { artist }
-            }
+    fn library_page_query_for_view(view: &LibraryViewState) -> protocol::LibraryViewQuery {
+        match view {
+            LibraryViewState::SongsRoot => protocol::LibraryViewQuery::Songs,
+            LibraryViewState::ArtistsRoot => protocol::LibraryViewQuery::Artists,
+            LibraryViewState::AlbumsRoot => protocol::LibraryViewQuery::Albums,
+            LibraryViewState::GenresRoot => protocol::LibraryViewQuery::Genres,
+            LibraryViewState::DecadesRoot => protocol::LibraryViewQuery::Decades,
+            LibraryViewState::GlobalSearch => protocol::LibraryViewQuery::GlobalSearch,
+            LibraryViewState::ArtistDetail { artist } => protocol::LibraryViewQuery::ArtistDetail {
+                artist: artist.clone(),
+            },
             LibraryViewState::AlbumDetail {
                 album,
                 album_artist,
-            } => protocol::LibraryMessage::RequestAlbumSongs {
-                album,
-                album_artist,
+            } => protocol::LibraryViewQuery::AlbumDetail {
+                album: album.clone(),
+                album_artist: album_artist.clone(),
             },
-            LibraryViewState::GenreDetail { genre } => {
-                protocol::LibraryMessage::RequestGenreSongs { genre }
-            }
-            LibraryViewState::DecadeDetail { decade } => {
-                protocol::LibraryMessage::RequestDecadeSongs { decade }
-            }
+            LibraryViewState::GenreDetail { genre } => protocol::LibraryViewQuery::GenreDetail {
+                genre: genre.clone(),
+            },
+            LibraryViewState::DecadeDetail { decade } => protocol::LibraryViewQuery::DecadeDetail {
+                decade: decade.clone(),
+            },
+        }
+    }
+
+    fn reset_library_page_state(&mut self) {
+        self.library_page_view = None;
+        self.library_page_next_offset = 0;
+        self.library_page_total = 0;
+        self.library_page_entries.clear();
+        self.library_page_query.clear();
+    }
+
+    fn library_entry_from_payload(payload: protocol::LibraryEntryPayload) -> LibraryEntry {
+        match payload {
+            protocol::LibraryEntryPayload::Song(song) => LibraryEntry::Song(song),
+            protocol::LibraryEntryPayload::Artist(artist) => LibraryEntry::Artist(artist),
+            protocol::LibraryEntryPayload::Album(album) => LibraryEntry::Album(album),
+            protocol::LibraryEntryPayload::Genre(genre) => LibraryEntry::Genre(genre),
+            protocol::LibraryEntryPayload::Decade(decade) => LibraryEntry::Decade(decade),
+        }
+    }
+
+    fn request_next_library_page(&mut self) {
+        let Some(view) = self.library_page_view.clone() else {
+            return;
         };
-        let _ = self.bus_sender.send(protocol::Message::Library(message));
+        let request_id = self.library_page_request_id;
+        let offset = self.library_page_next_offset;
+        let query = self.library_page_query.clone();
+        let _ = self.bus_sender.send(protocol::Message::Library(
+            protocol::LibraryMessage::RequestLibraryPage {
+                request_id,
+                view,
+                offset,
+                limit: LIBRARY_PAGE_FETCH_LIMIT,
+                query,
+            },
+        ));
+    }
+
+    fn handle_library_page_result(
+        &mut self,
+        request_id: u64,
+        total: usize,
+        entries: Vec<protocol::LibraryEntryPayload>,
+    ) {
+        if request_id != self.library_page_request_id || self.library_page_view.is_none() {
+            return;
+        }
+        self.library_page_total = total;
+        self.library_page_next_offset = self.library_page_next_offset.saturating_add(entries.len());
+        self.library_page_entries.extend(entries);
+
+        if self.library_page_next_offset < self.library_page_total {
+            self.request_next_library_page();
+            return;
+        }
+
+        let final_entries: Vec<LibraryEntry> = std::mem::take(&mut self.library_page_entries)
+            .into_iter()
+            .map(Self::library_entry_from_payload)
+            .collect();
+        self.reset_library_page_state();
+        self.set_library_entries(final_entries);
+    }
+
+    fn request_library_view_data(&mut self) {
+        let view = self.current_library_view();
+        if matches!(view, LibraryViewState::GlobalSearch)
+            && self.library_search_query.trim().is_empty()
+        {
+            self.reset_library_page_state();
+            self.set_library_entries(Vec::new());
+            return;
+        }
+        self.library_page_request_id = self.library_page_request_id.wrapping_add(1);
+        self.library_page_view = Some(Self::library_page_query_for_view(&view));
+        self.library_page_next_offset = 0;
+        self.library_page_total = 0;
+        self.library_page_entries.clear();
+        self.library_page_query = if matches!(view, LibraryViewState::GlobalSearch) {
+            self.library_search_query.clone()
+        } else {
+            String::new()
+        };
+        self.request_next_library_page();
     }
 
     fn set_library_entries(&mut self, entries: Vec<LibraryEntry>) {
@@ -4309,6 +4568,79 @@ impl UiManager {
             playing_track_metadata.as_ref(),
         );
         self.sync_library_ui();
+    }
+
+    fn handle_scan_status_message(&mut self, message: protocol::LibraryMessage) {
+        match message {
+            protocol::LibraryMessage::ScanStarted => {
+                self.library_scan_in_progress = true;
+                self.library_status_text = "Scanning library...".to_string();
+                self.library_cover_art_paths.clear();
+                self.folder_cover_art_paths.clear();
+                self.library_enrichment_pending.clear();
+                self.library_enrichment_last_request_at.clear();
+                self.library_enrichment_retry_counts.clear();
+                self.library_enrichment_retry_not_before.clear();
+                self.replace_prefetch_queue_if_changed(Vec::new());
+                self.replace_background_queue_if_changed(Vec::new());
+                self.library_last_detail_enrichment_entity = None;
+                self.library_add_to_dialog_visible = false;
+                self.sync_library_add_to_playlist_ui();
+                self.sync_library_ui();
+            }
+            protocol::LibraryMessage::ScanProgress {
+                discovered,
+                indexed,
+                metadata_pending,
+            } => {
+                self.library_status_text = format!(
+                    "Scanning library: discovered {}, indexed {}, metadata pending {}",
+                    discovered, indexed, metadata_pending
+                );
+                self.sync_library_ui();
+            }
+            protocol::LibraryMessage::ScanCompleted { indexed_tracks } => {
+                self.library_scan_in_progress = false;
+                self.library_status_text = format!("Indexed {} tracks", indexed_tracks);
+                self.library_cover_art_paths.clear();
+                self.folder_cover_art_paths.clear();
+                self.library_enrichment.clear();
+                self.library_enrichment_pending.clear();
+                self.library_enrichment_last_request_at.clear();
+                self.library_enrichment_retry_counts.clear();
+                self.library_enrichment_retry_not_before.clear();
+                self.replace_prefetch_queue_if_changed(Vec::new());
+                self.replace_background_queue_if_changed(Vec::new());
+                self.library_last_detail_enrichment_entity = None;
+                self.request_library_view_data();
+                self.sync_library_ui();
+            }
+            protocol::LibraryMessage::MetadataBackfillProgress { updated, remaining } => {
+                if remaining == 0 {
+                    self.library_status_text =
+                        format!("Metadata backfill complete ({} updated)", updated);
+                } else {
+                    self.library_status_text = format!(
+                        "Metadata backfill: {} updated, {} remaining",
+                        updated, remaining
+                    );
+                }
+                self.request_library_view_data();
+                self.sync_library_ui();
+            }
+            protocol::LibraryMessage::ScanFailed(error_text) => {
+                self.library_scan_in_progress = false;
+                self.library_status_text = error_text;
+                self.sync_library_ui();
+            }
+            _ => {}
+        }
+    }
+
+    fn drain_scan_progress_queue(&mut self) {
+        while let Ok(message) = self.library_scan_progress_rx.try_recv() {
+            self.handle_scan_status_message(message);
+        }
     }
 
     fn play_library_song_from_entries(&mut self, selected_song_id: &str) {
@@ -4401,25 +4733,7 @@ impl UiManager {
         }
     }
 
-    fn read_track_metadata(&self, path: &Path) -> TrackMetadata {
-        debug!("Reading metadata for: {}", path.display());
-
-        if let Some(parsed) = metadata_tags::read_common_track_metadata(path) {
-            if !parsed.title.is_empty() || !parsed.artist.is_empty() || !parsed.album.is_empty() {
-                return TrackMetadata {
-                    title: parsed.title,
-                    artist: parsed.artist,
-                    album: parsed.album,
-                    album_artist: parsed.album_artist,
-                    date: parsed.date,
-                    year: parsed.year,
-                    genre: parsed.genre,
-                    track_number: parsed.track_number,
-                };
-            }
-        }
-
-        // If no tags found, use filename as title
+    fn fallback_track_metadata(path: &Path) -> TrackMetadata {
         let filename = path
             .file_name()
             .and_then(|name| name.to_str())
@@ -4436,6 +4750,98 @@ impl UiManager {
             genre: "".to_string(),
             track_number: "".to_string(),
         }
+    }
+
+    fn read_track_metadata_summary(path: &Path) -> protocol::TrackMetadataSummary {
+        if let Some(parsed) = metadata_tags::read_common_track_metadata(path) {
+            if !parsed.title.is_empty() || !parsed.artist.is_empty() || !parsed.album.is_empty() {
+                return protocol::TrackMetadataSummary {
+                    title: parsed.title,
+                    artist: parsed.artist,
+                    album: parsed.album,
+                    album_artist: parsed.album_artist,
+                    date: parsed.date,
+                    genre: parsed.genre,
+                    year: parsed.year,
+                    track_number: parsed.track_number,
+                };
+            }
+        }
+
+        let fallback = Self::fallback_track_metadata(path);
+        protocol::TrackMetadataSummary {
+            title: fallback.title,
+            artist: fallback.artist,
+            album: fallback.album,
+            album_artist: fallback.album_artist,
+            date: fallback.date,
+            genre: fallback.genre,
+            year: fallback.year,
+            track_number: fallback.track_number,
+        }
+    }
+
+    fn track_metadata_from_summary(summary: &protocol::TrackMetadataSummary) -> TrackMetadata {
+        TrackMetadata {
+            title: summary.title.clone(),
+            artist: summary.artist.clone(),
+            album: summary.album.clone(),
+            album_artist: summary.album_artist.clone(),
+            date: summary.date.clone(),
+            year: summary.year.clone(),
+            genre: summary.genre.clone(),
+            track_number: summary.track_number.clone(),
+        }
+    }
+
+    fn queue_track_metadata_lookup(&self, track_id: String, track_path: PathBuf) {
+        let _ = self.metadata_lookup_tx.send(MetadataLookupRequest {
+            track_id,
+            track_path,
+        });
+    }
+
+    fn queue_track_metadata_lookup_batch(&self, tracks: &[protocol::RestoredTrack]) {
+        for track in tracks {
+            self.queue_track_metadata_lookup(track.id.clone(), track.path.clone());
+        }
+    }
+
+    fn apply_track_metadata_batch_updates(
+        &mut self,
+        updates: Vec<protocol::TrackMetadataPatch>,
+    ) -> bool {
+        if updates.is_empty() {
+            return false;
+        }
+        let index_by_track_id: HashMap<String, usize> = self
+            .track_ids
+            .iter()
+            .enumerate()
+            .map(|(index, track_id)| (track_id.clone(), index))
+            .collect();
+        let mut changed = false;
+        for update in updates {
+            let Some(index) = index_by_track_id.get(&update.track_id).copied() else {
+                continue;
+            };
+            let next = Self::track_metadata_from_summary(&update.summary);
+            if let Some(current) = self.track_metadata.get_mut(index) {
+                if current.title != next.title
+                    || current.artist != next.artist
+                    || current.album != next.album
+                    || current.album_artist != next.album_artist
+                    || current.date != next.date
+                    || current.year != next.year
+                    || current.genre != next.genre
+                    || current.track_number != next.track_number
+                {
+                    *current = next;
+                    changed = true;
+                }
+            }
+        }
+        changed
     }
 
     /// Handles selection gesture start from the UI overlay.
@@ -4570,6 +4976,7 @@ impl UiManager {
         self.sync_properties_action_state();
         self.sync_properties_dialog_ui();
         loop {
+            self.drain_scan_progress_queue();
             match self.bus_receiver.blocking_recv() {
                 Ok(message) => {
                     self.on_message_received();
@@ -4653,43 +5060,12 @@ impl UiManager {
                             protocol::LibraryMessage::EnrichmentPrefetchTick => {
                                 self.on_enrichment_prefetch_tick();
                             }
-                            protocol::LibraryMessage::ScanStarted => {
-                                self.library_scan_in_progress = true;
-                                self.library_status_text = "Scanning library...".to_string();
-                                self.library_cover_art_paths.clear();
-                                self.folder_cover_art_paths.clear();
-                                self.library_enrichment_pending.clear();
-                                self.library_enrichment_last_request_at.clear();
-                                self.library_enrichment_retry_counts.clear();
-                                self.library_enrichment_retry_not_before.clear();
-                                self.replace_prefetch_queue_if_changed(Vec::new());
-                                self.replace_background_queue_if_changed(Vec::new());
-                                self.library_last_detail_enrichment_entity = None;
-                                self.library_add_to_dialog_visible = false;
-                                self.sync_library_add_to_playlist_ui();
-                                self.sync_library_ui();
-                            }
-                            protocol::LibraryMessage::ScanCompleted { indexed_tracks } => {
-                                self.library_scan_in_progress = false;
-                                self.library_status_text =
-                                    format!("Indexed {} tracks", indexed_tracks);
-                                self.library_cover_art_paths.clear();
-                                self.folder_cover_art_paths.clear();
-                                self.library_enrichment.clear();
-                                self.library_enrichment_pending.clear();
-                                self.library_enrichment_last_request_at.clear();
-                                self.library_enrichment_retry_counts.clear();
-                                self.library_enrichment_retry_not_before.clear();
-                                self.replace_prefetch_queue_if_changed(Vec::new());
-                                self.replace_background_queue_if_changed(Vec::new());
-                                self.library_last_detail_enrichment_entity = None;
-                                self.request_library_view_data();
-                                self.sync_library_ui();
-                            }
-                            protocol::LibraryMessage::ScanFailed(error_text) => {
-                                self.library_scan_in_progress = false;
-                                self.library_status_text = error_text;
-                                self.sync_library_ui();
+                            protocol::LibraryMessage::ScanStarted
+                            | protocol::LibraryMessage::ScanProgress { .. }
+                            | protocol::LibraryMessage::ScanCompleted { .. }
+                            | protocol::LibraryMessage::MetadataBackfillProgress { .. }
+                            | protocol::LibraryMessage::ScanFailed(_) => {
+                                self.handle_scan_status_message(library_message);
                             }
                             protocol::LibraryMessage::SongsResult(songs) => {
                                 if matches!(
@@ -4814,6 +5190,13 @@ impl UiManager {
                                     }
                                 }
                             }
+                            protocol::LibraryMessage::LibraryPageResult {
+                                request_id,
+                                total,
+                                entries,
+                            } => {
+                                self.handle_library_page_result(request_id, total, entries);
+                            }
                             protocol::LibraryMessage::EnrichmentResult(payload) => {
                                 self.library_enrichment_pending.remove(&payload.entity);
                                 self.library_enrichment_last_request_at
@@ -4916,6 +5299,9 @@ impl UiManager {
                                     self.hide_library_toast();
                                 }
                             }
+                            protocol::LibraryMessage::DrainScanProgressQueue => {
+                                self.drain_scan_progress_queue();
+                            }
                             protocol::LibraryMessage::RequestScan
                             | protocol::LibraryMessage::RequestSongs
                             | protocol::LibraryMessage::RequestArtists
@@ -4927,6 +5313,7 @@ impl UiManager {
                             | protocol::LibraryMessage::RequestAlbumSongs { .. }
                             | protocol::LibraryMessage::RequestGenreSongs { .. }
                             | protocol::LibraryMessage::RequestDecadeSongs { .. }
+                            | protocol::LibraryMessage::RequestLibraryPage { .. }
                             | protocol::LibraryMessage::RequestEnrichment { .. }
                             | protocol::LibraryMessage::ReplaceEnrichmentPrefetchQueue { .. }
                             | protocol::LibraryMessage::ReplaceEnrichmentBackgroundQueue {
@@ -5043,13 +5430,14 @@ impl UiManager {
                             self.track_paths.clear();
                             self.track_cover_art_paths.clear();
                             self.track_metadata.clear();
-                            for track in tracks {
+                            for track in &tracks {
                                 self.track_ids.push(track.id.clone());
                                 self.track_paths.push(track.path.clone());
                                 self.track_cover_art_paths.push(None);
-                                let metadata = self.read_track_metadata(track.path.as_path());
-                                self.track_metadata.push(metadata);
+                                self.track_metadata
+                                    .push(Self::fallback_track_metadata(track.path.as_path()));
                             }
+                            self.queue_track_metadata_lookup_batch(&tracks);
                             self.refresh_playlist_column_content_targets();
                             self.apply_playlist_column_layout();
                             self.rebuild_track_model();
@@ -5061,8 +5449,9 @@ impl UiManager {
                             self.track_ids.push(id.clone());
                             self.track_paths.push(path.clone());
                             self.track_cover_art_paths.push(None);
-                            let tags = self.read_track_metadata(path.as_path());
-                            self.track_metadata.push(tags);
+                            self.track_metadata
+                                .push(Self::fallback_track_metadata(path.as_path()));
+                            self.queue_track_metadata_lookup(id, path);
                             self.refresh_playlist_column_content_targets();
                             self.apply_playlist_column_layout();
                             self.rebuild_track_model();
@@ -5125,14 +5514,17 @@ impl UiManager {
                         ) => {
                             let inserted_count = tracks.len();
                             let mut insert_cursor = insert_at.min(self.track_ids.len());
-                            for track in tracks {
-                                let metadata = self.read_track_metadata(track.path.as_path());
-                                self.track_ids.insert(insert_cursor, track.id);
-                                self.track_paths.insert(insert_cursor, track.path);
+                            for track in &tracks {
+                                self.track_ids.insert(insert_cursor, track.id.clone());
+                                self.track_paths.insert(insert_cursor, track.path.clone());
                                 self.track_cover_art_paths.insert(insert_cursor, None);
-                                self.track_metadata.insert(insert_cursor, metadata);
+                                self.track_metadata.insert(
+                                    insert_cursor,
+                                    Self::fallback_track_metadata(track.path.as_path()),
+                                );
                                 insert_cursor += 1;
                             }
+                            self.queue_track_metadata_lookup_batch(&tracks);
                             if self.pending_paste_feedback {
                                 self.pending_paste_feedback = false;
                                 let toast_text = format!("Pasted {} tracks", inserted_count);
@@ -5142,6 +5534,48 @@ impl UiManager {
                             self.refresh_playlist_column_content_targets();
                             self.apply_playlist_column_layout();
                             self.rebuild_track_model();
+                        }
+                        protocol::Message::Playlist(
+                            protocol::PlaylistMessage::TracksInsertedBatch { tracks, insert_at },
+                        ) => {
+                            let inserted_count = tracks.len();
+                            let mut insert_cursor = insert_at.min(self.track_ids.len());
+                            for track in &tracks {
+                                self.track_ids.insert(insert_cursor, track.id.clone());
+                                self.track_paths.insert(insert_cursor, track.path.clone());
+                                self.track_cover_art_paths.insert(insert_cursor, None);
+                                self.track_metadata.insert(
+                                    insert_cursor,
+                                    Self::fallback_track_metadata(track.path.as_path()),
+                                );
+                                insert_cursor += 1;
+                            }
+                            self.queue_track_metadata_lookup_batch(&tracks);
+                            if self.pending_paste_feedback {
+                                self.pending_paste_feedback = false;
+                                let toast_text = format!("Pasted {} tracks", inserted_count);
+                                self.library_status_text = toast_text.clone();
+                                self.show_library_toast(toast_text);
+                            }
+                            self.refresh_playlist_column_content_targets();
+                            self.apply_playlist_column_layout();
+                            self.rebuild_track_model();
+                        }
+                        protocol::Message::Playlist(
+                            protocol::PlaylistMessage::TrackMetadataBatchUpdated { updates },
+                        ) => {
+                            if self.apply_track_metadata_batch_updates(updates) {
+                                self.refresh_playlist_column_content_targets();
+                                self.apply_playlist_column_layout();
+                                let playing_track_path = self.current_playing_track_path.clone();
+                                let playing_track_metadata =
+                                    self.current_playing_track_metadata.clone();
+                                self.update_display_for_active_collection(
+                                    playing_track_path.as_ref(),
+                                    playing_track_metadata.as_ref(),
+                                );
+                                self.rebuild_track_model();
+                            }
                         }
                         protocol::Message::Playlist(
                             protocol::PlaylistMessage::PlayTrackByViewIndex(view_index),
@@ -5685,8 +6119,8 @@ impl UiManager {
                         _ => {}
                     }
                 }
-                Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
-                    self.on_message_lagged();
+                Err(tokio::sync::broadcast::error::RecvError::Lagged(skipped)) => {
+                    self.on_message_lagged(skipped);
                 }
                 Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
             }
