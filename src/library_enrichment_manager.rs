@@ -132,6 +132,7 @@ struct WikiSummary {
     canonical_url: String,
     image_url: Option<String>,
     page_type: String,
+    categories: Vec<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -212,6 +213,15 @@ impl LibraryEnrichmentManager {
                 album,
                 album_artist,
             } => format!("album:{album}\u{001f}{album_artist}"),
+        }
+    }
+
+    fn is_single_token_artist_entity(entity: &LibraryEnrichmentEntity) -> bool {
+        match entity {
+            LibraryEnrichmentEntity::Artist { artist } => {
+                Self::normalize_text(artist).split_whitespace().count() == 1
+            }
+            LibraryEnrichmentEntity::Album { .. } => false,
         }
     }
 
@@ -443,6 +453,46 @@ impl LibraryEnrichmentManager {
         ]
     }
 
+    fn artist_category_keywords() -> &'static [&'static str] {
+        &[
+            "musicians",
+            "singers",
+            "rappers",
+            "songwriters",
+            "composers",
+            "record producers",
+            "djs",
+            "bands",
+            "musical groups",
+            "girl groups",
+            "boy bands",
+            "idol groups",
+            "k pop",
+            "j pop",
+            "music groups",
+        ]
+    }
+
+    fn album_category_keywords() -> &'static [&'static str] {
+        &[
+            "albums",
+            "eps",
+            "debut albums",
+            "studio albums",
+            "live albums",
+            "compilation albums",
+            "soundtrack albums",
+            "mixtape albums",
+        ]
+    }
+
+    fn has_category_keyword(summary: &WikiSummary, keywords: &[&str]) -> bool {
+        summary.categories.iter().any(|category| {
+            let normalized = Self::normalize_text(category);
+            Self::contains_any(&normalized, keywords)
+        })
+    }
+
     fn title_parenthetical(title: &str) -> Option<String> {
         let open = title.find('(')?;
         let close = title.rfind(')')?;
@@ -482,6 +532,7 @@ impl LibraryEnrichmentManager {
         let extract = Self::normalize_text(&summary.extract);
         Self::contains_any(&description, Self::album_keywords())
             || Self::contains_any(&extract, Self::album_keywords())
+            || Self::has_category_keyword(summary, Self::album_category_keywords())
             || Self::contains_word(&title, "album")
             || Self::contains_word(&title, "ep")
     }
@@ -524,11 +575,19 @@ impl LibraryEnrichmentManager {
             || Self::contains_any(&parenthetical, Self::music_artist_keywords())
     }
 
-    fn has_artist_person_context(summary: &WikiSummary) -> bool {
+    fn has_artist_text_context(summary: &WikiSummary) -> bool {
         let description = Self::normalize_text(&summary.description);
         let extract = Self::normalize_text(&summary.extract);
         Self::contains_any(&description, Self::music_artist_keywords())
             || Self::contains_any(&extract, Self::music_artist_keywords())
+    }
+
+    fn has_artist_category_context(summary: &WikiSummary) -> bool {
+        Self::has_category_keyword(summary, Self::artist_category_keywords())
+    }
+
+    fn has_artist_person_context(summary: &WikiSummary) -> bool {
+        Self::has_artist_text_context(summary) || Self::has_artist_category_context(summary)
     }
 
     fn normalized_text_contains_phrase(haystack: &str, phrase: &str) -> bool {
@@ -655,10 +714,14 @@ impl LibraryEnrichmentManager {
                 let normalized_artist = Self::normalize_text(&cleaned_artist);
                 let compact_artist = normalized_artist.replace(' ', "");
                 let title_case_artist = Self::title_case_words(&cleaned_artist);
-                Self::push_unique_title(&mut titles, &mut seen, cleaned_artist.clone());
-                Self::push_unique_title(&mut titles, &mut seen, title_case_artist);
+                Self::push_unique_title_case_sensitive(
+                    &mut titles,
+                    &mut seen,
+                    cleaned_artist.clone(),
+                );
+                Self::push_unique_title_case_sensitive(&mut titles, &mut seen, title_case_artist);
                 if !compact_artist.is_empty() {
-                    Self::push_unique_title(
+                    Self::push_unique_title_case_sensitive(
                         &mut titles,
                         &mut seen,
                         Self::title_case_words(&compact_artist),
@@ -672,14 +735,18 @@ impl LibraryEnrichmentManager {
                 let cleaned_album = Self::collapse_whitespace(album);
                 let normalized_album = Self::normalize_text(&cleaned_album);
                 let compact_album = normalized_album.replace(' ', "");
-                Self::push_unique_title(&mut titles, &mut seen, cleaned_album.clone());
-                Self::push_unique_title(
+                Self::push_unique_title_case_sensitive(
+                    &mut titles,
+                    &mut seen,
+                    cleaned_album.clone(),
+                );
+                Self::push_unique_title_case_sensitive(
                     &mut titles,
                     &mut seen,
                     Self::title_case_words(&cleaned_album),
                 );
                 if !compact_album.is_empty() {
-                    Self::push_unique_title(
+                    Self::push_unique_title_case_sensitive(
                         &mut titles,
                         &mut seen,
                         Self::title_case_words(&compact_album),
@@ -687,13 +754,17 @@ impl LibraryEnrichmentManager {
                 }
                 if !album_artist.trim().is_empty() {
                     let cleaned_artist = Self::collapse_whitespace(album_artist);
-                    Self::push_unique_title(
+                    Self::push_unique_title_case_sensitive(
                         &mut titles,
                         &mut seen,
                         format!("{cleaned_album} ({cleaned_artist} album)"),
                     );
                 }
-                Self::push_unique_title(&mut titles, &mut seen, format!("{cleaned_album} (album)"));
+                Self::push_unique_title_case_sensitive(
+                    &mut titles,
+                    &mut seen,
+                    format!("{cleaned_album} (album)"),
+                );
             }
         }
         titles
@@ -715,6 +786,7 @@ impl LibraryEnrichmentManager {
 
                 let tier = Self::title_match_tier(artist, &summary.title);
                 let has_music_context = Self::has_artist_person_context(summary);
+                let has_music_category_context = Self::has_artist_category_context(summary);
                 let alias_mentioned = Self::artist_alias_mentioned_in_summary(artist, summary);
                 if tier < TitleMatchTier::NearExact && !(alias_mentioned && has_music_context) {
                     return Some("artist_title_not_near_exact");
@@ -722,8 +794,8 @@ impl LibraryEnrichmentManager {
 
                 let has_artist_title_hint = Self::title_has_artist_disambiguator(&summary.title);
                 let artist_word_count = Self::normalize_text(artist).split_whitespace().count();
-                if artist_word_count == 1 && !has_music_context && !has_artist_title_hint {
-                    return Some("single_token_artist_missing_music_context");
+                if artist_word_count == 1 && !has_music_category_context && !has_artist_title_hint {
+                    return Some("single_token_artist_missing_music_category_context");
                 }
 
                 if tier == TitleMatchTier::Exact || has_music_context || has_artist_title_hint {
@@ -779,8 +851,6 @@ impl LibraryEnrichmentManager {
     fn score_artist_summary(artist: &str, summary: &WikiSummary) -> i32 {
         let normalized_artist = Self::normalize_text(&Self::collapse_whitespace(artist));
         let normalized_title = Self::normalize_text(&summary.title);
-        let normalized_description = Self::normalize_text(&summary.description);
-        let normalized_extract = Self::normalize_text(&summary.extract);
         let title_match_tier = Self::title_match_tier(artist, &summary.title);
 
         if normalized_artist.is_empty() {
@@ -797,6 +867,8 @@ impl LibraryEnrichmentManager {
         }
 
         let has_music_context = Self::has_artist_person_context(summary);
+        let has_music_category_context = Self::has_artist_category_context(summary);
+        let has_music_text_context = Self::has_artist_text_context(summary);
         let has_artist_title_hint = Self::title_has_artist_disambiguator(&summary.title);
         let alias_mentioned = Self::artist_alias_mentioned_in_summary(artist, summary);
         if !has_music_context
@@ -807,12 +879,8 @@ impl LibraryEnrichmentManager {
         }
 
         let artist_word_count = normalized_artist.split_whitespace().count();
-        if artist_word_count == 1
-            && title_match_tier < TitleMatchTier::NearExact
-            && !has_artist_title_hint
-            && !has_music_context
-        {
-            return -3_200;
+        if artist_word_count == 1 && !has_artist_title_hint && !has_music_category_context {
+            return -6_400;
         }
 
         let mut score = 0;
@@ -831,10 +899,11 @@ impl LibraryEnrichmentManager {
             }
         }
 
-        if Self::contains_any(&normalized_description, Self::music_artist_keywords())
-            || Self::contains_any(&normalized_extract, Self::music_artist_keywords())
-        {
+        if has_music_text_context {
             score += 32;
+        }
+        if has_music_category_context {
+            score += 44;
         }
         if has_artist_title_hint {
             score += 20;
@@ -1359,7 +1428,7 @@ impl LibraryEnrichmentManager {
         score
     }
 
-    fn search_wikipedia_titles_action(
+    fn search_wikipedia_titles_action_title(
         &mut self,
         query: &str,
         entity: &LibraryEnrichmentEntity,
@@ -1368,7 +1437,7 @@ impl LibraryEnrichmentManager {
     ) -> Result<Vec<String>, String> {
         let encoded_query = urlencoding::encode(query);
         let url = format!(
-            "{}?action=query&list=search&srsearch={}&srlimit={}&format=json&utf8=1&maxlag=5",
+            "{}?action=query&list=search&srsearch={}&srwhat=title&srlimit={}&format=json&utf8=1&maxlag=5",
             WIKIPEDIA_ACTION_API_URL, encoded_query, MAX_CANDIDATES
         );
         let parsed = self.http_get_json(
@@ -1376,7 +1445,7 @@ impl LibraryEnrichmentManager {
             entity,
             attempt_kind,
             verbose_log,
-            "Wikipedia search/action",
+            "Wikipedia search/title",
         )?;
         Ok(Self::extract_title_strings(&parsed))
     }
@@ -1435,9 +1504,9 @@ impl LibraryEnrichmentManager {
     ) -> Result<WikiSummary, String> {
         let encoded_title = urlencoding::encode(title);
         let url = format!(
-            "{}?action=query&prop=extracts|pageimages|description|pageprops|info&\
+            "{}?action=query&prop=extracts|pageimages|description|pageprops|info|categories&\
              inprop=url&redirects=1&exintro=1&explaintext=1&pithumbsize=640&titles={}&\
-             format=json&utf8=1&maxlag=5",
+             clshow=!hidden&cllimit=50&format=json&utf8=1&maxlag=5",
             WIKIPEDIA_ACTION_API_URL, encoded_title
         );
         let parsed =
@@ -1484,6 +1553,17 @@ impl LibraryEnrichmentManager {
             } else {
                 String::new()
             };
+            let mut categories = Vec::new();
+            if let Some(category_values) = page_value["categories"].as_array() {
+                for category in category_values {
+                    if let Some(name) = category["title"].as_str() {
+                        let trimmed = name.trim();
+                        if !trimmed.is_empty() {
+                            categories.push(trimmed.to_string());
+                        }
+                    }
+                }
+            }
             return Ok(WikiSummary {
                 title,
                 description,
@@ -1491,6 +1571,7 @@ impl LibraryEnrichmentManager {
                 canonical_url,
                 image_url,
                 page_type,
+                categories,
             });
         }
 
@@ -1511,6 +1592,86 @@ impl LibraryEnrichmentManager {
         let key = trimmed.to_ascii_lowercase();
         if seen_titles.insert(key) {
             titles.push(trimmed.to_string());
+        }
+    }
+
+    fn push_unique_title_case_sensitive(
+        titles: &mut Vec<String>,
+        seen_titles: &mut HashSet<String>,
+        title: String,
+    ) {
+        let trimmed = title.trim();
+        if trimmed.is_empty() {
+            return;
+        }
+        if seen_titles.insert(trimmed.to_string()) {
+            titles.push(trimmed.to_string());
+        }
+    }
+
+    fn title_passes_entity_prefilter(entity: &LibraryEnrichmentEntity, title: &str) -> bool {
+        let normalized_title = Self::normalize_text(title);
+        if normalized_title.is_empty() {
+            return false;
+        }
+        if normalized_title.contains("disambiguation")
+            || normalized_title.contains("discography")
+            || normalized_title.starts_with("list of")
+        {
+            return false;
+        }
+
+        match entity {
+            LibraryEnrichmentEntity::Artist { artist } => {
+                let normalized_artist = Self::normalize_text(&Self::collapse_whitespace(artist));
+                if normalized_artist.is_empty() {
+                    return false;
+                }
+
+                let tier = Self::title_match_tier(artist, title);
+                if tier >= TitleMatchTier::NearExact {
+                    return true;
+                }
+
+                // Keep single-token names permissive for alias/redirect scenarios.
+                if normalized_artist.split_whitespace().count() <= 1 {
+                    return true;
+                }
+
+                let normalized_title_head = Self::normalized_title_head(title);
+                if Self::word_overlap_ratio(&normalized_artist, &normalized_title_head) >= 0.34 {
+                    return true;
+                }
+                let compact_artist = Self::compact_text(&normalized_artist);
+                let compact_title = Self::compact_text(&normalized_title_head);
+                !compact_artist.is_empty() && compact_title.contains(&compact_artist)
+            }
+            LibraryEnrichmentEntity::Album {
+                album,
+                album_artist: _,
+            } => {
+                let normalized_album = Self::normalize_text(&Self::collapse_whitespace(album));
+                if normalized_album.is_empty() {
+                    return false;
+                }
+
+                let tier = Self::title_match_tier(album, title);
+                if tier >= TitleMatchTier::NearExact {
+                    return true;
+                }
+
+                if normalized_album.split_whitespace().count() <= 1 {
+                    return true;
+                }
+
+                let normalized_title_head = Self::normalized_title_head(title);
+                if Self::word_overlap_ratio(&normalized_album, &normalized_title_head) >= 0.34 {
+                    return true;
+                }
+                let compact_album = Self::compact_text(&normalized_album);
+                let compact_title = Self::compact_text(&normalized_title_head);
+                !compact_album.is_empty() && compact_title.contains(&compact_album)
+            }
         }
     }
 
@@ -1570,7 +1731,7 @@ impl LibraryEnrichmentManager {
             *saw_budget = true;
             return;
         }
-        handle_result(self.search_wikipedia_titles_action(
+        handle_result(self.search_wikipedia_titles_action_title(
             query,
             entity,
             attempt_kind,
@@ -1591,13 +1752,6 @@ impl LibraryEnrichmentManager {
             *saw_budget = true;
             return;
         }
-        handle_result(self.search_wikipedia_titles_rest(
-            "search/page",
-            query,
-            entity,
-            attempt_kind,
-            verbose_log,
-        ));
     }
 
     fn candidate_titles_for_entity(
@@ -2617,6 +2771,15 @@ impl LibraryEnrichmentManager {
                 }
                 break;
             }
+            if !Self::title_passes_entity_prefilter(entity, &title) {
+                if verbose_log {
+                    info!(
+                        "Enrichment[{}]: candidate '{}' filtered before summary fetch (entity prefilter)",
+                        entity_label, title
+                    );
+                }
+                continue;
+            }
 
             let summary =
                 match self.fetch_wikipedia_summary(&title, entity, attempt_kind, verbose_log) {
@@ -3455,7 +3618,10 @@ impl LibraryEnrichmentManager {
                         cached.status,
                         LibraryEnrichmentStatus::Error | LibraryEnrichmentStatus::Disabled
                     ) || (cached.status == LibraryEnrichmentStatus::NotFound
-                        && cached.attempt_kind != LibraryEnrichmentAttemptKind::Detail));
+                        && cached.attempt_kind != LibraryEnrichmentAttemptKind::Detail)
+                        || (cached.status == LibraryEnrichmentStatus::Ready
+                            && cached.source_name == WIKIPEDIA_SOURCE_NAME
+                            && Self::is_single_token_artist_entity(&entity)));
                 if bypass_cached_for_interactive {
                     info!(
                         "Enrichment[{}]: interactive request bypassing cached {:?} result",
@@ -3581,8 +3747,8 @@ mod tests {
     use std::collections::HashSet;
 
     use super::{
-        AudioDbAlbumCandidate, AudioDbArtistCandidate, LibraryEnrichmentManager, TitleMatchTier,
-        WikiSummary,
+        AudioDbAlbumCandidate, AudioDbArtistCandidate, LibraryEnrichmentEntity,
+        LibraryEnrichmentManager, TitleMatchTier, WikiSummary,
     };
 
     fn sample_summary(title: &str, description: &str, extract: &str) -> WikiSummary {
@@ -3593,6 +3759,7 @@ mod tests {
             canonical_url: String::new(),
             image_url: None,
             page_type: String::new(),
+            categories: Vec::new(),
         }
     }
 
@@ -3680,6 +3847,28 @@ mod tests {
     }
 
     #[test]
+    fn test_title_prefilter_rejects_unrelated_multi_token_artist_titles() {
+        let entity = LibraryEnrichmentEntity::Artist {
+            artist: "Sample Performer".to_string(),
+        };
+        assert!(!LibraryEnrichmentManager::title_passes_entity_prefilter(
+            &entity,
+            "Completely Different Album"
+        ));
+    }
+
+    #[test]
+    fn test_title_prefilter_keeps_single_token_artist_permissive() {
+        let entity = LibraryEnrichmentEntity::Artist {
+            artist: "2Pac".to_string(),
+        };
+        assert!(LibraryEnrichmentManager::title_passes_entity_prefilter(
+            &entity,
+            "Tupac Shakur"
+        ));
+    }
+
+    #[test]
     fn test_score_artist_summary_accepts_compact_name_match() {
         let summary = sample_summary(
             "Sample Group (South Korean band)",
@@ -3725,11 +3914,12 @@ mod tests {
 
     #[test]
     fn test_direct_summary_matches_entity_allows_alias_redirect_with_music_context() {
-        let summary = sample_summary(
+        let mut summary = sample_summary(
             "Canonical Performer",
             "American rapper",
             "Canonical Performer, known professionally as Alias42, is an American rapper.",
         );
+        summary.categories = vec!["Category:American male rappers".to_string()];
         let entity = crate::protocol::LibraryEnrichmentEntity::Artist {
             artist: "Alias42".to_string(),
         };
@@ -3747,6 +3937,21 @@ mod tests {
         );
         let entity = crate::protocol::LibraryEnrichmentEntity::Artist {
             artist: "SAMPLE".to_string(),
+        };
+        assert!(!LibraryEnrichmentManager::direct_summary_matches_entity(
+            &entity, &summary
+        ));
+    }
+
+    #[test]
+    fn test_direct_summary_matches_entity_rejects_single_token_without_music_category_context() {
+        let summary = sample_summary(
+            "Sample",
+            "South Korean group",
+            "Sample is a South Korean group.",
+        );
+        let entity = crate::protocol::LibraryEnrichmentEntity::Artist {
+            artist: "Sample".to_string(),
         };
         assert!(!LibraryEnrichmentManager::direct_summary_matches_entity(
             &entity, &summary
@@ -3791,11 +3996,12 @@ mod tests {
 
     #[test]
     fn test_score_artist_summary_accepts_alias_redirect_with_music_context() {
-        let summary = sample_summary(
+        let mut summary = sample_summary(
             "Canonical Performer",
             "American rapper",
             "Canonical Performer, known professionally as Alias42, is an American rapper.",
         );
+        summary.categories = vec!["Category:American male rappers".to_string()];
         assert!(LibraryEnrichmentManager::score_artist_summary("Alias42", &summary) >= 92);
     }
 
@@ -3807,6 +4013,37 @@ mod tests {
             "Canonical Place, also known as Alias42, was an ancient settlement.",
         );
         assert!(LibraryEnrichmentManager::score_artist_summary("Alias42", &summary) < 0);
+    }
+
+    #[test]
+    fn test_score_artist_summary_rejects_single_token_non_music_exact_title() {
+        let summary = sample_summary(
+            "Sample",
+            "Legendary creature",
+            "Sample is a mythical creature in folklore.",
+        );
+        assert!(LibraryEnrichmentManager::score_artist_summary("Sample", &summary) < 0);
+    }
+
+    #[test]
+    fn test_score_artist_summary_accepts_single_token_when_category_is_music_group() {
+        let mut summary = sample_summary(
+            "Sample",
+            "South Korean group",
+            "Sample is a South Korean pop group.",
+        );
+        summary.categories = vec!["Category:South Korean girl groups".to_string()];
+        assert!(LibraryEnrichmentManager::score_artist_summary("Sample", &summary) >= 92);
+    }
+
+    #[test]
+    fn test_score_artist_summary_rejects_single_token_text_only_music_context() {
+        let summary = sample_summary(
+            "Sample",
+            "South Korean group",
+            "Sample is a South Korean pop group.",
+        );
+        assert!(LibraryEnrichmentManager::score_artist_summary("Sample", &summary) < 0);
     }
 
     #[test]
