@@ -2,21 +2,28 @@ import { ComboBox, LineEdit } from "std-widgets.slint";
 
 export component SettingsDropdownControl inherits Rectangle {
     in property <string> label;
+    in property <string> tooltip_text: "";
     in property <[string]> options;
     in-out property <int> selected_index;
     in-out property <string> custom_value;
     in property <string> custom_placeholder;
+    in property <bool> allow_custom_input: false;
+    in property <bool> enabled: true;
     in property <length> label_width: 170px;
     in property <length> control_min_width: 200px;
     in property <length> control_max_width: 320px;
     in property <length> control_height: 32px;
+    callback tooltip_hover_changed(bool, string, int, int);
 
     property <length> control_width: min(
         root.control_max_width,
         max(root.control_min_width, root.width - root.label_width - 16px)
     );
-    property <bool> use_custom: root.options.length > 0 && root.selected_index == root.options.length - 1;
+    property <bool> use_custom: root.allow_custom_input
+        && root.options.length > 0
+        && root.selected_index == root.options.length - 1;
     height: root.use_custom ? root.control_height * 2 + 14px : root.control_height + 6px;
+    opacity: root.enabled ? 1.0 : 0.62;
 
     VerticalLayout {
         spacing: 6px;
@@ -24,24 +31,42 @@ export component SettingsDropdownControl inherits Rectangle {
         HorizontalLayout {
             spacing: 10px;
 
-            Text {
-                text: root.label;
-                color: #ddd;
-                font-size: 12px;
+            label-host := Rectangle {
                 width: root.label_width;
-                vertical-alignment: center;
-                horizontal-alignment: left;
+                height: root.control_height;
+                background: transparent;
+                Text {
+                    text: root.label;
+                    color: root.enabled ? #ddd : #9f9f9f;
+                    font-size: 12px;
+                    vertical-alignment: center;
+                    horizontal-alignment: left;
+                }
+                label-tooltip-ta := TouchArea {
+                    changed has-hover => {
+                        if root.tooltip_text != "" {
+                            root.tooltip_hover_changed(
+                                self.has-hover,
+                                root.tooltip_text,
+                                floor((label-host.absolute-position.x + label-host.width / 2) / 1px),
+                                floor((label-host.absolute-position.y + label-host.height) / 1px)
+                            );
+                        }
+                    }
+                }
             }
 
             Rectangle {
                 width: root.control_width;
                 height: root.control_height;
                 background: transparent;
+                border-radius: 4px;
                 ComboBox {
                     width: parent.width;
                     height: parent.height;
                     model: root.options;
                     current-index <=> root.selected_index;
+                    enabled: root.enabled;
                 }
             }
             Rectangle { horizontal-stretch: 1; }
@@ -57,6 +82,7 @@ export component SettingsDropdownControl inherits Rectangle {
                 height: root.control_height;
                 text <=> root.custom_value;
                 placeholder-text: root.custom_placeholder;
+                enabled: root.enabled;
             }
             Rectangle { horizontal-stretch: 1; }
         }

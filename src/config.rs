@@ -34,6 +34,21 @@ pub struct OutputConfig {
     pub sample_rate_auto: bool,
     #[serde(default = "default_true")]
     pub bits_per_sample_auto: bool,
+    #[serde(default)]
+    pub resampler_quality: ResamplerQuality,
+    #[serde(default = "default_true")]
+    pub dither_on_bitdepth_reduce: bool,
+}
+
+/// Resampler quality profile used when sample-rate conversion is required.
+#[derive(Debug, Clone, Copy, serde::Deserialize, serde::Serialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum ResamplerQuality {
+    /// Good quality with lower CPU usage.
+    #[default]
+    High,
+    /// Higher quality with higher CPU usage.
+    VeryHigh,
 }
 
 /// UI preferences persisted between sessions.
@@ -117,6 +132,8 @@ impl Default for OutputConfig {
             channel_count_auto: true,
             sample_rate_auto: true,
             bits_per_sample_auto: true,
+            resampler_quality: ResamplerQuality::High,
+            dither_on_bitdepth_reduce: true,
         }
     }
 }
@@ -256,7 +273,9 @@ pub fn default_playlist_columns() -> Vec<PlaylistColumnConfig> {
 
 #[cfg(test)]
 mod tests {
-    use super::{default_playlist_columns, BufferingConfig, Config, LayoutConfig};
+    use super::{
+        default_playlist_columns, BufferingConfig, Config, LayoutConfig, ResamplerQuality,
+    };
 
     #[test]
     fn test_default_config_has_expected_values_and_auto_output_modes() {
@@ -270,6 +289,8 @@ mod tests {
         assert!(config.output.channel_count_auto);
         assert!(config.output.sample_rate_auto);
         assert!(config.output.bits_per_sample_auto);
+        assert_eq!(config.output.resampler_quality, ResamplerQuality::High);
+        assert!(config.output.dither_on_bitdepth_reduce);
 
         assert!(config.ui.show_layout_edit_intro);
         assert!(config.ui.show_tooltips);
@@ -310,6 +331,8 @@ decoder_request_chunk_ms = 1500
         assert!(parsed.output.channel_count_auto);
         assert!(parsed.output.sample_rate_auto);
         assert!(parsed.output.bits_per_sample_auto);
+        assert_eq!(parsed.output.resampler_quality, ResamplerQuality::High);
+        assert!(parsed.output.dither_on_bitdepth_reduce);
         assert_eq!(parsed.ui.layout, LayoutConfig::default());
         assert!(parsed.ui.button_cluster_instances.is_empty());
         assert!(parsed.ui.show_layout_edit_intro);
@@ -384,6 +407,14 @@ decoder_request_chunk_ms = 1500
         assert_eq!(
             parsed.output.bits_per_sample_auto,
             defaults.output.bits_per_sample_auto
+        );
+        assert_eq!(
+            parsed.output.resampler_quality,
+            defaults.output.resampler_quality
+        );
+        assert_eq!(
+            parsed.output.dither_on_bitdepth_reduce,
+            defaults.output.dither_on_bitdepth_reduce
         );
 
         assert_eq!(

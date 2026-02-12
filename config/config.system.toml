@@ -22,6 +22,17 @@ channel_count_auto = true
 sample_rate_auto = true
 bits_per_sample_auto = true
 
+# Sample-rate mode.
+# - `sample_rate_auto = true`: Match Content (recommended), output rate follows source content when verified
+# - `sample_rate_auto = false`: Manual, fixed to `sample_rate_khz`
+
+# Resampler profile used only when sample-rate conversion is needed.
+# Options: "high", "very_high"
+resampler_quality = "high"
+
+# Apply TPDF dither when converting float output to lower bit-depth integer formats.
+dither_on_bitdepth_reduce = true
+
 [ui]
 # Show the layout editor intro dialog the next time it is opened.
 show_layout_edit_intro = true

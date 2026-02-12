@@ -64,6 +64,8 @@ pub struct UiManager {
     last_total_ms: u64,
     current_playing_track_path: Option<PathBuf>,
     current_playing_track_metadata: Option<protocol::DetailedMetadata>,
+    current_technical_metadata: Option<protocol::TechnicalMetadata>,
+    current_output_path_info: Option<protocol::OutputPathInfo>,
     playlist_columns: Vec<PlaylistColumnConfig>,
     playlist_column_content_targets_px: Vec<u32>,
     playlist_column_target_widths_px: HashMap<String, u32>,
@@ -485,6 +487,8 @@ impl UiManager {
             last_total_ms: 0,
             current_playing_track_path: None,
             current_playing_track_metadata: None,
+            current_technical_metadata: None,
+            current_output_path_info: None,
             playlist_columns: config::default_playlist_columns(),
             playlist_column_content_targets_px: Vec::new(),
             playlist_column_target_widths_px: HashMap::new(),
@@ -585,6 +589,57 @@ impl UiManager {
         }
 
         self.last_health_log_at = now;
+    }
+
+    fn render_technical_info_text(&self) -> String {
+        let mut parts = Vec::new();
+        if let Some(meta) = self.current_technical_metadata.as_ref() {
+            parts.push(format!(
+                "{} | {} kbps | {} Hz | {} ch",
+                meta.format, meta.bitrate_kbps, meta.sample_rate_hz, meta.channel_count
+            ));
+        }
+        if let Some(path_info) = self.current_output_path_info.as_ref() {
+            let output_format = match path_info.output_stream.sample_format {
+                protocol::OutputSampleFormat::F32 => "f32",
+                protocol::OutputSampleFormat::I16 => "i16",
+                protocol::OutputSampleFormat::U16 => "u16",
+                protocol::OutputSampleFormat::Unknown => "unknown",
+            };
+            let mut transforms = Vec::new();
+            if path_info.resampled {
+                transforms.push("resample");
+            }
+            if path_info.remixed_channels {
+                transforms.push("channel-map");
+            }
+            if path_info.dithered {
+                transforms.push("dither");
+            }
+            let transform_text = if transforms.is_empty() {
+                "direct".to_string()
+            } else {
+                transforms.join("+")
+            };
+            parts.push(format!(
+                "Path: {} Hz/{} ch -> {} Hz/{} ch | {} bit {} ({})",
+                path_info.source_sample_rate_hz,
+                path_info.source_channel_count,
+                path_info.output_stream.sample_rate_hz,
+                path_info.output_stream.channel_count,
+                path_info.output_stream.bits_per_sample,
+                output_format,
+                transform_text
+            ));
+        }
+        parts.join(" | ")
+    }
+
+    fn refresh_technical_info_ui(&self) {
+        let info_text = self.render_technical_info_text();
+        let _ = self.ui.upgrade_in_event_loop(move |ui| {
+            ui.set_technical_info(info_text.into());
+        });
     }
 
     fn find_cover_art(track_path: &PathBuf) -> Option<PathBuf> {
@@ -4103,15 +4158,14 @@ impl UiManager {
                             protocol::PlaybackMessage::TechnicalMetadataChanged(meta),
                         ) => {
                             debug!("UiManager: Technical metadata changed: {:?}", meta);
-                            let _ = self.ui.upgrade_in_event_loop(move |ui| {
-                                ui.set_technical_info(
-                                    format!(
-                                        "{} | {} kbps | {} Hz",
-                                        meta.format, meta.bitrate_kbps, meta.sample_rate_hz
-                                    )
-                                    .into(),
-                                );
-                            });
+                            self.current_technical_metadata = Some(meta);
+                            self.refresh_technical_info_ui();
+                        }
+                        protocol::Message::Playback(
+                            protocol::PlaybackMessage::OutputPathChanged(path_info),
+                        ) => {
+                            self.current_output_path_info = Some(path_info);
+                            self.refresh_technical_info_ui();
                         }
                         protocol::Message::Playback(protocol::PlaybackMessage::Stop) => {
                             self.playback_active = false;
@@ -4120,6 +4174,8 @@ impl UiManager {
                             let had_playing_track = self.current_playing_track_path.is_some();
                             self.current_playing_track_path = None;
                             self.current_playing_track_metadata = None;
+                            self.current_technical_metadata = None;
+                            self.current_output_path_info = None;
                             self.update_display_for_active_collection(None, None);
 
                             // Reset cached progress values
