@@ -1034,6 +1034,14 @@ impl DbManager {
         )?;
         Ok(())
     }
+
+    /// Deletes all enrichment cache rows and returns number of deleted records.
+    pub fn clear_library_enrichment_cache(&self) -> Result<usize, rusqlite::Error> {
+        let deleted_rows = self
+            .conn
+            .execute("DELETE FROM library_enrichment_cache", [])?;
+        Ok(deleted_rows)
+    }
 }
 
 #[cfg(test)]

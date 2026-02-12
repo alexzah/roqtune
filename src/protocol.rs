@@ -210,6 +210,8 @@ pub enum LibraryMessage {
         entity: LibraryEnrichmentEntity,
         priority: LibraryEnrichmentPriority,
     },
+    EnrichmentPrefetchTick,
+    ClearEnrichmentCache,
     LibraryViewportChanged {
         first_row: usize,
         row_count: usize,
@@ -248,6 +250,10 @@ pub enum LibraryMessage {
         songs: Vec<LibrarySong>,
     },
     EnrichmentResult(LibraryEnrichmentPayload),
+    EnrichmentCacheCleared {
+        cleared_rows: usize,
+        deleted_images: usize,
+    },
     AddToPlaylistsCompleted {
         playlist_count: usize,
         track_count: usize,

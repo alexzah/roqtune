@@ -3703,6 +3703,17 @@ export component AppWindow inherits Window {
                                 }
                             }
                         }
+
+                        HorizontalLayout {
+                            spacing: 8px;
+                            Button {
+                                text: "Clear Internet Metadata Cache";
+                                width: 228px;
+                                height: settings-dialog-panel.button_height;
+                                clicked => { root.clear_library_enrichment_cache(); }
+                            }
+                            Rectangle { horizontal-stretch: 1; }
+                        }
                     }
             }
 
@@ -3914,6 +3925,7 @@ export component AppWindow inherits Window {
     callback library_online_metadata_prompt_deny();
     callback settings_set_library_online_metadata_enabled(bool);
     callback settings_set_library_online_metadata_prompt_pending(bool);
+    callback clear_library_enrichment_cache();
     callback library_viewport_changed(int, int);
     callback handle_track_click(int, bool, bool);
     callback on_pointer_down(int, bool, bool);

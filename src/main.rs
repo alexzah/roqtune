@@ -2448,6 +2448,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let _ = bus_sender_clone.send(Message::Library(protocol::LibraryMessage::RequestScan));
     });
 
+    let bus_sender_clone = bus_sender.clone();
+    ui.on_clear_library_enrichment_cache(move || {
+        let _ = bus_sender_clone.send(Message::Library(
+            protocol::LibraryMessage::ClearEnrichmentCache,
+        ));
+    });
+
     let config_state_clone = Arc::clone(&config_state);
     let output_options_clone = Arc::clone(&output_options);
     let runtime_output_override_clone = Arc::clone(&runtime_output_override);
