@@ -1313,8 +1313,6 @@ fn write_config_to_document(document: &mut DocumentMut, previous: &Config, confi
         let output = document["output"]
             .as_table_mut()
             .expect("output should be a table");
-        output.remove("quality_mode");
-        output.remove("auto_sample_rate_strategy");
         if !output.contains_key("output_device_name")
             || previous.output.output_device_name != config.output.output_device_name
         {
@@ -1395,9 +1393,6 @@ fn write_config_to_document(document: &mut DocumentMut, previous: &Config, confi
 
     {
         let ui = document["ui"].as_table_mut().expect("ui should be a table");
-        ui.remove("playlist_album_art_column_min_width_px");
-        ui.remove("playlist_album_art_column_max_width_px");
-        ui.remove("playlist_columns");
         set_table_scalar_if_changed(
             ui,
             "show_layout_edit_intro",
@@ -1552,6 +1547,75 @@ fn serialize_config_with_preserved_comments(
     Ok(document.to_string())
 }
 
+fn merge_table_with_targeted_updates(destination: &mut Table, source: &Table) {
+    for (key, source_item) in source.iter() {
+        match source_item {
+            Item::Table(source_table) => {
+                if !destination.get(key).is_some_and(Item::is_table) {
+                    destination.insert(key, Item::Table(Table::new()));
+                }
+                let destination_table = destination
+                    .get_mut(key)
+                    .and_then(Item::as_table_mut)
+                    .expect("table inserted above");
+                merge_table_with_targeted_updates(destination_table, source_table);
+            }
+            Item::ArrayOfTables(source_array) => {
+                if !destination.get(key).is_some_and(Item::is_array_of_tables) {
+                    set_table_value_preserving_decor(destination, key, source_item.clone());
+                    continue;
+                }
+                let destination_array = destination
+                    .get_mut(key)
+                    .and_then(Item::as_array_of_tables_mut)
+                    .expect("array-of-tables verified above");
+                let shared_len = destination_array.len().min(source_array.len());
+                for index in 0..shared_len {
+                    let destination_table = destination_array
+                        .get_mut(index)
+                        .expect("index should exist in destination array");
+                    let source_table = source_array
+                        .get(index)
+                        .expect("index should exist in source array");
+                    merge_table_with_targeted_updates(destination_table, source_table);
+                }
+                if source_array.len() > destination_array.len() {
+                    for index in destination_array.len()..source_array.len() {
+                        let source_table = source_array
+                            .get(index)
+                            .expect("index should exist in source array");
+                        destination_array.push(source_table.clone());
+                    }
+                } else if source_array.len() < destination_array.len() {
+                    for _ in source_array.len()..destination_array.len() {
+                        destination_array.remove(source_array.len());
+                    }
+                }
+            }
+            _ => {
+                set_table_value_preserving_decor(destination, key, source_item.clone());
+            }
+        }
+    }
+}
+
+fn serialize_layout_with_preserved_comments(
+    existing_text: &str,
+    layout: &LayoutConfig,
+) -> Result<String, String> {
+    let next_layout_text = toml::to_string(layout)
+        .map_err(|err| format!("failed to serialize layout to TOML: {}", err))?;
+    let next_document = next_layout_text
+        .parse::<DocumentMut>()
+        .map_err(|err| format!("failed to parse serialized layout TOML document: {}", err))?;
+    let mut existing_document = existing_text
+        .parse::<DocumentMut>()
+        .map_err(|err| format!("failed to parse existing layout as TOML document: {}", err))?;
+
+    merge_table_with_targeted_updates(existing_document.as_table_mut(), next_document.as_table());
+    Ok(existing_document.to_string())
+}
+
 fn persist_config_file(config: &Config, path: &std::path::Path) {
     let existing_text = std::fs::read_to_string(path).ok();
     let config_text = if let Some(existing_text) = existing_text {
@@ -1581,15 +1645,30 @@ fn persist_config_file(config: &Config, path: &std::path::Path) {
 }
 
 fn persist_layout_file(layout: &LayoutConfig, path: &std::path::Path) {
-    match toml::to_string(layout) {
-        Ok(layout_text) => {
-            if let Err(err) = std::fs::write(path, layout_text) {
-                log::error!("Failed to persist layout to {}: {}", path.display(), err);
+    let existing_text = std::fs::read_to_string(path).ok();
+    let layout_text = if let Some(existing_text) = existing_text {
+        match serialize_layout_with_preserved_comments(&existing_text, layout) {
+            Ok(updated_text) => Some(updated_text),
+            Err(err) => {
+                warn!(
+                    "Failed to preserve layout comments for {} ({}). Falling back to plain serialization.",
+                    path.display(),
+                    err
+                );
+                toml::to_string(layout).ok()
             }
         }
-        Err(err) => {
-            log::error!("Failed to serialize layout: {}", err);
-        }
+    } else {
+        toml::to_string(layout).ok()
+    };
+
+    let Some(layout_text) = layout_text else {
+        log::error!("Failed to serialize layout for {}", path.display());
+        return;
+    };
+
+    if let Err(err) = std::fs::write(path, layout_text) {
+        log::error!("Failed to persist layout to {}: {}", path.display(), err);
     }
 }
 
@@ -4902,8 +4981,9 @@ mod tests {
         resolve_playlist_header_gap_from_x, resolve_runtime_config, sanitize_config,
         sanitize_playlist_columns, select_manual_output_option_index_u32,
         select_output_option_index_u16, serialize_config_with_preserved_comments,
-        should_apply_custom_column_delete, sidebar_width_from_window, update_or_replace_vec_model,
-        visible_playlist_column_kinds, OutputSettingsOptions, RuntimeOutputOverride,
+        serialize_layout_with_preserved_comments, should_apply_custom_column_delete,
+        sidebar_width_from_window, update_or_replace_vec_model, visible_playlist_column_kinds,
+        OutputSettingsOptions, RuntimeOutputOverride,
     };
 
     fn unique_temp_directory(test_name: &str) -> PathBuf {
@@ -6002,6 +6082,10 @@ decoder_request_chunk_ms = 1500
             !serialized.contains("[[ui.playlist_columns]]"),
             "playlist columns should not be persisted in config.toml"
         );
+        assert!(
+            !serialized.contains("playlist_album_art_column_min_width_px"),
+            "playlist album art width fields should not be persisted in config.toml"
+        );
         let parsed_back: toml_edit::DocumentMut = serialized
             .parse()
             .expect("serialized config should remain valid TOML");
@@ -6010,6 +6094,124 @@ decoder_request_chunk_ms = 1500
             .and_then(|item| item.as_table())
             .and_then(|table| table.get("playlist_columns"))
             .is_none());
+    }
+
+    #[test]
+    fn test_serialize_layout_with_preserved_comments_keeps_existing_comments() {
+        let existing = r#"
+# layout top comment
+version = 1
+
+# album art width comment
+playlist_album_art_column_min_width_px = 16
+playlist_album_art_column_max_width_px = 480
+
+[[playlist_columns]]
+name = "Title"
+format = "{title}"
+enabled = true
+custom = false
+
+[root]
+# root comment
+node_type = "leaf"
+id = "l1"
+panel = "track_list"
+"#;
+        let mut layout: LayoutConfig =
+            toml::from_str(existing).expect("existing layout should parse");
+        layout.playlist_album_art_column_max_width_px = 512;
+
+        let serialized = serialize_layout_with_preserved_comments(existing, &layout)
+            .expect("comment-preserving layout serialization should succeed");
+
+        assert!(serialized.contains("# layout top comment"));
+        assert!(serialized.contains("# album art width comment"));
+        assert!(serialized.contains("# root comment"));
+        assert!(serialized.contains("playlist_album_art_column_max_width_px = 512"));
+    }
+
+    #[test]
+    fn test_serialize_layout_with_preserved_comments_rejects_invalid_toml() {
+        let invalid = "[root\nnode_type = \"leaf\"";
+        let layout = LayoutConfig::default();
+        let result = serialize_layout_with_preserved_comments(invalid, &layout);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_serialize_layout_with_preserved_comments_keeps_system_template_comments() {
+        let existing = include_str!("../config/layout.system.toml");
+        let mut layout: LayoutConfig =
+            toml::from_str(existing).expect("layout system template should parse");
+        layout.playlist_album_art_column_min_width_px = 24;
+
+        let serialized = serialize_layout_with_preserved_comments(existing, &layout)
+            .expect("comment-preserving layout serialization should succeed");
+
+        assert!(serialized.contains("# roqtune layout system template"));
+        assert!(serialized.contains("# Node conventions:"));
+        assert!(serialized.contains("playlist_album_art_column_min_width_px = 24"));
+    }
+
+    #[test]
+    fn test_serialize_layout_with_preserved_comments_keeps_unknown_keys() {
+        let existing = r#"
+version = 1
+custom_layout_flag = "keep-me"
+
+[root]
+node_type = "leaf"
+id = "l1"
+panel = "track_list"
+"#;
+        let layout = LayoutConfig::default();
+
+        let serialized = serialize_layout_with_preserved_comments(existing, &layout)
+            .expect("comment-preserving layout serialization should succeed");
+        assert!(serialized.contains("custom_layout_flag = \"keep-me\""));
+    }
+
+    #[test]
+    fn test_serialize_config_with_preserved_comments_keeps_unknown_keys() {
+        let existing = r#"
+[output]
+output_device_name = ""
+output_device_auto = true
+channel_count = 2
+sample_rate_khz = 44100
+bits_per_sample = 24
+channel_count_auto = true
+sample_rate_auto = true
+bits_per_sample_auto = true
+
+[ui]
+show_layout_edit_intro = true
+show_tooltips = true
+window_width = 900
+window_height = 650
+volume = 1.0
+
+[library]
+folders = []
+show_first_start_prompt = true
+online_metadata_enabled = false
+online_metadata_prompt_pending = true
+artist_image_cache_ttl_days = 30
+artist_image_cache_max_size_mb = 256
+custom_library_key = "keep-me"
+
+[buffering]
+player_low_watermark_ms = 12000
+player_target_buffer_ms = 24000
+player_request_interval_ms = 120
+decoder_request_chunk_ms = 1500
+"#;
+        let config = Config::default();
+
+        let serialized = serialize_config_with_preserved_comments(existing, &config)
+            .expect("comment-preserving config serialization should succeed");
+        assert!(serialized.contains("custom_library_key = \"keep-me\""));
     }
 
     #[test]
