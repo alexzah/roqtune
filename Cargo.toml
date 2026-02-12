@@ -25,7 +25,7 @@ serde_json = "1.0.149"
 rusqlite = { version = "0.38.0", features = ["bundled"] }
 governor = "0.10.4" # Rate limiting for UI updates
 souvlaki = "0.8.3" # Cross-platform media controls (MPRIS/SMTC/Now Playing)
-lofty = "0.23.1"
+lofty = "0.23.1" # Reading / writing metadata tags
 
 [build-dependencies]
 slint-build = "1.15.0"
