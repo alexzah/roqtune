@@ -9,9 +9,9 @@ slint = "1.15.0" # UI framework
 rfd = "0.17.2"   # For file dialogs
 log = "0.4.29" # logs
 colog = "1.4.0" # logs
-rand = "0.9.2"  # For shuffle and random playback
-getrandom = "0.3.4"  # For secure random seed generation
-symphonia = {version = "=0.4.0", features = [
+rand = "0.10.0"  # For shuffle and random playback
+getrandom = "0.4.1"  # For secure random seed generation
+symphonia = {version = "0.5.5", features = [
     "mp3",
     "wav", 
     "flac",
@@ -23,12 +23,12 @@ cpal = "0.15.3" # For audio playback
 tokio = { version = "1.49.0", features = ["sync"] }
 rubato = "0.16.2" # For audio resampling
 dirs = "6.0.0" # For getting user's home directory
-toml = "0.8.23" # For reading and writing toml files
-toml_edit = "0.22.27" # For comment-preserving config updates
+toml = "0.9.12" # For reading and writing toml files
+toml_edit = "0.25.0" # For comment-preserving config updates
 serde = "1.0.228"
 serde_json = "1.0.149"
-rusqlite = { version = "0.32.1", features = ["bundled"] }
-governor = "0.6.3" # Rate limiting for UI updates
+rusqlite = { version = "0.38.0", features = ["bundled"] }
+governor = "0.10.4" # Rate limiting for UI updates
 souvlaki = "0.8.3" # Cross-platform media controls (MPRIS/SMTC/Now Playing)
 lofty = "0.23.1"
 
