@@ -4,6 +4,7 @@ mod audio_probe;
 mod config;
 mod db_manager;
 mod layout;
+mod library_enrichment_manager;
 mod library_manager;
 mod media_controls_manager;
 mod metadata_manager;
@@ -36,6 +37,7 @@ use layout::{
     replace_leaf_panel, sanitize_layout_config, set_split_ratio, split_leaf, LayoutConfig,
     LayoutNode, LayoutPanelKind, SplitAxis, SPLITTER_THICKNESS_PX,
 };
+use library_enrichment_manager::LibraryEnrichmentManager;
 use library_manager::LibraryManager;
 use log::{debug, info, warn};
 use media_controls_manager::MediaControlsManager;
@@ -585,6 +587,12 @@ fn sanitize_config(config: Config) -> Config {
             sanitized_library_folders.push(trimmed.to_string());
         }
     }
+    let clamped_artist_image_cache_ttl_days =
+        config.library.artist_image_cache_ttl_days.clamp(1, 3650);
+    let clamped_artist_image_cache_max_size_mb = config
+        .library
+        .artist_image_cache_max_size_mb
+        .clamp(16, 16_384);
 
     Config {
         output: OutputConfig {
@@ -614,6 +622,10 @@ fn sanitize_config(config: Config) -> Config {
         library: LibraryConfig {
             folders: sanitized_library_folders,
             show_first_start_prompt: config.library.show_first_start_prompt,
+            online_metadata_enabled: config.library.online_metadata_enabled,
+            online_metadata_prompt_pending: config.library.online_metadata_prompt_pending,
+            artist_image_cache_ttl_days: clamped_artist_image_cache_ttl_days,
+            artist_image_cache_max_size_mb: clamped_artist_image_cache_max_size_mb,
         },
         buffering: BufferingConfig {
             player_low_watermark_ms: clamped_low_watermark,
@@ -1482,6 +1494,34 @@ fn write_config_to_document(document: &mut DocumentMut, previous: &Config, confi
             config.library.show_first_start_prompt,
             value,
         );
+        set_table_scalar_if_changed(
+            library,
+            "online_metadata_enabled",
+            previous.library.online_metadata_enabled,
+            config.library.online_metadata_enabled,
+            value,
+        );
+        set_table_scalar_if_changed(
+            library,
+            "online_metadata_prompt_pending",
+            previous.library.online_metadata_prompt_pending,
+            config.library.online_metadata_prompt_pending,
+            value,
+        );
+        set_table_scalar_if_changed(
+            library,
+            "artist_image_cache_ttl_days",
+            i64::from(previous.library.artist_image_cache_ttl_days),
+            i64::from(config.library.artist_image_cache_ttl_days),
+            value,
+        );
+        set_table_scalar_if_changed(
+            library,
+            "artist_image_cache_max_size_mb",
+            i64::from(previous.library.artist_image_cache_max_size_mb),
+            i64::from(config.library.artist_image_cache_max_size_mb),
+            value,
+        );
         if !library.contains_key("folders") || previous.library.folders != config.library.folders {
             let mut folders = Array::new();
             for folder in &config.library.folders {
@@ -1989,6 +2029,10 @@ fn apply_config_to_ui(
             ui.set_settings_library_selected_folder_index(0);
         }
     }
+    ui.set_settings_library_online_metadata_enabled(config.library.online_metadata_enabled);
+    ui.set_settings_library_online_metadata_prompt_pending(
+        config.library.online_metadata_prompt_pending,
+    );
     apply_playlist_columns_to_ui(ui, config);
     apply_layout_to_ui(ui, config, workspace_width_px, workspace_height_px);
 }
@@ -2458,6 +2502,212 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         )));
     });
 
+    let bus_sender_clone = bus_sender.clone();
+    let config_state_clone = Arc::clone(&config_state);
+    let output_options_clone = Arc::clone(&output_options);
+    let runtime_output_override_clone = Arc::clone(&runtime_output_override);
+    let last_runtime_signature_clone = Arc::clone(&last_runtime_signature);
+    let config_file_clone = config_file.clone();
+    let layout_workspace_size_clone = Arc::clone(&layout_workspace_size);
+    let ui_handle_clone = ui.as_weak().clone();
+    ui.on_library_online_metadata_prompt_accept(move || {
+        let next_config = {
+            let mut state = config_state_clone
+                .lock()
+                .expect("config state lock poisoned");
+            let mut next = state.clone();
+            next.library.online_metadata_enabled = true;
+            next.library.online_metadata_prompt_pending = false;
+            next = sanitize_config(next);
+            *state = next.clone();
+            next
+        };
+        persist_state_files_with_config_path(&next_config, &config_file_clone);
+        let options_snapshot = {
+            let options = output_options_clone
+                .lock()
+                .expect("output options lock poisoned");
+            options.clone()
+        };
+        let (workspace_width_px, workspace_height_px) =
+            workspace_size_snapshot(&layout_workspace_size_clone);
+        if let Some(ui) = ui_handle_clone.upgrade() {
+            apply_config_to_ui(
+                &ui,
+                &next_config,
+                &options_snapshot,
+                workspace_width_px,
+                workspace_height_px,
+            );
+        }
+        let runtime_override = runtime_output_override_snapshot(&runtime_output_override_clone);
+        let runtime_config =
+            resolve_runtime_config(&next_config, &options_snapshot, Some(&runtime_override));
+        {
+            let mut last_runtime = last_runtime_signature_clone
+                .lock()
+                .expect("runtime signature lock poisoned");
+            *last_runtime = OutputRuntimeSignature::from_output(&runtime_config.output);
+        }
+        let _ = bus_sender_clone.send(Message::Config(ConfigMessage::ConfigChanged(
+            runtime_config,
+        )));
+    });
+
+    let bus_sender_clone = bus_sender.clone();
+    let config_state_clone = Arc::clone(&config_state);
+    let output_options_clone = Arc::clone(&output_options);
+    let runtime_output_override_clone = Arc::clone(&runtime_output_override);
+    let last_runtime_signature_clone = Arc::clone(&last_runtime_signature);
+    let config_file_clone = config_file.clone();
+    let layout_workspace_size_clone = Arc::clone(&layout_workspace_size);
+    let ui_handle_clone = ui.as_weak().clone();
+    ui.on_library_online_metadata_prompt_deny(move || {
+        let next_config = {
+            let mut state = config_state_clone
+                .lock()
+                .expect("config state lock poisoned");
+            let mut next = state.clone();
+            next.library.online_metadata_enabled = false;
+            next.library.online_metadata_prompt_pending = false;
+            next = sanitize_config(next);
+            *state = next.clone();
+            next
+        };
+        persist_state_files_with_config_path(&next_config, &config_file_clone);
+        let options_snapshot = {
+            let options = output_options_clone
+                .lock()
+                .expect("output options lock poisoned");
+            options.clone()
+        };
+        let (workspace_width_px, workspace_height_px) =
+            workspace_size_snapshot(&layout_workspace_size_clone);
+        if let Some(ui) = ui_handle_clone.upgrade() {
+            apply_config_to_ui(
+                &ui,
+                &next_config,
+                &options_snapshot,
+                workspace_width_px,
+                workspace_height_px,
+            );
+        }
+        let runtime_override = runtime_output_override_snapshot(&runtime_output_override_clone);
+        let runtime_config =
+            resolve_runtime_config(&next_config, &options_snapshot, Some(&runtime_override));
+        {
+            let mut last_runtime = last_runtime_signature_clone
+                .lock()
+                .expect("runtime signature lock poisoned");
+            *last_runtime = OutputRuntimeSignature::from_output(&runtime_config.output);
+        }
+        let _ = bus_sender_clone.send(Message::Config(ConfigMessage::ConfigChanged(
+            runtime_config,
+        )));
+    });
+
+    let bus_sender_clone = bus_sender.clone();
+    let config_state_clone = Arc::clone(&config_state);
+    let output_options_clone = Arc::clone(&output_options);
+    let runtime_output_override_clone = Arc::clone(&runtime_output_override);
+    let last_runtime_signature_clone = Arc::clone(&last_runtime_signature);
+    let config_file_clone = config_file.clone();
+    let layout_workspace_size_clone = Arc::clone(&layout_workspace_size);
+    let ui_handle_clone = ui.as_weak().clone();
+    ui.on_settings_set_library_online_metadata_enabled(move |enabled| {
+        let next_config = {
+            let mut state = config_state_clone
+                .lock()
+                .expect("config state lock poisoned");
+            let mut next = state.clone();
+            next.library.online_metadata_enabled = enabled;
+            next = sanitize_config(next);
+            *state = next.clone();
+            next
+        };
+        persist_state_files_with_config_path(&next_config, &config_file_clone);
+        let options_snapshot = {
+            let options = output_options_clone
+                .lock()
+                .expect("output options lock poisoned");
+            options.clone()
+        };
+        let (workspace_width_px, workspace_height_px) =
+            workspace_size_snapshot(&layout_workspace_size_clone);
+        if let Some(ui) = ui_handle_clone.upgrade() {
+            apply_config_to_ui(
+                &ui,
+                &next_config,
+                &options_snapshot,
+                workspace_width_px,
+                workspace_height_px,
+            );
+        }
+        let runtime_override = runtime_output_override_snapshot(&runtime_output_override_clone);
+        let runtime_config =
+            resolve_runtime_config(&next_config, &options_snapshot, Some(&runtime_override));
+        {
+            let mut last_runtime = last_runtime_signature_clone
+                .lock()
+                .expect("runtime signature lock poisoned");
+            *last_runtime = OutputRuntimeSignature::from_output(&runtime_config.output);
+        }
+        let _ = bus_sender_clone.send(Message::Config(ConfigMessage::ConfigChanged(
+            runtime_config,
+        )));
+    });
+
+    let bus_sender_clone = bus_sender.clone();
+    let config_state_clone = Arc::clone(&config_state);
+    let output_options_clone = Arc::clone(&output_options);
+    let runtime_output_override_clone = Arc::clone(&runtime_output_override);
+    let last_runtime_signature_clone = Arc::clone(&last_runtime_signature);
+    let config_file_clone = config_file.clone();
+    let layout_workspace_size_clone = Arc::clone(&layout_workspace_size);
+    let ui_handle_clone = ui.as_weak().clone();
+    ui.on_settings_set_library_online_metadata_prompt_pending(move |pending| {
+        let next_config = {
+            let mut state = config_state_clone
+                .lock()
+                .expect("config state lock poisoned");
+            let mut next = state.clone();
+            next.library.online_metadata_prompt_pending = pending;
+            next = sanitize_config(next);
+            *state = next.clone();
+            next
+        };
+        persist_state_files_with_config_path(&next_config, &config_file_clone);
+        let options_snapshot = {
+            let options = output_options_clone
+                .lock()
+                .expect("output options lock poisoned");
+            options.clone()
+        };
+        let (workspace_width_px, workspace_height_px) =
+            workspace_size_snapshot(&layout_workspace_size_clone);
+        if let Some(ui) = ui_handle_clone.upgrade() {
+            apply_config_to_ui(
+                &ui,
+                &next_config,
+                &options_snapshot,
+                workspace_width_px,
+                workspace_height_px,
+            );
+        }
+        let runtime_override = runtime_output_override_snapshot(&runtime_output_override_clone);
+        let runtime_config =
+            resolve_runtime_config(&next_config, &options_snapshot, Some(&runtime_override));
+        {
+            let mut last_runtime = last_runtime_signature_clone
+                .lock()
+                .expect("runtime signature lock poisoned");
+            *last_runtime = OutputRuntimeSignature::from_output(&runtime_config.output);
+        }
+        let _ = bus_sender_clone.send(Message::Config(ConfigMessage::ConfigChanged(
+            runtime_config,
+        )));
+    });
+
     // Wire up play button
     let bus_sender_clone = bus_sender.clone();
     ui.on_play(move || {
@@ -2698,6 +2948,29 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let _ = bus_sender_clone.send(Message::Library(protocol::LibraryMessage::SetSearchQuery(
             query.to_string(),
         )));
+    });
+
+    let bus_sender_clone = bus_sender.clone();
+    ui.on_library_viewport_changed(move |first_row, row_count| {
+        if first_row < 0 || row_count <= 0 {
+            return;
+        }
+        let _ = bus_sender_clone.send(Message::Library(
+            protocol::LibraryMessage::LibraryViewportChanged {
+                first_row: first_row as usize,
+                row_count: row_count as usize,
+            },
+        ));
+    });
+
+    ui.on_open_external_url(move |url| {
+        let trimmed = url.trim();
+        if trimmed.is_empty() {
+            return;
+        }
+        if let Err(err) = webbrowser::open(trimmed) {
+            warn!("Failed to open external URL '{}': {}", trimmed, err);
+        }
     });
 
     let bus_sender_clone = bus_sender.clone();
@@ -4303,6 +4576,19 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             db_manager,
         );
         library_manager.run();
+    });
+
+    // Setup library enrichment manager
+    let enrichment_manager_bus_receiver = bus_sender.subscribe();
+    let enrichment_manager_bus_sender = bus_sender.clone();
+    thread::spawn(move || {
+        let db_manager = DbManager::new().expect("Failed to initialize database");
+        let mut enrichment_manager = LibraryEnrichmentManager::new(
+            enrichment_manager_bus_receiver,
+            enrichment_manager_bus_sender,
+            db_manager,
+        );
+        enrichment_manager.run();
     });
 
     // Setup metadata manager

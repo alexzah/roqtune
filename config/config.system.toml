@@ -121,6 +121,20 @@ folders = []
 # This is set to false once you skip or add folders.
 show_first_start_prompt = true
 
+# Enable internet lookups for artist/album detail blurbs and artist images.
+# Display-only: this does not modify your track metadata files.
+online_metadata_enabled = false
+
+# One-time non-blocking prompt gate for online metadata in Library mode.
+# Set this to true to re-test the prompt flow.
+online_metadata_prompt_pending = true
+
+# Artist image cache retention window in days.
+artist_image_cache_ttl_days = 30
+
+# Maximum on-disk artist-image cache size in MB before oldest files are pruned.
+artist_image_cache_max_size_mb = 256
+
 # ---------------------------------------------------------------------
 # ADVANCED USERS ONLY
 # These buffering settings directly affect decoder/player behavior.

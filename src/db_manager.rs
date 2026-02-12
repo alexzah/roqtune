@@ -1,8 +1,9 @@
 //! SQLite-backed persistence for playlists, library index data, and playlist-scoped UI metadata.
 
 use crate::protocol::{
-    LibraryAlbum, LibraryArtist, LibraryDecade, LibraryGenre, LibrarySong,
-    PlaylistColumnWidthOverride, PlaylistInfo, RestoredTrack, TrackMetadataSummary,
+    LibraryAlbum, LibraryArtist, LibraryDecade, LibraryEnrichmentEntity, LibraryEnrichmentPayload,
+    LibraryEnrichmentStatus, LibraryGenre, LibrarySong, PlaylistColumnWidthOverride, PlaylistInfo,
+    RestoredTrack, TrackMetadataSummary,
 };
 use rusqlite::{params, Connection, OptionalExtension};
 use std::{collections::HashSet, path::PathBuf};
@@ -14,6 +15,61 @@ pub struct DbManager {
 }
 
 impl DbManager {
+    fn enrichment_entity_parts(entity: &LibraryEnrichmentEntity) -> (String, String) {
+        match entity {
+            LibraryEnrichmentEntity::Artist { artist } => ("artist".to_string(), artist.clone()),
+            LibraryEnrichmentEntity::Album {
+                album,
+                album_artist,
+            } => (
+                "album".to_string(),
+                format!("{album}\u{001f}{album_artist}"),
+            ),
+        }
+    }
+
+    fn enrichment_status_to_str(status: LibraryEnrichmentStatus) -> &'static str {
+        match status {
+            LibraryEnrichmentStatus::Ready => "ready",
+            LibraryEnrichmentStatus::NotFound => "not_found",
+            LibraryEnrichmentStatus::Disabled => "disabled",
+            LibraryEnrichmentStatus::Error => "error",
+        }
+    }
+
+    fn enrichment_status_from_str(value: &str) -> LibraryEnrichmentStatus {
+        match value {
+            "ready" => LibraryEnrichmentStatus::Ready,
+            "not_found" => LibraryEnrichmentStatus::NotFound,
+            "disabled" => LibraryEnrichmentStatus::Disabled,
+            "error" => LibraryEnrichmentStatus::Error,
+            _ => LibraryEnrichmentStatus::Error,
+        }
+    }
+
+    fn enrichment_entity_from_parts(
+        entity_type: &str,
+        entity_key: &str,
+    ) -> LibraryEnrichmentEntity {
+        match entity_type {
+            "artist" => LibraryEnrichmentEntity::Artist {
+                artist: entity_key.to_string(),
+            },
+            "album" => {
+                let mut parts = entity_key.splitn(2, '\u{001f}');
+                let album = parts.next().unwrap_or_default().to_string();
+                let album_artist = parts.next().unwrap_or_default().to_string();
+                LibraryEnrichmentEntity::Album {
+                    album,
+                    album_artist,
+                }
+            }
+            _ => LibraryEnrichmentEntity::Artist {
+                artist: entity_key.to_string(),
+            },
+        }
+    }
+
     fn normalize_library_sort_key(value: &str, fallback: &str) -> String {
         let trimmed = value.trim();
         if trimmed.is_empty() {
@@ -106,6 +162,27 @@ impl DbManager {
         )?;
         self.conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_library_tracks_sort_album ON library_tracks(sort_album, sort_title, path)",
+            [],
+        )?;
+        self.conn.execute(
+            "CREATE TABLE IF NOT EXISTS library_enrichment_cache (
+                entity_type TEXT NOT NULL,
+                entity_key TEXT NOT NULL,
+                status TEXT NOT NULL,
+                blurb TEXT NOT NULL,
+                image_path TEXT,
+                image_url TEXT,
+                source_name TEXT NOT NULL,
+                source_url TEXT NOT NULL,
+                fetched_unix_ms INTEGER NOT NULL DEFAULT 0,
+                expires_unix_ms INTEGER NOT NULL DEFAULT 0,
+                last_error TEXT NOT NULL DEFAULT '',
+                PRIMARY KEY(entity_type, entity_key)
+            )",
+            [],
+        )?;
+        self.conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_library_enrichment_cache_expires ON library_enrichment_cache(expires_unix_ms)",
             [],
         )?;
         Ok(())
@@ -822,6 +899,140 @@ impl DbManager {
             songs.push(item?);
         }
         Ok(songs)
+    }
+
+    /// Returns a fresh enrichment cache entry for the supplied entity when present.
+    pub fn get_library_enrichment_cache(
+        &self,
+        entity: &LibraryEnrichmentEntity,
+        now_unix_ms: i64,
+    ) -> Result<Option<LibraryEnrichmentPayload>, rusqlite::Error> {
+        let (entity_type, entity_key) = Self::enrichment_entity_parts(entity);
+        let result = self
+            .conn
+            .query_row(
+                "SELECT entity_type, entity_key, status, blurb, image_path, source_name, source_url, expires_unix_ms
+                 FROM library_enrichment_cache
+                 WHERE entity_type = ?1 AND entity_key = ?2",
+                params![entity_type, entity_key],
+                |row| {
+                    let row_entity_type: String = row.get(0)?;
+                    let row_entity_key: String = row.get(1)?;
+                    let status: String = row.get(2)?;
+                    let blurb: String = row.get(3)?;
+                    let image_path: Option<String> = row.get(4)?;
+                    let source_name: String = row.get(5)?;
+                    let source_url: String = row.get(6)?;
+                    let expires_unix_ms: i64 = row.get(7)?;
+                    Ok((
+                        row_entity_type,
+                        row_entity_key,
+                        status,
+                        blurb,
+                        image_path,
+                        source_name,
+                        source_url,
+                        expires_unix_ms,
+                    ))
+                },
+            )
+            .optional()?;
+
+        let Some((
+            row_entity_type,
+            row_entity_key,
+            status,
+            blurb,
+            image_path,
+            source_name,
+            source_url,
+            expires_unix_ms,
+        )) = result
+        else {
+            return Ok(None);
+        };
+
+        if expires_unix_ms <= now_unix_ms {
+            return Ok(None);
+        }
+
+        Ok(Some(LibraryEnrichmentPayload {
+            entity: Self::enrichment_entity_from_parts(&row_entity_type, &row_entity_key),
+            status: Self::enrichment_status_from_str(&status),
+            blurb,
+            image_path: image_path.map(PathBuf::from),
+            source_name,
+            source_url,
+        }))
+    }
+
+    /// Inserts or updates one enrichment cache row.
+    pub fn upsert_library_enrichment_cache(
+        &self,
+        payload: &LibraryEnrichmentPayload,
+        image_url: Option<&str>,
+        fetched_unix_ms: i64,
+        expires_unix_ms: i64,
+        last_error: Option<&str>,
+    ) -> Result<(), rusqlite::Error> {
+        let (entity_type, entity_key) = Self::enrichment_entity_parts(&payload.entity);
+        self.conn.execute(
+            "INSERT INTO library_enrichment_cache (
+                entity_type, entity_key, status, blurb, image_path, image_url,
+                source_name, source_url, fetched_unix_ms, expires_unix_ms, last_error
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)
+            ON CONFLICT(entity_type, entity_key) DO UPDATE SET
+                status = excluded.status,
+                blurb = excluded.blurb,
+                image_path = excluded.image_path,
+                image_url = excluded.image_url,
+                source_name = excluded.source_name,
+                source_url = excluded.source_url,
+                fetched_unix_ms = excluded.fetched_unix_ms,
+                expires_unix_ms = excluded.expires_unix_ms,
+                last_error = excluded.last_error",
+            params![
+                entity_type,
+                entity_key,
+                Self::enrichment_status_to_str(payload.status),
+                payload.blurb,
+                payload
+                    .image_path
+                    .as_ref()
+                    .map(|path| path.to_string_lossy().to_string()),
+                image_url,
+                payload.source_name,
+                payload.source_url,
+                fetched_unix_ms,
+                expires_unix_ms,
+                last_error.unwrap_or_default(),
+            ],
+        )?;
+        Ok(())
+    }
+
+    /// Removes all expired enrichment cache rows.
+    pub fn prune_expired_library_enrichment_cache(
+        &self,
+        now_unix_ms: i64,
+    ) -> Result<(), rusqlite::Error> {
+        self.conn.execute(
+            "DELETE FROM library_enrichment_cache WHERE expires_unix_ms <= ?1",
+            params![now_unix_ms],
+        )?;
+        Ok(())
+    }
+
+    /// Clears cached image path references matching one on-disk path.
+    pub fn clear_library_enrichment_image_path(
+        &self,
+        image_path: &str,
+    ) -> Result<(), rusqlite::Error> {
+        self.conn.execute(
+            "UPDATE library_enrichment_cache SET image_path = NULL WHERE image_path = ?1",
+            params![image_path],
+        )?;
+        Ok(())
     }
 }
 

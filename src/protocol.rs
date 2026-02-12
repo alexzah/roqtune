@@ -206,6 +206,14 @@ pub enum LibraryMessage {
     RequestDecadeSongs {
         decade: String,
     },
+    RequestEnrichment {
+        entity: LibraryEnrichmentEntity,
+        priority: LibraryEnrichmentPriority,
+    },
+    LibraryViewportChanged {
+        first_row: usize,
+        row_count: usize,
+    },
     ScanStarted,
     ScanCompleted {
         indexed_tracks: usize,
@@ -239,6 +247,7 @@ pub enum LibraryMessage {
         decade: String,
         songs: Vec<LibrarySong>,
     },
+    EnrichmentResult(LibraryEnrichmentPayload),
     AddToPlaylistsCompleted {
         playlist_count: usize,
         track_count: usize,
@@ -247,6 +256,40 @@ pub enum LibraryMessage {
     ToastTimeout {
         generation: u64,
     },
+}
+
+/// Stable identity for one enrichable library entity.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Deserialize, serde::Serialize)]
+pub enum LibraryEnrichmentEntity {
+    Artist { artist: String },
+    Album { album: String, album_artist: String },
+}
+
+/// Scheduling intent for enrichment requests.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+pub enum LibraryEnrichmentPriority {
+    Interactive,
+    Prefetch,
+}
+
+/// Result state for one enrichment lookup.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+pub enum LibraryEnrichmentStatus {
+    Ready,
+    NotFound,
+    Disabled,
+    Error,
+}
+
+/// Display-only metadata fetched for library artist/album views.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+pub struct LibraryEnrichmentPayload {
+    pub entity: LibraryEnrichmentEntity,
+    pub status: LibraryEnrichmentStatus,
+    pub blurb: String,
+    pub image_path: Option<PathBuf>,
+    pub source_name: String,
+    pub source_url: String,
 }
 
 /// Metadata editor commands and notifications.

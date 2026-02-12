@@ -219,6 +219,12 @@ export component AppWindow inherits Window {
     in-out property <bool> library_album_header_has_art: false;
     in-out property <image> library_album_header_art;
     in-out property <string> library_album_header_meta: "";
+    in-out property <string> library_detail_header_blurb: "";
+    in-out property <string> library_detail_header_source_name: "";
+    in-out property <string> library_detail_header_source_url: "";
+    in-out property <bool> library_detail_header_source_visible: false;
+    in-out property <bool> library_detail_header_loading: false;
+    in-out property <bool> library_online_prompt_visible: false;
     in-out property <[LibraryRowData]> library_model: [];
     in-out property <bool> show_library_context_menu: false;
     property <length> library_context_menu_x: 0px;
@@ -242,6 +248,8 @@ export component AppWindow inherits Window {
     in-out property <bool> show_library_first_start_dialog: false;
     in-out property <[string]> settings_library_folders: [];
     in-out property <int> settings_library_selected_folder_index: -1;
+    in-out property <bool> settings_library_online_metadata_enabled: false;
+    in-out property <bool> settings_library_online_metadata_prompt_pending: true;
     in-out property <bool> layout_edit_mode: false;
     in-out property <bool> show_layout_editor_dialog: false;
     in-out property <bool> show_layout_leaf_context_menu: false;
@@ -1312,7 +1320,7 @@ export component AppWindow inherits Window {
                             width: 32px;
                         }
                         if root.library_album_header_visible && root.library_can_go_back : Text {
-                            text: "Back to Albums";
+                            text: root.library_root_index == 1 ? "Back to Artists" : "Back to Albums";
                             color: #8fa7c6;
                             font-size: 11px;
                             vertical-alignment: center;
@@ -1343,7 +1351,7 @@ export component AppWindow inherits Window {
                     }
 
                     if root.library_album_header_visible : Rectangle {
-                        height: 190px;
+                        height: 220px;
                         HorizontalLayout {
                             spacing: 14px;
                             Rectangle {
@@ -1360,7 +1368,7 @@ export component AppWindow inherits Window {
                                     image-fit: contain;
                                 }
                                 if !root.library_album_header_has_art : Text {
-                                    text: "▦";
+                                    text: root.library_root_index == 1 ? "◎" : "▦";
                                     color: #8fa7c6;
                                     font-size: 22px;
                                     horizontal-alignment: center;
@@ -1393,6 +1401,38 @@ export component AppWindow inherits Window {
                                         font-size: 11px;
                                         overflow: elide;
                                         horizontal-alignment: left;
+                                    }
+                                    Text {
+                                        text: root.library_detail_header_loading
+                                            ? "Loading internet metadata..."
+                                            : root.library_detail_header_blurb;
+                                        color: #c7c7c7;
+                                        font-size: 11px;
+                                        wrap: word-wrap;
+                                        max-height: 76px;
+                                        overflow: clip;
+                                        horizontal-alignment: left;
+                                    }
+                                    if root.library_detail_header_source_visible : Rectangle {
+                                        height: 18px;
+                                        background: library-source-link-ta.has-hover ? #2b2b2b : transparent;
+                                        border-radius: 3px;
+                                        Text {
+                                            x: 6px;
+                                            width: max(0px, parent.width - 12px);
+                                            text: "Source: " + root.library_detail_header_source_name;
+                                            color: #9fbedf;
+                                            font-size: 10px;
+                                            vertical-alignment: center;
+                                            overflow: elide;
+                                        }
+                                        library-source-link-ta := TouchArea {
+                                            clicked => {
+                                                if root.library_detail_header_source_url != "" {
+                                                    root.open_external_url(root.library_detail_header_source_url);
+                                                }
+                                            }
+                                        }
                                     }
                                     Rectangle { vertical-stretch: 1; }
                                 }
@@ -1452,8 +1492,16 @@ export component AppWindow inherits Window {
 
                     Rectangle { height: 1px; background: #333; }
 
-                        ScrollView {
+                        library-list-scroll := ScrollView {
                             vertical-stretch: 1;
+                            changed viewport-y => {
+                                let row-height-px = root.library_root_index == 2 ? 38
+                                    : root.library_root_index == 0 ? 32
+                                    : 34;
+                                let first-row = max(0, floor(self.viewport-y / (row-height-px * 1px)));
+                                let visible-rows = max(1, floor(self.height / (row-height-px * 1px)) + 2);
+                                root.library_viewport_changed(first-row, visible-rows);
+                            }
                             VerticalLayout {
                                 alignment: start;
                                 for item[row] in root.library_model : Rectangle {
@@ -1532,6 +1580,67 @@ export component AppWindow inherits Window {
                         horizontal-alignment: center;
                         vertical-alignment: center;
                         overflow: elide;
+                    }
+                }
+
+                if root.library_online_prompt_visible : Rectangle {
+                    z: 21;
+                    x: (parent.width - self.width) / 2;
+                    y: max(10px, parent.height - self.height - 52px);
+                    width: min(parent.width - 24px, 460px);
+                    height: 34px;
+                    border-radius: 4px;
+                    border-width: 1px;
+                    border-color: #3a4f68;
+                    background: #18314adf;
+
+                    HorizontalLayout {
+                        spacing: 8px;
+                        padding-left: 10px;
+                        padding-right: 6px;
+
+                        Text {
+                            text: "Fetch artist/album page metadata from internet";
+                            color: #dbe9f8;
+                            font-size: 11px;
+                            horizontal-stretch: 1;
+                            vertical-alignment: center;
+                            overflow: elide;
+                        }
+
+                        Rectangle {
+                            width: 22px;
+                            height: 22px;
+                            border-radius: 3px;
+                            background: prompt-accept-ta.has-hover ? #2c5c86 : #234a6c;
+                            Text {
+                                text: "✓";
+                                color: #e8f3ff;
+                                font-size: 12px;
+                                horizontal-alignment: center;
+                                vertical-alignment: center;
+                            }
+                            prompt-accept-ta := TouchArea {
+                                clicked => { root.library_online_metadata_prompt_accept(); }
+                            }
+                        }
+
+                        Rectangle {
+                            width: 22px;
+                            height: 22px;
+                            border-radius: 3px;
+                            background: prompt-deny-ta.has-hover ? #663838 : #4f2e2e;
+                            Text {
+                                text: "✕";
+                                color: #ffe8e8;
+                                font-size: 11px;
+                                horizontal-alignment: center;
+                                vertical-alignment: center;
+                            }
+                            prompt-deny-ta := TouchArea {
+                                clicked => { root.library_online_metadata_prompt_deny(); }
+                            }
+                        }
                     }
                 }
             }
@@ -3517,6 +3626,83 @@ export component AppWindow inherits Window {
                                 clicked => { root.library_rescan(); }
                             }
                         }
+
+                        Rectangle {
+                            height: 1px;
+                            background: #343434;
+                        }
+
+                        Text {
+                            text: "Online Metadata (Display-Only)";
+                            color: #ddd;
+                            font-size: 12px;
+                            font-weight: 700;
+                        }
+
+                        Rectangle {
+                            height: 30px;
+                            background: settings-library-online-toggle-ta.has-hover ? #2d2d2d : transparent;
+                            border-radius: 4px;
+                            Text {
+                                x: 8px;
+                                width: max(0px, parent.width - 40px);
+                                text: "Fetch metadata for artist/album pages from internet";
+                                color: #ddd;
+                                font-size: 11px;
+                                vertical-alignment: center;
+                                overflow: elide;
+                            }
+                            Switch {
+                                x: parent.width - self.width - 8px;
+                                y: (parent.height - self.height) / 2;
+                                width: 18px;
+                                text: "";
+                                checked: root.settings_library_online_metadata_enabled;
+                            }
+                            settings-library-online-toggle-ta := TouchArea {
+                                clicked => {
+                                    root.settings_library_online_metadata_enabled = !root.settings_library_online_metadata_enabled;
+                                    root.settings_set_library_online_metadata_enabled(root.settings_library_online_metadata_enabled);
+                                }
+                            }
+                        }
+
+                        Text {
+                            text: "This only changes artwork/text shown in Library views and never edits track tags.";
+                            color: #9da9b8;
+                            font-size: 10px;
+                            wrap: word-wrap;
+                        }
+
+                        Rectangle {
+                            height: 30px;
+                            background: settings-library-prompt-toggle-ta.has-hover ? #2d2d2d : transparent;
+                            border-radius: 4px;
+                            Text {
+                                x: 8px;
+                                width: max(0px, parent.width - 40px);
+                                text: "Show first-use internet metadata prompt";
+                                color: #ddd;
+                                font-size: 11px;
+                                vertical-alignment: center;
+                                overflow: elide;
+                            }
+                            Switch {
+                                x: parent.width - self.width - 8px;
+                                y: (parent.height - self.height) / 2;
+                                width: 18px;
+                                text: "";
+                                checked: root.settings_library_online_metadata_prompt_pending;
+                            }
+                            settings-library-prompt-toggle-ta := TouchArea {
+                                clicked => {
+                                    root.settings_library_online_metadata_prompt_pending = !root.settings_library_online_metadata_prompt_pending;
+                                    root.settings_set_library_online_metadata_prompt_pending(
+                                        root.settings_library_online_metadata_prompt_pending
+                                    );
+                                }
+                            }
+                        }
                     }
             }
 
@@ -3724,6 +3910,11 @@ export component AppWindow inherits Window {
     callback library_rescan();
     callback settings_select_library_folder(int);
     callback library_skip_first_start();
+    callback library_online_metadata_prompt_accept();
+    callback library_online_metadata_prompt_deny();
+    callback settings_set_library_online_metadata_enabled(bool);
+    callback settings_set_library_online_metadata_prompt_pending(bool);
+    callback library_viewport_changed(int, int);
     callback handle_track_click(int, bool, bool);
     callback on_pointer_down(int, bool, bool);
     callback on_drag_start(int);
@@ -3788,6 +3979,7 @@ export component AppWindow inherits Window {
     callback layout_redo_last_action();
     callback reset_layout_default();
     callback open_settings();
+    callback open_external_url(string);
     callback tooltip_hover_changed(bool, string, int, int);
     callback apply_settings(int, int, int, int, string, string, string, string, bool, bool, int, int, bool);
 }

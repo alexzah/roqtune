@@ -85,6 +85,14 @@ pub struct LibraryConfig {
     pub folders: Vec<String>,
     #[serde(default = "default_true")]
     pub show_first_start_prompt: bool,
+    #[serde(default)]
+    pub online_metadata_enabled: bool,
+    #[serde(default = "default_true")]
+    pub online_metadata_prompt_pending: bool,
+    #[serde(default = "default_artist_image_cache_ttl_days")]
+    pub artist_image_cache_ttl_days: u32,
+    #[serde(default = "default_artist_image_cache_max_size_mb")]
+    pub artist_image_cache_max_size_mb: u32,
 }
 
 /// Declarative playlist column definition.
@@ -174,6 +182,10 @@ impl Default for LibraryConfig {
         Self {
             folders: Vec::new(),
             show_first_start_prompt: true,
+            online_metadata_enabled: false,
+            online_metadata_prompt_pending: true,
+            artist_image_cache_ttl_days: default_artist_image_cache_ttl_days(),
+            artist_image_cache_max_size_mb: default_artist_image_cache_max_size_mb(),
         }
     }
 }
@@ -208,6 +220,14 @@ fn default_window_height() -> u32 {
 
 fn default_volume() -> f32 {
     1.0
+}
+
+fn default_artist_image_cache_ttl_days() -> u32 {
+    30
+}
+
+fn default_artist_image_cache_max_size_mb() -> u32 {
+    256
 }
 
 pub fn default_playlist_album_art_column_min_width_px() -> u32 {
@@ -305,6 +325,10 @@ mod tests {
         assert!((config.ui.volume - 1.0).abs() < f32::EPSILON);
         assert!(config.library.folders.is_empty());
         assert!(config.library.show_first_start_prompt);
+        assert!(!config.library.online_metadata_enabled);
+        assert!(config.library.online_metadata_prompt_pending);
+        assert_eq!(config.library.artist_image_cache_ttl_days, 30);
+        assert_eq!(config.library.artist_image_cache_max_size_mb, 256);
         assert_eq!(config.buffering.player_low_watermark_ms, 12_000);
         assert_eq!(config.buffering.player_target_buffer_ms, 24_000);
         assert_eq!(config.buffering.player_request_interval_ms, 120);
@@ -346,6 +370,10 @@ decoder_request_chunk_ms = 1500
         assert!((parsed.ui.volume - 1.0).abs() < f32::EPSILON);
         assert!(parsed.library.folders.is_empty());
         assert!(parsed.library.show_first_start_prompt);
+        assert!(!parsed.library.online_metadata_enabled);
+        assert!(parsed.library.online_metadata_prompt_pending);
+        assert_eq!(parsed.library.artist_image_cache_ttl_days, 30);
+        assert_eq!(parsed.library.artist_image_cache_max_size_mb, 256);
         assert_eq!(
             parsed.buffering.player_target_buffer_ms,
             BufferingConfig::default().player_target_buffer_ms
@@ -441,6 +469,22 @@ decoder_request_chunk_ms = 1500
         assert_eq!(
             parsed.library.show_first_start_prompt,
             defaults.library.show_first_start_prompt
+        );
+        assert_eq!(
+            parsed.library.online_metadata_enabled,
+            defaults.library.online_metadata_enabled
+        );
+        assert_eq!(
+            parsed.library.online_metadata_prompt_pending,
+            defaults.library.online_metadata_prompt_pending
+        );
+        assert_eq!(
+            parsed.library.artist_image_cache_ttl_days,
+            defaults.library.artist_image_cache_ttl_days
+        );
+        assert_eq!(
+            parsed.library.artist_image_cache_max_size_mb,
+            defaults.library.artist_image_cache_max_size_mb
         );
 
         assert_eq!(

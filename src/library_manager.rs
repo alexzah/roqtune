@@ -611,6 +611,8 @@ impl LibraryManager {
                     Message::Library(LibraryMessage::RequestDecadeSongs { decade }) => {
                         self.publish_decade_songs(decade);
                     }
+                    Message::Library(LibraryMessage::RequestEnrichment { .. }) => {}
+                    Message::Library(LibraryMessage::LibraryViewportChanged { .. }) => {}
                     Message::Library(LibraryMessage::AddSelectionToPlaylists {
                         selections,
                         playlist_ids,
