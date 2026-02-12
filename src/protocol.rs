@@ -210,6 +210,9 @@ pub enum LibraryMessage {
         entity: LibraryEnrichmentEntity,
         priority: LibraryEnrichmentPriority,
     },
+    ReplaceEnrichmentPrefetchQueue {
+        entities: Vec<LibraryEnrichmentEntity>,
+    },
     EnrichmentPrefetchTick,
     ClearEnrichmentCache,
     LibraryViewportChanged {

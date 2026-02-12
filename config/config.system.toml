@@ -135,10 +135,6 @@ artist_image_cache_ttl_days = 30
 # Maximum on-disk artist-image cache size in MB before oldest files are pruned.
 artist_image_cache_max_size_mb = 256
 
-# Enable local AI reranking for online metadata candidate selection.
-# Uses a small local cross-encoder model (no API keys).
-local_ai_reranker_enabled = true
-
 # ---------------------------------------------------------------------
 # ADVANCED USERS ONLY
 # These buffering settings directly affect decoder/player behavior.

@@ -97,11 +97,15 @@ pub struct UiManager {
     library_enrichment:
         HashMap<protocol::LibraryEnrichmentEntity, protocol::LibraryEnrichmentPayload>,
     library_enrichment_pending: HashSet<protocol::LibraryEnrichmentEntity>,
+    library_enrichment_last_request_at: HashMap<protocol::LibraryEnrichmentEntity, Instant>,
+    library_enrichment_retry_counts: HashMap<protocol::LibraryEnrichmentEntity, u32>,
+    library_enrichment_retry_not_before: HashMap<protocol::LibraryEnrichmentEntity, Instant>,
     library_last_detail_enrichment_entity: Option<protocol::LibraryEnrichmentEntity>,
     library_online_metadata_enabled: bool,
     library_online_metadata_prompt_pending: bool,
     library_artist_prefetch_first_row: usize,
     library_artist_prefetch_row_count: usize,
+    library_last_prefetch_entities: Vec<protocol::LibraryEnrichmentEntity>,
     library_search_query: String,
     library_search_visible: bool,
     library_scan_in_progress: bool,
@@ -207,6 +211,7 @@ const LIBRARY_ITEM_KIND_ARTIST: i32 = 1;
 const LIBRARY_ITEM_KIND_ALBUM: i32 = 2;
 const LIBRARY_ITEM_KIND_GENRE: i32 = 3;
 const LIBRARY_ITEM_KIND_DECADE: i32 = 4;
+const DETAIL_ENRICHMENT_RETRY_INTERVAL: Duration = Duration::from_secs(2);
 
 thread_local! {
     static TRACK_ROW_COVER_ART_IMAGE_CACHE: RefCell<HashMap<PathBuf, Image>> =
@@ -712,11 +717,15 @@ impl UiManager {
             folder_cover_art_paths: HashMap::new(),
             library_enrichment: HashMap::new(),
             library_enrichment_pending: HashSet::new(),
+            library_enrichment_last_request_at: HashMap::new(),
+            library_enrichment_retry_counts: HashMap::new(),
+            library_enrichment_retry_not_before: HashMap::new(),
             library_last_detail_enrichment_entity: None,
             library_online_metadata_enabled: false,
             library_online_metadata_prompt_pending: true,
             library_artist_prefetch_first_row: 0,
             library_artist_prefetch_row_count: 0,
+            library_last_prefetch_entities: Vec::new(),
             library_search_query: String::new(),
             library_search_visible: false,
             library_scan_in_progress: false,
@@ -2928,6 +2937,53 @@ impl UiManager {
         })
     }
 
+    fn is_retryable_enrichment_error(payload: &protocol::LibraryEnrichmentPayload) -> bool {
+        payload.status == protocol::LibraryEnrichmentStatus::Error
+            && (payload.blurb.to_ascii_lowercase().contains("timed out")
+                || payload.blurb.to_ascii_lowercase().contains("rate limit"))
+    }
+
+    fn clear_enrichment_retry_state(&mut self, entity: &protocol::LibraryEnrichmentEntity) {
+        self.library_enrichment_retry_counts.remove(entity);
+        self.library_enrichment_retry_not_before.remove(entity);
+    }
+
+    fn schedule_enrichment_retry_backoff(&mut self, entity: &protocol::LibraryEnrichmentEntity) {
+        let attempt = self
+            .library_enrichment_retry_counts
+            .entry(entity.clone())
+            .and_modify(|value| *value = value.saturating_add(1))
+            .or_insert(1);
+        let exponent = (*attempt).saturating_sub(1).min(6);
+        let delay_ms = 500u64.saturating_mul(1u64 << exponent).min(30_000);
+        self.library_enrichment_retry_not_before.insert(
+            entity.clone(),
+            Instant::now() + Duration::from_millis(delay_ms),
+        );
+    }
+
+    fn enrichment_retry_backoff_elapsed(&self, entity: &protocol::LibraryEnrichmentEntity) -> bool {
+        self.library_enrichment_retry_not_before
+            .get(entity)
+            .is_none_or(|deadline| Instant::now() >= *deadline)
+    }
+
+    fn should_request_prefetch_for_entity(
+        &mut self,
+        entity: &protocol::LibraryEnrichmentEntity,
+    ) -> bool {
+        let Some(existing) = self.library_enrichment.get(entity).cloned() else {
+            return true;
+        };
+        if Self::is_retryable_enrichment_error(&existing)
+            && self.enrichment_retry_backoff_elapsed(entity)
+        {
+            self.library_enrichment.remove(entity);
+            return true;
+        }
+        false
+    }
+
     fn request_enrichment(
         &mut self,
         entity: protocol::LibraryEnrichmentEntity,
@@ -2943,12 +2999,32 @@ impl UiManager {
         {
             self.library_enrichment.remove(&entity);
         }
+        if let Some(existing) = self.library_enrichment.get(&entity).cloned() {
+            if Self::is_retryable_enrichment_error(&existing)
+                && self.enrichment_retry_backoff_elapsed(&entity)
+            {
+                self.library_enrichment.remove(&entity);
+            }
+        }
 
         if self.library_enrichment_pending.contains(&entity) {
             if priority == protocol::LibraryEnrichmentPriority::Interactive {
-                let _ = self.bus_sender.send(protocol::Message::Library(
-                    protocol::LibraryMessage::RequestEnrichment { entity, priority },
-                ));
+                let should_retry = self
+                    .library_enrichment_last_request_at
+                    .get(&entity)
+                    .is_none_or(|requested_at| {
+                        requested_at.elapsed() >= DETAIL_ENRICHMENT_RETRY_INTERVAL
+                    });
+                if should_retry {
+                    let _ = self.bus_sender.send(protocol::Message::Library(
+                        protocol::LibraryMessage::RequestEnrichment {
+                            entity: entity.clone(),
+                            priority,
+                        },
+                    ));
+                    self.library_enrichment_last_request_at
+                        .insert(entity, Instant::now());
+                }
             }
             return;
         }
@@ -2956,10 +3032,50 @@ impl UiManager {
             return;
         }
 
-        self.library_enrichment_pending.insert(entity.clone());
+        if priority == protocol::LibraryEnrichmentPriority::Interactive {
+            self.library_enrichment_pending.insert(entity.clone());
+        }
         let _ = self.bus_sender.send(protocol::Message::Library(
-            protocol::LibraryMessage::RequestEnrichment { entity, priority },
+            protocol::LibraryMessage::RequestEnrichment {
+                entity: entity.clone(),
+                priority,
+            },
         ));
+        if priority == protocol::LibraryEnrichmentPriority::Interactive {
+            self.library_enrichment_last_request_at
+                .insert(entity, Instant::now());
+        }
+    }
+
+    fn retain_pending_detail_entity_only(&mut self) {
+        self.library_enrichment_pending
+            .retain(|entity| self.library_last_detail_enrichment_entity.as_ref() == Some(entity));
+        self.library_enrichment_last_request_at
+            .retain(|entity, _| self.library_enrichment_pending.contains(entity));
+    }
+
+    fn replace_prefetch_queue_if_changed(
+        &mut self,
+        entities: Vec<protocol::LibraryEnrichmentEntity>,
+    ) {
+        if self.library_last_prefetch_entities == entities {
+            return;
+        }
+        self.library_last_prefetch_entities = entities.clone();
+        let _ = self.bus_sender.send(protocol::Message::Library(
+            protocol::LibraryMessage::ReplaceEnrichmentPrefetchQueue { entities },
+        ));
+    }
+
+    fn maybe_retry_stalled_detail_enrichment(&mut self) {
+        let view = self.current_library_view();
+        let Some(entity) = Self::detail_enrichment_entity_for_view(&view) else {
+            return;
+        };
+        if !self.library_enrichment_pending.contains(&entity) {
+            return;
+        }
+        self.request_enrichment(entity, protocol::LibraryEnrichmentPriority::Interactive);
     }
 
     fn request_current_detail_enrichment_if_needed(&mut self, view: &LibraryViewState) {
@@ -2988,46 +3104,47 @@ impl UiManager {
             self.current_library_view(),
             LibraryViewState::ArtistsRoot | LibraryViewState::GlobalSearch
         ) {
+            self.retain_pending_detail_entity_only();
+            self.replace_prefetch_queue_if_changed(Vec::new());
             return;
         }
         if !self.library_online_metadata_enabled {
+            self.retain_pending_detail_entity_only();
+            self.replace_prefetch_queue_if_changed(Vec::new());
             return;
         }
         if row_count == 0 {
-            return;
-        }
-        if self.library_enrichment_pending.len() >= 48 {
+            self.retain_pending_detail_entity_only();
+            self.replace_prefetch_queue_if_changed(Vec::new());
             return;
         }
 
-        let lookahead = 2usize;
-        let start = first_row.saturating_sub(2);
+        let start = first_row.min(self.library_view_indices.len());
         let end = first_row
             .saturating_add(row_count)
-            .saturating_add(lookahead)
             .min(self.library_view_indices.len());
-        let mut requested_count = 0usize;
+        let mut prefetch_entities = Vec::new();
+        let mut seen_entities = HashSet::new();
         for row in start..end {
-            if requested_count >= 2 {
-                break;
-            }
             let Some(source_index) = self.library_view_indices.get(row).copied() else {
                 continue;
             };
             let Some(LibraryEntry::Artist(artist)) = self.library_entries.get(source_index) else {
                 continue;
             };
-            let pending_before = self.library_enrichment_pending.len();
-            self.request_enrichment(
-                protocol::LibraryEnrichmentEntity::Artist {
-                    artist: artist.artist.clone(),
-                },
-                protocol::LibraryEnrichmentPriority::Prefetch,
-            );
-            if self.library_enrichment_pending.len() > pending_before {
-                requested_count = requested_count.saturating_add(1);
+            let entity = protocol::LibraryEnrichmentEntity::Artist {
+                artist: artist.artist.clone(),
+            };
+            if !seen_entities.insert(entity.clone()) {
+                continue;
+            }
+            if self.should_request_prefetch_for_entity(&entity) {
+                prefetch_entities.push(entity);
             }
         }
+
+        self.retain_pending_detail_entity_only();
+        self.replace_prefetch_queue_if_changed(prefetch_entities);
     }
 
     fn on_enrichment_prefetch_tick(&mut self) {
@@ -3035,20 +3152,18 @@ impl UiManager {
         {
             return;
         }
+        self.maybe_retry_stalled_detail_enrichment();
 
         if matches!(
             self.current_library_view(),
             LibraryViewState::ArtistsRoot | LibraryViewState::GlobalSearch
         ) {
-            let prefetch_row_count = if self.library_artist_prefetch_row_count > 0 {
-                self.library_artist_prefetch_row_count
-            } else {
-                16
-            };
             self.prefetch_artist_enrichment_window(
                 self.library_artist_prefetch_first_row,
-                prefetch_row_count,
+                self.library_artist_prefetch_row_count,
             );
+        } else {
+            self.prefetch_artist_enrichment_window(0, 0);
         }
     }
 
@@ -3709,8 +3824,11 @@ impl UiManager {
                             "Internet metadata is disabled in Settings.".to_string();
                     }
                     protocol::LibraryEnrichmentStatus::Error => {
-                        detail_header_blurb =
-                            "Could not load internet metadata right now.".to_string();
+                        detail_header_blurb = if payload.blurb.trim().is_empty() {
+                            "Could not load internet metadata right now.".to_string()
+                        } else {
+                            payload.blurb.clone()
+                        };
                     }
                 }
             } else {
@@ -4211,6 +4329,10 @@ impl UiManager {
                                 self.library_cover_art_paths.clear();
                                 self.folder_cover_art_paths.clear();
                                 self.library_enrichment_pending.clear();
+                                self.library_enrichment_last_request_at.clear();
+                                self.library_enrichment_retry_counts.clear();
+                                self.library_enrichment_retry_not_before.clear();
+                                self.replace_prefetch_queue_if_changed(Vec::new());
                                 self.library_last_detail_enrichment_entity = None;
                                 self.library_add_to_dialog_visible = false;
                                 self.sync_library_add_to_playlist_ui();
@@ -4224,6 +4346,10 @@ impl UiManager {
                                 self.folder_cover_art_paths.clear();
                                 self.library_enrichment.clear();
                                 self.library_enrichment_pending.clear();
+                                self.library_enrichment_last_request_at.clear();
+                                self.library_enrichment_retry_counts.clear();
+                                self.library_enrichment_retry_not_before.clear();
+                                self.replace_prefetch_queue_if_changed(Vec::new());
                                 self.library_last_detail_enrichment_entity = None;
                                 self.request_library_view_data();
                                 self.sync_library_ui();
@@ -4358,7 +4484,14 @@ impl UiManager {
                             }
                             protocol::LibraryMessage::EnrichmentResult(payload) => {
                                 self.library_enrichment_pending.remove(&payload.entity);
+                                self.library_enrichment_last_request_at
+                                    .remove(&payload.entity);
                                 let entity = payload.entity.clone();
+                                if Self::is_retryable_enrichment_error(&payload) {
+                                    self.schedule_enrichment_retry_backoff(&entity);
+                                } else {
+                                    self.clear_enrichment_retry_state(&entity);
+                                }
                                 self.library_enrichment.insert(entity.clone(), payload);
 
                                 let mut updated = false;
@@ -4387,6 +4520,10 @@ impl UiManager {
                             } => {
                                 self.library_enrichment.clear();
                                 self.library_enrichment_pending.clear();
+                                self.library_enrichment_last_request_at.clear();
+                                self.library_enrichment_retry_counts.clear();
+                                self.library_enrichment_retry_not_before.clear();
+                                self.replace_prefetch_queue_if_changed(Vec::new());
                                 self.library_last_detail_enrichment_entity = None;
                                 TRACK_ROW_COVER_ART_IMAGE_CACHE.with(|cache| {
                                     cache.borrow_mut().clear();
@@ -4447,6 +4584,7 @@ impl UiManager {
                             | protocol::LibraryMessage::RequestGenreSongs { .. }
                             | protocol::LibraryMessage::RequestDecadeSongs { .. }
                             | protocol::LibraryMessage::RequestEnrichment { .. }
+                            | protocol::LibraryMessage::ReplaceEnrichmentPrefetchQueue { .. }
                             | protocol::LibraryMessage::ClearEnrichmentCache
                             | protocol::LibraryMessage::AddSelectionToPlaylists { .. } => {}
                         },
@@ -5066,6 +5204,10 @@ impl UiManager {
                                 config.library.online_metadata_prompt_pending;
                             if !self.library_online_metadata_enabled {
                                 self.library_enrichment_pending.clear();
+                                self.library_enrichment_last_request_at.clear();
+                                self.library_enrichment_retry_counts.clear();
+                                self.library_enrichment_retry_not_before.clear();
+                                self.replace_prefetch_queue_if_changed(Vec::new());
                                 self.library_last_detail_enrichment_entity = None;
                             }
                             self.playlist_columns = config.ui.playlist_columns.clone();

@@ -93,8 +93,6 @@ pub struct LibraryConfig {
     pub artist_image_cache_ttl_days: u32,
     #[serde(default = "default_artist_image_cache_max_size_mb")]
     pub artist_image_cache_max_size_mb: u32,
-    #[serde(default = "default_true")]
-    pub local_ai_reranker_enabled: bool,
 }
 
 /// Declarative playlist column definition.
@@ -188,7 +186,6 @@ impl Default for LibraryConfig {
             online_metadata_prompt_pending: true,
             artist_image_cache_ttl_days: default_artist_image_cache_ttl_days(),
             artist_image_cache_max_size_mb: default_artist_image_cache_max_size_mb(),
-            local_ai_reranker_enabled: true,
         }
     }
 }
@@ -332,7 +329,6 @@ mod tests {
         assert!(config.library.online_metadata_prompt_pending);
         assert_eq!(config.library.artist_image_cache_ttl_days, 30);
         assert_eq!(config.library.artist_image_cache_max_size_mb, 256);
-        assert!(config.library.local_ai_reranker_enabled);
         assert_eq!(config.buffering.player_low_watermark_ms, 12_000);
         assert_eq!(config.buffering.player_target_buffer_ms, 24_000);
         assert_eq!(config.buffering.player_request_interval_ms, 120);
@@ -378,7 +374,6 @@ decoder_request_chunk_ms = 1500
         assert!(parsed.library.online_metadata_prompt_pending);
         assert_eq!(parsed.library.artist_image_cache_ttl_days, 30);
         assert_eq!(parsed.library.artist_image_cache_max_size_mb, 256);
-        assert!(parsed.library.local_ai_reranker_enabled);
         assert_eq!(
             parsed.buffering.player_target_buffer_ms,
             BufferingConfig::default().player_target_buffer_ms
@@ -490,10 +485,6 @@ decoder_request_chunk_ms = 1500
         assert_eq!(
             parsed.library.artist_image_cache_max_size_mb,
             defaults.library.artist_image_cache_max_size_mb
-        );
-        assert_eq!(
-            parsed.library.local_ai_reranker_enabled,
-            defaults.library.local_ai_reranker_enabled
         );
 
         assert_eq!(
