@@ -628,6 +628,8 @@ impl UiManager {
         ui: slint::Weak<AppWindow>,
         bus_receiver: Receiver<protocol::Message>,
         bus_sender: Sender<protocol::Message>,
+        initial_online_metadata_enabled: bool,
+        initial_online_metadata_prompt_pending: bool,
     ) -> Self {
         let (cover_art_lookup_tx, cover_art_lookup_rx) = mpsc::channel::<CoverArtLookupRequest>();
         let cover_art_bus_sender = bus_sender.clone();
@@ -723,8 +725,8 @@ impl UiManager {
             library_enrichment_retry_counts: HashMap::new(),
             library_enrichment_retry_not_before: HashMap::new(),
             library_last_detail_enrichment_entity: None,
-            library_online_metadata_enabled: false,
-            library_online_metadata_prompt_pending: true,
+            library_online_metadata_enabled: initial_online_metadata_enabled,
+            library_online_metadata_prompt_pending: initial_online_metadata_prompt_pending,
             library_artist_prefetch_first_row: 0,
             library_artist_prefetch_row_count: 0,
             library_last_prefetch_entities: Vec::new(),

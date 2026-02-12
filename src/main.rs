@@ -2627,6 +2627,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 .lock()
                 .expect("config state lock poisoned");
             let mut next = state.clone();
+            // Any explicit user choice here counts as handling first-use prompt.
+            next.library.online_metadata_prompt_pending = false;
             next.library.online_metadata_enabled = enabled;
             next = sanitize_config(next);
             *state = next.clone();
@@ -4623,12 +4625,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Setup UI manager
     let ui_manager_bus_sender = bus_sender.clone();
     let ui_handle_clone = ui.as_weak().clone();
+    let initial_online_metadata_enabled = config.library.online_metadata_enabled;
+    let initial_online_metadata_prompt_pending = config.library.online_metadata_prompt_pending;
     thread::spawn(move || {
         let run_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             let mut ui_manager = UiManager::new(
                 ui_handle_clone,
                 ui_manager_bus_sender.subscribe(),
                 ui_manager_bus_sender.clone(),
+                initial_online_metadata_enabled,
+                initial_online_metadata_prompt_pending,
             );
             ui_manager.run();
         }));
