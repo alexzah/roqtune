@@ -1,5 +1,9 @@
 //! Split-tree layout data model, migration, actions, and geometry.
 
+use crate::config::{
+    default_playlist_album_art_column_max_width_px, default_playlist_album_art_column_min_width_px,
+    default_playlist_columns, PlaylistColumnConfig,
+};
 use std::collections::HashSet;
 
 /// Current persisted layout schema version.
@@ -159,6 +163,12 @@ pub enum LayoutNode {
 pub struct LayoutConfig {
     /// Layout schema version.
     pub version: u32,
+    /// Built-in Album Art playlist-column width minimum.
+    pub playlist_album_art_column_min_width_px: u32,
+    /// Built-in Album Art playlist-column width maximum.
+    pub playlist_album_art_column_max_width_px: u32,
+    /// Ordered playlist column list (built-ins + custom columns).
+    pub playlist_columns: Vec<PlaylistColumnConfig>,
     /// Root node of the split-tree.
     pub root: LayoutNode,
     /// Runtime-only leaf selection used in edit mode.
@@ -170,6 +180,11 @@ impl Default for LayoutConfig {
     fn default() -> Self {
         Self {
             version: LAYOUT_VERSION,
+            playlist_album_art_column_min_width_px: default_playlist_album_art_column_min_width_px(
+            ),
+            playlist_album_art_column_max_width_px: default_playlist_album_art_column_max_width_px(
+            ),
+            playlist_columns: default_playlist_columns(),
             root: build_default_layout_root(),
             selected_leaf_id: None,
         }
@@ -187,6 +202,12 @@ enum LayoutConfigWire {
 struct LayoutConfigV2Wire {
     #[serde(default = "default_layout_version", rename = "version")]
     _version: u32,
+    #[serde(default = "default_playlist_album_art_column_min_width_px")]
+    playlist_album_art_column_min_width_px: u32,
+    #[serde(default = "default_playlist_album_art_column_max_width_px")]
+    playlist_album_art_column_max_width_px: u32,
+    #[serde(default = "default_playlist_columns")]
+    playlist_columns: Vec<PlaylistColumnConfig>,
     #[serde(default = "default_layout_root_for_wire")]
     root: LayoutNode,
 }
@@ -214,6 +235,9 @@ impl<'de> serde::Deserialize<'de> for LayoutConfig {
         let config = match wire {
             LayoutConfigWire::V2(v2) => LayoutConfig {
                 version: LAYOUT_VERSION,
+                playlist_album_art_column_min_width_px: v2.playlist_album_art_column_min_width_px,
+                playlist_album_art_column_max_width_px: v2.playlist_album_art_column_max_width_px,
+                playlist_columns: v2.playlist_columns,
                 root: v2.root,
                 selected_leaf_id: None,
             },
@@ -527,6 +551,9 @@ fn migrate_legacy_layout(legacy: &LegacyLayoutConfig) -> LayoutConfig {
 
     LayoutConfig {
         version: LAYOUT_VERSION,
+        playlist_album_art_column_min_width_px: default_playlist_album_art_column_min_width_px(),
+        playlist_album_art_column_max_width_px: default_playlist_album_art_column_max_width_px(),
+        playlist_columns: default_playlist_columns(),
         root,
         selected_leaf_id: None,
     }
@@ -723,6 +750,9 @@ pub fn sanitize_layout_config(
         .and_then(|candidate| find_leaf_id(&root, candidate).map(|_| candidate.clone()));
     LayoutConfig {
         version: LAYOUT_VERSION,
+        playlist_album_art_column_min_width_px: config.playlist_album_art_column_min_width_px,
+        playlist_album_art_column_max_width_px: config.playlist_album_art_column_max_width_px,
+        playlist_columns: config.playlist_columns.clone(),
         root,
         selected_leaf_id: selected,
     }
@@ -924,6 +954,9 @@ pub fn add_root_leaf_if_empty(layout: &LayoutConfig, panel: LayoutPanelKind) -> 
     sanitize_layout_config(
         &LayoutConfig {
             version: LAYOUT_VERSION,
+            playlist_album_art_column_min_width_px: layout.playlist_album_art_column_min_width_px,
+            playlist_album_art_column_max_width_px: layout.playlist_album_art_column_max_width_px,
+            playlist_columns: layout.playlist_columns.clone(),
             root,
             selected_leaf_id: None,
         },
@@ -1239,6 +1272,11 @@ mod tests {
     fn sanitize_layout_config_preserves_duplicate_panels() {
         let config = LayoutConfig {
             version: LAYOUT_VERSION,
+            playlist_album_art_column_min_width_px:
+                crate::config::default_playlist_album_art_column_min_width_px(),
+            playlist_album_art_column_max_width_px:
+                crate::config::default_playlist_album_art_column_max_width_px(),
+            playlist_columns: crate::config::default_playlist_columns(),
             root: LayoutNode::Split {
                 id: "split-root".to_string(),
                 axis: SplitAxis::Vertical,

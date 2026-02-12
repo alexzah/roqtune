@@ -13,6 +13,65 @@
 # Layout schema version.
 version = 1
 
+# Built-in Album Art playlist-column width defaults.
+# Runtime sanitization clamps to:
+# min: 12..512
+# max: 24..1024
+# If min > max, values are swapped.
+playlist_album_art_column_min_width_px = 16
+playlist_album_art_column_max_width_px = 480
+
+# Playlist columns are ordered and rendered in this sequence.
+# Built-in columns should keep `custom = false`.
+# Custom user columns use `custom = true`.
+[[playlist_columns]]
+name = "Title"
+format = "{title}"
+enabled = true
+custom = false
+
+[[playlist_columns]]
+name = "Artist"
+format = "{artist}"
+enabled = true
+custom = false
+
+[[playlist_columns]]
+name = "Album"
+format = "{album}"
+enabled = true
+custom = false
+
+[[playlist_columns]]
+name = "Album Artist"
+format = "{album_artist}"
+enabled = false
+custom = false
+
+[[playlist_columns]]
+name = "Genre"
+format = "{genre}"
+enabled = false
+custom = false
+
+[[playlist_columns]]
+name = "Year"
+format = "{year}"
+enabled = false
+custom = false
+
+[[playlist_columns]]
+name = "Track #"
+format = "{track_number}"
+enabled = false
+custom = false
+
+[[playlist_columns]]
+name = "Album Art"
+format = "{album_art}"
+enabled = false
+custom = false
+
 [root]
 node_type = "split"
 id = "n17"

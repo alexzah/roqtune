@@ -59,6 +59,7 @@ The app is organized into cooperating runtime components connected through an ev
 
 - Config file: `<config_dir>/roqtune/config.toml`
 - Layout file: `<config_dir>/roqtune/layout.toml`
+  - Includes split-tree layout and playlist column configuration.
 - Playlist database: `<data_dir>/roqtune/playlist.db`
 - Cover art cache: `<cache_dir>/roqtune/covers/`
 - Artist enrichment image cache: `<cache_dir>/roqtune/library_enrichment/images/`

@@ -59,16 +59,19 @@ pub struct UiConfig {
     pub show_layout_edit_intro: bool,
     #[serde(default = "default_true")]
     pub show_tooltips: bool,
-    #[serde(default = "default_playlist_album_art_column_min_width_px")]
+    /// Runtime playlist-column width minimum loaded from `layout.toml`.
+    #[serde(skip, default = "default_playlist_album_art_column_min_width_px")]
     pub playlist_album_art_column_min_width_px: u32,
-    #[serde(default = "default_playlist_album_art_column_max_width_px")]
+    /// Runtime playlist-column width maximum loaded from `layout.toml`.
+    #[serde(skip, default = "default_playlist_album_art_column_max_width_px")]
     pub playlist_album_art_column_max_width_px: u32,
     /// Runtime-only layout state loaded from `layout.toml`.
     #[serde(skip)]
     pub layout: LayoutConfig,
     #[serde(default)]
     pub button_cluster_instances: Vec<ButtonClusterInstanceConfig>,
-    #[serde(default = "default_playlist_columns")]
+    /// Runtime playlist column set loaded from `layout.toml`.
+    #[serde(skip, default = "default_playlist_columns")]
     pub playlist_columns: Vec<PlaylistColumnConfig>,
     #[serde(default = "default_window_width")]
     pub window_width: u32,
@@ -400,6 +403,9 @@ decoder_request_chunk_ms = 1500
 
         assert!(!config_text.contains("[ui.layout]"));
         assert!(!config_text.contains("node_type"));
+        assert!(!config_text.contains("[[ui.playlist_columns]]"));
+        assert!(!config_text.contains("playlist_album_art_column_min_width_px"));
+        assert!(!config_text.contains("playlist_album_art_column_max_width_px"));
     }
 
     #[test]

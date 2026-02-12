@@ -1750,7 +1750,6 @@ impl LibraryEnrichmentManager {
         ));
         if self.budget_exceeded(entity, start, attempt_kind) {
             *saw_budget = true;
-            return;
         }
     }
 

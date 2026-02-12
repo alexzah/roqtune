@@ -545,7 +545,7 @@ fn sanitize_config(config: Config) -> Config {
     let clamped_bits = config.output.bits_per_sample.clamp(8, 32);
     let clamped_window_width = config.ui.window_width.clamp(600, 10_000);
     let clamped_window_height = config.ui.window_height.clamp(400, 10_000);
-    let sanitized_layout = sanitize_layout_config(
+    let mut sanitized_layout = sanitize_layout_config(
         &config.ui.layout,
         clamped_window_width,
         clamped_window_height,
@@ -567,6 +567,9 @@ fn sanitize_config(config: Config) -> Config {
             &mut clamped_album_art_column_max_width_px,
         );
     }
+    sanitized_layout.playlist_album_art_column_min_width_px = clamped_album_art_column_min_width_px;
+    sanitized_layout.playlist_album_art_column_max_width_px = clamped_album_art_column_max_width_px;
+    sanitized_layout.playlist_columns = sanitized_playlist_columns.clone();
     let clamped_low_watermark = config.buffering.player_low_watermark_ms.max(500);
     let clamped_target = config
         .buffering
@@ -1392,6 +1395,9 @@ fn write_config_to_document(document: &mut DocumentMut, previous: &Config, confi
 
     {
         let ui = document["ui"].as_table_mut().expect("ui should be a table");
+        ui.remove("playlist_album_art_column_min_width_px");
+        ui.remove("playlist_album_art_column_max_width_px");
+        ui.remove("playlist_columns");
         set_table_scalar_if_changed(
             ui,
             "show_layout_edit_intro",
@@ -1404,20 +1410,6 @@ fn write_config_to_document(document: &mut DocumentMut, previous: &Config, confi
             "show_tooltips",
             previous.ui.show_tooltips,
             config.ui.show_tooltips,
-            value,
-        );
-        set_table_scalar_if_changed(
-            ui,
-            "playlist_album_art_column_min_width_px",
-            i64::from(previous.ui.playlist_album_art_column_min_width_px),
-            i64::from(config.ui.playlist_album_art_column_min_width_px),
-            value,
-        );
-        set_table_scalar_if_changed(
-            ui,
-            "playlist_album_art_column_max_width_px",
-            i64::from(previous.ui.playlist_album_art_column_max_width_px),
-            i64::from(config.ui.playlist_album_art_column_max_width_px),
             value,
         );
         set_table_scalar_if_changed(
@@ -1460,25 +1452,6 @@ fn write_config_to_document(document: &mut DocumentMut, previous: &Config, confi
                 ui,
                 "button_cluster_instances",
                 Item::ArrayOfTables(button_instances),
-            );
-        }
-
-        if !ui.contains_key("playlist_columns")
-            || previous.ui.playlist_columns != config.ui.playlist_columns
-        {
-            let mut playlist_columns = ArrayOfTables::new();
-            for column in &config.ui.playlist_columns {
-                let mut column_table = Table::new();
-                column_table["name"] = value(column.name.clone());
-                column_table["format"] = value(column.format.clone());
-                column_table["enabled"] = value(column.enabled);
-                column_table["custom"] = value(column.custom);
-                playlist_columns.push(column_table);
-            }
-            set_table_value_preserving_decor(
-                ui,
-                "playlist_columns",
-                Item::ArrayOfTables(playlist_columns),
             );
         }
     }
@@ -1657,6 +1630,14 @@ fn load_layout_file(path: &Path) -> LayoutConfig {
             LayoutConfig::default()
         }
     }
+}
+
+fn hydrate_ui_columns_from_layout(config: &mut Config) {
+    config.ui.playlist_album_art_column_min_width_px =
+        config.ui.layout.playlist_album_art_column_min_width_px;
+    config.ui.playlist_album_art_column_max_width_px =
+        config.ui.layout.playlist_album_art_column_max_width_px;
+    config.ui.playlist_columns = config.ui.layout.playlist_columns.clone();
 }
 
 fn with_updated_layout(previous: &Config, layout: LayoutConfig) -> Config {
@@ -2100,6 +2081,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let config_content = std::fs::read_to_string(config_file.clone()).unwrap();
     let mut config = sanitize_config(toml::from_str::<Config>(&config_content).unwrap_or_default());
     config.ui.layout = load_layout_file(&layout_file);
+    hydrate_ui_columns_from_layout(&mut config);
     let config = sanitize_config(config);
     let initial_output_options = detect_output_settings_options(&config);
     let runtime_output_override = Arc::new(Mutex::new(RuntimeOutputOverride::default()));
@@ -6017,13 +5999,17 @@ decoder_request_chunk_ms = 1500
             serialized
         );
         assert!(
-            serialized.contains("[[ui.playlist_columns]]"),
-            "playlist column array-of-tables should remain valid after rewrite"
+            !serialized.contains("[[ui.playlist_columns]]"),
+            "playlist columns should not be persisted in config.toml"
         );
         let parsed_back: toml_edit::DocumentMut = serialized
             .parse()
             .expect("serialized config should remain valid TOML");
-        assert!(parsed_back["ui"]["playlist_columns"].is_array_of_tables());
+        assert!(parsed_back
+            .get("ui")
+            .and_then(|item| item.as_table())
+            .and_then(|table| table.get("playlist_columns"))
+            .is_none());
     }
 
     #[test]
