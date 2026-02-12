@@ -6,12 +6,9 @@
 
 use crate::config::{BufferingConfig, Config, ResamplerQuality};
 use crate::protocol::{self, AudioMessage, AudioPacket, ConfigMessage, Message, TrackIdentifier};
-use audioadapter_buffers::direct::SequentialSliceOfVecs;
-use audioadapter_buffers::owned::InterleavedOwned;
 use log::{debug, error, warn};
 use rubato::{
-    Async, FixedAsync, Indexing, Resampler, SincInterpolationParameters, SincInterpolationType,
-    WindowFunction,
+    Resampler, SincFixedIn, SincInterpolationParameters, SincInterpolationType, WindowFunction,
 };
 use std::cmp::min;
 use std::collections::VecDeque;
@@ -72,7 +69,7 @@ struct DecodeWorker {
     work_queue: VecDeque<DecodeWorkItem>,
     pending_tracks: VecDeque<TrackIdentifier>,
     active_track: Option<ActiveDecodeTrack>,
-    resampler: Option<Async<f32>>,
+    resampler: Option<SincFixedIn<f32>>,
     resampler_flushed: bool,
     resample_buffer: VecDeque<f32>,
     target_sample_rate: u32,
@@ -215,7 +212,7 @@ impl DecodeWorker {
         &self,
         source_sample_rate: u32,
         chunk_size: usize,
-    ) -> Result<Async<f32>, String> {
+    ) -> Result<SincFixedIn<f32>, String> {
         let params = match self.resampler_quality {
             ResamplerQuality::High => SincInterpolationParameters {
                 sinc_len: 256,
@@ -232,13 +229,12 @@ impl DecodeWorker {
                 window: WindowFunction::BlackmanHarris2,
             },
         };
-        Async::<f32>::new_sinc(
+        SincFixedIn::<f32>::new(
             self.target_sample_rate as f64 / source_sample_rate as f64,
             2.0,
-            &params,
+            params,
             chunk_size,
             self.target_channels.max(1) as usize,
-            FixedAsync::Input,
         )
         .map_err(|err| format!("Failed to create resampler: {err}"))
     }
@@ -251,32 +247,17 @@ impl DecodeWorker {
         deinterleaved
     }
 
-    fn process_resampler_output(
-        resampler: &mut Async<f32>,
-        channels: usize,
-        deinterleaved: &[Vec<f32>],
-        partial_len: Option<usize>,
-    ) -> Result<Vec<f32>, String> {
-        let input_frames = deinterleaved
-            .first()
-            .map(|channel| channel.len())
-            .unwrap_or(0);
-        let input_adapter = SequentialSliceOfVecs::new(deinterleaved, channels, input_frames)
-            .map_err(|err| format!("Failed to prepare resampler input: {err}"))?;
-        let mut output_adapter =
-            InterleavedOwned::new(0.0f32, channels, resampler.output_frames_max());
-        let indexing = Indexing {
-            input_offset: 0,
-            output_offset: 0,
-            partial_len,
-            active_channels_mask: None,
-        };
-        let (_, output_frames) = resampler
-            .process_into_buffer(&input_adapter, &mut output_adapter, Some(&indexing))
-            .map_err(|err| format!("Resample failed: {err}"))?;
-        let mut output = output_adapter.take_data();
-        output.truncate(output_frames.saturating_mul(channels));
-        Ok(output)
+    fn interleave(samples: &[Vec<f32>]) -> Vec<f32> {
+        if samples.is_empty() {
+            return Vec::new();
+        }
+        let mut interleaved = Vec::new();
+        for i in 0..samples[0].len() {
+            for sample in samples {
+                interleaved.push(sample[i]);
+            }
+        }
+        interleaved
     }
 
     fn resampler_input_chunk_size(&mut self, source_sample_rate: u32) -> usize {
@@ -345,12 +326,10 @@ impl DecodeWorker {
 
             if samples.is_empty() {
                 if input_exhausted && !self.resampler_flushed {
-                    let flush_input = vec![Vec::new(); channels];
-                    match Self::process_resampler_output(resampler, channels, &flush_input, Some(0))
-                    {
+                    match resampler.process_partial::<&[f32]>(None, None) {
                         Ok(flush_result) => {
                             self.resampler_flushed = true;
-                            return flush_result;
+                            return Self::interleave(&flush_result);
                         }
                         Err(err) => {
                             warn!("DecodeWorker: resampler flush failed: {}", err);
@@ -362,33 +341,30 @@ impl DecodeWorker {
             }
 
             let deinterleaved = Self::deinterleave(&samples, channels);
-            let input_frames = deinterleaved
-                .first()
-                .map(|channel| channel.len())
-                .unwrap_or(0);
-            let partial_len = if input_frames == input_frames_next {
-                None
+            let mut waves_out = if deinterleaved[0].len() == input_frames_next {
+                match resampler.process(&deinterleaved, None) {
+                    Ok(waves_out) => waves_out,
+                    Err(err) => {
+                        warn!("DecodeWorker: resample failed: {}", err);
+                        return samples;
+                    }
+                }
             } else {
-                Some(input_frames)
-            };
-            let mut waves_out = match Self::process_resampler_output(
-                resampler,
-                channels,
-                &deinterleaved,
-                partial_len,
-            ) {
-                Ok(waves_out) => waves_out,
-                Err(err) => {
-                    warn!("DecodeWorker: {}", err);
-                    return samples;
+                match resampler.process_partial(Some(&deinterleaved), None) {
+                    Ok(waves_out) => waves_out,
+                    Err(err) => {
+                        warn!("DecodeWorker: partial resample failed: {}", err);
+                        return samples;
+                    }
                 }
             };
 
             if input_exhausted && self.resample_buffer.is_empty() && !self.resampler_flushed {
-                let flush_input = vec![Vec::new(); channels];
-                match Self::process_resampler_output(resampler, channels, &flush_input, Some(0)) {
+                match resampler.process_partial::<&[f32]>(None, None) {
                     Ok(flush_result) => {
-                        waves_out.extend(flush_result);
+                        for i in 0..channels {
+                            waves_out[i].extend(flush_result[i].iter().copied());
+                        }
                         self.resampler_flushed = true;
                     }
                     Err(err) => {
@@ -397,7 +373,7 @@ impl DecodeWorker {
                     }
                 }
             }
-            return waves_out;
+            return Self::interleave(&waves_out);
         }
 
         Vec::new()

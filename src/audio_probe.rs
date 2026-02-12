@@ -198,8 +198,7 @@ fn current_unix_secs() -> u64 {
 fn device_fingerprint(host: &cpal::Host, device: &cpal::Device) -> DeviceFingerprint {
     let host_id = format!("{:?}", host.id());
     let device_name = device
-        .description()
-        .map(|description| description.name().to_string())
+        .name()
         .unwrap_or_else(|_| "Unknown Device".to_string());
     let mut signature_parts = Vec::new();
     if let Ok(configs) = device.supported_output_configs() {
@@ -208,8 +207,8 @@ fn device_fingerprint(host: &cpal::Host, device: &cpal::Device) -> DeviceFingerp
                 "{}:{:?}:{}:{}",
                 range.channels(),
                 range.sample_format(),
-                range.min_sample_rate(),
-                range.max_sample_rate()
+                range.min_sample_rate().0,
+                range.max_sample_rate().0
             ));
         }
     }
@@ -233,11 +232,11 @@ fn probe_output_device(
     if let Ok(configs) = device.supported_output_configs() {
         for range in configs {
             for rate in &candidate_rates {
-                if *rate >= range.min_sample_rate() && *rate <= range.max_sample_rate() {
+                if *rate >= range.min_sample_rate().0 && *rate <= range.max_sample_rate().0 {
                     configs_by_rate
                         .entry(*rate)
                         .or_default()
-                        .push(range.with_sample_rate(*rate));
+                        .push(range.with_sample_rate(cpal::SampleRate(*rate)));
                 }
             }
         }

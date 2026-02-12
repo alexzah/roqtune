@@ -2,7 +2,7 @@
 
 use crate::protocol::{PlaybackOrder, RepeatMode};
 use log::debug;
-use rand::{rngs::StdRng, RngExt, SeedableRng};
+use rand::{rngs::StdRng, Rng, SeedableRng};
 use std::{collections::HashSet, path::PathBuf};
 
 /// One playlist entry containing source path and stable id.

@@ -106,8 +106,8 @@ impl AudioPlayer {
         requested_sample_rate: u32,
     ) -> u32 {
         const COMMON_SAMPLE_RATES: [u32; 6] = [44_100, 48_000, 88_200, 96_000, 176_400, 192_000];
-        let min_rate = range.min_sample_rate();
-        let max_rate = range.max_sample_rate();
+        let min_rate = range.min_sample_rate().0;
+        let max_rate = range.max_sample_rate().0;
         if requested_sample_rate >= min_rate && requested_sample_rate <= max_rate {
             return requested_sample_rate;
         }
@@ -125,12 +125,11 @@ impl AudioPlayer {
         sample_format: cpal::SampleFormat,
     ) -> OutputStreamInfo {
         let device_name = device
-            .description()
-            .map(|description| description.name().to_string())
+            .name()
             .unwrap_or_else(|_| "Unknown Device".to_string());
         OutputStreamInfo {
             device_name,
-            sample_rate_hz: config.sample_rate,
+            sample_rate_hz: config.sample_rate.0,
             channel_count: config.channels,
             bits_per_sample: (sample_format.sample_size() * 8) as u16,
             sample_format: Self::output_sample_format_from_cpal(sample_format),
@@ -600,10 +599,7 @@ impl AudioPlayer {
             host.output_devices().ok().and_then(|devices| {
                 devices
                     .filter_map(|device| {
-                        let name = device
-                            .description()
-                            .ok()
-                            .map(|description| description.name().to_string())?;
+                        let name = device.name().ok()?;
                         if name == *device_name {
                             Some(device)
                         } else {
@@ -645,12 +641,13 @@ impl AudioPlayer {
         for range in configs {
             let candidate_sample_rate =
                 Self::choose_sample_rate_for_range(&range, requested_sample_rate.max(8_000));
-            let candidate = range.with_sample_rate(candidate_sample_rate);
+            let candidate = range.with_sample_rate(cpal::SampleRate(candidate_sample_rate));
             let channel_penalty =
                 u64::from(candidate.channels().abs_diff(requested_channels)) * 1_000;
             let sample_rate_penalty = u64::from(
                 candidate
                     .sample_rate()
+                    .0
                     .abs_diff(requested_sample_rate.max(8_000)),
             );
             let sample_format_penalty =
@@ -670,7 +667,7 @@ impl AudioPlayer {
         self.target_channels
             .store(selected_config.channels() as usize, Ordering::Relaxed);
         self.target_sample_rate
-            .store(selected_config.sample_rate() as usize, Ordering::Relaxed);
+            .store(selected_config.sample_rate().0 as usize, Ordering::Relaxed);
 
         let stream_config: cpal::StreamConfig = selected_config.config();
         let sample_format = selected_config.sample_format();
