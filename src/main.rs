@@ -2030,9 +2030,6 @@ fn apply_config_to_ui(
         }
     }
     ui.set_settings_library_online_metadata_enabled(config.library.online_metadata_enabled);
-    ui.set_settings_library_online_metadata_prompt_pending(
-        config.library.online_metadata_prompt_pending,
-    );
     apply_playlist_columns_to_ui(ui, config);
     apply_layout_to_ui(ui, config, workspace_width_px, workspace_height_px);
 }
@@ -2630,57 +2627,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             // Any explicit user choice here counts as handling first-use prompt.
             next.library.online_metadata_prompt_pending = false;
             next.library.online_metadata_enabled = enabled;
-            next = sanitize_config(next);
-            *state = next.clone();
-            next
-        };
-        persist_state_files_with_config_path(&next_config, &config_file_clone);
-        let options_snapshot = {
-            let options = output_options_clone
-                .lock()
-                .expect("output options lock poisoned");
-            options.clone()
-        };
-        let (workspace_width_px, workspace_height_px) =
-            workspace_size_snapshot(&layout_workspace_size_clone);
-        if let Some(ui) = ui_handle_clone.upgrade() {
-            apply_config_to_ui(
-                &ui,
-                &next_config,
-                &options_snapshot,
-                workspace_width_px,
-                workspace_height_px,
-            );
-        }
-        let runtime_override = runtime_output_override_snapshot(&runtime_output_override_clone);
-        let runtime_config =
-            resolve_runtime_config(&next_config, &options_snapshot, Some(&runtime_override));
-        {
-            let mut last_runtime = last_runtime_signature_clone
-                .lock()
-                .expect("runtime signature lock poisoned");
-            *last_runtime = OutputRuntimeSignature::from_output(&runtime_config.output);
-        }
-        let _ = bus_sender_clone.send(Message::Config(ConfigMessage::ConfigChanged(
-            runtime_config,
-        )));
-    });
-
-    let bus_sender_clone = bus_sender.clone();
-    let config_state_clone = Arc::clone(&config_state);
-    let output_options_clone = Arc::clone(&output_options);
-    let runtime_output_override_clone = Arc::clone(&runtime_output_override);
-    let last_runtime_signature_clone = Arc::clone(&last_runtime_signature);
-    let config_file_clone = config_file.clone();
-    let layout_workspace_size_clone = Arc::clone(&layout_workspace_size);
-    let ui_handle_clone = ui.as_weak().clone();
-    ui.on_settings_set_library_online_metadata_prompt_pending(move |pending| {
-        let next_config = {
-            let mut state = config_state_clone
-                .lock()
-                .expect("config state lock poisoned");
-            let mut next = state.clone();
-            next.library.online_metadata_prompt_pending = pending;
             next = sanitize_config(next);
             *state = next.clone();
             next

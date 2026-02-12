@@ -1,4 +1,5 @@
 import { ComboBox, LineEdit } from "std-widgets.slint";
+import { TooltipHoverArea } from "controls.slint";
 
 export component SettingsDropdownControl inherits Rectangle {
     in property <string> label;
@@ -42,16 +43,11 @@ export component SettingsDropdownControl inherits Rectangle {
                     vertical-alignment: center;
                     horizontal-alignment: left;
                 }
-                label-tooltip-ta := TouchArea {
-                    changed has-hover => {
-                        if root.tooltip_text != "" {
-                            root.tooltip_hover_changed(
-                                self.has-hover,
-                                root.tooltip_text,
-                                floor((label-host.absolute-position.x + label-host.width / 2) / 1px),
-                                floor((label-host.absolute-position.y + label-host.height) / 1px)
-                            );
-                        }
+                label-tooltip-ta := TooltipHoverArea {
+                    tooltip-text: root.tooltip_text;
+                    tooltip-enabled: root.tooltip_text != "";
+                    tooltip_hover_changed(is-hovered, tooltip, anchor-x-px, anchor-y-px) => {
+                        root.tooltip_hover_changed(is-hovered, tooltip, anchor-x-px, anchor-y-px);
                     }
                 }
             }

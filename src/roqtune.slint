@@ -2,7 +2,7 @@ import { Button, ComboBox, VerticalBox, StandardTableView, ScrollView, LineEdit,
 
 import { LayoutButtonClusterPanelModel, LayoutSplitterModel, LibraryRowData, MetadataEditorField, TrackRowData } from "ui/types.slint";
 import { ColumnHeaderMenu, ConfirmationDialog, InfoDialog } from "ui/components/menus.slint";
-import { PlayerButton, ButtonCluster } from "ui/components/controls.slint";
+import { PlayerButton, ButtonCluster, TooltipHoverArea } from "ui/components/controls.slint";
 import { VolumeSliderControl, SeekBarControl, MetadataViewer, AlbumArtViewer } from "ui/components/media.slint";
 import { PlaylistRow, TrackRow } from "ui/components/playlist.slint";
 import { ModeTabs } from "ui/components/tabs.slint";
@@ -251,7 +251,6 @@ export component AppWindow inherits Window {
     in-out property <[string]> settings_library_folders: [];
     in-out property <int> settings_library_selected_folder_index: -1;
     in-out property <bool> settings_library_online_metadata_enabled: false;
-    in-out property <bool> settings_library_online_metadata_prompt_pending: true;
     in-out property <bool> layout_edit_mode: false;
     in-out property <bool> show_layout_editor_dialog: false;
     in-out property <bool> show_layout_leaf_context_menu: false;
@@ -3459,14 +3458,10 @@ export component AppWindow inherits Window {
                                             vertical-alignment: center;
                                             horizontal-alignment: left;
                                         }
-                                        settings-dither-label-tooltip-ta := TouchArea {
-                                            changed has-hover => {
-                                                root.tooltip_hover_changed(
-                                                    self.has-hover,
-                                                    "Adds low-level noise when reducing bit depth to reduce quantization distortion.",
-                                                    floor((dither-label-host.absolute-position.x + dither-label-host.width / 2) / 1px),
-                                                    floor((dither-label-host.absolute-position.y + dither-label-host.height) / 1px)
-                                                );
+                                        settings-dither-label-tooltip-ta := TooltipHoverArea {
+                                            tooltip-text: "Adds low-level noise when reducing bit depth to reduce quantization distortion.";
+                                            tooltip_hover_changed(is-hovered, tooltip, anchor-x-px, anchor-y-px) => {
+                                                root.tooltip_hover_changed(is-hovered, tooltip, anchor-x-px, anchor-y-px);
                                             }
                                         }
                                     }
@@ -3591,32 +3586,30 @@ export component AppWindow inherits Window {
                             border-color: #3a3a3a;
                             border-radius: 4px;
                             background: #1f1f1f;
-                            ScrollView {
-                                width: parent.width;
-                                height: parent.height;
-                                VerticalLayout {
-                                    width: parent.width;
-                                    spacing: 2px;
-                                    padding: 4px;
-                                    for folder[index] in root.settings_library_folders : Rectangle {
-                                        width: parent.width;
-                                        height: 24px;
-                                        border-radius: 3px;
-                                        background: root.settings_library_selected_folder_index == index
-                                            ? #2f3f56
-                                            : settings-library-folder-ta.has-hover ? #2c2c2c : transparent;
-                                        Text {
-                                            x: 8px;
-                                            width: max(0px, parent.width - 16px);
-                                            text: folder;
-                                            color: root.settings_library_selected_folder_index == index ? #d7e6f8 : #c6c6c6;
-                                            font-size: 12px;
-                                            vertical-alignment: center;
-                                            overflow: elide;
-                                        }
-                                        settings-library-folder-ta := TouchArea {
-                                            clicked => { root.settings_select_library_folder(index); }
-                                        }
+                            clip: true;
+                            settings-library-folder-list := ListView {
+                                x: 1px;
+                                y: 1px;
+                                width: max(0px, parent.width - 2px);
+                                height: max(0px, parent.height - 2px);
+                                for folder[index] in root.settings_library_folders : Rectangle {
+                                    horizontal-stretch: 1;
+                                    height: 26px;
+                                    border-radius: 3px;
+                                    background: root.settings_library_selected_folder_index == index
+                                        ? #2f3f56
+                                        : settings-library-folder-ta.has-hover ? #2c2c2c : transparent;
+                                    Text {
+                                        x: 8px;
+                                        width: max(0px, parent.width - 16px);
+                                        text: folder;
+                                        color: root.settings_library_selected_folder_index == index ? #d7e6f8 : #c6c6c6;
+                                        font-size: 12px;
+                                        vertical-alignment: center;
+                                        overflow: elide;
+                                    }
+                                    settings-library-folder-ta := TouchArea {
+                                        clicked => { root.settings_select_library_folder(index); }
                                     }
                                 }
                             }
@@ -3661,66 +3654,59 @@ export component AppWindow inherits Window {
                         }
 
                         Rectangle {
-                            height: 30px;
+                            height: 32px;
                             background: settings-library-online-toggle-ta.has-hover ? #2d2d2d : transparent;
                             border-radius: 4px;
-                            Text {
-                                x: 8px;
-                                width: max(0px, parent.width - 40px);
-                                text: "Fetch metadata for artist/album pages from internet";
-                                color: #ddd;
-                                font-size: 11px;
-                                vertical-alignment: center;
-                                overflow: elide;
-                            }
-                            Switch {
-                                x: parent.width - self.width - 8px;
-                                y: (parent.height - self.height) / 2;
-                                width: 18px;
-                                text: "";
-                                checked: root.settings_library_online_metadata_enabled;
+                            HorizontalLayout {
+                                spacing: 10px;
+                                metadata-label-host := Rectangle {
+                                    width: max(
+                                        settings-dialog-panel.label_column_width,
+                                        parent.width - settings-dialog-panel.control_max_width - 10px
+                                    );
+                                    height: parent.height;
+                                    background: transparent;
+                                    Text {
+                                        text: "Fetch metadata for artist/album pages from internet";
+                                        width: parent.width;
+                                        color: #ddd;
+                                        font-size: 12px;
+                                        vertical-alignment: center;
+                                        horizontal-alignment: left;
+                                    }
+                                    metadata-label-tooltip-ta := TooltipHoverArea {
+                                        tooltip-text: "Internet metadata only affects displayed artwork/text in Library views and never edits audio file tags.";
+                                        tooltip_hover_changed(is-hovered, tooltip, anchor-x-px, anchor-y-px) => {
+                                            root.tooltip_hover_changed(is-hovered, tooltip, anchor-x-px, anchor-y-px);
+                                        }
+                                    }
+                                }
+                                Rectangle {
+                                    width: settings-dialog-panel.control_max_width;
+                                    height: parent.height;
+                                    background: transparent;
+                                    settings-library-online-toggle := Switch {
+                                        x: parent.width - self.width - 8px;
+                                        y: (parent.height - self.height) / 2;
+                                        width: 18px;
+                                        text: "";
+                                        checked <=> root.settings_library_online_metadata_enabled;
+                                    }
+                                }
+                                Rectangle { horizontal-stretch: 1; }
                             }
                             settings-library-online-toggle-ta := TouchArea {
-                                clicked => {
-                                    root.settings_library_online_metadata_enabled = !root.settings_library_online_metadata_enabled;
-                                    root.settings_set_library_online_metadata_enabled(root.settings_library_online_metadata_enabled);
-                                }
-                            }
-                        }
-
-                        Text {
-                            text: "This only changes artwork/text shown in Library views and never edits track tags.";
-                            color: #9da9b8;
-                            font-size: 10px;
-                            wrap: word-wrap;
-                        }
-
-                        Rectangle {
-                            height: 30px;
-                            background: settings-library-prompt-toggle-ta.has-hover ? #2d2d2d : transparent;
-                            border-radius: 4px;
-                            Text {
-                                x: 8px;
-                                width: max(0px, parent.width - 40px);
-                                text: "Show first-use internet metadata prompt";
-                                color: #ddd;
-                                font-size: 11px;
-                                vertical-alignment: center;
-                                overflow: elide;
-                            }
-                            Switch {
-                                x: parent.width - self.width - 8px;
-                                y: (parent.height - self.height) / 2;
-                                width: 18px;
-                                text: "";
-                                checked: root.settings_library_online_metadata_prompt_pending;
-                            }
-                            settings-library-prompt-toggle-ta := TouchArea {
-                                clicked => {
-                                    root.settings_library_online_metadata_prompt_pending = !root.settings_library_online_metadata_prompt_pending;
-                                    root.settings_set_library_online_metadata_prompt_pending(
-                                        root.settings_library_online_metadata_prompt_pending
+                                changed has-hover => {
+                                    root.tooltip_hover_changed(
+                                        self.has-hover,
+                                        "Internet metadata only affects displayed artwork/text in Library views and never edits audio file tags.",
+                                        floor((metadata-label-host.absolute-position.x + metadata-label-host.width / 2) / 1px),
+                                        floor((metadata-label-host.absolute-position.y + metadata-label-host.height) / 1px)
                                     );
+                                }
+                                clicked => {
+                                    settings-library-online-toggle.checked = !settings-library-online-toggle.checked;
+                                    root.settings_set_library_online_metadata_enabled(settings-library-online-toggle.checked);
                                 }
                             }
                         }
@@ -3945,7 +3931,6 @@ export component AppWindow inherits Window {
     callback library_online_metadata_prompt_accept();
     callback library_online_metadata_prompt_deny();
     callback settings_set_library_online_metadata_enabled(bool);
-    callback settings_set_library_online_metadata_prompt_pending(bool);
     callback clear_library_enrichment_cache();
     callback library_viewport_changed(int, int);
     callback handle_track_click(int, bool, bool);

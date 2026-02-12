@@ -4121,8 +4121,7 @@ impl UiManager {
         self.library_artist_row_indices = artist_row_indices;
         let collection_mode = self.collection_mode;
         let online_prompt_visible = self.collection_mode == COLLECTION_MODE_LIBRARY
-            && self.library_online_metadata_prompt_pending
-            && !self.library_online_metadata_enabled;
+            && self.library_online_metadata_prompt_pending;
 
         let _ = self.ui.upgrade_in_event_loop(move |ui| {
             let rows: Vec<LibraryRowData> = rows

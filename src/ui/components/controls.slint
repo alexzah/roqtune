@@ -1,3 +1,32 @@
+export component TooltipHoverArea inherits TouchArea {
+    in property <string> tooltip-text: "";
+    in property <bool> tooltip-enabled: true;
+    callback tooltip_hover_changed(bool, string, int, int);
+
+    changed has-hover => {
+        if (root.tooltip-enabled && root.tooltip-text != "") {
+            root.tooltip_hover_changed(
+                self.has-hover,
+                root.tooltip-text,
+                floor((root.absolute-position.x + root.width / 2) / 1px),
+                floor((root.absolute-position.y + root.height) / 1px)
+            );
+        }
+    }
+
+    changed tooltip-enabled => {
+        if (!root.tooltip-enabled && root.has-hover) {
+            root.tooltip_hover_changed(false, "", 0, 0);
+        }
+    }
+
+    changed tooltip-text => {
+        if (root.tooltip-text == "" && root.has-hover) {
+            root.tooltip_hover_changed(false, "", 0, 0);
+        }
+    }
+}
+
 export component PlayerButton inherits Rectangle {
     width: 32px;
     height: 32px;
