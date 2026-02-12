@@ -10,6 +10,7 @@
 - Beautiful library mode that scans and sorts your collection for easy browsing and listening
 - Custom column support in the track list, based on metadata format strings
 - Fully user customizable UI with layout editor based on modular panels
+- Broad format compatibility with [symphonia](https://crates.io/crates/symphonia)
 
 ## Quick Start
 

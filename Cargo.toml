@@ -12,12 +12,7 @@ colog = "1.4.0" # logs
 rand = "0.10.0"  # For shuffle and random playback
 getrandom = "0.4.1"  # For secure random seed generation
 symphonia = {version = "0.5.5", features = [
-    "mp3",
-    "wav", 
-    "flac",
-    "aac",
-    "isomp4",
-    "ogg"
+    "all"
 ] } # For audio decoding
 cpal = "0.15.3" # For audio playback
 tokio = { version = "1.49.0", features = ["sync"] }
