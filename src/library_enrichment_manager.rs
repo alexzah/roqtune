@@ -601,36 +601,27 @@ impl LibraryEnrichmentManager {
         query: &str,
         titles: &mut Vec<String>,
         seen_titles: &mut HashSet<String>,
-        search_had_error: &mut bool,
     ) {
         if query.trim().is_empty() {
             return;
         }
-        for fetch in [
+        for found_titles in [
             self.search_wikipedia_titles_action(query),
             self.search_wikipedia_titles_rest("search/title", query),
             self.search_wikipedia_titles_rest("search/page", query),
-        ] {
-            match fetch {
-                Ok(found_titles) => {
-                    for title in found_titles {
-                        Self::push_unique_title(titles, seen_titles, title);
-                    }
-                }
-                Err(_) => {
-                    *search_had_error = true;
-                }
+        ]
+        .into_iter()
+        .flatten()
+        {
+            for title in found_titles {
+                Self::push_unique_title(titles, seen_titles, title);
             }
         }
     }
 
-    fn candidate_titles_for_entity(
-        &self,
-        entity: &LibraryEnrichmentEntity,
-    ) -> Result<Vec<String>, String> {
+    fn candidate_titles_for_entity(&self, entity: &LibraryEnrichmentEntity) -> Vec<String> {
         let mut titles = Vec::new();
         let mut seen_titles = HashSet::new();
-        let mut search_had_error = false;
 
         match entity {
             LibraryEnrichmentEntity::Artist { artist } => {
@@ -639,7 +630,7 @@ impl LibraryEnrichmentManager {
                 let compact_artist = normalized_artist.replace(' ', "");
                 let title_case_artist = Self::title_case_words(&cleaned_artist);
                 if cleaned_artist.is_empty() {
-                    return Ok(Vec::new());
+                    return Vec::new();
                 }
 
                 Self::push_unique_title(&mut titles, &mut seen_titles, cleaned_artist.clone());
@@ -677,23 +668,13 @@ impl LibraryEnrichmentManager {
                     format!("intitle:\"{title_case_artist}\""),
                     cleaned_artist.clone(),
                 ] {
-                    self.append_titles_for_query(
-                        &query,
-                        &mut titles,
-                        &mut seen_titles,
-                        &mut search_had_error,
-                    );
+                    self.append_titles_for_query(&query, &mut titles, &mut seen_titles);
                 }
                 if !compact_artist.is_empty()
                     && compact_artist != normalized_artist
                     && compact_artist != cleaned_artist.to_ascii_lowercase()
                 {
-                    self.append_titles_for_query(
-                        &compact_artist,
-                        &mut titles,
-                        &mut seen_titles,
-                        &mut search_had_error,
-                    );
+                    self.append_titles_for_query(&compact_artist, &mut titles, &mut seen_titles);
                 }
             }
             LibraryEnrichmentEntity::Album {
@@ -707,7 +688,7 @@ impl LibraryEnrichmentManager {
                 let title_case_album = Self::title_case_words(&cleaned_album);
                 let title_case_artist = Self::title_case_words(&cleaned_artist);
                 if cleaned_album.is_empty() {
-                    return Ok(Vec::new());
+                    return Vec::new();
                 }
 
                 Self::push_unique_title(&mut titles, &mut seen_titles, cleaned_album.clone());
@@ -749,34 +730,21 @@ impl LibraryEnrichmentManager {
                     ]
                 };
                 for query in query_bundle {
-                    self.append_titles_for_query(
-                        &query,
-                        &mut titles,
-                        &mut seen_titles,
-                        &mut search_had_error,
-                    );
+                    self.append_titles_for_query(&query, &mut titles, &mut seen_titles);
                 }
                 if !compact_album.is_empty()
                     && compact_album != normalized_album
                     && compact_album != cleaned_album.to_ascii_lowercase()
                 {
-                    self.append_titles_for_query(
-                        &compact_album,
-                        &mut titles,
-                        &mut seen_titles,
-                        &mut search_had_error,
-                    );
+                    self.append_titles_for_query(&compact_album, &mut titles, &mut seen_titles);
                 }
             }
         }
 
-        if titles.is_empty() && search_had_error {
-            return Err("Wikipedia candidate search failed".to_string());
-        }
         if titles.len() > MAX_CANDIDATES * 4 {
             titles.truncate(MAX_CANDIDATES * 4);
         }
-        Ok(titles)
+        titles
     }
 
     fn lookup_budget_for_priority(priority: LibraryEnrichmentPriority) -> Duration {
@@ -862,21 +830,7 @@ impl LibraryEnrichmentManager {
         initial_priority: LibraryEnrichmentPriority,
         start: Instant,
     ) -> FetchOutcome {
-        let titles = match self.candidate_titles_for_entity(entity) {
-            Ok(titles) => titles,
-            Err(error) => {
-                return Self::build_outcome(
-                    entity,
-                    LibraryEnrichmentStatus::Error,
-                    String::new(),
-                    None,
-                    None,
-                    EnrichmentSource::Wikipedia,
-                    String::new(),
-                    Some(error),
-                );
-            }
-        };
+        let titles = self.candidate_titles_for_entity(entity);
 
         if titles.is_empty() {
             return Self::build_outcome(
@@ -905,16 +859,7 @@ impl LibraryEnrichmentManager {
         for title in titles.into_iter().take(MAX_SUMMARY_FETCHES) {
             self.drain_bus_messages_nonblocking();
             if self.budget_exceeded(entity, start, initial_priority) {
-                return Self::build_outcome(
-                    entity,
-                    LibraryEnrichmentStatus::Error,
-                    String::new(),
-                    None,
-                    None,
-                    EnrichmentSource::Wikipedia,
-                    String::new(),
-                    Some("Lookup budget exceeded".to_string()),
-                );
+                break;
             }
 
             let Ok(summary) = self.fetch_wikipedia_summary(&title) else {
