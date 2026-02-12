@@ -3446,7 +3446,6 @@ export component AppWindow inherits Window {
                     if root.settings_dialog_tab_index == 1 : VerticalLayout {
                         width: parent.width;
                         height: parent.height;
-                        alignment: start;
                         spacing: 8px;
 
                         Text {
@@ -3466,9 +3465,11 @@ export component AppWindow inherits Window {
                                 width: parent.width;
                                 height: parent.height;
                                 VerticalLayout {
+                                    width: parent.width;
                                     spacing: 2px;
                                     padding: 4px;
                                     for folder[index] in root.settings_library_folders : Rectangle {
+                                        width: parent.width;
                                         height: 24px;
                                         border-radius: 3px;
                                         background: root.settings_library_selected_folder_index == index
