@@ -383,14 +383,18 @@ fn detect_output_settings_options(config: &Config) -> OutputSettingsOptions {
     let host = cpal::default_host();
     if let Some(default_device) = host.default_output_device() {
         auto_device_name = default_device
-            .name()
+            .description()
+            .map(|description| description.name().to_string())
             .ok()
             .filter(|name| !name.is_empty())
             .unwrap_or_default();
     }
     if let Ok(devices) = host.output_devices() {
         for device in devices {
-            if let Ok(name) = device.name() {
+            if let Ok(name) = device
+                .description()
+                .map(|description| description.name().to_string())
+            {
                 if !name.is_empty() {
                     device_names.push(name);
                 }
@@ -430,7 +434,10 @@ fn detect_output_settings_options(config: &Config) -> OutputSettingsOptions {
             host.output_devices().ok().and_then(|devices| {
                 devices
                     .filter_map(|device| {
-                        let name = device.name().ok()?;
+                        let name = device
+                            .description()
+                            .ok()
+                            .map(|description| description.name().to_string())?;
                         if name == requested_name {
                             Some(device)
                         } else {
@@ -455,8 +462,8 @@ fn detect_output_settings_options(config: &Config) -> OutputSettingsOptions {
                 channels.insert(output_config.channels().max(1));
                 bits_per_sample.insert((output_config.sample_format().sample_size() * 8) as u16);
 
-                let min_rate = output_config.min_sample_rate().0;
-                let max_rate = output_config.max_sample_rate().0;
+                let min_rate = output_config.min_sample_rate();
+                let max_rate = output_config.max_sample_rate();
                 for common_rate in COMMON_SAMPLE_RATES {
                     if common_rate >= min_rate && common_rate <= max_rate {
                         sample_rates.insert(common_rate);
