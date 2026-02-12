@@ -97,12 +97,11 @@ pub struct UiManager {
     library_enrichment:
         HashMap<protocol::LibraryEnrichmentEntity, protocol::LibraryEnrichmentPayload>,
     library_enrichment_pending: HashSet<protocol::LibraryEnrichmentEntity>,
+    library_last_detail_enrichment_entity: Option<protocol::LibraryEnrichmentEntity>,
     library_online_metadata_enabled: bool,
     library_online_metadata_prompt_pending: bool,
     library_artist_prefetch_first_row: usize,
     library_artist_prefetch_row_count: usize,
-    library_artist_background_prefetch: Vec<String>,
-    library_artist_background_cursor: usize,
     library_search_query: String,
     library_search_visible: bool,
     library_scan_in_progress: bool,
@@ -713,12 +712,11 @@ impl UiManager {
             folder_cover_art_paths: HashMap::new(),
             library_enrichment: HashMap::new(),
             library_enrichment_pending: HashSet::new(),
+            library_last_detail_enrichment_entity: None,
             library_online_metadata_enabled: false,
             library_online_metadata_prompt_pending: true,
             library_artist_prefetch_first_row: 0,
             library_artist_prefetch_row_count: 0,
-            library_artist_background_prefetch: Vec::new(),
-            library_artist_background_cursor: 0,
             library_search_query: String::new(),
             library_search_visible: false,
             library_scan_in_progress: false,
@@ -2945,6 +2943,7 @@ impl UiManager {
         {
             self.library_enrichment.remove(&entity);
         }
+
         if self.library_enrichment_pending.contains(&entity) {
             if priority == protocol::LibraryEnrichmentPriority::Interactive {
                 let _ = self.bus_sender.send(protocol::Message::Library(
@@ -2965,13 +2964,30 @@ impl UiManager {
 
     fn request_current_detail_enrichment_if_needed(&mut self, view: &LibraryViewState) {
         let Some(entity) = Self::detail_enrichment_entity_for_view(view) else {
+            self.library_last_detail_enrichment_entity = None;
             return;
         };
+
+        let is_new_detail_entity =
+            self.library_last_detail_enrichment_entity.as_ref() != Some(&entity);
+        if is_new_detail_entity {
+            let should_refresh = self.library_enrichment.get(&entity).is_some_and(|payload| {
+                payload.status == protocol::LibraryEnrichmentStatus::NotFound
+                    || payload.status == protocol::LibraryEnrichmentStatus::Error
+            });
+            if should_refresh {
+                self.library_enrichment.remove(&entity);
+            }
+        }
+        self.library_last_detail_enrichment_entity = Some(entity.clone());
         self.request_enrichment(entity, protocol::LibraryEnrichmentPriority::Interactive);
     }
 
     fn prefetch_artist_enrichment_window(&mut self, first_row: usize, row_count: usize) {
-        if !matches!(self.current_library_view(), LibraryViewState::ArtistsRoot) {
+        if !matches!(
+            self.current_library_view(),
+            LibraryViewState::ArtistsRoot | LibraryViewState::GlobalSearch
+        ) {
             return;
         }
         if !self.library_online_metadata_enabled {
@@ -2984,7 +3000,7 @@ impl UiManager {
             return;
         }
 
-        let lookahead = 8usize;
+        let lookahead = 2usize;
         let start = first_row.saturating_sub(2);
         let end = first_row
             .saturating_add(row_count)
@@ -2992,7 +3008,7 @@ impl UiManager {
             .min(self.library_view_indices.len());
         let mut requested_count = 0usize;
         for row in start..end {
-            if requested_count >= 8 {
+            if requested_count >= 2 {
                 break;
             }
             let Some(source_index) = self.library_view_indices.get(row).copied() else {
@@ -3014,57 +3030,16 @@ impl UiManager {
         }
     }
 
-    fn update_background_artist_prefetch_seed(&mut self, artists: &[protocol::LibraryArtist]) {
-        self.library_artist_background_prefetch = artists
-            .iter()
-            .map(|artist| artist.artist.trim())
-            .filter(|artist| !artist.is_empty())
-            .map(str::to_string)
-            .collect();
-        self.library_artist_background_cursor = 0;
-    }
-
-    fn pump_background_artist_prefetch(&mut self) {
-        if !self.library_online_metadata_enabled {
-            return;
-        }
-        let total = self.library_artist_background_prefetch.len();
-        if total == 0 {
-            return;
-        }
-        if self.library_enrichment_pending.len() >= 48 {
-            return;
-        }
-
-        let mut requested = 0usize;
-        let mut examined = 0usize;
-        while requested < 4 && examined < total && self.library_enrichment_pending.len() < 48 {
-            let index = self.library_artist_background_cursor % total;
-            self.library_artist_background_cursor =
-                (self.library_artist_background_cursor + 1) % total;
-            examined = examined.saturating_add(1);
-
-            let artist_name = self.library_artist_background_prefetch[index].clone();
-            let pending_before = self.library_enrichment_pending.len();
-            self.request_enrichment(
-                protocol::LibraryEnrichmentEntity::Artist {
-                    artist: artist_name,
-                },
-                protocol::LibraryEnrichmentPriority::Prefetch,
-            );
-            if self.library_enrichment_pending.len() > pending_before {
-                requested = requested.saturating_add(1);
-            }
-        }
-    }
-
     fn on_enrichment_prefetch_tick(&mut self) {
         if !self.library_online_metadata_enabled || self.collection_mode != COLLECTION_MODE_LIBRARY
         {
             return;
         }
 
-        if matches!(self.current_library_view(), LibraryViewState::ArtistsRoot) {
+        if matches!(
+            self.current_library_view(),
+            LibraryViewState::ArtistsRoot | LibraryViewState::GlobalSearch
+        ) {
             let prefetch_row_count = if self.library_artist_prefetch_row_count > 0 {
                 self.library_artist_prefetch_row_count
             } else {
@@ -3075,7 +3050,6 @@ impl UiManager {
                 prefetch_row_count,
             );
         }
-        self.pump_background_artist_prefetch();
     }
 
     fn refresh_visible_artist_rows(&mut self, artist_name: &str) -> bool {
@@ -4236,9 +4210,8 @@ impl UiManager {
                                 self.library_status_text = "Scanning library...".to_string();
                                 self.library_cover_art_paths.clear();
                                 self.folder_cover_art_paths.clear();
-                                self.library_artist_background_prefetch.clear();
-                                self.library_artist_background_cursor = 0;
                                 self.library_enrichment_pending.clear();
+                                self.library_last_detail_enrichment_entity = None;
                                 self.library_add_to_dialog_visible = false;
                                 self.sync_library_add_to_playlist_ui();
                                 self.sync_library_ui();
@@ -4249,10 +4222,9 @@ impl UiManager {
                                     format!("Indexed {} tracks", indexed_tracks);
                                 self.library_cover_art_paths.clear();
                                 self.folder_cover_art_paths.clear();
-                                self.library_artist_background_prefetch.clear();
-                                self.library_artist_background_cursor = 0;
                                 self.library_enrichment.clear();
                                 self.library_enrichment_pending.clear();
+                                self.library_last_detail_enrichment_entity = None;
                                 self.request_library_view_data();
                                 self.sync_library_ui();
                             }
@@ -4272,7 +4244,6 @@ impl UiManager {
                                 }
                             }
                             protocol::LibraryMessage::ArtistsResult(artists) => {
-                                self.update_background_artist_prefetch_seed(&artists);
                                 if matches!(
                                     self.current_library_view(),
                                     LibraryViewState::ArtistsRoot
@@ -4416,6 +4387,7 @@ impl UiManager {
                             } => {
                                 self.library_enrichment.clear();
                                 self.library_enrichment_pending.clear();
+                                self.library_last_detail_enrichment_entity = None;
                                 TRACK_ROW_COVER_ART_IMAGE_CACHE.with(|cache| {
                                     cache.borrow_mut().clear();
                                 });
@@ -5094,6 +5066,7 @@ impl UiManager {
                                 config.library.online_metadata_prompt_pending;
                             if !self.library_online_metadata_enabled {
                                 self.library_enrichment_pending.clear();
+                                self.library_last_detail_enrichment_entity = None;
                             }
                             self.playlist_columns = config.ui.playlist_columns.clone();
                             self.album_art_column_min_width_px =

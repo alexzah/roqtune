@@ -61,6 +61,7 @@ The app is organized into cooperating runtime components connected through an ev
 - Layout file: `<config_dir>/roqtune/layout.toml`
 - Playlist database: `<data_dir>/roqtune/playlist.db`
 - Cover art cache: `<cache_dir>/roqtune/covers/`
+- Enrichment AI model cache: `<cache_dir>/roqtune/library_enrichment/ai_models/`
 - Output probe cache: `<cache_dir>/roqtune/output_probe_cache.json`
 
 Common Linux defaults:

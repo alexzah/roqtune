@@ -626,6 +626,7 @@ fn sanitize_config(config: Config) -> Config {
             online_metadata_prompt_pending: config.library.online_metadata_prompt_pending,
             artist_image_cache_ttl_days: clamped_artist_image_cache_ttl_days,
             artist_image_cache_max_size_mb: clamped_artist_image_cache_max_size_mb,
+            local_ai_reranker_enabled: config.library.local_ai_reranker_enabled,
         },
         buffering: BufferingConfig {
             player_low_watermark_ms: clamped_low_watermark,
@@ -1520,6 +1521,13 @@ fn write_config_to_document(document: &mut DocumentMut, previous: &Config, confi
             "artist_image_cache_max_size_mb",
             i64::from(previous.library.artist_image_cache_max_size_mb),
             i64::from(config.library.artist_image_cache_max_size_mb),
+            value,
+        );
+        set_table_scalar_if_changed(
+            library,
+            "local_ai_reranker_enabled",
+            previous.library.local_ai_reranker_enabled,
+            config.library.local_ai_reranker_enabled,
             value,
         );
         if !library.contains_key("folders") || previous.library.folders != config.library.folders {
