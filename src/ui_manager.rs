@@ -105,6 +105,9 @@ pub struct UiManager {
     library_online_metadata_prompt_pending: bool,
     library_artist_prefetch_first_row: usize,
     library_artist_prefetch_row_count: usize,
+    library_scroll_positions: HashMap<LibraryScrollViewKey, usize>,
+    pending_library_scroll_restore_row: Option<usize>,
+    library_scroll_restore_token: i32,
     library_artist_row_indices: HashMap<String, Vec<usize>>,
     library_last_prefetch_entities: Vec<protocol::LibraryEnrichmentEntity>,
     library_last_background_entities: Vec<protocol::LibraryEnrichmentEntity>,
@@ -180,6 +183,16 @@ enum LibraryViewState {
     AlbumDetail { album: String, album_artist: String },
     GenreDetail { genre: String },
     DecadeDetail { decade: String },
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+enum LibraryScrollViewKey {
+    SongsRoot,
+    ArtistsRoot,
+    AlbumsRoot,
+    GenresRoot,
+    DecadesRoot,
+    GlobalSearch,
 }
 
 #[derive(Clone, Debug)]
@@ -735,6 +748,9 @@ impl UiManager {
             library_online_metadata_prompt_pending: initial_online_metadata_prompt_pending,
             library_artist_prefetch_first_row: 0,
             library_artist_prefetch_row_count: 0,
+            library_scroll_positions: HashMap::new(),
+            pending_library_scroll_restore_row: None,
+            library_scroll_restore_token: 0,
             library_artist_row_indices: HashMap::new(),
             library_last_prefetch_entities: Vec::new(),
             library_last_background_entities: Vec::new(),
@@ -2868,6 +2884,40 @@ impl UiManager {
             .unwrap_or(LibraryViewState::SongsRoot)
     }
 
+    fn scroll_view_key_for_library_view(view: &LibraryViewState) -> Option<LibraryScrollViewKey> {
+        match view {
+            LibraryViewState::SongsRoot => Some(LibraryScrollViewKey::SongsRoot),
+            LibraryViewState::ArtistsRoot => Some(LibraryScrollViewKey::ArtistsRoot),
+            LibraryViewState::AlbumsRoot => Some(LibraryScrollViewKey::AlbumsRoot),
+            LibraryViewState::GenresRoot => Some(LibraryScrollViewKey::GenresRoot),
+            LibraryViewState::DecadesRoot => Some(LibraryScrollViewKey::DecadesRoot),
+            LibraryViewState::GlobalSearch => Some(LibraryScrollViewKey::GlobalSearch),
+            LibraryViewState::ArtistDetail { .. }
+            | LibraryViewState::AlbumDetail { .. }
+            | LibraryViewState::GenreDetail { .. }
+            | LibraryViewState::DecadeDetail { .. } => None,
+        }
+    }
+
+    fn remember_scroll_position_for_view(&mut self, view: &LibraryViewState, first_row: usize) {
+        if let Some(key) = Self::scroll_view_key_for_library_view(view) {
+            self.library_scroll_positions.insert(key, first_row);
+        }
+    }
+
+    fn remember_current_library_scroll_position(&mut self) {
+        let current_view = self.current_library_view();
+        self.remember_scroll_position_for_view(
+            &current_view,
+            self.library_artist_prefetch_first_row,
+        );
+    }
+
+    fn saved_scroll_position_for_view(&self, view: &LibraryViewState) -> Option<usize> {
+        let key = Self::scroll_view_key_for_library_view(view)?;
+        self.library_scroll_positions.get(&key).copied()
+    }
+
     fn current_library_root_index(&self) -> i32 {
         match self.library_view_stack.first() {
             Some(LibraryViewState::SongsRoot) => 0,
@@ -4057,6 +4107,17 @@ impl UiManager {
                 })
             })
             .collect();
+        let mut scroll_restore_row: Option<i32> = None;
+        if let Some(saved_row) = self.pending_library_scroll_restore_row {
+            if !rows.is_empty() {
+                let clamped_row = saved_row.min(rows.len().saturating_sub(1));
+                scroll_restore_row = Some(clamped_row as i32);
+                self.pending_library_scroll_restore_row = None;
+                self.library_scroll_restore_token =
+                    self.library_scroll_restore_token.wrapping_add(1);
+            }
+        }
+        let scroll_restore_token = self.library_scroll_restore_token;
         self.library_artist_row_indices = artist_row_indices;
         let collection_mode = self.collection_mode;
         let online_prompt_visible = self.collection_mode == COLLECTION_MODE_LIBRARY
@@ -4090,6 +4151,18 @@ impl UiManager {
             ui.set_library_online_prompt_visible(online_prompt_visible);
             Self::update_or_replace_library_model(&ui, rows);
         });
+        if let Some(restore_row) = scroll_restore_row {
+            let ui_handle = self.ui.clone();
+            let _ = self.ui.upgrade_in_event_loop(move |_| {
+                let deferred_ui_handle_late = ui_handle.clone();
+                slint::Timer::single_shot(Duration::from_millis(16), move || {
+                    if let Some(ui) = deferred_ui_handle_late.upgrade() {
+                        ui.set_library_scroll_target_row(restore_row);
+                        ui.set_library_scroll_restore_token(scroll_restore_token);
+                    }
+                });
+            });
+        }
         self.sync_library_search_state_to_ui();
         self.sync_properties_action_state();
     }
@@ -4131,6 +4204,7 @@ impl UiManager {
     }
 
     fn set_library_root_section(&mut self, section: i32) {
+        self.remember_current_library_scroll_position();
         let root = match section {
             1 => LibraryViewState::ArtistsRoot,
             2 => LibraryViewState::AlbumsRoot,
@@ -4142,6 +4216,7 @@ impl UiManager {
         self.library_view_stack.push(root);
         self.library_artist_prefetch_first_row = 0;
         self.library_artist_prefetch_row_count = 0;
+        self.pending_library_scroll_restore_row = None;
         self.prepare_library_view_transition();
         let playing_track_path = self.current_playing_track_path.clone();
         let playing_track_metadata = self.current_playing_track_metadata.clone();
@@ -4157,8 +4232,32 @@ impl UiManager {
         if self.library_view_stack.len() <= 1 {
             return;
         }
-        self.library_view_stack.pop();
-        self.library_artist_prefetch_first_row = 0;
+        let current_view = self.current_library_view();
+        self.remember_scroll_position_for_view(
+            &current_view,
+            self.library_artist_prefetch_first_row,
+        );
+        let popped = self.library_view_stack.pop();
+        let target_view = self.current_library_view();
+        let restoring_from_detail = matches!(
+            popped,
+            Some(
+                LibraryViewState::ArtistDetail { .. }
+                    | LibraryViewState::AlbumDetail { .. }
+                    | LibraryViewState::GenreDetail { .. }
+                    | LibraryViewState::DecadeDetail { .. }
+            )
+        );
+        if restoring_from_detail {
+            let restore_row = self
+                .saved_scroll_position_for_view(&target_view)
+                .unwrap_or(0);
+            self.pending_library_scroll_restore_row = Some(restore_row);
+            self.library_artist_prefetch_first_row = restore_row;
+        } else {
+            self.pending_library_scroll_restore_row = None;
+            self.library_artist_prefetch_first_row = 0;
+        }
         self.library_artist_prefetch_row_count = 0;
         self.prepare_library_view_transition();
         let playing_track_path = self.current_playing_track_path.clone();
@@ -4255,6 +4354,7 @@ impl UiManager {
                 self.play_library_song_from_entries(&song.id);
             }
             LibraryEntry::Artist(artist) => {
+                self.remember_current_library_scroll_position();
                 self.library_view_stack
                     .push(LibraryViewState::ArtistDetail {
                         artist: artist.artist,
@@ -4266,6 +4366,7 @@ impl UiManager {
                 self.sync_library_ui();
             }
             LibraryEntry::Album(album) => {
+                self.remember_current_library_scroll_position();
                 self.library_view_stack.push(LibraryViewState::AlbumDetail {
                     album: album.album,
                     album_artist: album.album_artist,
@@ -4277,6 +4378,7 @@ impl UiManager {
                 self.sync_library_ui();
             }
             LibraryEntry::Genre(genre) => {
+                self.remember_current_library_scroll_position();
                 self.library_view_stack
                     .push(LibraryViewState::GenreDetail { genre: genre.genre });
                 self.library_artist_prefetch_first_row = 0;
@@ -4286,6 +4388,7 @@ impl UiManager {
                 self.sync_library_ui();
             }
             LibraryEntry::Decade(decade) => {
+                self.remember_current_library_scroll_position();
                 self.library_view_stack
                     .push(LibraryViewState::DecadeDetail {
                         decade: decade.decade,
@@ -4531,6 +4634,8 @@ impl UiManager {
                                     first_row, row_count
                                 );
                                 self.library_artist_prefetch_first_row = first_row;
+                                let current_view = self.current_library_view();
+                                self.remember_scroll_position_for_view(&current_view, first_row);
                                 if row_count > 0 {
                                     self.library_artist_prefetch_row_count = row_count;
                                 }

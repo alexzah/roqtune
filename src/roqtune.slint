@@ -225,6 +225,8 @@ export component AppWindow inherits Window {
     in-out property <bool> library_detail_header_source_visible: false;
     in-out property <bool> library_detail_header_loading: false;
     in-out property <bool> library_online_prompt_visible: false;
+    in-out property <int> library_scroll_target_row: 0;
+    in-out property <int> library_scroll_restore_token: 0;
     in-out property <[LibraryRowData]> library_model: [];
     in-out property <bool> show_library_context_menu: false;
     property <length> library_context_menu_x: 0px;
@@ -1497,6 +1499,11 @@ export component AppWindow inherits Window {
                             property <int> row-height-px: root.library_root_index == 2 ? 38
                                 : root.library_root_index == 0 ? 32
                                 : 34;
+                            property <int> restore-token: root.library_scroll_restore_token;
+                            changed restore-token => {
+                                let clamped-row = min(max(0, root.library_scroll_target_row), max(0, root.library_model.length - 1));
+                                self.viewport-y = 0px - clamped-row * (self.row-height-px * 1px);
+                            }
                             changed viewport-y => {
                                 let scroll-offset-y = max(0px, -self.viewport-y);
                                 let first-row = max(0, floor(scroll-offset-y / (self.row-height-px * 1px)));
