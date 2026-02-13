@@ -984,6 +984,48 @@ impl DbManager {
         Ok(())
     }
 
+    /// Deletes indexed library rows for the provided concrete file paths.
+    pub fn delete_library_paths(&self, paths: &[PathBuf]) -> Result<usize, rusqlite::Error> {
+        if paths.is_empty() {
+            return Ok(0);
+        }
+
+        self.conn.execute("BEGIN IMMEDIATE TRANSACTION", [])?;
+        let mut stmt = match self
+            .conn
+            .prepare("DELETE FROM library_tracks WHERE path = ?1")
+        {
+            Ok(stmt) => stmt,
+            Err(err) => {
+                let _ = self.conn.execute("ROLLBACK", []);
+                return Err(err);
+            }
+        };
+
+        let mut deleted = 0usize;
+        let mut seen_paths = HashSet::new();
+        for path in paths {
+            let key = path.to_string_lossy().to_string();
+            if !seen_paths.insert(key.clone()) {
+                continue;
+            }
+            match stmt.execute(params![key]) {
+                Ok(changed) => {
+                    deleted = deleted.saturating_add(changed);
+                }
+                Err(err) => {
+                    drop(stmt);
+                    let _ = self.conn.execute("ROLLBACK", []);
+                    return Err(err);
+                }
+            }
+        }
+
+        drop(stmt);
+        self.conn.execute("COMMIT", [])?;
+        Ok(deleted)
+    }
+
     /// Loads all songs in library sorted alphabetically by title.
     pub fn get_library_songs(&self) -> Result<Vec<LibrarySong>, rusqlite::Error> {
         let mut stmt = self.conn.prepare(

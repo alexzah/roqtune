@@ -1091,6 +1091,52 @@ impl LibraryManager {
             }));
     }
 
+    fn remove_selection_from_library(&self, selections: Vec<protocol::LibrarySelectionSpec>) {
+        if selections.is_empty() {
+            let _ =
+                self.bus_producer
+                    .send(Message::Library(LibraryMessage::RemoveSelectionFailed(
+                        "No library items selected".to_string(),
+                    )));
+            return;
+        }
+
+        let paths = match self.resolve_selection_paths(selections) {
+            Ok(paths) => paths,
+            Err(err) => {
+                let _ = self
+                    .bus_producer
+                    .send(Message::Library(LibraryMessage::RemoveSelectionFailed(err)));
+                return;
+            }
+        };
+
+        if paths.is_empty() {
+            let _ =
+                self.bus_producer
+                    .send(Message::Library(LibraryMessage::RemoveSelectionFailed(
+                        "No tracks matched the selected library items".to_string(),
+                    )));
+            return;
+        }
+
+        match self.db_manager.delete_library_paths(&paths) {
+            Ok(removed_tracks) => {
+                let _ = self.bus_producer.send(Message::Library(
+                    LibraryMessage::RemoveSelectionCompleted { removed_tracks },
+                ));
+            }
+            Err(err) => {
+                let _ = self.bus_producer.send(Message::Library(
+                    LibraryMessage::RemoveSelectionFailed(format!(
+                        "Failed to remove selected library items: {}",
+                        err
+                    )),
+                ));
+            }
+        }
+    }
+
     /// Starts the blocking event loop for library scans and query requests.
     pub fn run(&mut self) {
         loop {
@@ -1173,6 +1219,9 @@ impl LibraryManager {
                         playlist_ids,
                     }) => {
                         self.add_selection_to_playlists(selections, playlist_ids);
+                    }
+                    Message::Library(LibraryMessage::RemoveSelectionFromLibrary { selections }) => {
+                        self.remove_selection_from_library(selections);
                     }
                     _ => {}
                 },

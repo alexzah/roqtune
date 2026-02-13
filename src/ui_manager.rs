@@ -129,6 +129,7 @@ pub struct UiManager {
     library_toast_generation: u64,
     pending_paste_feedback: bool,
     copied_library_selections: Vec<protocol::LibrarySelectionSpec>,
+    pending_library_remove_selections: Vec<protocol::LibrarySelectionSpec>,
     properties_request_nonce: u64,
     properties_pending_request_id: Option<u64>,
     properties_pending_request_kind: Option<PropertiesRequestKind>,
@@ -909,6 +910,7 @@ impl UiManager {
             library_toast_generation: 0,
             pending_paste_feedback: false,
             copied_library_selections: Vec::new(),
+            pending_library_remove_selections: Vec::new(),
             properties_request_nonce: 0,
             properties_pending_request_id: None,
             properties_pending_request_kind: None,
@@ -3090,6 +3092,37 @@ impl UiManager {
         );
     }
 
+    fn request_library_remove_selection_confirmation(&mut self) {
+        let selections = self.build_library_selection_specs();
+        if selections.is_empty() {
+            return;
+        }
+        self.pending_library_remove_selections = selections;
+        let _ = self.ui.upgrade_in_event_loop(move |ui| {
+            ui.set_show_library_remove_confirm(true);
+        });
+    }
+
+    fn confirm_library_remove_selection(&mut self) {
+        let selections = std::mem::take(&mut self.pending_library_remove_selections);
+        let _ = self.ui.upgrade_in_event_loop(move |ui| {
+            ui.set_show_library_remove_confirm(false);
+        });
+        if selections.is_empty() {
+            return;
+        }
+        let _ = self.bus_sender.send(protocol::Message::Library(
+            protocol::LibraryMessage::RemoveSelectionFromLibrary { selections },
+        ));
+    }
+
+    fn cancel_library_remove_selection(&mut self) {
+        self.pending_library_remove_selections.clear();
+        let _ = self.ui.upgrade_in_event_loop(move |ui| {
+            ui.set_show_library_remove_confirm(false);
+        });
+    }
+
     fn paste_copied_tracks(&mut self) {
         if !self.copied_track_paths.is_empty() {
             self.pending_paste_feedback = true;
@@ -3112,9 +3145,14 @@ impl UiManager {
         ));
     }
 
+    fn cut_selected_library_items(&mut self) {
+        self.copy_selected_library_items();
+        self.request_library_remove_selection_confirmation();
+    }
+
     fn cut_selected_tracks(&mut self) {
         if self.collection_mode == COLLECTION_MODE_LIBRARY {
-            self.copy_selected_library_items();
+            self.cut_selected_library_items();
             return;
         }
         if self.is_filter_view_active() || self.selected_indices.is_empty() {
@@ -5228,6 +5266,21 @@ impl UiManager {
                             protocol::LibraryMessage::SetSearchQuery(query) => {
                                 self.set_library_search_query(query);
                             }
+                            protocol::LibraryMessage::CopySelected => {
+                                self.copy_selected_library_items();
+                            }
+                            protocol::LibraryMessage::CutSelected => {
+                                self.cut_selected_library_items();
+                            }
+                            protocol::LibraryMessage::DeleteSelected => {
+                                self.request_library_remove_selection_confirmation();
+                            }
+                            protocol::LibraryMessage::ConfirmRemoveSelection => {
+                                self.confirm_library_remove_selection();
+                            }
+                            protocol::LibraryMessage::CancelRemoveSelection => {
+                                self.cancel_library_remove_selection();
+                            }
                             protocol::LibraryMessage::LibraryViewportChanged {
                                 first_row,
                                 row_count,
@@ -5503,6 +5556,32 @@ impl UiManager {
                                 self.library_status_text = toast_text.clone();
                                 self.show_library_toast(toast_text);
                             }
+                            protocol::LibraryMessage::RemoveSelectionCompleted {
+                                removed_tracks,
+                            } => {
+                                self.pending_library_remove_selections.clear();
+                                let _ = self.ui.upgrade_in_event_loop(move |ui| {
+                                    ui.set_show_library_remove_confirm(false);
+                                });
+                                let toast_text =
+                                    format!("Removed {} track(s) from library", removed_tracks);
+                                self.library_status_text = toast_text.clone();
+                                self.show_library_toast(toast_text);
+                                self.library_cover_art_paths.clear();
+                                self.folder_cover_art_paths.clear();
+                                self.request_library_view_data();
+                                self.request_library_root_counts();
+                            }
+                            protocol::LibraryMessage::RemoveSelectionFailed(error_text) => {
+                                self.pending_library_remove_selections.clear();
+                                let _ = self.ui.upgrade_in_event_loop(move |ui| {
+                                    ui.set_show_library_remove_confirm(false);
+                                });
+                                let toast_text =
+                                    format!("Failed to remove from library: {}", error_text);
+                                self.library_status_text = toast_text.clone();
+                                self.show_library_toast(toast_text);
+                            }
                             protocol::LibraryMessage::ToastTimeout { generation } => {
                                 if generation == self.library_toast_generation {
                                     self.hide_library_toast();
@@ -5530,7 +5609,8 @@ impl UiManager {
                                 ..
                             }
                             | protocol::LibraryMessage::ClearEnrichmentCache
-                            | protocol::LibraryMessage::AddSelectionToPlaylists { .. } => {}
+                            | protocol::LibraryMessage::AddSelectionToPlaylists { .. }
+                            | protocol::LibraryMessage::RemoveSelectionFromLibrary { .. } => {}
                         },
                         protocol::Message::Metadata(metadata_message) => match metadata_message {
                             protocol::MetadataMessage::OpenPropertiesForCurrentSelection => {
@@ -5690,6 +5770,10 @@ impl UiManager {
                             self.rebuild_track_model();
                         }
                         protocol::Message::Playlist(protocol::PlaylistMessage::DeleteSelected) => {
+                            if self.collection_mode == COLLECTION_MODE_LIBRARY {
+                                self.request_library_remove_selection_confirmation();
+                                continue;
+                            }
                             if self.is_filter_view_active() {
                                 continue;
                             }

@@ -2423,6 +2423,20 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     });
 
     let bus_sender_clone = bus_sender.clone();
+    ui.on_library_confirm_remove_selection(move || {
+        let _ = bus_sender_clone.send(Message::Library(
+            protocol::LibraryMessage::ConfirmRemoveSelection,
+        ));
+    });
+
+    let bus_sender_clone = bus_sender.clone();
+    ui.on_library_cancel_remove_selection(move || {
+        let _ = bus_sender_clone.send(Message::Library(
+            protocol::LibraryMessage::CancelRemoveSelection,
+        ));
+    });
+
+    let bus_sender_clone = bus_sender.clone();
     ui.on_open_properties_for_current_selection(move || {
         let _ = bus_sender_clone.send(Message::Metadata(
             MetadataMessage::OpenPropertiesForCurrentSelection,
@@ -2876,6 +2890,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let ui_handle_clone = ui.as_weak().clone();
     ui.on_delete_selected_tracks(move || {
         if let Some(ui) = ui_handle_clone.upgrade() {
+            if ui.get_collection_mode() == 1 {
+                let _ = bus_sender_clone
+                    .send(Message::Library(protocol::LibraryMessage::DeleteSelected));
+                return;
+            }
             if ui.get_playlist_filter_active() {
                 flash_read_only_view_indicator(ui_handle_clone.clone());
                 return;
@@ -2904,7 +2923,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     });
 
     let bus_sender_clone = bus_sender.clone();
+    let ui_handle_clone = ui.as_weak().clone();
     ui.on_copy_selected_tracks(move || {
+        if let Some(ui) = ui_handle_clone.upgrade() {
+            if ui.get_collection_mode() == 1 {
+                let _ =
+                    bus_sender_clone.send(Message::Library(protocol::LibraryMessage::CopySelected));
+                return;
+            }
+        }
         let _ = bus_sender_clone.send(Message::Playlist(PlaylistMessage::CopySelectedTracks));
     });
 
@@ -2912,6 +2939,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let ui_handle_clone = ui.as_weak().clone();
     ui.on_cut_selected_tracks(move || {
         if let Some(ui) = ui_handle_clone.upgrade() {
+            if ui.get_collection_mode() == 1 {
+                let _ =
+                    bus_sender_clone.send(Message::Library(protocol::LibraryMessage::CutSelected));
+                return;
+            }
             if ui.get_playlist_filter_active() {
                 flash_read_only_view_indicator(ui_handle_clone.clone());
                 return;
@@ -2924,6 +2956,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let ui_handle_clone = ui.as_weak().clone();
     ui.on_paste_copied_tracks(move || {
         if let Some(ui) = ui_handle_clone.upgrade() {
+            if ui.get_collection_mode() == 1 {
+                return;
+            }
             if ui.get_playlist_filter_active() {
                 flash_read_only_view_indicator(ui_handle_clone.clone());
                 return;

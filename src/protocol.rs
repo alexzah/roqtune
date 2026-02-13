@@ -200,6 +200,14 @@ pub enum LibraryMessage {
         selections: Vec<LibrarySelectionSpec>,
         playlist_ids: Vec<String>,
     },
+    CopySelected,
+    CutSelected,
+    DeleteSelected,
+    ConfirmRemoveSelection,
+    CancelRemoveSelection,
+    RemoveSelectionFromLibrary {
+        selections: Vec<LibrarySelectionSpec>,
+    },
     RequestScan,
     RequestRootCounts,
     #[allow(dead_code)]
@@ -319,6 +327,10 @@ pub enum LibraryMessage {
         track_count: usize,
     },
     AddToPlaylistsFailed(String),
+    RemoveSelectionCompleted {
+        removed_tracks: usize,
+    },
+    RemoveSelectionFailed(String),
     ToastTimeout {
         generation: u64,
     },

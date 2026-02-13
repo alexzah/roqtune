@@ -78,6 +78,11 @@ export component AppWindow inherits Window {
                 root.show_playlist_track_context_menu = false;
                 return accept;
             }
+            if (event.text == Key.Escape && root.show_library_remove_confirm) {
+                root.library_cancel_remove_selection();
+                root.show_library_remove_confirm = false;
+                return accept;
+            }
             if (event.text == Key.Escape && root.library_add_to_dialog_visible) {
                 root.library_cancel_add_to_playlists();
                 return accept;
@@ -113,17 +118,27 @@ export component AppWindow inherits Window {
                 return accept;
             }
             if (event.text == Key.Delete) {
-                if (root.editing_playlist_index != -1
-                        || root.show_confirm_dialog
-                        || root.show_apply_filter_view_confirm) {
-                    return reject;
-                }
-                if (root.sidebar_has_focus) {
-                    root.confirm_delete_playlist(root.active_playlist_index);
-                } else {
+                if (root.collection_mode == 1) {
+                    if (root.show_library_remove_confirm
+                            || root.show_confirm_dialog
+                            || root.show_apply_filter_view_confirm) {
+                        return reject;
+                    }
                     root.delete_selected_tracks();
+                    return accept;
+                } else {
+                    if (root.editing_playlist_index != -1
+                            || root.show_confirm_dialog
+                            || root.show_apply_filter_view_confirm) {
+                        return reject;
+                    }
+                    if (root.sidebar_has_focus) {
+                        root.confirm_delete_playlist(root.active_playlist_index);
+                    } else {
+                        root.delete_selected_tracks();
+                    }
+                    return accept;
                 }
-                return accept;
             }
             if (event.text == Key.F2) {
                 root.editing_playlist_index = root.active_playlist_index;
@@ -164,6 +179,7 @@ export component AppWindow inherits Window {
     property <string> delete_confirm_message: "";
     in-out property <bool> show_confirm_dialog: false;
     in-out property <bool> show_apply_filter_view_confirm: false;
+    in-out property <bool> show_library_remove_confirm: false;
     in-out property <string> apply_filter_view_confirm_message: "";
     in-out property <int> delete_custom_column_index: -1;
     in-out property <string> delete_custom_column_message: "";
@@ -1270,7 +1286,7 @@ export component AppWindow inherits Window {
                                     let click-x = root.layout-region-x(i) + parent.x + self.x + self.mouse-x;
                                     let click-y = root.layout-region-y(i) + parent.y + self.y + self.mouse-y;
                                     root.playlist_track_context_menu_x = min(root.width - 170px, max(8px, click-x));
-                                    root.playlist_track_context_menu_y = min(root.height - 42px, max(8px, click-y));
+                                    root.playlist_track_context_menu_y = min(root.height - 160px, max(8px, click-y));
                                     root.show_playlist_track_context_menu = true;
                                 }
                             }
@@ -1578,7 +1594,7 @@ export component AppWindow inherits Window {
                                             let click-x = root.layout-region-x(i) + parent.x + self.x + self.mouse-x;
                                             let click-y = root.layout-region-y(i) + parent.y + self.y + self.mouse-y;
                                             root.library_context_menu_x = min(root.width - 170px, max(8px, click-x));
-                                            root.library_context_menu_y = min(root.height - 70px, max(8px, click-y));
+                                            root.library_context_menu_y = min(root.height - 184px, max(8px, click-y));
                                             root.show_library_context_menu = true;
                                         }
                                     }
@@ -2584,8 +2600,8 @@ export component AppWindow inherits Window {
         z: 152;
         x: root.playlist_track_context_menu_x;
         y: root.playlist_track_context_menu_y;
-        width: 160px;
-        height: 34px;
+        width: 170px;
+        height: 132px;
         border-radius: 6px;
         background: #262626;
         border-width: 1px;
@@ -2593,6 +2609,7 @@ export component AppWindow inherits Window {
 
         VerticalLayout {
             padding: 4px;
+            spacing: 2px;
             Rectangle {
                 height: 24px;
                 border-radius: 4px;
@@ -2614,6 +2631,86 @@ export component AppWindow inherits Window {
                     }
                 }
             }
+            Rectangle {
+                height: 24px;
+                border-radius: 4px;
+                background: playlist-copy-ta.has-hover ? #363636 : transparent;
+                Text {
+                    x: 10px;
+                    width: parent.width - 20px;
+                    text: "Copy";
+                    color: #ddd;
+                    font-size: 12px;
+                    vertical-alignment: center;
+                    overflow: elide;
+                }
+                playlist-copy-ta := TouchArea {
+                    clicked => {
+                        root.show_playlist_track_context_menu = false;
+                        root.copy_selected_tracks();
+                    }
+                }
+            }
+            Rectangle {
+                height: 24px;
+                border-radius: 4px;
+                background: playlist-paste-ta.has-hover ? #363636 : transparent;
+                Text {
+                    x: 10px;
+                    width: parent.width - 20px;
+                    text: "Paste";
+                    color: #ddd;
+                    font-size: 12px;
+                    vertical-alignment: center;
+                    overflow: elide;
+                }
+                playlist-paste-ta := TouchArea {
+                    clicked => {
+                        root.show_playlist_track_context_menu = false;
+                        root.paste_copied_tracks();
+                    }
+                }
+            }
+            Rectangle {
+                height: 24px;
+                border-radius: 4px;
+                background: playlist-cut-ta.has-hover ? #363636 : transparent;
+                Text {
+                    x: 10px;
+                    width: parent.width - 20px;
+                    text: "Cut";
+                    color: #ddd;
+                    font-size: 12px;
+                    vertical-alignment: center;
+                    overflow: elide;
+                }
+                playlist-cut-ta := TouchArea {
+                    clicked => {
+                        root.show_playlist_track_context_menu = false;
+                        root.cut_selected_tracks();
+                    }
+                }
+            }
+            Rectangle {
+                height: 24px;
+                border-radius: 4px;
+                background: playlist-delete-ta.has-hover ? #4a2a2a : transparent;
+                Text {
+                    x: 10px;
+                    width: parent.width - 20px;
+                    text: "Delete";
+                    color: #db6f6f;
+                    font-size: 12px;
+                    vertical-alignment: center;
+                    overflow: elide;
+                }
+                playlist-delete-ta := TouchArea {
+                    clicked => {
+                        root.show_playlist_track_context_menu = false;
+                        root.delete_selected_tracks();
+                    }
+                }
+            }
         }
     }
 
@@ -2631,8 +2728,8 @@ export component AppWindow inherits Window {
         z: 154;
         x: root.library_context_menu_x;
         y: root.library_context_menu_y;
-        width: 160px;
-        height: 62px;
+        width: 190px;
+        height: 132px;
         border-radius: 6px;
         background: #262626;
         border-width: 1px;
@@ -2641,6 +2738,27 @@ export component AppWindow inherits Window {
         VerticalLayout {
             padding: 4px;
             spacing: 2px;
+            Rectangle {
+                height: 24px;
+                border-radius: 4px;
+                background: library-properties-ta.has-hover && root.library_properties_enabled ? #363636 : transparent;
+                Text {
+                    x: 10px;
+                    width: parent.width - 20px;
+                    text: "Properties";
+                    color: root.library_properties_enabled ? #ddd : #777;
+                    font-size: 12px;
+                    vertical-alignment: center;
+                    overflow: elide;
+                }
+                library-properties-ta := TouchArea {
+                    enabled: root.library_properties_enabled;
+                    clicked => {
+                        root.show_library_context_menu = false;
+                        root.open_properties_for_current_selection();
+                    }
+                }
+            }
             Rectangle {
                 height: 24px;
                 border-radius: 4px;
@@ -2664,21 +2782,60 @@ export component AppWindow inherits Window {
             Rectangle {
                 height: 24px;
                 border-radius: 4px;
-                background: library-properties-ta.has-hover && root.library_properties_enabled ? #363636 : transparent;
+                background: library-copy-ta.has-hover ? #363636 : transparent;
                 Text {
                     x: 10px;
                     width: parent.width - 20px;
-                    text: "Properties";
-                    color: root.library_properties_enabled ? #ddd : #777;
+                    text: "Copy";
+                    color: #ddd;
                     font-size: 12px;
                     vertical-alignment: center;
                     overflow: elide;
                 }
-                library-properties-ta := TouchArea {
-                    enabled: root.library_properties_enabled;
+                library-copy-ta := TouchArea {
                     clicked => {
                         root.show_library_context_menu = false;
-                        root.open_properties_for_current_selection();
+                        root.copy_selected_tracks();
+                    }
+                }
+            }
+            Rectangle {
+                height: 24px;
+                border-radius: 4px;
+                background: library-cut-ta.has-hover ? #363636 : transparent;
+                Text {
+                    x: 10px;
+                    width: parent.width - 20px;
+                    text: "Cut";
+                    color: #ddd;
+                    font-size: 12px;
+                    vertical-alignment: center;
+                    overflow: elide;
+                }
+                library-cut-ta := TouchArea {
+                    clicked => {
+                        root.show_library_context_menu = false;
+                        root.cut_selected_tracks();
+                    }
+                }
+            }
+            Rectangle {
+                height: 24px;
+                border-radius: 4px;
+                background: library-delete-ta.has-hover ? #4a2a2a : transparent;
+                Text {
+                    x: 10px;
+                    width: parent.width - 20px;
+                    text: "Remove from library";
+                    color: #db6f6f;
+                    font-size: 12px;
+                    vertical-alignment: center;
+                    overflow: elide;
+                }
+                library-delete-ta := TouchArea {
+                    clicked => {
+                        root.show_library_context_menu = false;
+                        root.delete_selected_tracks();
                     }
                 }
             }
@@ -2947,6 +3104,22 @@ export component AppWindow inherits Window {
         }
         cancelled => {
             root.show_apply_filter_view_confirm = false;
+            root.refocus_main();
+        }
+    }
+
+    library_remove_overlay := ConfirmationDialog {
+        is-visible: root.show_library_remove_confirm;
+        message: "Remove from library? This will not delete any files\n\nNote: songs may be re-added in a rescan if files remain in library folders";
+        confirm-button-text: "Remove";
+        confirmed => {
+            root.library_confirm_remove_selection();
+            root.show_library_remove_confirm = false;
+            root.refocus_main();
+        }
+        cancelled => {
+            root.library_cancel_remove_selection();
+            root.show_library_remove_confirm = false;
             root.refocus_main();
         }
     }
@@ -3935,6 +4108,8 @@ export component AppWindow inherits Window {
     callback library_toggle_add_to_playlist(int);
     callback library_confirm_add_to_playlists();
     callback library_cancel_add_to_playlists();
+    callback library_confirm_remove_selection();
+    callback library_cancel_remove_selection();
     callback open_properties_for_current_selection();
     callback properties_field_edited(int, string);
     callback properties_save();
