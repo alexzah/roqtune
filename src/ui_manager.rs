@@ -59,6 +59,7 @@ pub struct UiManager {
     drag_indices: Vec<usize>,
     is_dragging: bool,
     pressed_index: Option<usize>,
+    pending_single_select_on_click: Option<usize>,
     progress_rl:
         RateLimiter<NotKeyed, governor::state::InMemoryState, governor::clock::DefaultClock>,
     // Cached progress values to avoid unnecessary UI updates
@@ -841,6 +842,7 @@ impl UiManager {
             drag_indices: Vec::new(),
             is_dragging: false,
             pressed_index: None,
+            pending_single_select_on_click: None,
             progress_rl: RateLimiter::direct(
                 Quota::with_period(Duration::from_millis(30)).unwrap(),
             ),
@@ -5085,11 +5087,18 @@ impl UiManager {
         );
         let Some(source_index) = self.map_view_to_source_index(pressed_index) else {
             self.pressed_index = None;
+            self.pending_single_select_on_click = None;
             return;
         };
         self.pressed_index = Some(source_index);
+        self.pending_single_select_on_click = None;
 
         let is_already_selected = self.selected_indices.contains(&source_index);
+        if is_already_selected && !ctrl && !shift && self.selected_indices.len() > 1 {
+            // Defer collapse to pointer-up so dragging still moves the full selection.
+            self.pending_single_select_on_click = Some(source_index);
+            return;
+        }
         if !is_already_selected || ctrl || shift {
             if shift && !self.view_indices.is_empty() {
                 let shift_selected_indices = Self::build_shift_selection_from_view_order(
@@ -5120,8 +5129,10 @@ impl UiManager {
         if self.is_filter_view_active() {
             self.drag_indices.clear();
             self.is_dragging = false;
+            self.pending_single_select_on_click = None;
             return;
         }
+        self.pending_single_select_on_click = None;
 
         let Some(source_index) = self.map_view_to_source_index(pressed_index) else {
             return;
@@ -5166,6 +5177,7 @@ impl UiManager {
             self.drag_indices.clear();
             self.is_dragging = false;
             self.pressed_index = None;
+            self.pending_single_select_on_click = None;
             let _ = self.ui.upgrade_in_event_loop(move |ui| {
                 ui.set_is_dragging(false);
                 ui.set_drop_index(-1);
@@ -5188,6 +5200,10 @@ impl UiManager {
 
             let _ = self.bus_sender.send(protocol::Message::Playlist(
                 protocol::PlaylistMessage::ReorderTracks { indices, to },
+            ));
+        } else if let Some(source_index) = self.pending_single_select_on_click.take() {
+            let _ = self.bus_sender.send(protocol::Message::Playlist(
+                protocol::PlaylistMessage::SelectionChanged(vec![source_index]),
             ));
         }
 

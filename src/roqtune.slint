@@ -2634,6 +2634,26 @@ export component AppWindow inherits Window {
             Rectangle {
                 height: 24px;
                 border-radius: 4px;
+                background: playlist-cut-ta.has-hover ? #363636 : transparent;
+                Text {
+                    x: 10px;
+                    width: parent.width - 20px;
+                    text: "Cut";
+                    color: #ddd;
+                    font-size: 12px;
+                    vertical-alignment: center;
+                    overflow: elide;
+                }
+                playlist-cut-ta := TouchArea {
+                    clicked => {
+                        root.show_playlist_track_context_menu = false;
+                        root.cut_selected_tracks();
+                    }
+                }
+            }
+            Rectangle {
+                height: 24px;
+                border-radius: 4px;
                 background: playlist-copy-ta.has-hover ? #363636 : transparent;
                 Text {
                     x: 10px;
@@ -2668,26 +2688,6 @@ export component AppWindow inherits Window {
                     clicked => {
                         root.show_playlist_track_context_menu = false;
                         root.paste_copied_tracks();
-                    }
-                }
-            }
-            Rectangle {
-                height: 24px;
-                border-radius: 4px;
-                background: playlist-cut-ta.has-hover ? #363636 : transparent;
-                Text {
-                    x: 10px;
-                    width: parent.width - 20px;
-                    text: "Cut";
-                    color: #ddd;
-                    font-size: 12px;
-                    vertical-alignment: center;
-                    overflow: elide;
-                }
-                playlist-cut-ta := TouchArea {
-                    clicked => {
-                        root.show_playlist_track_context_menu = false;
-                        root.cut_selected_tracks();
                     }
                 }
             }
@@ -2782,26 +2782,6 @@ export component AppWindow inherits Window {
             Rectangle {
                 height: 24px;
                 border-radius: 4px;
-                background: library-copy-ta.has-hover ? #363636 : transparent;
-                Text {
-                    x: 10px;
-                    width: parent.width - 20px;
-                    text: "Copy";
-                    color: #ddd;
-                    font-size: 12px;
-                    vertical-alignment: center;
-                    overflow: elide;
-                }
-                library-copy-ta := TouchArea {
-                    clicked => {
-                        root.show_library_context_menu = false;
-                        root.copy_selected_tracks();
-                    }
-                }
-            }
-            Rectangle {
-                height: 24px;
-                border-radius: 4px;
                 background: library-cut-ta.has-hover ? #363636 : transparent;
                 Text {
                     x: 10px;
@@ -2816,6 +2796,26 @@ export component AppWindow inherits Window {
                     clicked => {
                         root.show_library_context_menu = false;
                         root.cut_selected_tracks();
+                    }
+                }
+            }
+            Rectangle {
+                height: 24px;
+                border-radius: 4px;
+                background: library-copy-ta.has-hover ? #363636 : transparent;
+                Text {
+                    x: 10px;
+                    width: parent.width - 20px;
+                    text: "Copy";
+                    color: #ddd;
+                    font-size: 12px;
+                    vertical-alignment: center;
+                    overflow: elide;
+                }
+                library-copy-ta := TouchArea {
+                    clicked => {
+                        root.show_library_context_menu = false;
+                        root.copy_selected_tracks();
                     }
                 }
             }
@@ -3110,7 +3110,7 @@ export component AppWindow inherits Window {
 
     library_remove_overlay := ConfirmationDialog {
         is-visible: root.show_library_remove_confirm;
-        message: "Remove from library? This will not delete any files\n\nNote: songs may be re-added in a rescan if files remain in library folders";
+        message: "Remove from library? This will not delete any files\n\nNote: tracks may be re-added in a rescan if files remain in library folders";
         confirm-button-text: "Remove";
         confirmed => {
             root.library_confirm_remove_selection();
