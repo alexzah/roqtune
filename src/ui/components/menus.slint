@@ -168,16 +168,18 @@ export component ConfirmationDialog inherits Rectangle {
     TouchArea {}
 
     Rectangle {
-        width: 350px;
-        height: 150px;
+        width: min(460px, max(280px, root.width - 24px));
+        height: min(240px, max(140px, root.height - 24px));
+        x: max(0px, (parent.width - self.width) / 2);
+        y: max(0px, (parent.height - self.height) / 2);
         background: #282828;
         border-width: 1px;
         border-color: #444;
         border-radius: 4px;
 
         VerticalLayout {
-            padding: 20px;
-            spacing: 20px;
+            padding: 16px;
+            spacing: 12px;
 
             Text {
                 text: root.message;
@@ -185,6 +187,7 @@ export component ConfirmationDialog inherits Rectangle {
                 font-size: 14px;
                 horizontal-alignment: center;
                 wrap: word-wrap;
+                vertical-stretch: 1;
             }
 
             HorizontalLayout {

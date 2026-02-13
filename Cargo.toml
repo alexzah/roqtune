@@ -5,7 +5,7 @@ edition = "2021"
 build = "build.rs"
 
 [dependencies]
-slint = "1.15.0" # UI framework
+slint = { version = "1.15.0", features = ["unstable-winit-030"] } # UI framework
 rfd = "0.17.2"   # For file dialogs
 log = "0.4.29" # logs
 colog = "1.4.0" # logs

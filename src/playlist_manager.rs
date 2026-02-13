@@ -807,7 +807,6 @@ impl PlaylistManager {
                     protocol::Message::Playback(protocol::PlaybackMessage::Play) => {
                         debug!("PlaylistManager: Received play command");
                         let has_paused_track = !self.playback_playlist.is_playing()
-                            && self.playback_playlist_id.is_some()
                             && self
                                 .playback_playlist
                                 .get_playing_track_index()
@@ -2574,6 +2573,84 @@ mod tests {
                 Err(TryRecvError::Lagged(_)) => continue,
                 Err(TryRecvError::Closed) => {
                     panic!("bus closed while waiting for resumed playback message")
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn test_play_resumes_paused_library_queue_without_restarting_active_playlist() {
+        let mut harness = PlaylistManagerHarness::new();
+        harness.drain_messages();
+
+        let library_tracks = vec![
+            protocol::RestoredTrack {
+                id: "lib_queue_track_0".to_string(),
+                path: PathBuf::from("/tmp/lib_queue_track_0.mp3"),
+            },
+            protocol::RestoredTrack {
+                id: "lib_queue_track_1".to_string(),
+                path: PathBuf::from("/tmp/lib_queue_track_1.mp3"),
+            },
+        ];
+        harness.send(protocol::Message::Playlist(
+            protocol::PlaylistMessage::PlayLibraryQueue {
+                tracks: library_tracks,
+                start_index: 1,
+            },
+        ));
+        let _ = wait_for_message(&mut harness.receiver, Duration::from_secs(1), |message| {
+            matches!(
+                message,
+                protocol::Message::Playlist(protocol::PlaylistMessage::PlaylistIndicesChanged {
+                    is_playing: true,
+                    playing_index: Some(1),
+                    ..
+                })
+            )
+        });
+
+        harness.send(protocol::Message::Playback(
+            protocol::PlaybackMessage::Pause,
+        ));
+        let _ = wait_for_message(&mut harness.receiver, Duration::from_secs(1), |message| {
+            matches!(
+                message,
+                protocol::Message::Playlist(protocol::PlaylistMessage::PlaylistIndicesChanged {
+                    is_playing: false,
+                    playing_index: Some(1),
+                    ..
+                })
+            )
+        });
+
+        harness.drain_messages();
+        harness.send(protocol::Message::Playback(protocol::PlaybackMessage::Play));
+
+        let start = Instant::now();
+        loop {
+            if start.elapsed() > Duration::from_secs(1) {
+                panic!("timed out waiting for library-queue resume message");
+            }
+            match harness.receiver.try_recv() {
+                Ok(protocol::Message::Audio(protocol::AudioMessage::DecodeTracks(tracks))) => {
+                    panic!(
+                        "unexpected decode request while resuming paused library queue: {:?}",
+                        tracks
+                    );
+                }
+                Ok(protocol::Message::Playlist(
+                    protocol::PlaylistMessage::PlaylistIndicesChanged {
+                        is_playing: true,
+                        playing_index: Some(1),
+                        ..
+                    },
+                )) => break,
+                Ok(_) => {}
+                Err(TryRecvError::Empty) => thread::sleep(Duration::from_millis(5)),
+                Err(TryRecvError::Lagged(_)) => continue,
+                Err(TryRecvError::Closed) => {
+                    panic!("bus closed while waiting for library-queue resume message")
                 }
             }
         }

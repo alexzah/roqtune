@@ -228,7 +228,7 @@ export component AppWindow inherits Window {
     in-out property <bool> library_can_go_back: false;
     in-out property <bool> library_scan_in_progress: false;
     in-out property <string> library_view_title: "Songs";
-    in-out property <string> library_view_subtitle: "All songs";
+    in-out property <string> library_view_subtitle: "";
     in-out property <string> library_status_text: "";
     in-out property <string> library_toast_text: "";
     in-out property <bool> library_toast_visible: false;
@@ -1349,9 +1349,6 @@ export component AppWindow inherits Window {
                             }
                             clicked => { root.library_back(); }
                         }
-                        if !root.library_can_go_back : Rectangle {
-                            width: 32px;
-                        }
                         if root.library_album_header_visible && root.library_can_go_back : Text {
                             text: root.library_root_index == 1 ? "Back to Artists" : "Back to Albums";
                             color: #8fa7c6;
@@ -1361,10 +1358,11 @@ export component AppWindow inherits Window {
                         if !root.library_album_header_visible : Text {
                             text: root.library_view_title;
                             color: #ddd;
-                            font-size: 13px;
-                            font-weight: 700;
+                            font-size: 16px;
+                            font-weight: 800;
                             horizontal-stretch: 1;
-                            vertical-alignment: center;
+                            horizontal-alignment: left;
+                            vertical-alignment: bottom;
                             overflow: elide;
                         }
                         if root.library_scan_in_progress : Text {

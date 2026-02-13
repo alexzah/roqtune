@@ -15,6 +15,7 @@ mod protocol;
 mod ui_manager;
 
 use std::{
+    cell::{Cell, RefCell},
     collections::{BTreeSet, HashMap, HashSet},
     path::{Path, PathBuf},
     rc::Rc,
@@ -48,6 +49,7 @@ use metadata_manager::MetadataManager;
 use playlist::Playlist;
 use playlist_manager::PlaylistManager;
 use protocol::{ConfigMessage, Message, MetadataMessage, PlaybackMessage, PlaylistMessage};
+use slint::winit_030::{winit, EventResult as WinitEventResult, WinitWindowAccessor};
 use slint::{ComponentHandle, LogicalSize, Model, ModelRc, VecModel};
 use tokio::sync::broadcast;
 use toml_edit::{value, Array, ArrayOfTables, DocumentMut, Item, Table};
@@ -161,6 +163,10 @@ const SUPPORTED_AUDIO_EXTENSIONS: [&str; 7] = ["mp3", "wav", "ogg", "flac", "aac
 const PLAYLIST_COLUMN_KIND_TEXT: i32 = 0;
 const PLAYLIST_COLUMN_KIND_ALBUM_ART: i32 = 1;
 const TOOLTIP_HOVER_DELAY_MS: u64 = 650;
+const PLAYLIST_IMPORT_CHUNK_SIZE: usize = 512;
+const DROP_IMPORT_BATCH_DELAY_MS: u64 = 80;
+const COLLECTION_MODE_PLAYLIST: i32 = 0;
+const COLLECTION_MODE_LIBRARY: i32 = 1;
 
 fn is_supported_audio_file(path: &Path) -> bool {
     path.extension()
@@ -221,6 +227,164 @@ fn collect_audio_files_from_folder(folder_path: &Path) -> Vec<PathBuf> {
 
     tracks.sort_unstable();
     tracks
+}
+
+fn collect_audio_files_from_dropped_paths(paths: &[PathBuf]) -> Vec<PathBuf> {
+    let mut tracks = BTreeSet::new();
+    for path in paths {
+        if path.is_file() {
+            if is_supported_audio_file(path) {
+                tracks.insert(path.clone());
+            }
+            continue;
+        }
+        if path.is_dir() {
+            for track in collect_audio_files_from_folder(path) {
+                tracks.insert(track);
+            }
+        }
+    }
+    tracks.into_iter().collect()
+}
+
+fn collect_library_folders_from_dropped_paths(paths: &[PathBuf]) -> Vec<String> {
+    let mut folders = BTreeSet::new();
+    for path in paths {
+        if path.is_dir() {
+            folders.insert(path.to_string_lossy().to_string());
+            continue;
+        }
+        if path.is_file() && is_supported_audio_file(path) {
+            if let Some(parent) = path.parent() {
+                if !parent.as_os_str().is_empty() {
+                    folders.insert(parent.to_string_lossy().to_string());
+                }
+            }
+        }
+    }
+    folders.into_iter().collect()
+}
+
+fn enqueue_playlist_bulk_import(
+    playlist_bulk_import_tx: &mpsc::SyncSender<protocol::PlaylistBulkImportRequest>,
+    bus_sender: &broadcast::Sender<Message>,
+    paths: &[PathBuf],
+    source: protocol::ImportSource,
+) -> usize {
+    let mut queued = 0usize;
+    for chunk in paths.chunks(PLAYLIST_IMPORT_CHUNK_SIZE) {
+        if let Err(err) = playlist_bulk_import_tx.send(protocol::PlaylistBulkImportRequest {
+            paths: chunk.to_vec(),
+            source,
+        }) {
+            warn!(
+                "Failed to enqueue import batch ({} track(s)): {}",
+                chunk.len(),
+                err
+            );
+            break;
+        }
+        queued += chunk.len();
+        let _ = bus_sender.send(protocol::Message::Playlist(
+            protocol::PlaylistMessage::DrainBulkImportQueue,
+        ));
+    }
+    queued
+}
+
+#[derive(Clone)]
+struct LibraryFolderImportContext {
+    config_state: Arc<Mutex<Config>>,
+    output_options: Arc<Mutex<OutputSettingsOptions>>,
+    runtime_output_override: Arc<Mutex<RuntimeOutputOverride>>,
+    last_runtime_signature: Arc<Mutex<OutputRuntimeSignature>>,
+    config_file: PathBuf,
+    layout_workspace_size: Arc<Mutex<(u32, u32)>>,
+    ui_handle: slint::Weak<AppWindow>,
+    bus_sender: broadcast::Sender<Message>,
+}
+
+fn add_library_folders_to_config_and_scan(
+    context: &LibraryFolderImportContext,
+    folders_to_add: Vec<String>,
+) -> usize {
+    let normalized_folders: Vec<String> = folders_to_add
+        .into_iter()
+        .map(|folder| folder.trim().to_string())
+        .filter(|folder| !folder.is_empty())
+        .collect();
+    if normalized_folders.is_empty() {
+        return 0;
+    }
+
+    let (next_config, added_count) = {
+        let mut state = context
+            .config_state
+            .lock()
+            .expect("config state lock poisoned");
+        let mut next = state.clone();
+        let mut added = 0usize;
+        for folder in normalized_folders {
+            if !next
+                .library
+                .folders
+                .iter()
+                .any(|existing| existing == &folder)
+            {
+                next.library.folders.push(folder);
+                added += 1;
+            }
+        }
+        if added == 0 {
+            return 0;
+        }
+        next.library.show_first_start_prompt = false;
+        next = sanitize_config(next);
+        *state = next.clone();
+        (next, added)
+    };
+
+    persist_state_files_with_config_path(&next_config, &context.config_file);
+    let options_snapshot = {
+        let options = context
+            .output_options
+            .lock()
+            .expect("output options lock poisoned");
+        options.clone()
+    };
+    let (workspace_width_px, workspace_height_px) =
+        workspace_size_snapshot(&context.layout_workspace_size);
+    if let Some(ui) = context.ui_handle.upgrade() {
+        apply_config_to_ui(
+            &ui,
+            &next_config,
+            &options_snapshot,
+            workspace_width_px,
+            workspace_height_px,
+        );
+        ui.set_show_library_first_start_dialog(false);
+    }
+
+    let runtime_override = runtime_output_override_snapshot(&context.runtime_output_override);
+    let runtime_config =
+        resolve_runtime_config(&next_config, &options_snapshot, Some(&runtime_override));
+    {
+        let mut last_runtime = context
+            .last_runtime_signature
+            .lock()
+            .expect("runtime signature lock poisoned");
+        *last_runtime = OutputRuntimeSignature::from_output(&runtime_config.output);
+    }
+    let _ = context
+        .bus_sender
+        .send(Message::Config(ConfigMessage::ConfigChanged(
+            runtime_config,
+        )));
+    let _ = context
+        .bus_sender
+        .send(Message::Library(protocol::LibraryMessage::RequestScan));
+
+    added_count
 }
 
 fn filter_common_u16(detected: &BTreeSet<u16>, common_values: &[u16], fallback: u16) -> Vec<u16> {
@@ -2155,10 +2319,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         log::error!("panic in thread '{}': {}", thread_name, panic_info);
     }));
 
-    if std::env::var_os("SLINT_BACKEND").is_none() {
-        std::env::set_var("SLINT_BACKEND", "winit-software");
+    let configured_backend = std::env::var("SLINT_BACKEND").unwrap_or_else(|_| {
         info!("SLINT_BACKEND not set. Defaulting to winit-software");
-    }
+        "winit-software".to_string()
+    });
+    let backend_selector = slint::BackendSelector::new().backend_name(configured_backend.clone());
+    backend_selector
+        .select()
+        .map_err(|err| format!("Failed to initialize Slint backend: {}", err))?;
 
     // Setup ui state
     let ui = AppWindow::new()?;
@@ -2266,6 +2434,101 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         mpsc::sync_channel::<protocol::PlaylistBulkImportRequest>(64);
     let (library_scan_progress_tx, library_scan_progress_rx) =
         mpsc::sync_channel::<protocol::LibraryMessage>(512);
+    let library_folder_import_context = LibraryFolderImportContext {
+        config_state: Arc::clone(&config_state),
+        output_options: Arc::clone(&output_options),
+        runtime_output_override: Arc::clone(&runtime_output_override),
+        last_runtime_signature: Arc::clone(&last_runtime_signature),
+        config_file: config_file.clone(),
+        layout_workspace_size: Arc::clone(&layout_workspace_size),
+        ui_handle: ui.as_weak().clone(),
+        bus_sender: bus_sender.clone(),
+    };
+
+    let ui_handle_for_drop = ui.as_weak().clone();
+    let pending_drop_paths: Rc<RefCell<Vec<(i32, PathBuf)>>> = Rc::new(RefCell::new(Vec::new()));
+    let drop_flush_scheduled = Rc::new(Cell::new(false));
+    let playlist_bulk_import_tx_for_drop = playlist_bulk_import_tx.clone();
+    let bus_sender_for_drop = bus_sender.clone();
+    let library_context_for_drop = library_folder_import_context.clone();
+    ui.window().on_winit_window_event(move |_, event| {
+        if let winit::event::WindowEvent::DroppedFile(path) = event {
+            debug!("Dropped file: {}", path.display());
+            let collection_mode = ui_handle_for_drop
+                .upgrade()
+                .map(|ui| ui.get_collection_mode())
+                .unwrap_or(COLLECTION_MODE_PLAYLIST);
+            pending_drop_paths
+                .borrow_mut()
+                .push((collection_mode, path.clone()));
+            if !drop_flush_scheduled.get() {
+                drop_flush_scheduled.set(true);
+                let pending_drop_paths = pending_drop_paths.clone();
+                let drop_flush_scheduled = drop_flush_scheduled.clone();
+                let playlist_bulk_import_tx = playlist_bulk_import_tx_for_drop.clone();
+                let bus_sender = bus_sender_for_drop.clone();
+                let library_context = library_context_for_drop.clone();
+                slint::Timer::single_shot(
+                    Duration::from_millis(DROP_IMPORT_BATCH_DELAY_MS),
+                    move || {
+                        drop_flush_scheduled.set(false);
+                        let pending = std::mem::take(&mut *pending_drop_paths.borrow_mut());
+                        if pending.is_empty() {
+                            return;
+                        }
+                        let mut playlist_paths = Vec::new();
+                        let mut library_paths = Vec::new();
+                        for (mode, path) in pending {
+                            if mode == COLLECTION_MODE_LIBRARY {
+                                library_paths.push(path);
+                            } else {
+                                playlist_paths.push(path);
+                            }
+                        }
+                        if !playlist_paths.is_empty() {
+                            let playlist_bulk_import_tx = playlist_bulk_import_tx.clone();
+                            let bus_sender = bus_sender.clone();
+                            thread::spawn(move || {
+                                let tracks =
+                                    collect_audio_files_from_dropped_paths(&playlist_paths);
+                                if tracks.is_empty() {
+                                    debug!("Ignored dropped playlist item(s): no supported tracks");
+                                    return;
+                                }
+                                let source = if playlist_paths.iter().any(|path| path.is_dir()) {
+                                    protocol::ImportSource::AddFolderDialog
+                                } else {
+                                    protocol::ImportSource::AddFilesDialog
+                                };
+                                let queued = enqueue_playlist_bulk_import(
+                                    &playlist_bulk_import_tx,
+                                    &bus_sender,
+                                    &tracks,
+                                    source,
+                                );
+                                debug!(
+                                    "Queued {} track(s) from drag-and-drop into playlist",
+                                    queued
+                                );
+                            });
+                        }
+                        if !library_paths.is_empty() {
+                            let folders =
+                                collect_library_folders_from_dropped_paths(&library_paths);
+                            if folders.is_empty() {
+                                debug!("Ignored dropped library item(s): no usable folders found");
+                                return;
+                            }
+                            let added =
+                                add_library_folders_to_config_and_scan(&library_context, folders);
+                            debug!("Added {} folder(s) from drag-and-drop into library", added);
+                        }
+                    },
+                );
+            }
+        }
+        WinitEventResult::Propagate
+    });
 
     let playlist_bulk_import_tx_clone = playlist_bulk_import_tx.clone();
     let bus_sender_clone = bus_sender.clone();
@@ -2294,19 +2557,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             if filtered_paths.is_empty() {
                 return;
             }
-            if let Err(err) =
-                playlist_bulk_import_tx_clone.send(protocol::PlaylistBulkImportRequest {
-                    paths: filtered_paths.clone(),
-                    source: protocol::ImportSource::AddFilesDialog,
-                })
-            {
-                warn!("Failed to enqueue file import batch: {}", err);
-                return;
-            }
-            let _ = bus_sender_clone.send(protocol::Message::Playlist(
-                protocol::PlaylistMessage::DrainBulkImportQueue,
-            ));
-            debug!("Queued {} track(s) from Add files", filtered_paths.len());
+            let queued = enqueue_playlist_bulk_import(
+                &playlist_bulk_import_tx_clone,
+                &bus_sender_clone,
+                &filtered_paths,
+                protocol::ImportSource::AddFilesDialog,
+            );
+            debug!("Queued {} track(s) from Add files", queued);
         }
     });
 
@@ -2324,22 +2581,17 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     tracks.len(),
                     folder_path.display()
                 );
-                for chunk in tracks.chunks(512) {
-                    if let Err(err) = bulk_import_tx.send(protocol::PlaylistBulkImportRequest {
-                        paths: chunk.to_vec(),
-                        source: protocol::ImportSource::AddFolderDialog,
-                    }) {
-                        warn!(
-                            "Failed to enqueue folder-import batch ({} track(s)): {}",
-                            chunk.len(),
-                            err
-                        );
-                        break;
-                    }
-                    let _ = bus_sender_for_scan.send(protocol::Message::Playlist(
-                        protocol::PlaylistMessage::DrainBulkImportQueue,
-                    ));
-                }
+                let queued = enqueue_playlist_bulk_import(
+                    &bulk_import_tx,
+                    &bus_sender_for_scan,
+                    &tracks,
+                    protocol::ImportSource::AddFolderDialog,
+                );
+                debug!(
+                    "Queued {} track(s) from Add folder {}",
+                    queued,
+                    folder_path.display()
+                );
             });
         }
     });
@@ -2471,71 +2723,17 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     });
 
-    let bus_sender_clone = bus_sender.clone();
-    let config_state_clone = Arc::clone(&config_state);
-    let output_options_clone = Arc::clone(&output_options);
-    let runtime_output_override_clone = Arc::clone(&runtime_output_override);
-    let last_runtime_signature_clone = Arc::clone(&last_runtime_signature);
-    let config_file_clone = config_file.clone();
-    let layout_workspace_size_clone = Arc::clone(&layout_workspace_size);
-    let ui_handle_clone = ui.as_weak().clone();
+    let library_folder_import_context_clone = library_folder_import_context.clone();
     ui.on_library_add_folder(move || {
         let Some(folder_path) = rfd::FileDialog::new().pick_folder() else {
             return;
         };
         let folder = folder_path.to_string_lossy().to_string();
-        let next_config = {
-            let mut state = config_state_clone
-                .lock()
-                .expect("config state lock poisoned");
-            let mut next = state.clone();
-            if !next
-                .library
-                .folders
-                .iter()
-                .any(|existing| existing == &folder)
-            {
-                next.library.folders.push(folder);
-            }
-            next.library.show_first_start_prompt = false;
-            next = sanitize_config(next);
-            *state = next.clone();
-            next
-        };
-
-        persist_state_files_with_config_path(&next_config, &config_file_clone);
-        let options_snapshot = {
-            let options = output_options_clone
-                .lock()
-                .expect("output options lock poisoned");
-            options.clone()
-        };
-        let (workspace_width_px, workspace_height_px) =
-            workspace_size_snapshot(&layout_workspace_size_clone);
-        if let Some(ui) = ui_handle_clone.upgrade() {
-            apply_config_to_ui(
-                &ui,
-                &next_config,
-                &options_snapshot,
-                workspace_width_px,
-                workspace_height_px,
-            );
-            ui.set_show_library_first_start_dialog(false);
-        }
-
-        let runtime_override = runtime_output_override_snapshot(&runtime_output_override_clone);
-        let runtime_config =
-            resolve_runtime_config(&next_config, &options_snapshot, Some(&runtime_override));
-        {
-            let mut last_runtime = last_runtime_signature_clone
-                .lock()
-                .expect("runtime signature lock poisoned");
-            *last_runtime = OutputRuntimeSignature::from_output(&runtime_config.output);
-        }
-        let _ = bus_sender_clone.send(Message::Config(ConfigMessage::ConfigChanged(
-            runtime_config,
-        )));
-        let _ = bus_sender_clone.send(Message::Library(protocol::LibraryMessage::RequestScan));
+        let added = add_library_folders_to_config_and_scan(
+            &library_folder_import_context_clone,
+            vec![folder],
+        );
+        debug!("Added {} folder(s) from library folder picker", added);
     });
 
     let bus_sender_clone = bus_sender.clone();

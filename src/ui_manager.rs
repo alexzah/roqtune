@@ -3232,28 +3232,19 @@ impl UiManager {
 
     fn library_view_labels(view: &LibraryViewState) -> (String, String) {
         match view {
-            LibraryViewState::SongsRoot => ("Songs".to_string(), "All songs".to_string()),
-            LibraryViewState::ArtistsRoot => ("Artists".to_string(), "All artists".to_string()),
-            LibraryViewState::AlbumsRoot => ("Albums".to_string(), "All albums".to_string()),
-            LibraryViewState::GenresRoot => ("Genres".to_string(), "All genres".to_string()),
-            LibraryViewState::DecadesRoot => ("Decades".to_string(), "All decades".to_string()),
-            LibraryViewState::GlobalSearch => (
-                "Global Search".to_string(),
-                "Type to search songs, artists, and albums".to_string(),
-            ),
-            LibraryViewState::ArtistDetail { artist } => {
-                (artist.clone(), "Songs grouped by album".to_string())
-            }
+            LibraryViewState::SongsRoot => ("Songs".to_string(), String::new()),
+            LibraryViewState::ArtistsRoot => ("Artists".to_string(), String::new()),
+            LibraryViewState::AlbumsRoot => ("Albums".to_string(), String::new()),
+            LibraryViewState::GenresRoot => ("Genres".to_string(), String::new()),
+            LibraryViewState::DecadesRoot => ("Decades".to_string(), String::new()),
+            LibraryViewState::GlobalSearch => ("Global Search".to_string(), String::new()),
+            LibraryViewState::ArtistDetail { artist } => (artist.clone(), String::new()),
             LibraryViewState::AlbumDetail {
                 album,
                 album_artist,
             } => (album.clone(), format!("by {}", album_artist)),
-            LibraryViewState::GenreDetail { genre } => {
-                (genre.clone(), "Songs in genre".to_string())
-            }
-            LibraryViewState::DecadeDetail { decade } => {
-                (decade.clone(), "Songs in decade".to_string())
-            }
+            LibraryViewState::GenreDetail { genre } => (genre.clone(), String::new()),
+            LibraryViewState::DecadeDetail { decade } => (decade.clone(), String::new()),
         }
     }
 
@@ -6997,7 +6988,7 @@ mod tests {
     fn test_library_view_labels_for_global_search() {
         let (title, subtitle) = UiManager::library_view_labels(&LibraryViewState::GlobalSearch);
         assert_eq!(title, "Global Search");
-        assert_eq!(subtitle, "Type to search songs, artists, and albums");
+        assert_eq!(subtitle, "");
     }
 
     #[test]
