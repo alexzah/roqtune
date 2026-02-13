@@ -1782,9 +1782,59 @@ impl UiManager {
         }
     }
 
+    fn fallback_detailed_metadata_from_path(path: &Path) -> protocol::DetailedMetadata {
+        if let Some(parsed) = metadata_tags::read_common_track_metadata(path) {
+            let has_any_metadata = !parsed.title.trim().is_empty()
+                || !parsed.artist.trim().is_empty()
+                || !parsed.album.trim().is_empty()
+                || !parsed.date.trim().is_empty()
+                || !parsed.year.trim().is_empty()
+                || !parsed.genre.trim().is_empty();
+            if has_any_metadata {
+                let title = if parsed.title.trim().is_empty() {
+                    path.file_stem()
+                        .and_then(|stem| stem.to_str())
+                        .or_else(|| path.file_name().and_then(|name| name.to_str()))
+                        .unwrap_or_default()
+                        .to_string()
+                } else {
+                    parsed.title
+                };
+                let date = if parsed.date.trim().is_empty() {
+                    parsed.year
+                } else {
+                    parsed.date
+                };
+                return protocol::DetailedMetadata {
+                    title,
+                    artist: parsed.artist,
+                    album: parsed.album,
+                    date,
+                    genre: parsed.genre,
+                };
+            }
+        }
+
+        let title = path
+            .file_stem()
+            .and_then(|stem| stem.to_str())
+            .or_else(|| path.file_name().and_then(|name| name.to_str()))
+            .unwrap_or_default()
+            .to_string();
+        protocol::DetailedMetadata {
+            title,
+            artist: String::new(),
+            album: String::new(),
+            date: String::new(),
+            genre: String::new(),
+        }
+    }
+
     fn resolve_library_display_target(
         selected_indices: &[usize],
         library_entries: &[LibraryEntry],
+        playlist_track_paths: &[PathBuf],
+        playlist_track_metadata: &[TrackMetadata],
         playing_track_path: Option<&PathBuf>,
         playing_track_metadata: Option<&protocol::DetailedMetadata>,
     ) -> (Option<PathBuf>, Option<protocol::DetailedMetadata>) {
@@ -1814,6 +1864,24 @@ impl UiManager {
                     Some(Self::to_detailed_metadata_from_library_song(song)),
                 );
             }
+
+            if let Some(index) = playlist_track_paths
+                .iter()
+                .position(|candidate| candidate == path)
+            {
+                if let Some(metadata) = playlist_track_metadata.get(index) {
+                    return (playing_path, Some(Self::to_detailed_metadata(metadata)));
+                }
+            }
+
+            if let Some(metadata) = playing_track_metadata {
+                return (playing_path, Some(metadata.clone()));
+            }
+
+            return (
+                playing_path,
+                Some(Self::fallback_detailed_metadata_from_path(path)),
+            );
         }
 
         (playing_path, playing_track_metadata.cloned())
@@ -1828,9 +1896,16 @@ impl UiManager {
         let (display_path, display_metadata) = Self::resolve_library_display_target(
             selected_indices,
             &self.library_entries,
+            &self.track_paths,
+            &self.track_metadata,
             playing_track_path,
             playing_track_metadata,
         );
+        if self.current_playing_track_metadata.is_none()
+            && display_path.as_ref() == self.current_playing_track_path.as_ref()
+        {
+            self.current_playing_track_metadata = display_metadata.clone();
+        }
         self.update_cover_art(display_path.as_ref());
         let _ = self.bus_sender.send(protocol::Message::Playback(
             protocol::PlaybackMessage::MetadataDisplayChanged(display_metadata),
@@ -4621,10 +4696,26 @@ impl UiManager {
             return;
         }
 
-        let final_entries: Vec<LibraryEntry> = std::mem::take(&mut self.library_page_entries)
+        let page_view = self.library_page_view.clone();
+        let mut final_entries: Vec<LibraryEntry> = std::mem::take(&mut self.library_page_entries)
             .into_iter()
             .map(Self::library_entry_from_payload)
             .collect();
+        if matches!(
+            page_view,
+            Some(protocol::LibraryViewQuery::ArtistDetail { .. })
+        ) {
+            let mut albums = Vec::new();
+            let mut songs = Vec::new();
+            for entry in final_entries {
+                match entry {
+                    LibraryEntry::Album(album) => albums.push(album),
+                    LibraryEntry::Song(song) => songs.push(song),
+                    LibraryEntry::Artist(_) | LibraryEntry::Genre(_) | LibraryEntry::Decade(_) => {}
+                }
+            }
+            final_entries = Self::build_artist_detail_entries(albums, songs);
+        }
         self.reset_library_page_state();
         self.set_library_entries(final_entries);
     }
@@ -5902,11 +5993,24 @@ impl UiManager {
 
                             let previous_playing_track_path =
                                 self.current_playing_track_path.clone();
+                            let previous_playing_track_metadata =
+                                self.current_playing_track_metadata.clone();
                             self.current_playing_track_path = playing_track_path.clone();
-                            self.current_playing_track_metadata = playing_track_metadata.clone();
+                            self.current_playing_track_metadata = if let Some(meta) =
+                                playing_track_metadata.clone()
+                            {
+                                Some(meta)
+                            } else if self.current_playing_track_path == previous_playing_track_path
+                            {
+                                previous_playing_track_metadata
+                            } else {
+                                None
+                            };
+                            let resolved_playing_metadata =
+                                self.current_playing_track_metadata.clone();
                             self.update_display_for_active_collection(
                                 playing_track_path.as_ref(),
-                                playing_track_metadata.as_ref(),
+                                resolved_playing_metadata.as_ref(),
                             );
                             if previous_playing_track_path != self.current_playing_track_path {
                                 self.sync_library_ui();
@@ -6548,6 +6652,8 @@ mod tests {
         let (path, meta) = UiManager::resolve_library_display_target(
             &selected,
             &entries,
+            &[],
+            &[],
             playing_path.as_ref(),
             Some(&playing_meta),
         );
@@ -6578,6 +6684,8 @@ mod tests {
         let (path, meta) = UiManager::resolve_library_display_target(
             &selected,
             &entries,
+            &[],
+            &[],
             playing_path.as_ref(),
             Some(&playing_meta),
         );
@@ -6585,6 +6693,59 @@ mod tests {
         assert_eq!(path, Some(PathBuf::from("playing.mp3")));
         let meta = meta.expect("playing metadata should be preserved");
         assert_eq!(meta.title, "Playing");
+    }
+
+    #[test]
+    fn test_resolve_library_display_target_uses_playlist_metadata_when_detail_view_has_no_song_rows(
+    ) {
+        let selected = vec![];
+        let entries = vec![LibraryEntry::Artist(protocol::LibraryArtist {
+            artist: "Artist".to_string(),
+            album_count: 1,
+            song_count: 8,
+        })];
+        let playlist_paths = vec![PathBuf::from("playing.mp3")];
+        let playlist_metadata = vec![make_meta("Now Playing")];
+        let playing_path = Some(PathBuf::from("playing.mp3"));
+
+        let (path, meta) = UiManager::resolve_library_display_target(
+            &selected,
+            &entries,
+            &playlist_paths,
+            &playlist_metadata,
+            playing_path.as_ref(),
+            None,
+        );
+
+        assert_eq!(path, Some(PathBuf::from("playing.mp3")));
+        let meta = meta.expect("playlist metadata should be used for playing fallback");
+        assert_eq!(meta.title, "Now Playing");
+        assert_eq!(meta.artist, "Now Playing-artist");
+    }
+
+    #[test]
+    fn test_resolve_library_display_target_falls_back_to_path_metadata_when_missing_everywhere() {
+        let selected = vec![];
+        let entries = vec![LibraryEntry::Artist(protocol::LibraryArtist {
+            artist: "Artist".to_string(),
+            album_count: 1,
+            song_count: 8,
+        })];
+        let playing_path = Some(PathBuf::from("/tmp/Example Song.flac"));
+
+        let (path, meta) = UiManager::resolve_library_display_target(
+            &selected,
+            &entries,
+            &[],
+            &[],
+            playing_path.as_ref(),
+            None,
+        );
+
+        assert_eq!(path, Some(PathBuf::from("/tmp/Example Song.flac")));
+        let meta = meta.expect("fallback metadata should be synthesized from path");
+        assert_eq!(meta.title, "Example Song");
+        assert!(meta.artist.is_empty());
     }
 
     #[test]
