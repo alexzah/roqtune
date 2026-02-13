@@ -631,6 +631,54 @@ impl LibraryManager {
             }));
     }
 
+    fn publish_root_counts(&self) {
+        let songs = match self.db_manager.get_library_songs_count() {
+            Ok(count) => count,
+            Err(err) => {
+                warn!("Failed to load songs count: {}", err);
+                return;
+            }
+        };
+        let artists = match self.db_manager.get_library_artists_count() {
+            Ok(count) => count,
+            Err(err) => {
+                warn!("Failed to load artists count: {}", err);
+                return;
+            }
+        };
+        let albums = match self.db_manager.get_library_albums_count() {
+            Ok(count) => count,
+            Err(err) => {
+                warn!("Failed to load albums count: {}", err);
+                return;
+            }
+        };
+        let genres = match self.db_manager.get_library_genres_count() {
+            Ok(count) => count,
+            Err(err) => {
+                warn!("Failed to load genres count: {}", err);
+                return;
+            }
+        };
+        let decades = match self.db_manager.get_library_decades_count() {
+            Ok(count) => count,
+            Err(err) => {
+                warn!("Failed to load decades count: {}", err);
+                return;
+            }
+        };
+
+        let _ = self
+            .bus_producer
+            .send(Message::Library(LibraryMessage::RootCountsResult {
+                songs,
+                artists,
+                albums,
+                genres,
+                decades,
+            }));
+    }
+
     fn publish_artist_detail(&self, artist: String) {
         match self.db_manager.get_library_artist_detail(&artist) {
             Ok((albums, songs)) => {
@@ -1067,6 +1115,9 @@ impl LibraryManager {
                     }
                     Message::Library(LibraryMessage::RequestScan) => {
                         self.scan_library();
+                    }
+                    Message::Library(LibraryMessage::RequestRootCounts) => {
+                        self.publish_root_counts();
                     }
                     Message::Library(LibraryMessage::RequestSongs) => {
                         self.publish_songs();

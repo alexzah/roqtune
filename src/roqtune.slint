@@ -208,6 +208,7 @@ export component AppWindow inherits Window {
     in-out property <int> sidebar_width_px: 220;
     in-out property <int> collection_mode: 0; // 0: Playlist, 1: Library
     in-out property <int> library_root_index: 0; // 0: Songs, 1: Artists, 2: Albums, 3: Genres, 4: Decades
+    in-out property <[int]> library_root_counts: [0, 0, 0, 0, 0];
     in-out property <bool> library_can_go_back: false;
     in-out property <bool> library_scan_in_progress: false;
     in-out property <string> library_view_title: "Songs";
@@ -710,17 +711,32 @@ export component AppWindow inherits Window {
                         VerticalLayout {
                             spacing: 2px;
                             for root-label[index] in ["Songs", "Artists", "Albums", "Genres", "Decades"] : Rectangle {
+                                property <int> root-count: index < root.library_root_counts.length ? root.library_root_counts[index] : 0;
                                 height: 24px;
                                 border-radius: 2px;
                                 background: root.library_root_index == index ? #3d3d3d : library-root-ta.has-hover ? #333 : transparent;
 
-                                Text {
+                                HorizontalLayout {
                                     x: 8px;
-                                    text: root-label;
-                                    color: root.library_root_index == index ? #eee : #aaa;
-                                    font-size: 13px;
-                                    vertical-alignment: center;
-                                    horizontal-alignment: left;
+                                    width: parent.width - 16px;
+                                    spacing: 8px;
+
+                                    Text {
+                                        text: root-label;
+                                        color: root.library_root_index == index ? #eee : #aaa;
+                                        font-size: 13px;
+                                        vertical-alignment: center;
+                                        horizontal-alignment: left;
+                                        horizontal-stretch: 1;
+                                    }
+
+                                    Text {
+                                        text: root-count + "";
+                                        color: root.library_root_index == index ? #cfd4de : #8b8f99;
+                                        font-size: 12px;
+                                        vertical-alignment: center;
+                                        horizontal-alignment: right;
+                                    }
                                 }
 
                                 library-root-ta := TouchArea {

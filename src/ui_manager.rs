@@ -94,6 +94,7 @@ pub struct UiManager {
     library_view_indices: Vec<usize>,
     library_selected_indices: Vec<usize>,
     library_selection_anchor: Option<usize>,
+    library_root_counts: [usize; 5],
     library_cover_art_paths: HashMap<PathBuf, Option<PathBuf>>,
     folder_cover_art_paths: HashMap<PathBuf, Option<PathBuf>>,
     library_enrichment:
@@ -874,6 +875,7 @@ impl UiManager {
             library_view_indices: Vec::new(),
             library_selected_indices: Vec::new(),
             library_selection_anchor: None,
+            library_root_counts: [0; 5],
             library_cover_art_paths: HashMap::new(),
             folder_cover_art_paths: HashMap::new(),
             library_enrichment: HashMap::new(),
@@ -3838,6 +3840,17 @@ impl UiManager {
         });
     }
 
+    fn sync_library_root_counts_to_ui(&self) {
+        let counts: Vec<i32> = self
+            .library_root_counts
+            .iter()
+            .map(|count| (*count).min(i32::MAX as usize) as i32)
+            .collect();
+        let _ = self.ui.upgrade_in_event_loop(move |ui| {
+            ui.set_library_root_counts(ModelRc::from(Rc::new(VecModel::from(counts))));
+        });
+    }
+
     fn select_library_list_item(
         &mut self,
         index: usize,
@@ -4638,6 +4651,12 @@ impl UiManager {
         self.request_next_library_page();
     }
 
+    fn request_library_root_counts(&self) {
+        let _ = self.bus_sender.send(protocol::Message::Library(
+            protocol::LibraryMessage::RequestRootCounts,
+        ));
+    }
+
     fn set_library_entries(&mut self, entries: Vec<LibraryEntry>) {
         self.library_entries = entries;
         self.reset_library_selection();
@@ -4696,6 +4715,7 @@ impl UiManager {
                 self.library_last_detail_enrichment_entity = None;
                 self.sync_library_scan_status_to_ui();
                 self.request_library_view_data();
+                self.request_library_root_counts();
             }
             protocol::LibraryMessage::MetadataBackfillProgress { updated, remaining } => {
                 if remaining == 0 {
@@ -4703,6 +4723,7 @@ impl UiManager {
                         format!("Metadata backfill complete ({} updated)", updated);
                     self.sync_library_scan_status_to_ui();
                     self.request_library_view_data();
+                    self.request_library_root_counts();
                 } else {
                     self.library_status_text = format!(
                         "Metadata backfill: {} updated, {} remaining",
@@ -5056,6 +5077,8 @@ impl UiManager {
     pub fn run(&mut self) {
         self.sync_library_ui();
         self.sync_library_add_to_playlist_ui();
+        self.sync_library_root_counts_to_ui();
+        self.request_library_root_counts();
         self.sync_properties_action_state();
         self.sync_properties_dialog_ui();
         loop {
@@ -5200,6 +5223,17 @@ impl UiManager {
                                         decades.into_iter().map(LibraryEntry::Decade).collect(),
                                     );
                                 }
+                            }
+                            protocol::LibraryMessage::RootCountsResult {
+                                songs,
+                                artists,
+                                albums,
+                                genres,
+                                decades,
+                            } => {
+                                self.library_root_counts =
+                                    [songs, artists, albums, genres, decades];
+                                self.sync_library_root_counts_to_ui();
                             }
                             protocol::LibraryMessage::GlobalSearchDataResult {
                                 songs,
@@ -5387,6 +5421,7 @@ impl UiManager {
                                 self.drain_scan_progress_queue();
                             }
                             protocol::LibraryMessage::RequestScan
+                            | protocol::LibraryMessage::RequestRootCounts
                             | protocol::LibraryMessage::RequestSongs
                             | protocol::LibraryMessage::RequestArtists
                             | protocol::LibraryMessage::RequestAlbums

@@ -201,6 +201,7 @@ pub enum LibraryMessage {
         playlist_ids: Vec<String>,
     },
     RequestScan,
+    RequestRootCounts,
     #[allow(dead_code)]
     RequestSongs,
     #[allow(dead_code)]
@@ -268,6 +269,13 @@ pub enum LibraryMessage {
         remaining: usize,
     },
     ScanFailed(String),
+    RootCountsResult {
+        songs: usize,
+        artists: usize,
+        albums: usize,
+        genres: usize,
+        decades: usize,
+    },
     SongsResult(Vec<LibrarySong>),
     ArtistsResult(Vec<LibraryArtist>),
     AlbumsResult(Vec<LibraryAlbum>),
