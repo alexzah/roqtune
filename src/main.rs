@@ -395,6 +395,35 @@ fn runtime_output_override_snapshot(
     state.clone()
 }
 
+fn output_preferences_changed(previous: &OutputConfig, next: &OutputConfig) -> bool {
+    previous.output_device_name != next.output_device_name
+        || previous.output_device_auto != next.output_device_auto
+        || previous.channel_count != next.channel_count
+        || previous.sample_rate_khz != next.sample_rate_khz
+        || previous.bits_per_sample != next.bits_per_sample
+        || previous.channel_count_auto != next.channel_count_auto
+        || previous.sample_rate_auto != next.sample_rate_auto
+        || previous.bits_per_sample_auto != next.bits_per_sample_auto
+        || previous.resampler_quality != next.resampler_quality
+        || previous.dither_on_bitdepth_reduce != next.dither_on_bitdepth_reduce
+}
+
+fn snapshot_output_device_names(host: &cpal::Host) -> Vec<String> {
+    let mut device_names = Vec::new();
+    if let Ok(devices) = host.output_devices() {
+        for device in devices {
+            if let Ok(name) = device.name() {
+                if !name.is_empty() {
+                    device_names.push(name);
+                }
+            }
+        }
+    }
+    device_names.sort();
+    device_names.dedup();
+    device_names
+}
+
 fn detect_output_settings_options(config: &Config) -> OutputSettingsOptions {
     const COMMON_SAMPLE_RATES: [u32; 6] = [44_100, 48_000, 88_200, 96_000, 176_400, 192_000];
     const COMMON_CHANNEL_COUNTS: [u16; 4] = [2, 1, 6, 8];
@@ -408,7 +437,7 @@ fn detect_output_settings_options(config: &Config) -> OutputSettingsOptions {
     let mut sample_rates = BTreeSet::new();
     let mut bits_per_sample = BTreeSet::new();
     let mut verified_sample_rates = BTreeSet::new();
-    let mut device_names = Vec::new();
+    let mut device_names;
     let mut auto_device_name = String::new();
 
     let host = cpal::default_host();
@@ -419,15 +448,7 @@ fn detect_output_settings_options(config: &Config) -> OutputSettingsOptions {
             .filter(|name| !name.is_empty())
             .unwrap_or_default();
     }
-    if let Ok(devices) = host.output_devices() {
-        for device in devices {
-            if let Ok(name) = device.name() {
-                if !name.is_empty() {
-                    device_names.push(name);
-                }
-            }
-        }
-    }
+    device_names = snapshot_output_device_names(&host);
     if !config.output.output_device_name.trim().is_empty() {
         device_names.push(config.output.output_device_name.trim().to_string());
     }
@@ -2226,6 +2247,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     );
     let config_state = Arc::new(Mutex::new(config.clone()));
     let output_options = Arc::new(Mutex::new(initial_output_options.clone()));
+    let output_device_inventory = Arc::new(Mutex::new(snapshot_output_device_names(
+        &cpal::default_host(),
+    )));
     let layout_workspace_size = Arc::new(Mutex::new((
         initial_workspace_width_px,
         initial_workspace_height_px,
@@ -4206,7 +4230,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
             persist_state_files_with_config_path(&next_config, &config_file_clone);
 
-            {
+            if output_preferences_changed(&previous_config.output, &next_config.output) {
                 let mut runtime_override = runtime_output_override_clone
                     .lock()
                     .expect("runtime output override lock poisoned");
@@ -4740,11 +4764,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         audio_player.run();
     });
 
-    // Re-detect output options on device-open notifications and refresh auto runtime output.
+    // Re-detect output options only when an audio-device open coincides with
+    // an output-device inventory change (startup has already done initial detection).
     let mut device_event_receiver = bus_sender.subscribe();
     let bus_sender_clone = bus_sender.clone();
     let config_state_clone = Arc::clone(&config_state);
     let output_options_clone = Arc::clone(&output_options);
+    let output_device_inventory_clone = Arc::clone(&output_device_inventory);
     let ui_handle_clone = ui.as_weak().clone();
     let layout_workspace_size_clone = Arc::clone(&layout_workspace_size);
     let runtime_output_override_clone = Arc::clone(&runtime_output_override);
@@ -4839,6 +4865,24 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 }
             }
             Ok(Message::Config(ConfigMessage::AudioDeviceOpened { .. })) => {
+                let current_inventory = snapshot_output_device_names(&cpal::default_host());
+                let inventory_changed = {
+                    let mut inventory = output_device_inventory_clone
+                        .lock()
+                        .expect("output device inventory lock poisoned");
+                    if *inventory == current_inventory {
+                        false
+                    } else {
+                        *inventory = current_inventory;
+                        true
+                    }
+                };
+                if !inventory_changed {
+                    debug!(
+                        "Skipping output options re-detection after audio-device open: inventory unchanged"
+                    );
+                    continue;
+                }
                 let persisted_config = {
                     let state = config_state_clone
                         .lock()
@@ -5050,16 +5094,16 @@ mod tests {
         apply_column_order_keys, choose_preferred_u16, choose_preferred_u32,
         clamp_width_for_visible_column, collect_audio_files_from_folder,
         default_album_art_column_width_bounds, default_button_cluster_actions_by_index,
-        is_album_art_builtin_column, is_supported_audio_file, playlist_column_key_at_visible_index,
-        playlist_column_width_bounds, playlist_column_width_bounds_with_album_art,
-        quantize_splitter_ratio_to_precision, reorder_visible_playlist_columns,
-        resolve_playlist_header_column_from_x, resolve_playlist_header_divider_from_x,
-        resolve_playlist_header_gap_from_x, resolve_runtime_config, sanitize_config,
-        sanitize_playlist_columns, select_manual_output_option_index_u32,
-        select_output_option_index_u16, serialize_config_with_preserved_comments,
-        serialize_layout_with_preserved_comments, should_apply_custom_column_delete,
-        sidebar_width_from_window, update_or_replace_vec_model, visible_playlist_column_kinds,
-        OutputSettingsOptions, RuntimeOutputOverride,
+        is_album_art_builtin_column, is_supported_audio_file, output_preferences_changed,
+        playlist_column_key_at_visible_index, playlist_column_width_bounds,
+        playlist_column_width_bounds_with_album_art, quantize_splitter_ratio_to_precision,
+        reorder_visible_playlist_columns, resolve_playlist_header_column_from_x,
+        resolve_playlist_header_divider_from_x, resolve_playlist_header_gap_from_x,
+        resolve_runtime_config, sanitize_config, sanitize_playlist_columns,
+        select_manual_output_option_index_u32, select_output_option_index_u16,
+        serialize_config_with_preserved_comments, serialize_layout_with_preserved_comments,
+        should_apply_custom_column_delete, sidebar_width_from_window, update_or_replace_vec_model,
+        visible_playlist_column_kinds, OutputSettingsOptions, RuntimeOutputOverride,
     };
 
     fn unique_temp_directory(test_name: &str) -> PathBuf {
@@ -6040,6 +6084,23 @@ mod tests {
         let runtime = resolve_runtime_config(&persisted, &options, Some(&runtime_override));
         assert_eq!(runtime.output.sample_rate_khz, 96_000);
         assert_eq!(persisted.output.sample_rate_khz, 44_100);
+    }
+
+    #[test]
+    fn test_output_preferences_changed_detects_output_changes() {
+        let previous = Config::default().output;
+        let mut next = previous.clone();
+        next.sample_rate_auto = false;
+
+        assert!(output_preferences_changed(&previous, &next));
+    }
+
+    #[test]
+    fn test_output_preferences_changed_ignores_non_output_fields() {
+        let previous = Config::default().output;
+        let next = previous.clone();
+
+        assert!(!output_preferences_changed(&previous, &next));
     }
 
     #[test]

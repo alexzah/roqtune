@@ -7,7 +7,7 @@ use std::collections::{HashMap, HashSet};
 use std::hash::{Hash, Hasher};
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{SyncSender, TrySendError};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use log::{debug, info, warn};
 use tokio::sync::broadcast::{Receiver, Sender};
@@ -22,6 +22,8 @@ const SUPPORTED_AUDIO_EXTENSIONS: [&str; 7] = ["mp3", "wav", "ogg", "flac", "aac
 const LIBRARY_SCAN_UPSERT_BATCH_SIZE: usize = 256;
 const LIBRARY_SCAN_METADATA_BATCH_SIZE: usize = 128;
 const LIBRARY_SCAN_PROGRESS_INTERVAL: usize = 256;
+const LIBRARY_SCAN_PLAYBACK_COOPERATE_INTERVAL: usize = 96;
+const LIBRARY_SCAN_PLAYBACK_COOPERATE_SLEEP: Duration = Duration::from_millis(1);
 
 struct LibraryTrackMetadata {
     title: String,
@@ -40,6 +42,7 @@ pub struct LibraryManager {
     db_manager: DbManager,
     library_folders: Vec<String>,
     scan_progress_tx: SyncSender<LibraryMessage>,
+    playback_active: bool,
 }
 
 impl LibraryManager {
@@ -56,6 +59,7 @@ impl LibraryManager {
             db_manager,
             library_folders: Vec::new(),
             scan_progress_tx,
+            playback_active: false,
         }
     }
 
@@ -304,6 +308,14 @@ impl LibraryManager {
         }
     }
 
+    fn maybe_cooperate_for_playback(&self, processed_units: usize) {
+        if self.playback_active
+            && processed_units.is_multiple_of(LIBRARY_SCAN_PLAYBACK_COOPERATE_INTERVAL)
+        {
+            std::thread::sleep(LIBRARY_SCAN_PLAYBACK_COOPERATE_SLEEP);
+        }
+    }
+
     fn scan_library(&mut self) {
         self.push_scan_progress_update(LibraryMessage::ScanStarted, false);
 
@@ -415,6 +427,7 @@ impl LibraryManager {
                     true,
                 );
             }
+            self.maybe_cooperate_for_playback(discovered);
         }
 
         if !scan_stubs_batch.is_empty() {
@@ -459,7 +472,8 @@ impl LibraryManager {
             Vec::with_capacity(LIBRARY_SCAN_METADATA_BATCH_SIZE);
         let mut metadata_updated = 0usize;
         let total_pending = metadata_backfill_targets.len();
-        for (file_path, path_string, modified_unix_ms, file_size_bytes) in metadata_backfill_targets
+        for (target_index, (file_path, path_string, modified_unix_ms, file_size_bytes)) in
+            metadata_backfill_targets.into_iter().enumerate()
         {
             metadata_batch.push(Self::metadata_update_from_file(
                 &file_path,
@@ -493,6 +507,7 @@ impl LibraryManager {
                     true,
                 );
             }
+            self.maybe_cooperate_for_playback(target_index.saturating_add(1));
         }
 
         if !metadata_batch.is_empty() {
@@ -1035,6 +1050,20 @@ impl LibraryManager {
                 Ok(message) => match message {
                     Message::Config(protocol::ConfigMessage::ConfigChanged(config)) => {
                         self.library_folders = config.library.folders;
+                    }
+                    Message::Playlist(protocol::PlaylistMessage::PlaylistIndicesChanged {
+                        is_playing,
+                        ..
+                    }) => {
+                        self.playback_active = is_playing;
+                    }
+                    Message::Playback(protocol::PlaybackMessage::Play)
+                    | Message::Playback(protocol::PlaybackMessage::TrackStarted(_)) => {
+                        self.playback_active = true;
+                    }
+                    Message::Playback(protocol::PlaybackMessage::Pause)
+                    | Message::Playback(protocol::PlaybackMessage::Stop) => {
+                        self.playback_active = false;
                     }
                     Message::Library(LibraryMessage::RequestScan) => {
                         self.scan_library();

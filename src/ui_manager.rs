@@ -2552,6 +2552,15 @@ impl UiManager {
         });
     }
 
+    fn sync_library_scan_status_to_ui(&self) {
+        let scan_in_progress = self.library_scan_in_progress;
+        let status_text = self.library_status_text.clone();
+        let _ = self.ui.upgrade_in_event_loop(move |ui| {
+            ui.set_library_scan_in_progress(scan_in_progress);
+            ui.set_library_status_text(status_text.into());
+        });
+    }
+
     fn sync_filter_state_to_ui(&self) {
         let sort_states = self.sort_state_model();
         let filter_active = self.is_filter_view_active();
@@ -4586,7 +4595,7 @@ impl UiManager {
                 self.library_last_detail_enrichment_entity = None;
                 self.library_add_to_dialog_visible = false;
                 self.sync_library_add_to_playlist_ui();
-                self.sync_library_ui();
+                self.sync_library_scan_status_to_ui();
             }
             protocol::LibraryMessage::ScanProgress {
                 discovered,
@@ -4597,7 +4606,7 @@ impl UiManager {
                     "Scanning library: discovered {}, indexed {}, metadata pending {}",
                     discovered, indexed, metadata_pending
                 );
-                self.sync_library_ui();
+                self.sync_library_scan_status_to_ui();
             }
             protocol::LibraryMessage::ScanCompleted { indexed_tracks } => {
                 self.library_scan_in_progress = false;
@@ -4612,26 +4621,27 @@ impl UiManager {
                 self.replace_prefetch_queue_if_changed(Vec::new());
                 self.replace_background_queue_if_changed(Vec::new());
                 self.library_last_detail_enrichment_entity = None;
+                self.sync_library_scan_status_to_ui();
                 self.request_library_view_data();
-                self.sync_library_ui();
             }
             protocol::LibraryMessage::MetadataBackfillProgress { updated, remaining } => {
                 if remaining == 0 {
                     self.library_status_text =
                         format!("Metadata backfill complete ({} updated)", updated);
+                    self.sync_library_scan_status_to_ui();
+                    self.request_library_view_data();
                 } else {
                     self.library_status_text = format!(
                         "Metadata backfill: {} updated, {} remaining",
                         updated, remaining
                     );
+                    self.sync_library_scan_status_to_ui();
                 }
-                self.request_library_view_data();
-                self.sync_library_ui();
             }
             protocol::LibraryMessage::ScanFailed(error_text) => {
                 self.library_scan_in_progress = false;
                 self.library_status_text = error_text;
-                self.sync_library_ui();
+                self.sync_library_scan_status_to_ui();
             }
             _ => {}
         }

@@ -550,7 +550,9 @@ impl PlaylistManager {
         }
         self.broadcast_playlist_changed();
         self.broadcast_selection_changed();
-        if Some(&self.active_playlist_id) == self.playback_playlist_id.as_ref() {
+        if Some(&self.active_playlist_id) == self.playback_playlist_id.as_ref()
+            && !self.playback_playlist.is_playing()
+        {
             self.cache_tracks(false);
         }
     }
@@ -733,13 +735,18 @@ impl PlaylistManager {
                         self.broadcast_playlist_changed();
                         self.broadcast_selection_changed();
 
-                        if Some(&self.active_playlist_id) == self.playback_playlist_id.as_ref() {
+                        if Some(&self.active_playlist_id) == self.playback_playlist_id.as_ref()
+                            && !self.playback_playlist.is_playing()
+                        {
                             self.cache_tracks(false);
                         }
                     }
                     protocol::Message::Config(protocol::ConfigMessage::ConfigChanged(config)) => {
+                        let previous_sample_rate_auto = self.sample_rate_auto_enabled;
                         self.update_runtime_policy_from_config(&config);
-                        if self.playback_playlist.is_playing() {
+                        if self.playback_playlist.is_playing()
+                            && previous_sample_rate_auto != self.sample_rate_auto_enabled
+                        {
                             self.cache_tracks(false);
                         }
                     }
@@ -2049,6 +2056,16 @@ mod tests {
         }
     }
 
+    fn stream_info_for_rate(sample_rate_hz: u32) -> protocol::OutputStreamInfo {
+        protocol::OutputStreamInfo {
+            device_name: "default".to_string(),
+            sample_rate_hz,
+            channel_count: 2,
+            bits_per_sample: 32,
+            sample_format: protocol::OutputSampleFormat::F32,
+        }
+    }
+
     fn wait_for_playlist_restored_track_ids(
         receiver: &mut Receiver<protocol::Message>,
         timeout: Duration,
@@ -3117,6 +3134,71 @@ mod tests {
                 matches!(
                     message,
                     protocol::Message::Playlist(protocol::PlaylistMessage::TrackStarted { .. })
+                )
+            },
+        );
+    }
+
+    #[test]
+    fn test_config_changed_without_policy_change_does_not_retrigger_rate_switch() {
+        let mut harness = PlaylistManagerHarness::new();
+        let (_id0, _) = harness.add_track("pm_cfg_no_rate_switch_0");
+        harness.drain_messages();
+
+        harness.send(protocol::Message::Config(
+            protocol::ConfigMessage::OutputDeviceCapabilitiesChanged {
+                verified_sample_rates: vec![44_100],
+            },
+        ));
+        harness.send(protocol::Message::Playback(
+            protocol::PlaybackMessage::PlayTrackByIndex(0),
+        ));
+        let _ = wait_for_message(&mut harness.receiver, Duration::from_secs(1), |message| {
+            matches!(
+                message,
+                protocol::Message::Config(protocol::ConfigMessage::SetRuntimeOutputRate {
+                    sample_rate_hz: 44_100,
+                    ..
+                })
+            )
+        });
+        harness.send(protocol::Message::Config(
+            protocol::ConfigMessage::AudioDeviceOpened {
+                stream_info: stream_info_for_rate(44_100),
+            },
+        ));
+        let _ = wait_for_message(&mut harness.receiver, Duration::from_secs(1), |message| {
+            matches!(
+                message,
+                protocol::Message::Audio(protocol::AudioMessage::DecodeTracks(_))
+            )
+        });
+        harness.drain_messages();
+
+        // Simulate output reopening at a different rate while playback remains active.
+        harness.send(protocol::Message::Config(
+            protocol::ConfigMessage::AudioDeviceOpened {
+                stream_info: stream_info_for_rate(192_000),
+            },
+        ));
+        harness.drain_messages();
+
+        let mut config = Config::default();
+        config.output.output_device_name = "default".to_string();
+        config.output.output_device_auto = true;
+        config.output.sample_rate_auto = true;
+        config.output.sample_rate_khz = 192_000;
+        harness.send(protocol::Message::Config(
+            protocol::ConfigMessage::ConfigChanged(config),
+        ));
+
+        assert_no_message(
+            &mut harness.receiver,
+            Duration::from_millis(250),
+            |message| {
+                matches!(
+                    message,
+                    protocol::Message::Config(protocol::ConfigMessage::SetRuntimeOutputRate { .. })
                 )
             },
         );
