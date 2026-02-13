@@ -3634,6 +3634,79 @@ impl UiManager {
         true
     }
 
+    fn refresh_visible_library_cover_art_rows(&mut self) -> bool {
+        if self.collection_mode != COLLECTION_MODE_LIBRARY || self.library_view_indices.is_empty() {
+            return false;
+        }
+
+        let view = self.current_library_view();
+        let detail_header_visible = matches!(
+            view,
+            LibraryViewState::AlbumDetail { .. } | LibraryViewState::ArtistDetail { .. }
+        );
+        let (cover_decode_start, cover_decode_end) =
+            self.library_cover_decode_window(self.library_view_indices.len());
+        let (row_start, row_end) = if detail_header_visible {
+            (0usize, self.library_view_indices.len())
+        } else {
+            (cover_decode_start, cover_decode_end)
+        };
+        if row_start >= row_end {
+            return false;
+        }
+
+        let selected_set: HashSet<usize> = self.library_selected_indices.iter().copied().collect();
+        let mut updates: Vec<(usize, LibraryRowPresentation)> = Vec::new();
+
+        for row_index in row_start..row_end {
+            let Some(source_index) = self.library_view_indices.get(row_index).copied() else {
+                continue;
+            };
+            let Some(entry) = self.library_entries.get(source_index).cloned() else {
+                continue;
+            };
+            let resolve_cover_art = matches!(entry, LibraryEntry::Artist(_))
+                || detail_header_visible
+                || (row_index >= cover_decode_start && row_index < cover_decode_end);
+            if !resolve_cover_art {
+                continue;
+            }
+
+            let presentation = self.library_row_presentation_from_entry(
+                &entry,
+                &view,
+                selected_set.contains(&source_index),
+                true,
+            );
+            if presentation.cover_art_path.is_none() {
+                continue;
+            }
+            updates.push((row_index, presentation));
+        }
+
+        if updates.is_empty() {
+            return false;
+        }
+
+        let _ = self.ui.upgrade_in_event_loop(move |ui| {
+            let current_model = ui.get_library_model();
+            let Some(vec_model) = current_model
+                .as_any()
+                .downcast_ref::<VecModel<LibraryRowData>>()
+            else {
+                return;
+            };
+
+            for (row_index, presentation) in updates {
+                if row_index < vec_model.row_count() {
+                    let row_data = UiManager::library_row_data_from_presentation(presentation);
+                    vec_model.set_row_data(row_index, row_data);
+                }
+            }
+        });
+        true
+    }
+
     fn resolve_library_cover_art_path(&mut self, track_path: &PathBuf) -> Option<PathBuf> {
         if let Some(cached) = self.library_cover_art_paths.get(track_path) {
             if let Some(path) = cached {
@@ -5066,6 +5139,7 @@ impl UiManager {
                                     first_row,
                                     effective_row_count,
                                 );
+                                self.refresh_visible_library_cover_art_rows();
                             }
                             protocol::LibraryMessage::EnrichmentPrefetchTick => {
                                 self.on_enrichment_prefetch_tick();
