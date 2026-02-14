@@ -56,6 +56,7 @@ pub struct UiManager {
     selection_anchor_track_id: Option<String>,
     copied_track_paths: Vec<PathBuf>,
     active_playing_index: Option<usize>,
+    library_playing_index: Option<usize>,
     drag_indices: Vec<usize>,
     is_dragging: bool,
     pressed_index: Option<usize>,
@@ -839,6 +840,7 @@ impl UiManager {
             selection_anchor_track_id: None,
             copied_track_paths: Vec::new(),
             active_playing_index: None,
+            library_playing_index: None,
             drag_indices: Vec::new(),
             is_dragging: false,
             pressed_index: None,
@@ -1756,6 +1758,19 @@ impl UiManager {
         }
     }
 
+    fn status_text_from_detailed_metadata(meta: &protocol::DetailedMetadata) -> String {
+        let title = if meta.title.is_empty() {
+            "Unknown".to_string()
+        } else {
+            meta.title.clone()
+        };
+        if !meta.artist.is_empty() {
+            format!("{} - {}", meta.artist, title)
+        } else {
+            title
+        }
+    }
+
     fn resolve_display_target(
         selected_indices: &[usize],
         track_paths: &[PathBuf],
@@ -1917,6 +1932,20 @@ impl UiManager {
         }
 
         (playing_path, playing_track_metadata.cloned())
+    }
+
+    fn update_library_playing_index(&mut self) {
+        if let Some(playing_path) = &self.current_playing_track_path {
+            self.library_playing_index = self.library_entries.iter().position(|entry| {
+                if let LibraryEntry::Song(song) = entry {
+                    &song.path == playing_path
+                } else {
+                    false
+                }
+            });
+        } else {
+            self.library_playing_index = None;
+        }
     }
 
     fn update_display_for_library_selection(
@@ -4502,12 +4531,18 @@ impl UiManager {
                     let resolve_cover_art = matches!(entry, LibraryEntry::Artist(_))
                         || allow_cover_decode_for_all
                         || (row_index >= cover_decode_start && row_index < cover_decode_end);
-                    self.library_row_presentation_from_entry(
+                    let mut presentation = self.library_row_presentation_from_entry(
                         entry,
                         &view,
                         selected_set.contains(source_index),
                         resolve_cover_art,
-                    )
+                    );
+                    if let Some(playing_idx) = self.library_playing_index {
+                        if *source_index == playing_idx {
+                            presentation.is_playing = true;
+                        }
+                    }
+                    presentation
                 })
             })
             .collect();
@@ -4581,6 +4616,7 @@ impl UiManager {
         }
         self.collection_mode = normalized_mode;
         if self.collection_mode == COLLECTION_MODE_LIBRARY {
+            self.update_library_playing_index();
             self.request_library_view_data();
         } else {
             self.library_add_to_dialog_visible = false;
@@ -6044,6 +6080,7 @@ impl UiManager {
                             self.current_playing_track_metadata = None;
                             self.current_technical_metadata = None;
                             self.current_output_path_info = None;
+                            self.library_playing_index = None;
                             self.update_display_for_active_collection(None, None);
 
                             // Reset cached progress values
@@ -6125,8 +6162,10 @@ impl UiManager {
                             } else {
                                 None
                             };
+                            self.update_library_playing_index();
                             let resolved_playing_metadata =
                                 self.current_playing_track_metadata.clone();
+
                             self.update_display_for_active_collection(
                                 playing_track_path.as_ref(),
                                 resolved_playing_metadata.as_ref(),
@@ -6135,7 +6174,15 @@ impl UiManager {
                                 self.sync_library_ui();
                             }
 
+                            let status_text = self
+                                .current_playing_track_metadata
+                                .as_ref()
+                                .map(Self::status_text_from_detailed_metadata);
+
                             let _ = self.ui.upgrade_in_event_loop(move |ui| {
+                                if let Some(text) = status_text {
+                                    ui.set_status_text(text.into());
+                                }
                                 let repeat_int = match repeat_mode {
                                     protocol::RepeatMode::Off => 0,
                                     protocol::RepeatMode::Playlist => 1,
