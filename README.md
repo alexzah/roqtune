@@ -40,6 +40,7 @@
 
 ## Keyboard Shortcuts
 
+- Standard cut, copy, paste shortcuts (`Ctrl+X`, `Ctrl+C`, `Ctrl+V`)
 - `F6` or `Ctrl+L`: toggle layout editor mode
 - `Delete`: delete selected tracks (or active playlist when sidebar is focused)
 - `F2`: rename active playlist
@@ -63,7 +64,7 @@ The app is organized into cooperating runtime components connected through an ev
 `roqtune` stores files in OS-appropriate user directories via the `dirs` crate.
 
 - Config file: `<config_dir>/roqtune/config.toml`
-- Layout file: `<config_dir>/roqtune/layout.toml`
+- UI Layout file: `<config_dir>/roqtune/layout.toml`
 - Playlist database (SQLite 3): `<data_dir>/roqtune/playlist.db`
 - Cover art cache: `<cache_dir>/roqtune/covers/`
 - Artist enrichment image cache: `<cache_dir>/roqtune/library_enrichment/images/`
