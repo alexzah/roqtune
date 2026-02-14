@@ -223,11 +223,11 @@ export component AppWindow inherits Window {
     in-out property <length> control_cluster_menu_y: 0px;
     in-out property <int> sidebar_width_px: 220;
     in-out property <int> collection_mode: 0; // 0: Playlist, 1: Library
-    in-out property <int> library_root_index: 0; // 0: Songs, 1: Artists, 2: Albums, 3: Genres, 4: Decades
+    in-out property <int> library_root_index: 0; // 0: Tracks, 1: Artists, 2: Albums, 3: Genres, 4: Decades
     in-out property <[int]> library_root_counts: [0, 0, 0, 0, 0];
     in-out property <bool> library_can_go_back: false;
     in-out property <bool> library_scan_in_progress: false;
-    in-out property <string> library_view_title: "Songs";
+    in-out property <string> library_view_title: "Tracks";
     in-out property <string> library_view_subtitle: "";
     in-out property <string> library_status_text: "";
     in-out property <string> library_toast_text: "";
@@ -726,7 +726,7 @@ export component AppWindow inherits Window {
 
                         VerticalLayout {
                             spacing: 2px;
-                            for root-label[index] in ["Songs", "Artists", "Albums", "Genres", "Decades"] : Rectangle {
+                            for root-label[index] in ["Tracks", "Artists", "Albums", "Genres", "Decades"] : Rectangle {
                                 property <int> root-count: index < root.library_root_counts.length ? root.library_root_counts[index] : 0;
                                 height: 24px;
                                 border-radius: 2px;

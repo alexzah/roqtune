@@ -6,7 +6,7 @@
 
 ## Features
 
-- Easily manage multiple playlists of songs with a feature rich playlist mode
+- Easily manage multiple playlists of tracks with a feature rich playlist mode
 - Beautiful library mode that scans and sorts your collection for easy browsing and listening
 - Custom column support in the track list, based on metadata format strings
 - Fully user customizable UI with layout editor based on modular panels

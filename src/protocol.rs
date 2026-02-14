@@ -278,7 +278,7 @@ pub enum LibraryMessage {
     },
     ScanFailed(String),
     RootCountsResult {
-        songs: usize,
+        tracks: usize,
         artists: usize,
         albums: usize,
         genres: usize,
@@ -290,27 +290,27 @@ pub enum LibraryMessage {
     GenresResult(Vec<LibraryGenre>),
     DecadesResult(Vec<LibraryDecade>),
     GlobalSearchDataResult {
-        songs: Vec<LibrarySong>,
+        tracks: Vec<LibrarySong>,
         artists: Vec<LibraryArtist>,
         albums: Vec<LibraryAlbum>,
     },
     ArtistDetailResult {
         artist: String,
         albums: Vec<LibraryAlbum>,
-        songs: Vec<LibrarySong>,
+        tracks: Vec<LibrarySong>,
     },
     AlbumSongsResult {
         album: String,
         album_artist: String,
-        songs: Vec<LibrarySong>,
+        tracks: Vec<LibrarySong>,
     },
     GenreSongsResult {
         genre: String,
-        songs: Vec<LibrarySong>,
+        tracks: Vec<LibrarySong>,
     },
     DecadeSongsResult {
         decade: String,
-        songs: Vec<LibrarySong>,
+        tracks: Vec<LibrarySong>,
     },
     LibraryPageResult {
         request_id: u64,
@@ -510,7 +510,7 @@ pub struct LibrarySong {
 /// Paged library query selector.
 #[derive(Debug, Clone)]
 pub enum LibraryViewQuery {
-    Songs,
+    Tracks,
     Artists,
     Albums,
     Genres,

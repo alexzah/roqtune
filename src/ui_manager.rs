@@ -594,13 +594,13 @@ impl UiManager {
 
     fn build_artist_detail_entries(
         albums: Vec<protocol::LibraryAlbum>,
-        songs: Vec<protocol::LibrarySong>,
+        tracks: Vec<protocol::LibrarySong>,
     ) -> Vec<LibraryEntry> {
         let mut songs_by_album: HashMap<(String, String), Vec<protocol::LibrarySong>> =
             HashMap::new();
         let mut album_year_by_key: HashMap<(String, String), i32> = HashMap::new();
 
-        for song in songs {
+        for song in tracks {
             let key = (song.album.clone(), song.album_artist.clone());
             if let Some(year) = Self::parse_library_year(&song.year) {
                 album_year_by_key
@@ -687,12 +687,12 @@ impl UiManager {
     }
 
     fn build_global_search_entries(
-        songs: Vec<protocol::LibrarySong>,
+        tracks: Vec<protocol::LibrarySong>,
         artists: Vec<protocol::LibraryArtist>,
         albums: Vec<protocol::LibraryAlbum>,
     ) -> Vec<LibraryEntry> {
-        let mut entries = Vec::with_capacity(songs.len() + artists.len() + albums.len());
-        entries.extend(songs.into_iter().map(LibraryEntry::Song));
+        let mut entries = Vec::with_capacity(tracks.len() + artists.len() + albums.len());
+        entries.extend(tracks.into_iter().map(LibraryEntry::Song));
         entries.extend(artists.into_iter().map(LibraryEntry::Artist));
         entries.extend(albums.into_iter().map(LibraryEntry::Album));
         entries.sort_by(|left, right| {
@@ -3232,7 +3232,7 @@ impl UiManager {
 
     fn library_view_labels(view: &LibraryViewState) -> (String, String) {
         match view {
-            LibraryViewState::SongsRoot => ("Songs".to_string(), String::new()),
+            LibraryViewState::SongsRoot => ("Tracks".to_string(), String::new()),
             LibraryViewState::ArtistsRoot => ("Artists".to_string(), String::new()),
             LibraryViewState::AlbumsRoot => ("Albums".to_string(), String::new()),
             LibraryViewState::GenresRoot => ("Genres".to_string(), String::new()),
@@ -4228,12 +4228,12 @@ impl UiManager {
                 primary: artist.artist.clone(),
                 secondary: if global_search_view {
                     format!(
-                        "Artist • {} albums • {} songs",
+                        "Artist • {} albums • {} tracks",
                         artist.album_count, artist.song_count
                     )
                 } else {
                     format!(
-                        "{} albums • {} songs",
+                        "{} albums • {} tracks",
                         artist.album_count, artist.song_count
                     )
                 },
@@ -4251,11 +4251,11 @@ impl UiManager {
                 primary: album.album.clone(),
                 secondary: if global_search_view {
                     format!(
-                        "Album • {} • {} songs",
+                        "Album • {} • {} tracks",
                         album.album_artist, album.song_count
                     )
                 } else {
-                    format!("{} • {} songs", album.album_artist, album.song_count)
+                    format!("{} • {} tracks", album.album_artist, album.song_count)
                 },
                 item_kind: LIBRARY_ITEM_KIND_ALBUM,
                 cover_art_path: if resolve_cover_art {
@@ -4272,7 +4272,7 @@ impl UiManager {
             LibraryEntry::Genre(genre) => LibraryRowPresentation {
                 leading: String::new(),
                 primary: genre.genre.clone(),
-                secondary: format!("{} songs", genre.song_count),
+                secondary: format!("{} tracks", genre.song_count),
                 item_kind: LIBRARY_ITEM_KIND_GENRE,
                 cover_art_path: None,
                 is_playing: false,
@@ -4281,7 +4281,7 @@ impl UiManager {
             LibraryEntry::Decade(decade) => LibraryRowPresentation {
                 leading: String::new(),
                 primary: decade.decade.clone(),
-                secondary: format!("{} songs", decade.song_count),
+                secondary: format!("{} tracks", decade.song_count),
                 item_kind: LIBRARY_ITEM_KIND_DECADE,
                 cover_art_path: None,
                 is_playing: false,
@@ -4374,7 +4374,7 @@ impl UiManager {
                 let songs_label = if detail_song_count == 1 {
                     "song"
                 } else {
-                    "songs"
+                    "tracks"
                 };
                 if let Some(year) = album_year {
                     format!("{} • {} {}", year, detail_song_count, songs_label)
@@ -4391,7 +4391,7 @@ impl UiManager {
                 let songs_label = if detail_song_count == 1 {
                     "song"
                 } else {
-                    "songs"
+                    "tracks"
                 };
                 format!(
                     "{} {} • {} {}",
@@ -4648,7 +4648,7 @@ impl UiManager {
 
     fn library_page_query_for_view(view: &LibraryViewState) -> protocol::LibraryViewQuery {
         match view {
-            LibraryViewState::SongsRoot => protocol::LibraryViewQuery::Songs,
+            LibraryViewState::SongsRoot => protocol::LibraryViewQuery::Tracks,
             LibraryViewState::ArtistsRoot => protocol::LibraryViewQuery::Artists,
             LibraryViewState::AlbumsRoot => protocol::LibraryViewQuery::Albums,
             LibraryViewState::GenresRoot => protocol::LibraryViewQuery::Genres,
@@ -4737,15 +4737,15 @@ impl UiManager {
             Some(protocol::LibraryViewQuery::ArtistDetail { .. })
         ) {
             let mut albums = Vec::new();
-            let mut songs = Vec::new();
+            let mut tracks = Vec::new();
             for entry in final_entries {
                 match entry {
                     LibraryEntry::Album(album) => albums.push(album),
-                    LibraryEntry::Song(song) => songs.push(song),
+                    LibraryEntry::Song(song) => tracks.push(song),
                     LibraryEntry::Artist(_) | LibraryEntry::Genre(_) | LibraryEntry::Decade(_) => {}
                 }
             }
-            final_entries = Self::build_artist_detail_entries(albums, songs);
+            final_entries = Self::build_artist_detail_entries(albums, tracks);
         }
         self.reset_library_page_state();
         self.set_library_entries(final_entries);
@@ -4870,7 +4870,7 @@ impl UiManager {
     }
 
     fn play_library_song_from_entries(&mut self, selected_song_id: &str) {
-        let songs: Vec<protocol::LibrarySong> = self
+        let tracks: Vec<protocol::LibrarySong> = self
             .library_entries
             .iter()
             .filter_map(|entry| match entry {
@@ -4878,14 +4878,14 @@ impl UiManager {
                 _ => None,
             })
             .collect();
-        if songs.is_empty() {
+        if tracks.is_empty() {
             return;
         }
-        let Some(start_index) = songs.iter().position(|song| song.id == selected_song_id) else {
+        let Some(start_index) = tracks.iter().position(|song| song.id == selected_song_id) else {
             return;
         };
 
-        let tracks: Vec<protocol::RestoredTrack> = songs
+        let tracks: Vec<protocol::RestoredTrack> = tracks
             .into_iter()
             .map(|song| protocol::RestoredTrack {
                 id: song.id,
@@ -5325,13 +5325,13 @@ impl UiManager {
                             | protocol::LibraryMessage::ScanFailed(_) => {
                                 self.handle_scan_status_message(library_message);
                             }
-                            protocol::LibraryMessage::SongsResult(songs) => {
+                            protocol::LibraryMessage::SongsResult(tracks) => {
                                 if matches!(
                                     self.current_library_view(),
                                     LibraryViewState::SongsRoot
                                 ) {
                                     self.set_library_entries(
-                                        songs.into_iter().map(LibraryEntry::Song).collect(),
+                                        tracks.into_iter().map(LibraryEntry::Song).collect(),
                                     );
                                 }
                             }
@@ -5376,18 +5376,18 @@ impl UiManager {
                                 }
                             }
                             protocol::LibraryMessage::RootCountsResult {
-                                songs,
+                                tracks,
                                 artists,
                                 albums,
                                 genres,
                                 decades,
                             } => {
                                 self.library_root_counts =
-                                    [songs, artists, albums, genres, decades];
+                                    [tracks, artists, albums, genres, decades];
                                 self.sync_library_root_counts_to_ui();
                             }
                             protocol::LibraryMessage::GlobalSearchDataResult {
-                                songs,
+                                tracks,
                                 artists,
                                 albums,
                             } => {
@@ -5396,14 +5396,14 @@ impl UiManager {
                                     LibraryViewState::GlobalSearch
                                 ) {
                                     self.set_library_entries(Self::build_global_search_entries(
-                                        songs, artists, albums,
+                                        tracks, artists, albums,
                                     ));
                                 }
                             }
                             protocol::LibraryMessage::ArtistDetailResult {
                                 artist,
                                 albums,
-                                songs,
+                                tracks,
                             } => {
                                 if let LibraryViewState::ArtistDetail {
                                     artist: requested_artist,
@@ -5411,7 +5411,7 @@ impl UiManager {
                                 {
                                     if requested_artist == artist {
                                         self.set_library_entries(
-                                            Self::build_artist_detail_entries(albums, songs),
+                                            Self::build_artist_detail_entries(albums, tracks),
                                         );
                                     }
                                 }
@@ -5419,7 +5419,7 @@ impl UiManager {
                             protocol::LibraryMessage::AlbumSongsResult {
                                 album,
                                 album_artist,
-                                songs,
+                                tracks,
                             } => {
                                 if let LibraryViewState::AlbumDetail {
                                     album: requested_album,
@@ -5430,31 +5430,31 @@ impl UiManager {
                                         && requested_album_artist == album_artist
                                     {
                                         self.set_library_entries(
-                                            songs.into_iter().map(LibraryEntry::Song).collect(),
+                                            tracks.into_iter().map(LibraryEntry::Song).collect(),
                                         );
                                     }
                                 }
                             }
-                            protocol::LibraryMessage::GenreSongsResult { genre, songs } => {
+                            protocol::LibraryMessage::GenreSongsResult { genre, tracks } => {
                                 if let LibraryViewState::GenreDetail {
                                     genre: requested_genre,
                                 } = self.current_library_view()
                                 {
                                     if requested_genre == genre {
                                         self.set_library_entries(
-                                            songs.into_iter().map(LibraryEntry::Song).collect(),
+                                            tracks.into_iter().map(LibraryEntry::Song).collect(),
                                         );
                                     }
                                 }
                             }
-                            protocol::LibraryMessage::DecadeSongsResult { decade, songs } => {
+                            protocol::LibraryMessage::DecadeSongsResult { decade, tracks } => {
                                 if let LibraryViewState::DecadeDetail {
                                     decade: requested_decade,
                                 } = self.current_library_view()
                                 {
                                     if requested_decade == decade {
                                         self.set_library_entries(
-                                            songs.into_iter().map(LibraryEntry::Song).collect(),
+                                            tracks.into_iter().map(LibraryEntry::Song).collect(),
                                         );
                                     }
                                 }
@@ -6846,7 +6846,7 @@ mod tests {
             make_library_album("No Year", "Artist"),
             make_library_album("Zeta", "Artist"),
         ];
-        let songs = vec![
+        let tracks = vec![
             make_library_song_in_album(
                 "alpha-1",
                 "Alpha Song 1",
@@ -6894,7 +6894,7 @@ mod tests {
             ),
         ];
 
-        let entries = UiManager::build_artist_detail_entries(albums, songs);
+        let entries = UiManager::build_artist_detail_entries(albums, tracks);
         let summary: Vec<String> = entries
             .iter()
             .map(|entry| match entry {
@@ -6926,7 +6926,7 @@ mod tests {
     #[test]
     fn test_build_artist_detail_entries_creates_album_header_for_song_only_album() {
         let albums = vec![];
-        let songs = vec![make_library_song_in_album(
+        let tracks = vec![make_library_song_in_album(
             "beta-1",
             "Beta Song 1",
             "beta-1.mp3",
@@ -6936,7 +6936,7 @@ mod tests {
             "1",
         )];
 
-        let entries = UiManager::build_artist_detail_entries(albums, songs);
+        let entries = UiManager::build_artist_detail_entries(albums, tracks);
         assert_eq!(entries.len(), 2);
 
         match &entries[0] {
@@ -6960,14 +6960,14 @@ mod tests {
 
     #[test]
     fn test_build_global_search_entries_orders_by_name_then_kind() {
-        let songs = vec![
+        let tracks = vec![
             make_library_song("song-alpha", "Alpha", "alpha.mp3"),
             make_library_song("song-beta", "Beta", "beta.mp3"),
         ];
         let artists = vec![make_library_artist("Alpha", 3, 25)];
         let albums = vec![make_library_album("Alpha", "Artist One")];
 
-        let entries = UiManager::build_global_search_entries(songs, artists, albums);
+        let entries = UiManager::build_global_search_entries(tracks, artists, albums);
         let summary: Vec<String> = entries
             .into_iter()
             .map(|entry| match entry {

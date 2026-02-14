@@ -1026,7 +1026,7 @@ impl DbManager {
         Ok(deleted)
     }
 
-    /// Loads all songs in library sorted alphabetically by title.
+    /// Loads all tracks in library sorted alphabetically by title.
     pub fn get_library_songs(&self) -> Result<Vec<LibrarySong>, rusqlite::Error> {
         let mut stmt = self.conn.prepare(
             "SELECT song_id, path, title, artist, album, album_artist, genre, year, track_number
@@ -1046,14 +1046,14 @@ impl DbManager {
                 track_number: row.get(8)?,
             })
         })?;
-        let mut songs = Vec::new();
+        let mut tracks = Vec::new();
         for item in iter {
-            songs.push(item?);
+            tracks.push(item?);
         }
-        Ok(songs)
+        Ok(tracks)
     }
 
-    /// Loads one songs page and total row count.
+    /// Loads one tracks page and total row count.
     pub fn get_library_songs_page(
         &self,
         offset: usize,
@@ -1364,7 +1364,7 @@ impl DbManager {
         Ok(count.max(0) as usize)
     }
 
-    /// Loads songs for one album+album-artist pair sorted by track number then title.
+    /// Loads tracks for one album+album-artist pair sorted by track number then title.
     pub fn get_library_album_songs(
         &self,
         album: &str,
@@ -1389,14 +1389,14 @@ impl DbManager {
                 track_number: row.get(8)?,
             })
         })?;
-        let mut songs = Vec::new();
+        let mut tracks = Vec::new();
         for item in iter {
-            songs.push(item?);
+            tracks.push(item?);
         }
-        Ok(songs)
+        Ok(tracks)
     }
 
-    /// Loads artist detail (albums and songs) for one artist.
+    /// Loads artist detail (albums and tracks) for one artist.
     pub fn get_library_artist_detail(
         &self,
         artist: &str,
@@ -1440,14 +1440,14 @@ impl DbManager {
                 track_number: row.get(8)?,
             })
         })?;
-        let mut songs = Vec::new();
+        let mut tracks = Vec::new();
         for item in song_iter {
-            songs.push(item?);
+            tracks.push(item?);
         }
-        Ok((albums, songs))
+        Ok((albums, tracks))
     }
 
-    /// Loads songs for one normalized genre label.
+    /// Loads tracks for one normalized genre label.
     pub fn get_library_genre_songs(
         &self,
         genre: &str,
@@ -1474,14 +1474,14 @@ impl DbManager {
                 track_number: row.get(8)?,
             })
         })?;
-        let mut songs = Vec::new();
+        let mut tracks = Vec::new();
         for item in iter {
-            songs.push(item?);
+            tracks.push(item?);
         }
-        Ok(songs)
+        Ok(tracks)
     }
 
-    /// Loads songs for one normalized decade label.
+    /// Loads tracks for one normalized decade label.
     pub fn get_library_decade_songs(
         &self,
         decade: &str,
@@ -1509,11 +1509,11 @@ impl DbManager {
                 track_number: row.get(8)?,
             })
         })?;
-        let mut songs = Vec::new();
+        let mut tracks = Vec::new();
         for item in iter {
-            songs.push(item?);
+            tracks.push(item?);
         }
-        Ok(songs)
+        Ok(tracks)
     }
 
     /// Returns a fresh enrichment cache entry for the supplied entity when present.
