@@ -12,6 +12,11 @@
 - Fully user customizable UI with layout editor based on modular panels
 - Broad audio format support with [symphonia](https://crates.io/crates/symphonia) and [lofty](https://crates.io/crates/lofty)
 
+## Project Status
+
+- Project is in early development, and is roughly alpha quality. Major functionality is working but some bugs, especially visual, are still to be expected.
+- Only linux is supported currently, though the project is being built cross platform, since that's what I'm able to test at the moment.
+
 ## Quick Start
 
 ### Prerequisites
@@ -21,7 +26,7 @@
 ### Build and Run
 
 - Debug build: `cargo build`
-- Run app: `cargo run`
+- Run app (unoptimized debug version): `cargo run`
 - Release build: `cargo build --release`
 - Run release: `cargo run --release`
 - Fast compile check: `cargo check`
@@ -44,12 +49,12 @@
 
 The app is organized into cooperating runtime components connected through an event bus (`tokio::sync::broadcast`):
 
+- `src/protocol.rs`: shared message protocol for all components.
 - `src/main.rs`: startup, wiring, Slint callback bindings, and runtime coordination.
 - `src/playlist_manager.rs`: playlist edits, playback sequencing, and decode-cache intent.
 - `src/audio_decoder.rs`: decode + seek + resample pipeline.
 - `src/audio_player.rs`: output stream, queue management, and playback progress.
 - `src/ui_manager.rs`: applies bus events to UI state and metadata/cover-art updates.
-- `src/protocol.rs`: shared message protocol for all components.
 - `src/layout.rs`: layout tree model and edit operations.
 - `src/db_manager.rs`: SQLite persistence for playlists, tracks, and playlist UI metadata.
 
@@ -59,8 +64,7 @@ The app is organized into cooperating runtime components connected through an ev
 
 - Config file: `<config_dir>/roqtune/config.toml`
 - Layout file: `<config_dir>/roqtune/layout.toml`
-  - Includes split-tree layout and playlist column configuration.
-- Playlist database: `<data_dir>/roqtune/playlist.db`
+- Playlist database (SQLite 3): `<data_dir>/roqtune/playlist.db`
 - Cover art cache: `<cache_dir>/roqtune/covers/`
 - Artist enrichment image cache: `<cache_dir>/roqtune/library_enrichment/images/`
 - Output probe cache: `<cache_dir>/roqtune/output_probe_cache.json`
@@ -77,19 +81,13 @@ System templates in this repo:
 - `config/config.system.toml` (copy to `~/.config/roqtune/config.toml` and edit)
 - `config/layout.system.toml` (copy to `~/.config/roqtune/layout.toml` and edit)
 
-## Audio Output Behavior
-
-- Match Content mode (default): probes and caches verified device rates, then switches output rate per track boundary when supported.
-- Manual mode: keeps one fixed output sample rate (`sample_rate_auto = false` and `sample_rate_khz`).
-- Output conversion quality is configurable via `resampler_quality` (`high`/`highest`).
-- Optional dither is available for float-to-integer output conversion (`dither_on_bitdepth_reduce`).
-
 ## UI Development
 
 - Main UI file: `src/roqtune.slint`
 - Reusable UI parts: `src/ui/components/*.slint`
 - Shared UI model types: `src/ui/types.slint`
 
-## Project Status
+## AI Disclosure
+- The core event bus architecture, technology choices, and initial implementation were created by hand with minimal AI input
+- AI agents were heavily used for feature implementations, resulting in enormous time / effort savings over what I could do by hand
 
-This project is under active development, with ongoing work on playback flow, UI ergonomics, and configuration flexibility.
