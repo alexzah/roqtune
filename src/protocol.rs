@@ -576,6 +576,8 @@ pub struct TechnicalMetadata {
     pub channel_count: u16,
     /// Estimated duration in milliseconds.
     pub duration_ms: u64,
+    /// Source bit depth (e.g., 16, 24, 32).
+    pub bits_per_sample: u16,
 }
 
 /// Concrete output stream sample type selected by the audio backend.

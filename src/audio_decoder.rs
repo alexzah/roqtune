@@ -779,6 +779,7 @@ impl DecodeWorker {
                 .map(|channels| channels.count() as u16)
                 .unwrap_or(2),
             duration_ms: duration_ms as u64,
+            bits_per_sample: codec_params.bits_per_sample.unwrap_or(16) as u16,
         }
     }
 }

@@ -980,47 +980,75 @@ impl UiManager {
     }
 
     fn render_technical_info_text(&self) -> String {
-        let mut parts = Vec::new();
-        if let Some(meta) = self.current_technical_metadata.as_ref() {
-            parts.push(format!(
-                "{} | {} kbps | {} Hz | {} ch",
-                meta.format, meta.bitrate_kbps, meta.sample_rate_hz, meta.channel_count
-            ));
-        }
-        if let Some(path_info) = self.current_output_path_info.as_ref() {
-            let output_format = match path_info.output_stream.sample_format {
-                protocol::OutputSampleFormat::F32 => "f32",
-                protocol::OutputSampleFormat::I16 => "i16",
-                protocol::OutputSampleFormat::U16 => "u16",
-                protocol::OutputSampleFormat::Unknown => "unknown",
-            };
-            let mut transforms = Vec::new();
-            if path_info.resampled {
-                transforms.push("resample");
+        let meta = match self.current_technical_metadata.as_ref() {
+            Some(m) => m,
+            None => return String::new(),
+        };
+        let path_info = match self.current_output_path_info.as_ref() {
+            Some(p) => p,
+            None => {
+                return format!(
+                    "Source: {} ({} bit, {} kbps)",
+                    meta.format, meta.bits_per_sample, meta.bitrate_kbps
+                )
             }
-            if path_info.remixed_channels {
-                transforms.push("channel-map");
-            }
-            if path_info.dithered {
-                transforms.push("dither");
-            }
-            let transform_text = if transforms.is_empty() {
-                "direct".to_string()
+        };
+
+        let source_bits = meta.bits_per_sample;
+        let source_rate = path_info.source_sample_rate_hz;
+        let source_ch = path_info.source_channel_count;
+
+        let rate_str = if source_rate >= 1000 {
+            let khz = source_rate as f32 / 1000.0;
+            if khz == khz.round() {
+                format!("{}kHz", khz as u32)
             } else {
-                transforms.join("+")
+                format!("{:.1}kHz", khz)
+            }
+        } else {
+            format!("{}Hz", source_rate)
+        };
+
+        let source_info = format!(
+            "{} ({} bit, {}, {}ch, {} kbps)",
+            meta.format, source_bits, rate_str, source_ch, meta.bitrate_kbps
+        );
+
+        let mut transforms = Vec::new();
+
+        if path_info.resampled {
+            let out_rate = path_info.output_stream.sample_rate_hz;
+            let out_rate_str = if out_rate >= 1000 {
+                let khz = out_rate as f32 / 1000.0;
+                if khz == khz.round() {
+                    format!("{}kHz", khz as u32)
+                } else {
+                    format!("{:.1}kHz", khz)
+                }
+            } else {
+                format!("{}Hz", out_rate)
             };
-            parts.push(format!(
-                "Path: {} Hz/{} ch -> {} Hz/{} ch | {} bit {} ({})",
-                path_info.source_sample_rate_hz,
-                path_info.source_channel_count,
-                path_info.output_stream.sample_rate_hz,
-                path_info.output_stream.channel_count,
-                path_info.output_stream.bits_per_sample,
-                output_format,
-                transform_text
+            transforms.push(format!("Resample: {} -> {}", rate_str, out_rate_str));
+        }
+
+        if path_info.remixed_channels {
+            transforms.push(format!(
+                "Channel map: {}ch -> {}ch",
+                source_ch, path_info.output_stream.channel_count
             ));
         }
-        parts.join(" | ")
+
+        if path_info.dithered {
+            transforms.push("Dither".to_string());
+        }
+
+        let transform_str = if transforms.is_empty() {
+            "Direct play".to_string()
+        } else {
+            transforms.join(" / ")
+        };
+
+        format!("Source: {} | {}", source_info, transform_str)
     }
 
     fn refresh_technical_info_ui(&self) {

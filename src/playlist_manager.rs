@@ -3309,6 +3309,7 @@ mod tests {
                 sample_rate_hz: 44_100,
                 channel_count: 2,
                 duration_ms: 100_000,
+                bits_per_sample: 16,
             }),
         ));
         harness.send(protocol::Message::Playback(
