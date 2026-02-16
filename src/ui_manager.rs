@@ -1749,19 +1749,6 @@ impl UiManager {
         self.apply_playlist_column_layout_internal(true);
     }
 
-    fn status_text_from_track_metadata(track_metadata: &TrackMetadata) -> slint::SharedString {
-        let title = if track_metadata.title.is_empty() {
-            "Unknown".to_string()
-        } else {
-            track_metadata.title.clone()
-        };
-        if !track_metadata.artist.is_empty() {
-            format!("{} - {}", track_metadata.artist, title).into()
-        } else {
-            title.into()
-        }
-    }
-
     fn status_text_from_detailed_metadata(meta: &protocol::DetailedMetadata) -> String {
         let title = if meta.title.is_empty() {
             "Unknown".to_string()
@@ -5000,39 +4987,115 @@ impl UiManager {
         }
     }
 
-    fn play_library_track_from_entries(&mut self, selected_track_id: &str) {
-        let tracks: Vec<protocol::LibraryTrack> = self
-            .library_entries
-            .iter()
-            .filter_map(|entry| match entry {
-                LibraryEntry::Track(track) => Some(track.clone()),
-                _ => None,
-            })
-            .collect();
-        if tracks.is_empty() {
-            return;
+    fn has_paused_playback_queue(&self) -> bool {
+        !self.playback_active && self.current_playing_track_path.is_some()
+    }
+
+    fn build_playlist_queue_request(
+        &self,
+        preferred_view_index: Option<usize>,
+    ) -> Option<protocol::PlaybackQueueRequest> {
+        let preferred_source_index =
+            preferred_view_index.and_then(|view_index| self.map_view_to_source_index(view_index));
+        let selected_set: HashSet<usize> = self.selected_indices.iter().copied().collect();
+        let mut selected_start_index = None;
+        let mut explicit_start_index = None;
+        let mut tracks = Vec::with_capacity(self.view_indices.len());
+
+        for source_index in self.view_indices.iter().copied() {
+            let Some(track_id) = self.track_ids.get(source_index) else {
+                continue;
+            };
+            let Some(track_path) = self.track_paths.get(source_index) else {
+                continue;
+            };
+            let queue_index = tracks.len();
+            if preferred_source_index == Some(source_index) {
+                explicit_start_index = Some(queue_index);
+            }
+            if selected_start_index.is_none() && selected_set.contains(&source_index) {
+                selected_start_index = Some(queue_index);
+            }
+            tracks.push(protocol::RestoredTrack {
+                id: track_id.clone(),
+                path: track_path.clone(),
+            });
         }
-        let Some(start_index) = tracks
-            .iter()
-            .position(|track| track.id == selected_track_id)
-        else {
+
+        if tracks.is_empty() {
+            return None;
+        }
+
+        let start_index = explicit_start_index.or(selected_start_index).unwrap_or(0);
+        Some(protocol::PlaybackQueueRequest {
+            source: protocol::PlaybackQueueSource::Playlist {
+                playlist_id: self.active_playlist_id.clone(),
+            },
+            tracks,
+            start_index,
+        })
+    }
+
+    fn build_library_queue_request(
+        &self,
+        preferred_source_index: Option<usize>,
+    ) -> Option<protocol::PlaybackQueueRequest> {
+        let selected_set: HashSet<usize> = self.library_selected_indices.iter().copied().collect();
+        let mut selected_start_index = None;
+        let mut explicit_start_index = None;
+        let mut tracks = Vec::new();
+
+        for source_index in self.library_view_indices.iter().copied() {
+            let Some(LibraryEntry::Track(track)) = self.library_entries.get(source_index) else {
+                continue;
+            };
+            let queue_index = tracks.len();
+            if preferred_source_index == Some(source_index) {
+                explicit_start_index = Some(queue_index);
+            }
+            if selected_start_index.is_none() && selected_set.contains(&source_index) {
+                selected_start_index = Some(queue_index);
+            }
+            tracks.push(protocol::RestoredTrack {
+                id: track.id.clone(),
+                path: track.path.clone(),
+            });
+        }
+
+        if tracks.is_empty() {
+            return None;
+        }
+
+        let start_index = explicit_start_index.or(selected_start_index).unwrap_or(0);
+        Some(protocol::PlaybackQueueRequest {
+            source: protocol::PlaybackQueueSource::Library,
+            tracks,
+            start_index,
+        })
+    }
+
+    fn start_queue_if_possible(&self, request: Option<protocol::PlaybackQueueRequest>) {
+        let Some(request) = request else {
             return;
         };
-
-        let tracks: Vec<protocol::RestoredTrack> = tracks
-            .into_iter()
-            .map(|track| protocol::RestoredTrack {
-                id: track.id,
-                path: track.path,
-            })
-            .collect();
-
-        let _ = self.bus_sender.send(protocol::Message::Playlist(
-            protocol::PlaylistMessage::PlayLibraryQueue {
-                tracks,
-                start_index,
-            },
+        let _ = self.bus_sender.send(protocol::Message::Playback(
+            protocol::PlaybackMessage::StartQueue(request),
         ));
+    }
+
+    fn play_active_collection(&self) {
+        if self.has_paused_playback_queue() {
+            let _ = self
+                .bus_sender
+                .send(protocol::Message::Playback(protocol::PlaybackMessage::Play));
+            return;
+        }
+        let request = if self.collection_mode == COLLECTION_MODE_LIBRARY {
+            self.build_library_queue_request(None)
+        } else {
+            self.build_playlist_queue_request(None)
+        };
+        self.start_queue_if_possible(request);
     }
 
     fn activate_library_item(&mut self, index: usize) {
@@ -5041,8 +5104,8 @@ impl UiManager {
         };
 
         match entry {
-            LibraryEntry::Track(track) => {
-                self.play_library_track_from_entries(&track.id);
+            LibraryEntry::Track(_) => {
+                self.start_queue_if_possible(self.build_library_queue_request(Some(index)));
             }
             LibraryEntry::Artist(artist) => {
                 self.remember_current_library_scroll_position();
@@ -6015,11 +6078,9 @@ impl UiManager {
                         protocol::Message::Playlist(
                             protocol::PlaylistMessage::PlayTrackByViewIndex(view_index),
                         ) => {
-                            if let Some(source_index) = self.map_view_to_source_index(view_index) {
-                                let _ = self.bus_sender.send(protocol::Message::Playback(
-                                    protocol::PlaybackMessage::PlayTrackByIndex(source_index),
-                                ));
-                            }
+                            self.start_queue_if_possible(
+                                self.build_playlist_queue_request(Some(view_index)),
+                            );
                         }
                         protocol::Message::Playlist(
                             protocol::PlaylistMessage::OpenPlaylistSearch,
@@ -6063,31 +6124,9 @@ impl UiManager {
                             self.apply_filter_view_snapshot_locally(source_indices);
                         }
                         protocol::Message::Playback(
-                            protocol::PlaybackMessage::PlayTrackByIndex(index),
+                            protocol::PlaybackMessage::PlayActiveCollection,
                         ) => {
-                            let previous_active_playing_index = self.active_playing_index;
-                            self.active_playing_index = Some(index);
-                            self.playback_active = true;
-                            let status_text = self
-                                .track_metadata
-                                .get(index)
-                                .map(Self::status_text_from_track_metadata)
-                                .unwrap_or_else(|| "".into());
-                            let _ = self.ui.upgrade_in_event_loop(move |ui| {
-                                ui.set_status_text(status_text);
-                            });
-                            self.rebuild_track_model();
-                            if previous_active_playing_index != self.active_playing_index {
-                                self.center_active_collection_on_playing_track_change();
-                            }
-                        }
-                        protocol::Message::Playback(protocol::PlaybackMessage::Play) => {
-                            self.playback_active = true;
-                            self.rebuild_track_model();
-                        }
-                        protocol::Message::Playback(protocol::PlaybackMessage::Pause) => {
-                            self.playback_active = false;
-                            self.rebuild_track_model();
+                            self.play_active_collection();
                         }
                         protocol::Message::Playback(
                             protocol::PlaybackMessage::PlaybackProgress {
@@ -6174,29 +6213,13 @@ impl UiManager {
                             self.rebuild_track_model();
                         }
                         protocol::Message::Playlist(protocol::PlaylistMessage::TrackStarted {
-                            index,
+                            index: _index,
                             playlist_id,
+                            ..
                         }) => {
-                            let is_active_playlist = playlist_id == self.active_playlist_id;
-                            let previous_active_playing_index = self.active_playing_index;
-                            self.active_playing_index = if is_active_playlist {
-                                Some(index)
-                            } else {
-                                None
-                            };
-                            self.playback_active = is_active_playlist;
-                            let status_text = self
-                                .track_metadata
-                                .get(index)
-                                .map(Self::status_text_from_track_metadata)
-                                .unwrap_or_else(|| "".into());
-
-                            let _ = self.ui.upgrade_in_event_loop(move |ui| {
-                                ui.set_status_text(status_text);
-                            });
-                            self.rebuild_track_model();
-                            if previous_active_playing_index != self.active_playing_index {
-                                self.center_active_collection_on_playing_track_change();
+                            self.playback_active = true;
+                            if playlist_id != self.active_playlist_id {
+                                self.active_playing_index = None;
                             }
                         }
                         protocol::Message::Playlist(
@@ -6220,8 +6243,16 @@ impl UiManager {
                             self.selected_indices = selected_indices_clone.clone();
                             let is_playing_active_playlist =
                                 playing_playlist_id.as_ref() == Some(&self.active_playlist_id);
+                            let active_playing_index_from_path =
+                                playing_track_path.as_ref().and_then(|playing_path| {
+                                    self.track_paths
+                                        .iter()
+                                        .position(|candidate| candidate == playing_path)
+                                });
                             self.active_playing_index = if is_playing_active_playlist {
-                                playing_index
+                                active_playing_index_from_path.or_else(|| {
+                                    playing_index.filter(|index| *index < self.track_paths.len())
+                                })
                             } else {
                                 None
                             };

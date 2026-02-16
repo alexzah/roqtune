@@ -2967,7 +2967,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let bus_sender_clone = bus_sender.clone();
     ui.on_play(move || {
         debug!("Play button clicked");
-        let _ = bus_sender_clone.send(Message::Playback(PlaybackMessage::Play));
+        let _ = bus_sender_clone.send(Message::Playback(PlaybackMessage::PlayActiveCollection));
     });
 
     // Wire up stop button

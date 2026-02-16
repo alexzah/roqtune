@@ -90,10 +90,6 @@ pub enum PlaylistMessage {
         playlist_ids: Vec<String>,
         paths: Vec<PathBuf>,
     },
-    PlayLibraryQueue {
-        tracks: Vec<RestoredTrack>,
-        start_index: usize,
-    },
     TracksInserted {
         tracks: Vec<RestoredTrack>,
         insert_at: usize,
@@ -477,6 +473,21 @@ pub struct RestoredTrack {
     pub path: PathBuf,
 }
 
+/// Playback queue source used for UI synchronization and routing semantics.
+#[derive(Debug, Clone)]
+pub enum PlaybackQueueSource {
+    Playlist { playlist_id: String },
+    Library,
+}
+
+/// Immutable playback queue snapshot used to bootstrap playback state.
+#[derive(Debug, Clone)]
+pub struct PlaybackQueueRequest {
+    pub source: PlaybackQueueSource,
+    pub tracks: Vec<RestoredTrack>,
+    pub start_index: usize,
+}
+
 /// Dedicated high-volume payload for playlist bulk-import queues.
 #[derive(Debug, Clone)]
 pub struct PlaylistBulkImportRequest {
@@ -655,9 +666,10 @@ pub enum AudioMessage {
 #[derive(Debug, Clone)]
 pub enum PlaybackMessage {
     ReadyForPlayback(String),
-    Play,                    // play the currently selected track
-    PlayTrackByIndex(usize), // play a specific track by index
-    PlayTrackById(String),   // play a specific track by identifier
+    Play, // resume the active playback queue
+    PlayActiveCollection,
+    StartQueue(PlaybackQueueRequest),
+    PlayTrackById(String), // play a specific track by identifier
     Stop,
     Pause,
     Next,
