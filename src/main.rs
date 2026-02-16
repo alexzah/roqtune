@@ -33,6 +33,7 @@ use audio_probe::get_or_probe_output_device;
 use config::{
     BufferingConfig, ButtonClusterInstanceConfig, Config, LibraryConfig, OutputConfig,
     PlaylistColumnConfig, ResamplerQuality, UiConfig, UiPlaybackOrder, UiRepeatMode,
+    ViewerPanelDisplayPriority, ViewerPanelInstanceConfig,
 };
 use cpal::traits::{DeviceTrait, HostTrait};
 use db_manager::DbManager;
@@ -764,6 +765,8 @@ fn sanitize_config(config: Config) -> Config {
     );
     let sanitized_button_cluster_instances =
         sanitize_button_cluster_instances(&sanitized_layout, &config.ui.button_cluster_instances);
+    let sanitized_viewer_panel_instances =
+        sanitize_viewer_panel_instances(&sanitized_layout, &config.ui.viewer_panel_instances);
     let clamped_volume = config.ui.volume.clamp(0.0, 1.0);
     let mut clamped_album_art_column_min_width_px = config
         .ui
@@ -830,6 +833,7 @@ fn sanitize_config(config: Config) -> Config {
             playlist_album_art_column_max_width_px: clamped_album_art_column_max_width_px,
             layout: sanitized_layout,
             button_cluster_instances: sanitized_button_cluster_instances,
+            viewer_panel_instances: sanitized_viewer_panel_instances,
             playlist_columns: sanitized_playlist_columns,
             window_width: clamped_window_width,
             window_height: clamped_window_height,
@@ -868,9 +872,32 @@ fn collect_button_cluster_leaf_ids(node: &LayoutNode, out: &mut Vec<String>) {
     }
 }
 
+fn collect_viewer_panel_leaf_ids(node: &LayoutNode, out: &mut Vec<String>) {
+    match node {
+        LayoutNode::Leaf { id, panel } => {
+            if *panel == LayoutPanelKind::MetadataViewer
+                || *panel == LayoutPanelKind::AlbumArtViewer
+            {
+                out.push(id.clone());
+            }
+        }
+        LayoutNode::Split { first, second, .. } => {
+            collect_viewer_panel_leaf_ids(first, out);
+            collect_viewer_panel_leaf_ids(second, out);
+        }
+        LayoutNode::Empty => {}
+    }
+}
+
 fn button_cluster_leaf_ids(layout: &LayoutConfig) -> Vec<String> {
     let mut ids = Vec::new();
     collect_button_cluster_leaf_ids(&layout.root, &mut ids);
+    ids
+}
+
+fn viewer_panel_leaf_ids(layout: &LayoutConfig) -> Vec<String> {
+    let mut ids = Vec::new();
+    collect_viewer_panel_leaf_ids(&layout.root, &mut ids);
     ids
 }
 
@@ -946,6 +973,32 @@ fn sanitize_button_cluster_instances(
                         default_button_cluster_actions_by_index(index)
                     }
                 }),
+        })
+        .collect()
+}
+
+fn sanitize_viewer_panel_instances(
+    layout: &LayoutConfig,
+    instances: &[ViewerPanelInstanceConfig],
+) -> Vec<ViewerPanelInstanceConfig> {
+    let leaf_ids = viewer_panel_leaf_ids(layout);
+    let mut priority_by_leaf: HashMap<&str, ViewerPanelDisplayPriority> = HashMap::new();
+    for instance in instances {
+        let leaf_id = instance.leaf_id.trim();
+        if leaf_id.is_empty() {
+            continue;
+        }
+        priority_by_leaf.insert(leaf_id, instance.display_priority);
+    }
+
+    leaf_ids
+        .into_iter()
+        .map(|leaf_id| ViewerPanelInstanceConfig {
+            display_priority: priority_by_leaf
+                .get(leaf_id.as_str())
+                .copied()
+                .unwrap_or_default(),
+            leaf_id,
         })
         .collect()
 }
@@ -1471,6 +1524,140 @@ fn apply_button_cluster_views_to_ui(
     ui.set_layout_button_cluster_panels(ModelRc::from(Rc::new(VecModel::from(views))));
 }
 
+fn viewer_panel_display_priority_to_code(priority: ViewerPanelDisplayPriority) -> i32 {
+    match priority {
+        ViewerPanelDisplayPriority::Default => 0,
+        ViewerPanelDisplayPriority::PreferSelection => 1,
+        ViewerPanelDisplayPriority::PreferNowPlaying => 2,
+        ViewerPanelDisplayPriority::SelectionOnly => 3,
+        ViewerPanelDisplayPriority::NowPlayingOnly => 4,
+    }
+}
+
+fn viewer_panel_display_priority_from_code(priority: i32) -> ViewerPanelDisplayPriority {
+    match priority {
+        1 => ViewerPanelDisplayPriority::PreferSelection,
+        2 => ViewerPanelDisplayPriority::PreferNowPlaying,
+        3 => ViewerPanelDisplayPriority::SelectionOnly,
+        4 => ViewerPanelDisplayPriority::NowPlayingOnly,
+        _ => ViewerPanelDisplayPriority::Default,
+    }
+}
+
+fn viewer_panel_display_priority_for_leaf(
+    instances: &[ViewerPanelInstanceConfig],
+    leaf_id: &str,
+) -> ViewerPanelDisplayPriority {
+    instances
+        .iter()
+        .find(|instance| instance.leaf_id == leaf_id)
+        .map(|instance| instance.display_priority)
+        .unwrap_or_default()
+}
+
+fn apply_viewer_panel_views_to_ui(
+    ui: &AppWindow,
+    metrics: &layout::TreeLayoutMetrics,
+    config: &Config,
+) {
+    let default_display_title = ui.get_display_title();
+    let default_display_artist = ui.get_display_artist();
+    let default_display_album = ui.get_display_album();
+    let default_display_date = ui.get_display_date();
+    let default_display_genre = ui.get_display_genre();
+    let default_art_source = ui.get_current_cover_art();
+    let default_has_art = ui.get_current_cover_art_available();
+    let existing_metadata_by_leaf: HashMap<String, LayoutMetadataViewerPanelModel> = ui
+        .get_layout_metadata_viewer_panels()
+        .iter()
+        .map(|panel| (panel.leaf_id.to_string(), panel))
+        .collect();
+    let existing_album_art_by_leaf: HashMap<String, LayoutAlbumArtViewerPanelModel> = ui
+        .get_layout_album_art_viewer_panels()
+        .iter()
+        .map(|panel| (panel.leaf_id.to_string(), panel))
+        .collect();
+
+    let metadata_views: Vec<LayoutMetadataViewerPanelModel> = metrics
+        .leaves
+        .iter()
+        .filter(|leaf| leaf.panel == LayoutPanelKind::MetadataViewer)
+        .map(|leaf| {
+            let display_priority = viewer_panel_display_priority_to_code(
+                viewer_panel_display_priority_for_leaf(&config.ui.viewer_panel_instances, &leaf.id),
+            );
+            if let Some(existing) = existing_metadata_by_leaf.get(&leaf.id) {
+                return LayoutMetadataViewerPanelModel {
+                    leaf_id: leaf.id.clone().into(),
+                    x_px: leaf.x,
+                    y_px: leaf.y,
+                    width_px: leaf.width,
+                    height_px: leaf.height,
+                    visible: true,
+                    display_priority,
+                    display_title: existing.display_title.clone(),
+                    display_artist: existing.display_artist.clone(),
+                    display_album: existing.display_album.clone(),
+                    display_date: existing.display_date.clone(),
+                    display_genre: existing.display_genre.clone(),
+                };
+            }
+            LayoutMetadataViewerPanelModel {
+                leaf_id: leaf.id.clone().into(),
+                x_px: leaf.x,
+                y_px: leaf.y,
+                width_px: leaf.width,
+                height_px: leaf.height,
+                visible: true,
+                display_priority,
+                display_title: default_display_title.clone(),
+                display_artist: default_display_artist.clone(),
+                display_album: default_display_album.clone(),
+                display_date: default_display_date.clone(),
+                display_genre: default_display_genre.clone(),
+            }
+        })
+        .collect();
+
+    let album_art_views: Vec<LayoutAlbumArtViewerPanelModel> = metrics
+        .leaves
+        .iter()
+        .filter(|leaf| leaf.panel == LayoutPanelKind::AlbumArtViewer)
+        .map(|leaf| {
+            let display_priority = viewer_panel_display_priority_to_code(
+                viewer_panel_display_priority_for_leaf(&config.ui.viewer_panel_instances, &leaf.id),
+            );
+            if let Some(existing) = existing_album_art_by_leaf.get(&leaf.id) {
+                return LayoutAlbumArtViewerPanelModel {
+                    leaf_id: leaf.id.clone().into(),
+                    x_px: leaf.x,
+                    y_px: leaf.y,
+                    width_px: leaf.width,
+                    height_px: leaf.height,
+                    visible: true,
+                    display_priority,
+                    art_source: existing.art_source.clone(),
+                    has_art: existing.has_art,
+                };
+            }
+            LayoutAlbumArtViewerPanelModel {
+                leaf_id: leaf.id.clone().into(),
+                x_px: leaf.x,
+                y_px: leaf.y,
+                width_px: leaf.width,
+                height_px: leaf.height,
+                visible: true,
+                display_priority,
+                art_source: default_art_source.clone(),
+                has_art: default_has_art,
+            }
+        })
+        .collect();
+
+    ui.set_layout_metadata_viewer_panels(ModelRc::from(Rc::new(VecModel::from(metadata_views))));
+    ui.set_layout_album_art_viewer_panels(ModelRc::from(Rc::new(VecModel::from(album_art_views))));
+}
+
 fn set_table_value_preserving_decor(table: &mut Table, key: &str, item: Item) {
     let replacing_scalar_with_aot = item.is_array_of_tables()
         && table
@@ -1687,6 +1874,30 @@ fn write_config_to_document(document: &mut DocumentMut, previous: &Config, confi
                 ui,
                 "button_cluster_instances",
                 Item::ArrayOfTables(button_instances),
+            );
+        }
+
+        if !ui.contains_key("viewer_panel_instances")
+            || previous.ui.viewer_panel_instances != config.ui.viewer_panel_instances
+        {
+            let mut viewer_instances = ArrayOfTables::new();
+            for instance in &config.ui.viewer_panel_instances {
+                let mut instance_table = Table::new();
+                instance_table["leaf_id"] = value(instance.leaf_id.clone());
+                let display_priority = match instance.display_priority {
+                    ViewerPanelDisplayPriority::Default => "default",
+                    ViewerPanelDisplayPriority::PreferSelection => "prefer_selection",
+                    ViewerPanelDisplayPriority::PreferNowPlaying => "prefer_now_playing",
+                    ViewerPanelDisplayPriority::SelectionOnly => "selection_only",
+                    ViewerPanelDisplayPriority::NowPlayingOnly => "now_playing_only",
+                };
+                instance_table["display_priority"] = value(display_priority);
+                viewer_instances.push(instance_table);
+            }
+            set_table_value_preserving_decor(
+                ui,
+                "viewer_panel_instances",
+                Item::ArrayOfTables(viewer_instances),
             );
         }
     }
@@ -1968,6 +2179,7 @@ fn with_updated_layout(previous: &Config, layout: LayoutConfig) -> Config {
                 .playlist_album_art_column_max_width_px,
             layout,
             button_cluster_instances: previous.ui.button_cluster_instances.clone(),
+            viewer_panel_instances: previous.ui.viewer_panel_instances.clone(),
             playlist_columns: previous.ui.playlist_columns.clone(),
             window_width: previous.ui.window_width,
             window_height: previous.ui.window_height,
@@ -2125,6 +2337,7 @@ fn apply_layout_to_ui(
     ));
     ui.set_layout_selected_leaf_index(selected_leaf_index);
     apply_button_cluster_views_to_ui(ui, &metrics, config);
+    apply_viewer_panel_views_to_ui(ui, &metrics, config);
 }
 
 fn apply_playlist_columns_to_ui(ui: &AppWindow, config: &Config) {
@@ -3609,6 +3822,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             ui.set_control_cluster_menu_x(x_px.max(8) as f32);
             ui.set_control_cluster_menu_y(y_px.max(8) as f32);
             apply_control_cluster_menu_actions_for_leaf(&ui, &config_snapshot, &leaf_id);
+            ui.set_show_viewer_panel_settings_menu(false);
             ui.set_show_control_cluster_menu(true);
         }
     });
@@ -3645,6 +3859,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             apply_layout_to_ui(&ui, &next_config, workspace_width_px, workspace_height_px);
             ui.set_control_cluster_menu_target_leaf_id(leaf_id.clone());
             apply_control_cluster_menu_actions_for_leaf(&ui, &next_config, &leaf_id);
+            ui.set_show_viewer_panel_settings_menu(false);
             ui.set_show_control_cluster_menu(true);
         }
     });
@@ -3685,7 +3900,106 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             apply_layout_to_ui(&ui, &next_config, workspace_width_px, workspace_height_px);
             ui.set_control_cluster_menu_target_leaf_id(leaf_id.clone());
             apply_control_cluster_menu_actions_for_leaf(&ui, &next_config, &leaf_id);
+            ui.set_show_viewer_panel_settings_menu(false);
             ui.set_show_control_cluster_menu(true);
+        }
+    });
+
+    let config_state_clone = Arc::clone(&config_state);
+    let ui_handle_clone = ui.as_weak().clone();
+    ui.on_open_viewer_panel_settings_for_leaf(move |leaf_id, panel_kind, x_px, y_px| {
+        if leaf_id.trim().is_empty() {
+            return;
+        }
+        if panel_kind != LayoutPanelKind::MetadataViewer.to_code()
+            && panel_kind != LayoutPanelKind::AlbumArtViewer.to_code()
+        {
+            return;
+        }
+        let priority_index = {
+            let state = config_state_clone
+                .lock()
+                .expect("config state lock poisoned");
+            viewer_panel_display_priority_to_code(viewer_panel_display_priority_for_leaf(
+                &state.ui.viewer_panel_instances,
+                &leaf_id,
+            ))
+        };
+        if let Some(ui) = ui_handle_clone.upgrade() {
+            ui.set_control_cluster_menu_target_leaf_id("".into());
+            ui.set_show_control_cluster_menu(false);
+            ui.set_viewer_panel_settings_target_leaf_id(leaf_id.clone());
+            ui.set_viewer_panel_settings_target_panel_kind(panel_kind);
+            ui.set_viewer_panel_settings_display_priority_index(priority_index);
+            ui.set_viewer_panel_settings_x(x_px.max(8) as f32);
+            ui.set_viewer_panel_settings_y(y_px.max(8) as f32);
+            ui.set_show_viewer_panel_settings_menu(true);
+        }
+    });
+
+    let bus_sender_clone = bus_sender.clone();
+    let config_state_clone = Arc::clone(&config_state);
+    let output_options_clone = Arc::clone(&output_options);
+    let runtime_output_override_clone = Arc::clone(&runtime_output_override);
+    let config_file_clone = config_file.clone();
+    let layout_workspace_size_clone = Arc::clone(&layout_workspace_size);
+    let ui_handle_clone = ui.as_weak().clone();
+    ui.on_set_viewer_panel_display_priority(move |leaf_id, priority_code| {
+        let leaf_id_text = leaf_id.to_string();
+        if leaf_id_text.trim().is_empty() {
+            return;
+        }
+        let display_priority = viewer_panel_display_priority_from_code(priority_code);
+        let (next_config, workspace_width_px, workspace_height_px) = {
+            let mut state = config_state_clone
+                .lock()
+                .expect("config state lock poisoned");
+            let mut next_config = state.clone();
+            if let Some(instance) = next_config
+                .ui
+                .viewer_panel_instances
+                .iter_mut()
+                .find(|instance| instance.leaf_id == leaf_id_text)
+            {
+                instance.display_priority = display_priority;
+            } else {
+                next_config
+                    .ui
+                    .viewer_panel_instances
+                    .push(ViewerPanelInstanceConfig {
+                        leaf_id: leaf_id_text.clone(),
+                        display_priority,
+                    });
+            }
+            next_config = sanitize_config(next_config);
+            *state = next_config.clone();
+            let (workspace_width_px, workspace_height_px) =
+                workspace_size_snapshot(&layout_workspace_size_clone);
+            (next_config, workspace_width_px, workspace_height_px)
+        };
+        persist_state_files_with_config_path(&next_config, &config_file_clone);
+        let output_options_snapshot = {
+            let options = output_options_clone
+                .lock()
+                .expect("output options lock poisoned");
+            options.clone()
+        };
+        let runtime_override = runtime_output_override_snapshot(&runtime_output_override_clone);
+        let runtime_config = resolve_runtime_config(
+            &next_config,
+            &output_options_snapshot,
+            Some(&runtime_override),
+        );
+        let _ = bus_sender_clone.send(Message::Config(ConfigMessage::ConfigChanged(
+            runtime_config,
+        )));
+        if let Some(ui) = ui_handle_clone.upgrade() {
+            apply_layout_to_ui(&ui, &next_config, workspace_width_px, workspace_height_px);
+            ui.set_viewer_panel_settings_target_leaf_id(leaf_id_text.into());
+            ui.set_viewer_panel_settings_display_priority_index(
+                viewer_panel_display_priority_to_code(display_priority),
+            );
+            ui.set_show_viewer_panel_settings_menu(true);
         }
     });
 
@@ -4471,6 +4785,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         .playlist_album_art_column_max_width_px,
                     layout: previous_config.ui.layout.clone(),
                     button_cluster_instances: previous_config.ui.button_cluster_instances.clone(),
+                    viewer_panel_instances: previous_config.ui.viewer_panel_instances.clone(),
                     playlist_columns: previous_config.ui.playlist_columns.clone(),
                     window_width: previous_config.ui.window_width,
                     window_height: previous_config.ui.window_height,
@@ -4567,6 +4882,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     .playlist_album_art_column_max_width_px,
                 layout: previous_config.ui.layout.clone(),
                 button_cluster_instances: previous_config.ui.button_cluster_instances.clone(),
+                viewer_panel_instances: previous_config.ui.viewer_panel_instances.clone(),
                 playlist_columns: updated_columns,
                 window_width: previous_config.ui.window_width,
                 window_height: previous_config.ui.window_height,
@@ -4665,6 +4981,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     .playlist_album_art_column_max_width_px,
                 layout: previous_config.ui.layout.clone(),
                 button_cluster_instances: previous_config.ui.button_cluster_instances.clone(),
+                viewer_panel_instances: previous_config.ui.viewer_panel_instances.clone(),
                 playlist_columns: updated_columns,
                 window_width: previous_config.ui.window_width,
                 window_height: previous_config.ui.window_height,
@@ -4765,6 +5082,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     .playlist_album_art_column_max_width_px,
                 layout: previous_config.ui.layout.clone(),
                 button_cluster_instances: previous_config.ui.button_cluster_instances.clone(),
+                viewer_panel_instances: previous_config.ui.viewer_panel_instances.clone(),
                 playlist_columns: updated_columns,
                 window_width: previous_config.ui.window_width,
                 window_height: previous_config.ui.window_height,
@@ -4859,6 +5177,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     .playlist_album_art_column_max_width_px,
                 layout: previous_config.ui.layout.clone(),
                 button_cluster_instances: previous_config.ui.button_cluster_instances.clone(),
+                viewer_panel_instances: previous_config.ui.viewer_panel_instances.clone(),
                 playlist_columns: updated_columns,
                 window_width: previous_config.ui.window_width,
                 window_height: previous_config.ui.window_height,
@@ -5259,6 +5578,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 .playlist_album_art_column_max_width_px,
                             layout: state.ui.layout.clone(),
                             button_cluster_instances: state.ui.button_cluster_instances.clone(),
+                            viewer_panel_instances: state.ui.viewer_panel_instances.clone(),
                             playlist_columns: reordered_columns,
                             window_width: state.ui.window_width,
                             window_height: state.ui.window_height,
@@ -6353,6 +6673,7 @@ mod tests {
                 playlist_album_art_column_max_width_px: 480,
                 layout: LayoutConfig::default(),
                 button_cluster_instances: Vec::new(),
+                viewer_panel_instances: Vec::new(),
                 playlist_columns: crate::config::default_playlist_columns(),
                 window_width: 900,
                 window_height: 650,

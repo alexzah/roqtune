@@ -72,6 +72,8 @@ pub struct UiConfig {
     pub layout: LayoutConfig,
     #[serde(default)]
     pub button_cluster_instances: Vec<ButtonClusterInstanceConfig>,
+    #[serde(default)]
+    pub viewer_panel_instances: Vec<ViewerPanelInstanceConfig>,
     /// Runtime playlist column set loaded from `layout.toml`.
     #[serde(skip, default = "default_playlist_columns")]
     pub playlist_columns: Vec<PlaylistColumnConfig>,
@@ -144,6 +146,33 @@ pub struct ButtonClusterInstanceConfig {
     pub actions: Vec<i32>,
 }
 
+/// Display-target resolution strategy for metadata/album-art viewer panels.
+#[derive(Debug, Clone, Copy, serde::Deserialize, serde::Serialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum ViewerPanelDisplayPriority {
+    /// Follow the latest event source (selection or now playing).
+    #[default]
+    Default,
+    /// Prefer current selection, then fallback to now playing.
+    PreferSelection,
+    /// Prefer now playing, then fallback to current selection.
+    PreferNowPlaying,
+    /// Only render selection context.
+    SelectionOnly,
+    /// Only render now-playing context.
+    NowPlayingOnly,
+}
+
+/// Per-leaf metadata/album-art viewer configuration persisted with layout preferences.
+#[derive(Debug, Clone, serde::Deserialize, serde::Serialize, PartialEq, Eq)]
+pub struct ViewerPanelInstanceConfig {
+    /// Layout leaf identifier that owns this viewer.
+    pub leaf_id: String,
+    /// Display-target resolution strategy.
+    #[serde(default)]
+    pub display_priority: ViewerPanelDisplayPriority,
+}
+
 /// Tuning knobs for decode/playback buffering.
 #[derive(Debug, Clone, serde::Deserialize, serde::Serialize)]
 pub struct BufferingConfig {
@@ -186,6 +215,7 @@ impl Default for UiConfig {
             ),
             layout: LayoutConfig::default(),
             button_cluster_instances: Vec::new(),
+            viewer_panel_instances: Vec::new(),
             playlist_columns: default_playlist_columns(),
             window_width: default_window_width(),
             window_height: default_window_height(),
@@ -325,7 +355,7 @@ pub fn default_playlist_columns() -> Vec<PlaylistColumnConfig> {
 mod tests {
     use super::{
         default_playlist_columns, BufferingConfig, Config, LayoutConfig, ResamplerQuality,
-        UiConfig, UiPlaybackOrder, UiRepeatMode,
+        UiConfig, UiPlaybackOrder, UiRepeatMode, ViewerPanelDisplayPriority,
     };
 
     #[test]
@@ -350,6 +380,7 @@ mod tests {
         assert_eq!(config.ui.playlist_album_art_column_max_width_px, 480);
         assert_eq!(config.ui.layout, LayoutConfig::default());
         assert!(config.ui.button_cluster_instances.is_empty());
+        assert!(config.ui.viewer_panel_instances.is_empty());
         assert_eq!(config.ui.playlist_columns, default_playlist_columns());
         assert_eq!(config.ui.window_width, 900);
         assert_eq!(config.ui.window_height, 650);
@@ -392,6 +423,7 @@ decoder_request_chunk_ms = 1500
         assert!(parsed.output.dither_on_bitdepth_reduce);
         assert_eq!(parsed.ui.layout, LayoutConfig::default());
         assert!(parsed.ui.button_cluster_instances.is_empty());
+        assert!(parsed.ui.viewer_panel_instances.is_empty());
         assert!(parsed.ui.show_layout_edit_intro);
         assert!(parsed.ui.show_tooltips);
         assert!(parsed.ui.auto_scroll_to_playing_track);
@@ -504,6 +536,7 @@ decoder_request_chunk_ms = 1500
         );
         assert_eq!(parsed.ui.layout, LayoutConfig::default());
         assert!(parsed.ui.button_cluster_instances.is_empty());
+        assert!(parsed.ui.viewer_panel_instances.is_empty());
         assert_eq!(parsed.ui.playlist_columns, default_playlist_columns());
         assert_eq!(parsed.ui.window_width, defaults.ui.window_width);
         assert_eq!(parsed.ui.window_height, defaults.ui.window_height);
@@ -551,5 +584,38 @@ decoder_request_chunk_ms = 1500
         let parsed: UiConfig =
             toml::from_str("auto_center_playing_track = false").expect("config should parse");
         assert!(!parsed.auto_scroll_to_playing_track);
+    }
+
+    #[test]
+    fn test_viewer_panel_display_priority_defaults_to_latest_event_model() {
+        let parsed: UiConfig = toml::from_str(
+            r#"
+            [[viewer_panel_instances]]
+            leaf_id = "n12"
+            "#,
+        )
+        .expect("config should parse");
+        assert_eq!(parsed.viewer_panel_instances.len(), 1);
+        assert_eq!(
+            parsed.viewer_panel_instances[0].display_priority,
+            ViewerPanelDisplayPriority::Default
+        );
+    }
+
+    #[test]
+    fn test_viewer_panel_display_priority_parses_prefer_now_playing() {
+        let parsed: UiConfig = toml::from_str(
+            r#"
+            [[viewer_panel_instances]]
+            leaf_id = "n12"
+            display_priority = "prefer_now_playing"
+            "#,
+        )
+        .expect("config should parse");
+        assert_eq!(parsed.viewer_panel_instances.len(), 1);
+        assert_eq!(
+            parsed.viewer_panel_instances[0].display_priority,
+            ViewerPanelDisplayPriority::PreferNowPlaying
+        );
     }
 }

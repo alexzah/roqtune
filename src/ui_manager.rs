@@ -23,8 +23,9 @@ use tokio::sync::broadcast::{Receiver, Sender};
 
 use crate::{
     config::{self, PlaylistColumnConfig},
-    metadata_tags, protocol, AppWindow, LibraryRowData,
-    MetadataEditorField as UiMetadataEditorField, TrackRowData,
+    metadata_tags, protocol, AppWindow, LayoutAlbumArtViewerPanelModel,
+    LayoutMetadataViewerPanelModel, LibraryRowData, MetadataEditorField as UiMetadataEditorField,
+    TrackRowData,
 };
 use governor::{Quota, RateLimiter};
 
@@ -249,12 +250,25 @@ enum DisplayTargetPriority {
     Playing,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum DisplayTargetResolutionMode {
+    PreferSelection,
+    PreferPlaying,
+    SelectionOnly,
+    PlayingOnly,
+}
+
 const PLAYLIST_COLUMN_KIND_TEXT: i32 = 0;
 const PLAYLIST_COLUMN_KIND_ALBUM_ART: i32 = 1;
 const BASE_ROW_HEIGHT_PX: u32 = 30;
 const ALBUM_ART_ROW_PADDING_PX: u32 = 8;
 const COLLECTION_MODE_PLAYLIST: i32 = 0;
 const COLLECTION_MODE_LIBRARY: i32 = 1;
+const VIEWER_DISPLAY_PRIORITY_DEFAULT: i32 = 0;
+const VIEWER_DISPLAY_PRIORITY_PREFER_SELECTION: i32 = 1;
+const VIEWER_DISPLAY_PRIORITY_PREFER_NOW_PLAYING: i32 = 2;
+const VIEWER_DISPLAY_PRIORITY_SELECTION_ONLY: i32 = 3;
+const VIEWER_DISPLAY_PRIORITY_NOW_PLAYING_ONLY: i32 = 4;
 const LIBRARY_ITEM_KIND_SONG: i32 = 0;
 const LIBRARY_ITEM_KIND_ARTIST: i32 = 1;
 const LIBRARY_ITEM_KIND_ALBUM: i32 = 2;
@@ -2081,6 +2095,303 @@ impl UiManager {
         (None, None)
     }
 
+    fn resolve_display_target_with_mode(
+        selected_indices: &[usize],
+        track_paths: &[PathBuf],
+        track_metadata: &[TrackMetadata],
+        playing_track_path: Option<&PathBuf>,
+        playing_track_metadata: Option<&protocol::DetailedMetadata>,
+        mode: DisplayTargetResolutionMode,
+    ) -> (Option<PathBuf>, Option<protocol::DetailedMetadata>) {
+        match mode {
+            DisplayTargetResolutionMode::PreferSelection => Self::resolve_display_target(
+                selected_indices,
+                track_paths,
+                track_metadata,
+                playing_track_path,
+                playing_track_metadata,
+                false,
+            ),
+            DisplayTargetResolutionMode::PreferPlaying => Self::resolve_display_target(
+                selected_indices,
+                track_paths,
+                track_metadata,
+                playing_track_path,
+                playing_track_metadata,
+                true,
+            ),
+            DisplayTargetResolutionMode::SelectionOnly => Self::resolve_display_target(
+                selected_indices,
+                track_paths,
+                track_metadata,
+                None,
+                None,
+                false,
+            ),
+            DisplayTargetResolutionMode::PlayingOnly => Self::resolve_display_target(
+                &[],
+                track_paths,
+                track_metadata,
+                playing_track_path,
+                playing_track_metadata,
+                true,
+            ),
+        }
+    }
+
+    fn resolve_library_display_target_with_mode(
+        selected_indices: &[usize],
+        library_entries: &[LibraryEntry],
+        playlist_track_paths: &[PathBuf],
+        playlist_track_metadata: &[TrackMetadata],
+        playing_track_path: Option<&PathBuf>,
+        playing_track_metadata: Option<&protocol::DetailedMetadata>,
+        mode: DisplayTargetResolutionMode,
+    ) -> (Option<PathBuf>, Option<protocol::DetailedMetadata>) {
+        match mode {
+            DisplayTargetResolutionMode::PreferSelection => Self::resolve_library_display_target(
+                selected_indices,
+                library_entries,
+                playlist_track_paths,
+                playlist_track_metadata,
+                playing_track_path,
+                playing_track_metadata,
+                false,
+            ),
+            DisplayTargetResolutionMode::PreferPlaying => Self::resolve_library_display_target(
+                selected_indices,
+                library_entries,
+                playlist_track_paths,
+                playlist_track_metadata,
+                playing_track_path,
+                playing_track_metadata,
+                true,
+            ),
+            DisplayTargetResolutionMode::SelectionOnly => Self::resolve_library_display_target(
+                selected_indices,
+                library_entries,
+                playlist_track_paths,
+                playlist_track_metadata,
+                None,
+                None,
+                false,
+            ),
+            DisplayTargetResolutionMode::PlayingOnly => Self::resolve_library_display_target(
+                &[],
+                library_entries,
+                playlist_track_paths,
+                playlist_track_metadata,
+                playing_track_path,
+                playing_track_metadata,
+                true,
+            ),
+        }
+    }
+
+    fn display_resolution_mode_from_priority_code(
+        priority_code: i32,
+        last_event_priority: DisplayTargetPriority,
+    ) -> DisplayTargetResolutionMode {
+        match priority_code {
+            VIEWER_DISPLAY_PRIORITY_PREFER_SELECTION => {
+                DisplayTargetResolutionMode::PreferSelection
+            }
+            VIEWER_DISPLAY_PRIORITY_PREFER_NOW_PLAYING => {
+                DisplayTargetResolutionMode::PreferPlaying
+            }
+            VIEWER_DISPLAY_PRIORITY_SELECTION_ONLY => DisplayTargetResolutionMode::SelectionOnly,
+            VIEWER_DISPLAY_PRIORITY_NOW_PLAYING_ONLY => DisplayTargetResolutionMode::PlayingOnly,
+            _ => {
+                if last_event_priority == DisplayTargetPriority::Playing {
+                    DisplayTargetResolutionMode::PreferPlaying
+                } else {
+                    DisplayTargetResolutionMode::PreferSelection
+                }
+            }
+        }
+    }
+
+    fn viewer_panel_priority_index(priority_code: i32) -> usize {
+        match priority_code {
+            VIEWER_DISPLAY_PRIORITY_PREFER_SELECTION => 1,
+            VIEWER_DISPLAY_PRIORITY_PREFER_NOW_PLAYING => 2,
+            VIEWER_DISPLAY_PRIORITY_SELECTION_ONLY => 3,
+            VIEWER_DISPLAY_PRIORITY_NOW_PLAYING_ONLY => 4,
+            _ => 0,
+        }
+    }
+
+    fn resolve_active_collection_display_target_with_mode(
+        &self,
+        mode: DisplayTargetResolutionMode,
+        playing_track_path: Option<&PathBuf>,
+        playing_track_metadata: Option<&protocol::DetailedMetadata>,
+    ) -> (Option<PathBuf>, Option<protocol::DetailedMetadata>) {
+        if self.collection_mode == COLLECTION_MODE_LIBRARY {
+            Self::resolve_library_display_target_with_mode(
+                &self.library_selected_indices,
+                &self.library_entries,
+                &self.track_paths,
+                &self.track_metadata,
+                playing_track_path,
+                playing_track_metadata,
+                mode,
+            )
+        } else {
+            Self::resolve_display_target_with_mode(
+                &self.selected_indices,
+                &self.track_paths,
+                &self.track_metadata,
+                playing_track_path,
+                playing_track_metadata,
+                mode,
+            )
+        }
+    }
+
+    fn resolve_cover_art_path_for_viewer_path(&mut self, track_path: &PathBuf) -> Option<PathBuf> {
+        let source_index = self
+            .track_paths
+            .iter()
+            .position(|candidate| candidate == track_path);
+        let mut cover_art_path =
+            source_index.and_then(|index| self.resolve_track_cover_art_path(index));
+        if cover_art_path.is_none() {
+            cover_art_path = self.resolve_library_cover_art_path(track_path);
+        }
+        if cover_art_path.is_none() {
+            cover_art_path = Self::find_cover_art(track_path.as_path());
+        }
+        if let Some(source_index) = source_index {
+            if let Some(slot) = self.track_cover_art_paths.get_mut(source_index) {
+                *slot = cover_art_path.clone();
+            }
+            if cover_art_path.is_some() {
+                self.track_cover_art_missing_tracks.remove(track_path);
+            } else {
+                self.track_cover_art_missing_tracks
+                    .insert(track_path.clone());
+            }
+        }
+        self.library_cover_art_paths
+            .insert(track_path.clone(), cover_art_path.clone());
+        cover_art_path
+    }
+
+    fn refresh_viewer_panel_models(
+        &self,
+        metadata_by_priority: Vec<Option<protocol::DetailedMetadata>>,
+        cover_art_paths_by_priority: Vec<Option<PathBuf>>,
+    ) {
+        let _ = self.ui.upgrade_in_event_loop(move |ui| {
+            let metadata_model = ui.get_layout_metadata_viewer_panels();
+            if let Some(vec_model) = metadata_model
+                .as_any()
+                .downcast_ref::<VecModel<LayoutMetadataViewerPanelModel>>()
+            {
+                let row_count = vec_model.row_count();
+                for row_index in 0..row_count {
+                    let Some(mut row_data) = vec_model.row_data(row_index) else {
+                        continue;
+                    };
+                    let priority_index =
+                        UiManager::viewer_panel_priority_index(row_data.display_priority);
+                    row_data.display_priority = priority_index as i32;
+                    if let Some(metadata) = metadata_by_priority
+                        .get(priority_index)
+                        .and_then(|value| value.as_ref())
+                    {
+                        row_data.display_title = metadata.title.as_str().into();
+                        row_data.display_artist = metadata.artist.as_str().into();
+                        row_data.display_album = metadata.album.as_str().into();
+                        row_data.display_date = metadata.date.as_str().into();
+                        row_data.display_genre = metadata.genre.as_str().into();
+                    } else {
+                        row_data.display_title = "".into();
+                        row_data.display_artist = "".into();
+                        row_data.display_album = "".into();
+                        row_data.display_date = "".into();
+                        row_data.display_genre = "".into();
+                    }
+                    vec_model.set_row_data(row_index, row_data);
+                }
+            }
+
+            let album_art_model = ui.get_layout_album_art_viewer_panels();
+            if let Some(vec_model) = album_art_model
+                .as_any()
+                .downcast_ref::<VecModel<LayoutAlbumArtViewerPanelModel>>()
+            {
+                let row_count = vec_model.row_count();
+                for row_index in 0..row_count {
+                    let Some(mut row_data) = vec_model.row_data(row_index) else {
+                        continue;
+                    };
+                    let priority_index =
+                        UiManager::viewer_panel_priority_index(row_data.display_priority);
+                    row_data.display_priority = priority_index as i32;
+                    let art_path = cover_art_paths_by_priority
+                        .get(priority_index)
+                        .cloned()
+                        .unwrap_or(None);
+                    let art_source = art_path
+                        .as_ref()
+                        .and_then(|path| UiManager::try_load_cover_art_image(path))
+                        .unwrap_or_default();
+                    let has_art = art_path.is_some();
+                    row_data.art_source = art_source;
+                    row_data.has_art = has_art;
+                    vec_model.set_row_data(row_index, row_data);
+                }
+            }
+        });
+    }
+
+    fn update_viewer_panel_content_for_all_priorities(
+        &mut self,
+        playing_track_path: Option<&PathBuf>,
+        playing_track_metadata: Option<&protocol::DetailedMetadata>,
+    ) {
+        let priority_codes = [
+            VIEWER_DISPLAY_PRIORITY_DEFAULT,
+            VIEWER_DISPLAY_PRIORITY_PREFER_SELECTION,
+            VIEWER_DISPLAY_PRIORITY_PREFER_NOW_PLAYING,
+            VIEWER_DISPLAY_PRIORITY_SELECTION_ONLY,
+            VIEWER_DISPLAY_PRIORITY_NOW_PLAYING_ONLY,
+        ];
+        let mut metadata_by_priority = Vec::with_capacity(priority_codes.len());
+        let mut display_paths_by_priority = Vec::with_capacity(priority_codes.len());
+        for priority_code in priority_codes {
+            let mode = Self::display_resolution_mode_from_priority_code(
+                priority_code,
+                self.display_target_priority,
+            );
+            let (display_path, display_metadata) = self
+                .resolve_active_collection_display_target_with_mode(
+                    mode,
+                    playing_track_path,
+                    playing_track_metadata,
+                );
+            display_paths_by_priority.push(display_path);
+            metadata_by_priority.push(display_metadata);
+        }
+
+        let mut cover_art_cache: HashMap<Option<PathBuf>, Option<PathBuf>> = HashMap::new();
+        let mut cover_art_paths_by_priority = Vec::with_capacity(display_paths_by_priority.len());
+        for display_path in &display_paths_by_priority {
+            let cache_key = display_path.clone();
+            let entry = cover_art_cache.entry(cache_key.clone()).or_insert_with(|| {
+                if let Some(path) = cache_key.as_ref() {
+                    self.resolve_cover_art_path_for_viewer_path(path)
+                } else {
+                    None
+                }
+            });
+            cover_art_paths_by_priority.push(entry.clone());
+        }
+        self.refresh_viewer_panel_models(metadata_by_priority, cover_art_paths_by_priority);
+    }
+
     fn update_library_playing_index(&mut self) {
         if let Some(playing_path) = &self.playing_track.path {
             self.library_playing_index = self.library_entries.iter().position(|entry| {
@@ -2138,6 +2449,10 @@ impl UiManager {
                 prefer_playing,
             );
         }
+        self.update_viewer_panel_content_for_all_priorities(
+            playing_track_path.as_ref(),
+            playing_track_metadata.as_ref(),
+        );
     }
 
     fn next_properties_request_id(&mut self) -> u64 {
@@ -6701,6 +7016,7 @@ impl UiManager {
                             });
                             self.sync_library_ui();
                             self.rebuild_track_model();
+                            self.update_display_for_active_collection();
                         }
                         protocol::Message::Playlist(
                             protocol::PlaylistMessage::PlaylistViewportWidthChanged(width_px),

@@ -46,3 +46,30 @@ export struct LayoutButtonClusterPanelModel {
     visible: bool,
     actions: [int],
 }
+
+export struct LayoutMetadataViewerPanelModel {
+    leaf_id: string,
+    x_px: int,
+    y_px: int,
+    width_px: int,
+    height_px: int,
+    visible: bool,
+    display_priority: int,
+    display_title: string,
+    display_artist: string,
+    display_album: string,
+    display_date: string,
+    display_genre: string,
+}
+
+export struct LayoutAlbumArtViewerPanelModel {
+    leaf_id: string,
+    x_px: int,
+    y_px: int,
+    width_px: int,
+    height_px: int,
+    visible: bool,
+    display_priority: int,
+    art_source: image,
+    has_art: bool,
+}
