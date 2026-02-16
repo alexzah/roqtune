@@ -21,6 +21,7 @@ use mdns_sd::{ServiceDaemon, ServiceEvent};
 use serde_json::Value;
 use tokio::sync::broadcast::{Receiver, Sender};
 
+use crate::metadata_tags;
 use crate::protocol::{
     CastConnectionState, CastDeviceInfo, CastMessage, CastPlaybackPathKind, Message,
     PlaybackMessage, TrackStarted,
@@ -469,6 +470,16 @@ struct MediaStatus {
     idle_reason: Option<String>,
 }
 
+#[derive(Debug, Clone)]
+struct CastTrackInfo {
+    title: String,
+    artist: String,
+    album: String,
+    duration_ms: Option<u64>,
+    album_art_path: Option<PathBuf>,
+    album_art_content_type: Option<String>,
+}
+
 struct CastSession {
     stream: native_tls::TlsStream<TcpStream>,
     receiver_id: String,
@@ -639,18 +650,32 @@ impl CastSession {
         url: &str,
         content_type: &str,
         start_offset_ms: u64,
+        metadata: &CastTrackInfo,
+        album_art_url: Option<&str>,
     ) -> Result<(), String> {
         let request_id = self.alloc_request_id();
+        let mut media = serde_json::json!({
+            "contentId":url,
+            "streamType":"BUFFERED",
+            "contentType":content_type,
+            "metadata":{
+                "metadataType":3,
+                "title":metadata.title,
+                "artist":metadata.artist,
+                "albumName":metadata.album
+            }
+        });
+        if let Some(duration_ms) = metadata.duration_ms.filter(|value| *value > 0) {
+            media["duration"] = serde_json::json!(duration_ms as f64 / 1000.0);
+        }
+        if let Some(art_url) = album_art_url.filter(|value| !value.trim().is_empty()) {
+            media["metadata"]["images"] = serde_json::json!([{ "url": art_url }]);
+        }
         let mut payload = serde_json::json!({
             "type":"LOAD",
             "requestId":request_id,
             "autoplay":true,
-            "media":{
-                "contentId":url,
-                "streamType":"BUFFERED",
-                "contentType":content_type,
-                "metadata":{"metadataType":0}
-            }
+            "media":media
         });
         if start_offset_ms > 0 {
             payload["currentTime"] = serde_json::json!(start_offset_ms as f64 / 1000.0);
@@ -939,6 +964,198 @@ fn parse_media_status(payload: &str) -> Option<MediaStatus> {
             .and_then(Value::as_str)
             .map(ToString::to_string),
     })
+}
+
+fn default_track_title_from_path(path: &Path) -> String {
+    path.file_stem()
+        .and_then(|stem| stem.to_str())
+        .or_else(|| path.file_name().and_then(|name| name.to_str()))
+        .unwrap_or_default()
+        .to_string()
+}
+
+fn detect_image_extension(bytes: &[u8]) -> Option<&'static str> {
+    if bytes.len() >= 8
+        && bytes[0] == 0x89
+        && bytes[1] == b'P'
+        && bytes[2] == b'N'
+        && bytes[3] == b'G'
+        && bytes[4] == 0x0D
+        && bytes[5] == 0x0A
+        && bytes[6] == 0x1A
+        && bytes[7] == 0x0A
+    {
+        return Some("png");
+    }
+    if bytes.len() >= 3 && bytes[0] == 0xFF && bytes[1] == 0xD8 && bytes[2] == 0xFF {
+        return Some("jpg");
+    }
+    if bytes.len() >= 12 && bytes[0..4] == *b"RIFF" && bytes[8..12] == *b"WEBP" {
+        return Some("webp");
+    }
+    if bytes.len() >= 6 && (&bytes[0..6] == b"GIF87a" || &bytes[0..6] == b"GIF89a") {
+        return Some("gif");
+    }
+    if bytes.len() >= 2 && bytes[0] == b'B' && bytes[1] == b'M' {
+        return Some("bmp");
+    }
+    None
+}
+
+fn image_extension_to_content_type(extension: &str) -> Option<&'static str> {
+    match extension {
+        "jpg" | "jpeg" => Some("image/jpeg"),
+        "png" => Some("image/png"),
+        "webp" => Some("image/webp"),
+        "gif" => Some("image/gif"),
+        "bmp" => Some("image/bmp"),
+        _ => None,
+    }
+}
+
+fn image_content_type_from_path(path: &Path) -> Option<String> {
+    let ext = path
+        .extension()
+        .and_then(|ext| ext.to_str())
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+    image_extension_to_content_type(ext.as_str()).map(ToString::to_string)
+}
+
+fn find_external_cover_art(track_path: &Path) -> Option<PathBuf> {
+    let parent = track_path.parent()?;
+    let names = ["cover", "front", "folder", "album", "art"];
+    let extensions = ["jpg", "jpeg", "png", "webp"];
+
+    let mut found_files = Vec::new();
+    if let Ok(entries) = std::fs::read_dir(parent) {
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if !path.is_file() {
+                continue;
+            }
+            let Some(file_stem) = path.file_stem().and_then(|s| s.to_str()) else {
+                continue;
+            };
+            let stem_lower = file_stem.to_ascii_lowercase();
+            if !names.iter().any(|name| stem_lower == *name) {
+                continue;
+            }
+            let Some(extension) = path.extension().and_then(|ext| ext.to_str()) else {
+                continue;
+            };
+            if extensions
+                .iter()
+                .any(|candidate| extension.eq_ignore_ascii_case(candidate))
+            {
+                found_files.push(path);
+            }
+        }
+    }
+    found_files.sort();
+    found_files.into_iter().next()
+}
+
+fn cast_embedded_art_cache_dir() -> PathBuf {
+    dirs::cache_dir()
+        .unwrap_or_else(std::env::temp_dir)
+        .join("roqtune")
+        .join("cast_covers")
+}
+
+fn embedded_art_cache_stem(track_path: &Path) -> String {
+    use std::collections::hash_map::DefaultHasher;
+    use std::hash::{Hash, Hasher};
+
+    let mut hasher = DefaultHasher::new();
+    track_path.hash(&mut hasher);
+    format!("{:x}", hasher.finish())
+}
+
+fn extract_embedded_cover_art_to_cache(track_path: &Path) -> Option<(PathBuf, String)> {
+    let bytes = metadata_tags::read_embedded_cover_art(track_path)?;
+    let extension = detect_image_extension(&bytes)?;
+    let content_type = image_extension_to_content_type(extension)?.to_string();
+    let cache_dir = cast_embedded_art_cache_dir();
+    if std::fs::create_dir_all(&cache_dir).is_err() {
+        return None;
+    }
+    let stem = embedded_art_cache_stem(track_path);
+    let cache_path = cache_dir.join(format!("{stem}.{extension}"));
+    if !cache_path.exists() && std::fs::write(&cache_path, bytes).is_err() {
+        return None;
+    }
+    Some((cache_path, content_type))
+}
+
+fn probe_track_duration_ms(path: &Path) -> Option<u64> {
+    use lofty::file::AudioFile;
+    use symphonia::core::formats::FormatOptions;
+    use symphonia::core::io::MediaSourceStream;
+    use symphonia::core::meta::MetadataOptions;
+    use symphonia::core::probe::Hint;
+
+    let file = File::open(path).ok()?;
+    let mss = MediaSourceStream::new(Box::new(file), Default::default());
+    let hint = Hint::new();
+    let probed = symphonia::default::get_probe()
+        .format(
+            &hint,
+            mss,
+            &FormatOptions::default(),
+            &MetadataOptions::default(),
+        )
+        .ok()?;
+    if let Some(track) = probed.format.default_track() {
+        let codec = &track.codec_params;
+        if let (Some(sample_rate), Some(n_frames)) = (codec.sample_rate, codec.n_frames) {
+            if sample_rate > 0 && n_frames > 0 {
+                let duration_ms = (n_frames as f64 * 1000.0 / sample_rate as f64).round() as u64;
+                if duration_ms > 0 {
+                    return Some(duration_ms);
+                }
+            }
+        }
+    }
+
+    lofty::read_from_path(path)
+        .ok()
+        .map(|tagged| tagged.properties().duration().as_millis() as u64)
+        .filter(|duration_ms| *duration_ms > 0)
+}
+
+fn read_cast_track_info(source_path: &Path) -> CastTrackInfo {
+    let fallback_title = default_track_title_from_path(source_path);
+    let mut title = fallback_title.clone();
+    let mut artist = String::new();
+    let mut album = String::new();
+    if let Some(common) = metadata_tags::read_common_track_metadata(source_path) {
+        if !common.title.trim().is_empty() {
+            title = common.title;
+        }
+        artist = common.artist;
+        album = common.album;
+    }
+    let duration_ms = probe_track_duration_ms(source_path);
+    let (album_art_path, album_art_content_type) = if let Some(path) =
+        find_external_cover_art(source_path)
+    {
+        let content_type = image_content_type_from_path(&path);
+        (Some(path), content_type)
+    } else if let Some((path, content_type)) = extract_embedded_cover_art_to_cache(source_path) {
+        (Some(path), Some(content_type))
+    } else {
+        (None, None)
+    };
+
+    CastTrackInfo {
+        title,
+        artist,
+        album,
+        duration_ms,
+        album_art_path,
+        album_art_content_type,
+    }
 }
 
 fn transcode_to_wav_pcm(path: &Path, cache_dir: &Path) -> Result<PathBuf, String> {
@@ -1239,6 +1456,24 @@ impl CastManager {
             receiver_ip,
         )?;
         let url = self.stream_server.media_url(&token, local_ip);
+        let track_info = read_cast_track_info(&source_path);
+        let album_art_url = if let (Some(art_path), Some(art_content_type)) = (
+            track_info.album_art_path.clone(),
+            track_info.album_art_content_type.clone(),
+        ) {
+            match self
+                .stream_server
+                .register_file(art_path, art_content_type, receiver_ip)
+            {
+                Ok(art_token) => Some(self.stream_server.media_url(&art_token, local_ip)),
+                Err(err) => {
+                    debug!("CastManager: failed to register album art stream: {}", err);
+                    None
+                }
+            }
+        } else {
+            None
+        };
         let session = self
             .session
             .as_mut()
@@ -1250,7 +1485,13 @@ impl CastManager {
                 start_offset_ms, track_id
             );
         }
-        session.load_media(&url, &content_type, load_start_offset_ms)?;
+        session.load_media(
+            &url,
+            &content_type,
+            load_start_offset_ms,
+            &track_info,
+            album_art_url.as_deref(),
+        )?;
         self.current_track_id = Some(track_id.to_string());
         self.current_path_kind = Some(mode);
         let _ = self
