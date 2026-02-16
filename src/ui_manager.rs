@@ -84,7 +84,7 @@ pub struct UiManager {
     filter_sort_direction: Option<PlaylistSortDirection>,
     filter_search_query: String,
     filter_search_visible: bool,
-    auto_center_playing_track: bool,
+    auto_scroll_to_playing_track: bool,
     playlist_scroll_center_token: i32,
     playback_active: bool,
     processed_message_count: u64,
@@ -883,7 +883,7 @@ impl UiManager {
             filter_sort_direction: None,
             filter_search_query: String::new(),
             filter_search_visible: false,
-            auto_center_playing_track: true,
+            auto_scroll_to_playing_track: true,
             playlist_scroll_center_token: 0,
             playback_active: false,
             processed_message_count: 0,
@@ -2656,16 +2656,26 @@ impl UiManager {
             return;
         };
         self.library_scroll_center_token = self.library_scroll_center_token.wrapping_add(1);
-        let token = self.library_scroll_center_token;
+        let immediate_token = self.library_scroll_center_token;
+        self.library_scroll_center_token = self.library_scroll_center_token.wrapping_add(1);
+        let deferred_token = self.library_scroll_center_token;
         let row = view_index as i32;
+        let ui_handle = self.ui.clone();
         let _ = self.ui.upgrade_in_event_loop(move |ui| {
             ui.set_library_scroll_target_row(row);
-            ui.set_library_scroll_center_token(token);
+            ui.set_library_scroll_center_token(immediate_token);
+            let deferred_ui_handle = ui_handle.clone();
+            slint::Timer::single_shot(Duration::from_millis(24), move || {
+                if let Some(ui) = deferred_ui_handle.upgrade() {
+                    ui.set_library_scroll_target_row(row);
+                    ui.set_library_scroll_center_token(deferred_token);
+                }
+            });
         });
     }
 
-    fn center_active_collection_on_playing_track_change(&mut self) {
-        if !self.auto_center_playing_track {
+    fn auto_scroll_active_collection_to_playing_track(&mut self) {
+        if !self.auto_scroll_to_playing_track {
             return;
         }
         if self.collection_mode == COLLECTION_MODE_LIBRARY {
@@ -4822,6 +4832,7 @@ impl UiManager {
         }
         self.update_display_for_active_collection();
         self.sync_library_ui();
+        self.auto_scroll_active_collection_to_playing_track();
     }
 
     fn prepare_library_view_transition(&mut self) {
@@ -5028,11 +5039,15 @@ impl UiManager {
 
     fn set_library_entries(&mut self, entries: Vec<LibraryEntry>) {
         self.library_entries = entries;
+        self.update_library_playing_index();
         self.reset_library_selection();
         self.library_add_to_dialog_visible = false;
         self.sync_library_add_to_playlist_ui();
         self.update_display_for_active_collection();
         self.sync_library_ui();
+        if self.collection_mode == COLLECTION_MODE_LIBRARY {
+            self.auto_scroll_active_collection_to_playing_track();
+        }
     }
 
     fn handle_scan_status_message(&mut self, message: protocol::LibraryMessage) {
@@ -6448,7 +6463,7 @@ impl UiManager {
                             if playing_track_changed
                                 || previous_active_playing_index != self.active_playing_index
                             {
-                                self.center_active_collection_on_playing_track_change();
+                                self.auto_scroll_active_collection_to_playing_track();
                             }
                         }
                         protocol::Message::Playlist(
@@ -6615,7 +6630,8 @@ impl UiManager {
                         protocol::Message::Config(protocol::ConfigMessage::ConfigChanged(
                             config,
                         )) => {
-                            self.auto_center_playing_track = config.ui.auto_center_playing_track;
+                            self.auto_scroll_to_playing_track =
+                                config.ui.auto_scroll_to_playing_track;
                             self.library_online_metadata_enabled =
                                 config.library.online_metadata_enabled;
                             self.library_online_metadata_prompt_pending =

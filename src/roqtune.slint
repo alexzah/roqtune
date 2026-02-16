@@ -3959,53 +3959,49 @@ export component AppWindow inherits Window {
 
                             Rectangle {
                                 height: 32px;
-                                background: settings-auto-center-toggle-ta.has-hover ? #2d2d2d : transparent;
+                                background: settings-auto-scroll-toggle-ta.has-hover ? #2d2d2d : transparent;
                                 border-radius: 4px;
                                 HorizontalLayout {
                                     spacing: 10px;
-                                    auto-center-label-host := Rectangle {
+                                    auto-scroll-label-host := Rectangle {
                                         width: settings-dialog-panel.label_column_width + 24px;
                                         height: parent.height;
                                         background: transparent;
                                         Text {
-                                            text: "Auto-center playing track on change";
+                                            text: "Auto scroll to playing track";
                                             color: #ddd;
                                             font-size: 12px;
+                                            width: parent.width;
+                                            height: parent.height;
                                             vertical-alignment: center;
                                             horizontal-alignment: left;
-                                        }
-                                        settings-auto-center-tooltip-ta := TooltipHoverArea {
-                                            tooltip-text: "When enabled, track list views auto-scroll to keep the newly playing track centered.";
-                                            tooltip_hover_changed(is-hovered, tooltip, anchor-x-px, anchor-y-px) => {
-                                                root.tooltip_hover_changed(is-hovered, tooltip, anchor-x-px, anchor-y-px);
-                                            }
                                         }
                                     }
                                     Rectangle {
                                         width: settings-dialog-panel.control_max_width;
                                         height: parent.height;
                                         background: transparent;
-                                        settings-auto-center-toggle := Switch {
+                                        settings-auto-scroll-toggle := Switch {
                                             x: parent.width - self.width - 8px;
                                             y: (parent.height - self.height) / 2;
                                             width: 18px;
                                             text: "";
-                                            checked <=> root.settings_auto_center_playing_track;
+                                            checked <=> root.settings_auto_scroll_to_playing_track;
                                         }
                                     }
                                     Rectangle { horizontal-stretch: 1; }
                                 }
-                                settings-auto-center-toggle-ta := TouchArea {
+                                settings-auto-scroll-toggle-ta := TouchArea {
                                     changed has-hover => {
                                         root.tooltip_hover_changed(
                                             self.has-hover,
-                                            "When enabled, track list views auto-scroll to keep the newly playing track centered.",
-                                            floor((auto-center-label-host.absolute-position.x + auto-center-label-host.width / 2) / 1px),
-                                            floor((auto-center-label-host.absolute-position.y + auto-center-label-host.height) / 1px)
+                                            "When enabled, track list views auto-scroll to keep the playing track centered.",
+                                            floor((auto-scroll-label-host.absolute-position.x + auto-scroll-label-host.width / 2) / 1px),
+                                            floor((auto-scroll-label-host.absolute-position.y + auto-scroll-label-host.height) / 1px)
                                         );
                                     }
                                     clicked => {
-                                        settings-auto-center-toggle.checked = !settings-auto-center-toggle.checked;
+                                        settings-auto-scroll-toggle.checked = !settings-auto-scroll-toggle.checked;
                                     }
                                 }
                             }
@@ -4198,7 +4194,7 @@ export component AppWindow inherits Window {
                             root.settings_bits_per_sample_custom_value,
                             root.settings_show_layout_edit_tutorial,
                             root.settings_show_tooltips,
-                            root.settings_auto_center_playing_track,
+                            root.settings_auto_scroll_to_playing_track,
                             root.settings_sample_rate_mode_index,
                             root.settings_resampler_quality_index,
                             root.settings_dither_on_bitdepth_reduce
@@ -4319,7 +4315,7 @@ export component AppWindow inherits Window {
     in-out property <string> settings_verified_sample_rates_summary: "Verified rates: (none)";
     in-out property <bool> settings_show_layout_edit_tutorial: true;
     in-out property <bool> settings_show_tooltips: true;
-    in-out property <bool> settings_auto_center_playing_track: true;
+    in-out property <bool> settings_auto_scroll_to_playing_track: true;
     in-out property <bool> settings_dither_on_bitdepth_reduce: true;
     in-out property <bool> show_tooltips_enabled: true;
     in-out property <int> settings_dialog_tab_index: 0;
