@@ -467,6 +467,7 @@ struct MediaStatus {
     player_state: String,
     current_time_s: f64,
     duration_s: f64,
+    media_session_id: Option<i64>,
     idle_reason: Option<String>,
 }
 
@@ -688,30 +689,42 @@ impl CastSession {
         Ok(())
     }
 
-    fn play(&mut self) -> Result<(), String> {
+    fn play(&mut self, media_session_id: Option<i64>) -> Result<(), String> {
         let request_id = self.alloc_request_id();
+        let mut payload = serde_json::json!({"type":"PLAY","requestId":request_id});
+        if let Some(media_session_id) = media_session_id {
+            payload["mediaSessionId"] = serde_json::json!(media_session_id);
+        }
         self.send_json(
             CAST_NAMESPACE_MEDIA,
             &self.media_transport_id.clone(),
-            serde_json::json!({"type":"PLAY","requestId":request_id}),
+            payload,
         )
     }
 
-    fn pause(&mut self) -> Result<(), String> {
+    fn pause(&mut self, media_session_id: Option<i64>) -> Result<(), String> {
         let request_id = self.alloc_request_id();
+        let mut payload = serde_json::json!({"type":"PAUSE","requestId":request_id});
+        if let Some(media_session_id) = media_session_id {
+            payload["mediaSessionId"] = serde_json::json!(media_session_id);
+        }
         self.send_json(
             CAST_NAMESPACE_MEDIA,
             &self.media_transport_id.clone(),
-            serde_json::json!({"type":"PAUSE","requestId":request_id}),
+            payload,
         )
     }
 
-    fn stop(&mut self) -> Result<(), String> {
+    fn stop(&mut self, media_session_id: Option<i64>) -> Result<(), String> {
         let request_id = self.alloc_request_id();
+        let mut payload = serde_json::json!({"type":"STOP","requestId":request_id});
+        if let Some(media_session_id) = media_session_id {
+            payload["mediaSessionId"] = serde_json::json!(media_session_id);
+        }
         self.send_json(
             CAST_NAMESPACE_MEDIA,
             &self.media_transport_id.clone(),
-            serde_json::json!({"type":"STOP","requestId":request_id}),
+            payload,
         )
     }
 
@@ -736,7 +749,7 @@ impl CastSession {
     }
 
     fn shutdown_receiver_and_close(&mut self) {
-        if let Err(err) = self.stop() {
+        if let Err(err) = self.stop(None) {
             debug!("CastSession: media STOP during disconnect failed: {}", err);
         }
         if let Err(err) = self.stop_receiver_app() {
@@ -762,17 +775,21 @@ impl CastSession {
         self.receiver_app_session_id = None;
     }
 
-    fn seek_ms(&mut self, position_ms: u64) -> Result<(), String> {
+    fn seek_ms(&mut self, position_ms: u64, media_session_id: Option<i64>) -> Result<(), String> {
         let request_id = self.alloc_request_id();
+        let mut payload = serde_json::json!({
+            "type":"SEEK",
+            "requestId":request_id,
+            "currentTime":position_ms as f64 / 1000.0,
+            "resumeState":"PLAYBACK_START"
+        });
+        if let Some(media_session_id) = media_session_id {
+            payload["mediaSessionId"] = serde_json::json!(media_session_id);
+        }
         self.send_json(
             CAST_NAMESPACE_MEDIA,
             &self.media_transport_id.clone(),
-            serde_json::json!({
-                "type":"SEEK",
-                "requestId":request_id,
-                "currentTime":position_ms as f64 / 1000.0,
-                "resumeState":"PLAYBACK_START"
-            }),
+            payload,
         )
     }
 
@@ -957,8 +974,18 @@ fn parse_media_status(payload: &str) -> Option<MediaStatus> {
         duration_s: status
             .get("media")
             .and_then(|media| media.get("duration"))
+            .or_else(|| status.get("duration"))
             .and_then(Value::as_f64)
             .unwrap_or(0.0),
+        media_session_id: status
+            .get("mediaSessionId")
+            .and_then(Value::as_i64)
+            .or_else(|| {
+                status
+                    .get("mediaSessionId")
+                    .and_then(Value::as_u64)
+                    .and_then(|value| i64::try_from(value).ok())
+            }),
         idle_reason: status
             .get("idleReason")
             .and_then(Value::as_str)
@@ -1301,6 +1328,9 @@ pub struct CastManager {
     current_track_id: Option<String>,
     current_track_source_path: Option<PathBuf>,
     current_path_kind: Option<CastPlaybackPathKind>,
+    current_media_session_id: Option<i64>,
+    current_track_duration_ms: Option<u64>,
+    stop_requested: bool,
     last_status_poll_at: Instant,
 }
 
@@ -1324,6 +1354,9 @@ impl CastManager {
             current_track_id: None,
             current_track_source_path: None,
             current_path_kind: None,
+            current_media_session_id: None,
+            current_track_duration_ms: None,
+            stop_requested: false,
             last_status_poll_at: Instant::now(),
         }
     }
@@ -1409,6 +1442,9 @@ impl CastManager {
         self.current_track_id = None;
         self.current_track_source_path = None;
         self.current_path_kind = None;
+        self.current_media_session_id = None;
+        self.current_track_duration_ms = None;
+        self.stop_requested = false;
         self.connected_device = None;
         self.emit_connection_state(
             CastConnectionState::Disconnected,
@@ -1494,6 +1530,9 @@ impl CastManager {
         )?;
         self.current_track_id = Some(track_id.to_string());
         self.current_path_kind = Some(mode);
+        self.current_media_session_id = None;
+        self.current_track_duration_ms = track_info.duration_ms;
+        self.stop_requested = false;
         let _ = self
             .bus_producer
             .send(Message::Cast(CastMessage::PlaybackPathChanged {
@@ -1542,6 +1581,8 @@ impl CastManager {
                     track_id.to_string(),
                 )));
             self.current_track_source_path = None;
+            self.current_media_session_id = None;
+            self.current_track_duration_ms = None;
             return;
         }
 
@@ -1569,25 +1610,51 @@ impl CastManager {
                         track_id.to_string(),
                     )));
                 self.current_track_source_path = None;
+                self.current_media_session_id = None;
+                self.current_track_duration_ms = None;
             }
         }
     }
 
     fn handle_media_status(&mut self, status: MediaStatus) {
+        if let Some(media_session_id) = status.media_session_id {
+            self.current_media_session_id = Some(media_session_id);
+        }
         if let Some(track_id) = self.current_track_id.clone() {
             let elapsed_ms = (status.current_time_s.max(0.0) * 1000.0).round() as u64;
-            let total_ms = (status.duration_s.max(0.0) * 1000.0).round() as u64;
+            let mut total_ms = (status.duration_s.max(0.0) * 1000.0).round() as u64;
+            if total_ms == 0 {
+                total_ms = self.current_track_duration_ms.unwrap_or(0);
+            } else {
+                self.current_track_duration_ms = Some(total_ms);
+            }
             let _ = self
                 .bus_producer
                 .send(Message::Playback(PlaybackMessage::PlaybackProgress {
                     elapsed_ms,
                     total_ms,
                 }));
+            if status.player_state == "PLAYING" || status.player_state == "BUFFERING" {
+                self.stop_requested = false;
+            }
             if status.player_state == "IDLE" {
+                if self.stop_requested
+                    && (status.idle_reason.as_deref() == Some("CANCELLED")
+                        || status.idle_reason.as_deref() == Some("INTERRUPTED"))
+                {
+                    self.current_track_id = None;
+                    self.current_track_source_path = None;
+                    self.current_media_session_id = None;
+                    self.current_track_duration_ms = None;
+                    self.stop_requested = false;
+                    return;
+                }
                 match status.idle_reason.as_deref() {
                     Some("FINISHED") => {
                         self.current_track_id = None;
                         self.current_track_source_path = None;
+                        self.current_media_session_id = None;
+                        self.current_track_duration_ms = None;
                         let _ = self
                             .bus_producer
                             .send(Message::Playback(PlaybackMessage::TrackFinished(track_id)));
@@ -1629,6 +1696,8 @@ impl CastManager {
                         }
                         self.current_track_id = None;
                         self.current_track_source_path = None;
+                        self.current_media_session_id = None;
+                        self.current_track_duration_ms = None;
                         let _ = self
                             .bus_producer
                             .send(Message::Cast(CastMessage::PlaybackError {
@@ -1700,28 +1769,38 @@ impl CastManager {
             }) => self.load_track(&track_id, path, start_offset_ms),
             Message::Cast(CastMessage::Play) => {
                 if let Some(session) = self.session.as_mut() {
-                    if let Err(err) = session.play() {
+                    if let Err(err) = session.play(self.current_media_session_id) {
                         warn!("CastManager: play command failed: {}", err);
                     }
                 }
             }
             Message::Cast(CastMessage::Pause) => {
                 if let Some(session) = self.session.as_mut() {
-                    if let Err(err) = session.pause() {
+                    if let Err(err) = session.pause(self.current_media_session_id) {
                         warn!("CastManager: pause command failed: {}", err);
                     }
                 }
             }
             Message::Cast(CastMessage::Stop) => {
+                self.stop_requested = true;
                 if let Some(session) = self.session.as_mut() {
-                    if let Err(err) = session.stop() {
+                    if let Err(err) = session.stop(self.current_media_session_id) {
                         warn!("CastManager: stop command failed: {}", err);
+                        if let Err(pause_err) = session.pause(self.current_media_session_id) {
+                            warn!(
+                                "CastManager: pause fallback after stop failure also failed: {}",
+                                pause_err
+                            );
+                        }
+                    }
+                    if let Err(err) = session.request_media_status() {
+                        warn!("CastManager: stop follow-up GET_STATUS failed: {}", err);
                     }
                 }
             }
             Message::Cast(CastMessage::SeekMs(position_ms)) => {
                 if let Some(session) = self.session.as_mut() {
-                    if let Err(err) = session.seek_ms(position_ms) {
+                    if let Err(err) = session.seek_ms(position_ms, self.current_media_session_id) {
                         warn!("CastManager: seek command failed: {}", err);
                     }
                 }
