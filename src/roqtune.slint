@@ -2912,7 +2912,7 @@ export component AppWindow inherits Window {
                         overflow: elide;
                     }
                     quick-layout-toggle := Switch {
-                        width: 18px;
+                        width: 36px;
                         text: "";
                         checked: root.layout_edit_mode;
                         toggled => {
@@ -3354,7 +3354,7 @@ export component AppWindow inherits Window {
                             padding-right: 8px;
                             spacing: 8px;
                             playlist-toggle := Switch {
-                                width: 18px;
+                                width: 36px;
                                 text: "";
                                 checked: playlist-option-row.row-checked;
                                 toggled => {
@@ -4057,7 +4057,7 @@ export component AppWindow inherits Window {
                                         settings-dither-toggle := Switch {
                                             x: parent.width - self.width - 8px;
                                             y: (parent.height - self.height) / 2;
-                                            width: 18px;
+                                            width: 36px;
                                             text: "";
                                             checked <=> root.settings_dither_on_bitdepth_reduce;
                                         }
@@ -4102,7 +4102,7 @@ export component AppWindow inherits Window {
                                         settings-layout-intro-toggle := Switch {
                                             x: parent.width - self.width - 8px;
                                             y: (parent.height - self.height) / 2;
-                                            width: 18px;
+                                            width: 36px;
                                             text: "";
                                             checked <=> root.settings_show_layout_edit_tutorial;
                                         }
@@ -4137,7 +4137,7 @@ export component AppWindow inherits Window {
                                         settings-tooltips-toggle := Switch {
                                             x: parent.width - self.width - 8px;
                                             y: (parent.height - self.height) / 2;
-                                            width: 18px;
+                                            width: 36px;
                                             text: "";
                                             checked <=> root.settings_show_tooltips;
                                         }
@@ -4178,7 +4178,7 @@ export component AppWindow inherits Window {
                                         settings-auto-scroll-toggle := Switch {
                                             x: parent.width - self.width - 8px;
                                             y: (parent.height - self.height) / 2;
-                                            width: 18px;
+                                            width: 36px;
                                             text: "";
                                             checked <=> root.settings_auto_scroll_to_playing_track;
                                         }
@@ -4322,7 +4322,7 @@ export component AppWindow inherits Window {
                                     settings-library-online-toggle := Switch {
                                         x: parent.width - self.width - 8px;
                                         y: (parent.height - self.height) / 2;
-                                        width: 18px;
+                                        width: 36px;
                                         text: "";
                                         checked <=> root.settings_library_online_metadata_enabled;
                                     }

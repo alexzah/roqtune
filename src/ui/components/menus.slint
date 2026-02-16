@@ -82,7 +82,7 @@ export component ColumnHeaderMenu inherits PopupWindow {
                 column-toggle := Switch {
                     x: 6px;
                     y: (parent.height - self.height) / 2;
-                    width: 18px;
+                    width: 36px;
                     text: "";
                     checked: i < root.checked.length ? root.checked[i] : false;
                     toggled => {
@@ -95,13 +95,13 @@ export component ColumnHeaderMenu inherits PopupWindow {
                     font-size: 12px;
                     vertical-alignment: center;
                     horizontal-alignment: left;
-                    x: 30px;
-                    width: parent.width - (parent.is-custom ? 58px : 36px);
+                    x: 48px;
+                    width: parent.width - (parent.is-custom ? 76px : 54px);
                     overflow: elide;
                 }
                 column-item-ta := TouchArea {
-                    x: 30px;
-                    width: parent.width - (parent.is-custom ? 54px : 30px);
+                    x: 48px;
+                    width: parent.width - (parent.is-custom ? 72px : 48px);
                     clicked => {
                         root.toggle-column(i);
                     }
