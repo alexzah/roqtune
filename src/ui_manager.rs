@@ -66,8 +66,7 @@ pub struct UiManager {
     // Cached progress values to avoid unnecessary UI updates
     last_elapsed_ms: u64,
     last_total_ms: u64,
-    current_playing_track_path: Option<PathBuf>,
-    current_playing_track_metadata: Option<protocol::DetailedMetadata>,
+    playing_track: PlayingTrackState,
     display_target_priority: DisplayTargetPriority,
     current_technical_metadata: Option<protocol::TechnicalMetadata>,
     current_output_path_info: Option<protocol::OutputPathInfo>,
@@ -159,6 +158,12 @@ struct TrackMetadata {
     year: String,
     genre: String,
     track_number: String,
+}
+
+#[derive(Clone, Default)]
+struct PlayingTrackState {
+    path: Option<PathBuf>,
+    metadata: Option<protocol::DetailedMetadata>,
 }
 
 /// Width policy used by adaptive playlist column sizing.
@@ -860,8 +865,7 @@ impl UiManager {
             ),
             last_elapsed_ms: 0,
             last_total_ms: 0,
-            current_playing_track_path: None,
-            current_playing_track_metadata: None,
+            playing_track: PlayingTrackState::default(),
             display_target_priority: DisplayTargetPriority::Playing,
             current_technical_metadata: None,
             current_output_path_info: None,
@@ -1772,11 +1776,93 @@ impl UiManager {
         }
     }
 
+    fn resolve_metadata_for_track_path_from_sources(
+        path: &Path,
+        track_paths: &[PathBuf],
+        track_metadata: &[TrackMetadata],
+        library_entries: &[LibraryEntry],
+    ) -> Option<protocol::DetailedMetadata> {
+        if let Some(index) = track_paths.iter().position(|candidate| candidate == path) {
+            if let Some(metadata) = track_metadata.get(index) {
+                return Some(Self::to_detailed_metadata(metadata));
+            }
+        }
+
+        if let Some(track) = library_entries.iter().find_map(|entry| match entry {
+            LibraryEntry::Track(track) if track.path.as_path() == path => Some(track),
+            _ => None,
+        }) {
+            return Some(Self::to_detailed_metadata_from_library_track(track));
+        }
+
+        None
+    }
+
+    fn resolve_metadata_for_track_path(&self, path: &Path) -> Option<protocol::DetailedMetadata> {
+        Self::resolve_metadata_for_track_path_from_sources(
+            path,
+            &self.track_paths,
+            &self.track_metadata,
+            &self.library_entries,
+        )
+        .or_else(|| Some(Self::fallback_detailed_metadata_from_path(path)))
+    }
+
+    fn set_playing_track(
+        &mut self,
+        path: Option<PathBuf>,
+        metadata_hint: Option<protocol::DetailedMetadata>,
+    ) -> bool {
+        let previous_path = self.playing_track.path.clone();
+        let path_changed = previous_path != path;
+        self.playing_track.path = path.clone();
+        self.playing_track.metadata = match (path.as_ref(), metadata_hint) {
+            (None, _) => None,
+            (Some(_), Some(metadata)) => Some(metadata),
+            (Some(path), None) if !path_changed => self.playing_track.metadata.clone(),
+            (Some(path), None) => self.resolve_metadata_for_track_path(path.as_path()),
+        };
+        path_changed
+    }
+
+    fn refresh_playing_track_metadata(&mut self) -> bool {
+        let Some(path) = self.playing_track.path.as_ref() else {
+            if self.playing_track.metadata.is_some() {
+                self.playing_track.metadata = None;
+                return true;
+            }
+            return false;
+        };
+        let resolved = self.resolve_metadata_for_track_path(path.as_path());
+        if Self::detailed_metadata_equal(&self.playing_track.metadata, &resolved) {
+            return false;
+        }
+        self.playing_track.metadata = resolved;
+        true
+    }
+
     fn has_display_target(
         path: &Option<PathBuf>,
         metadata: &Option<protocol::DetailedMetadata>,
     ) -> bool {
         path.is_some() || metadata.is_some()
+    }
+
+    fn detailed_metadata_equal(
+        left: &Option<protocol::DetailedMetadata>,
+        right: &Option<protocol::DetailedMetadata>,
+    ) -> bool {
+        match (left.as_ref(), right.as_ref()) {
+            (None, None) => true,
+            (Some(left), Some(right)) => {
+                left.title == right.title
+                    && left.artist == right.artist
+                    && left.album == right.album
+                    && left.date == right.date
+                    && left.genre == right.genre
+            }
+            _ => false,
+        }
     }
 
     fn resolve_display_target(
@@ -1996,7 +2082,7 @@ impl UiManager {
     }
 
     fn update_library_playing_index(&mut self) {
-        if let Some(playing_path) = &self.current_playing_track_path {
+        if let Some(playing_path) = &self.playing_track.path {
             self.library_playing_index = self.library_entries.iter().position(|entry| {
                 if let LibraryEntry::Track(track) = entry {
                     &track.path == playing_path
@@ -2025,37 +2111,30 @@ impl UiManager {
             playing_track_metadata,
             prefer_playing,
         );
-        if self.current_playing_track_metadata.is_none()
-            && display_path.as_ref() == self.current_playing_track_path.as_ref()
-        {
-            self.current_playing_track_metadata = display_metadata.clone();
-        }
         self.update_cover_art(display_path.as_ref());
         let _ = self.bus_sender.send(protocol::Message::Playback(
             protocol::PlaybackMessage::MetadataDisplayChanged(display_metadata),
         ));
     }
 
-    fn update_display_for_active_collection(
-        &mut self,
-        playing_track_path: Option<&PathBuf>,
-        playing_track_metadata: Option<&protocol::DetailedMetadata>,
-    ) {
+    fn update_display_for_active_collection(&mut self) {
+        let playing_track_path = self.playing_track.path.clone();
+        let playing_track_metadata = self.playing_track.metadata.clone();
         let prefer_playing = self.display_target_priority == DisplayTargetPriority::Playing;
         if self.collection_mode == COLLECTION_MODE_LIBRARY {
             let selected_indices = self.library_selected_indices.clone();
             self.update_display_for_library_selection(
                 &selected_indices,
-                playing_track_path,
-                playing_track_metadata,
+                playing_track_path.as_ref(),
+                playing_track_metadata.as_ref(),
                 prefer_playing,
             );
         } else {
             let selected_indices = self.selected_indices.clone();
             self.update_display_for_selection(
                 &selected_indices,
-                playing_track_path,
-                playing_track_metadata,
+                playing_track_path.as_ref(),
+                playing_track_metadata.as_ref(),
                 prefer_playing,
             );
         }
@@ -2368,7 +2447,7 @@ impl UiManager {
             }
         }
 
-        if self.current_playing_track_path.as_deref() == Some(path) {
+        if self.playing_track.path.as_deref() == Some(path) {
             let detailed = protocol::DetailedMetadata {
                 title: summary.title.clone(),
                 artist: summary.artist.clone(),
@@ -2376,7 +2455,7 @@ impl UiManager {
                 date,
                 genre: summary.genre.clone(),
             };
-            if self.current_playing_track_metadata.as_ref().map(|meta| {
+            if self.playing_track.metadata.as_ref().map(|meta| {
                 meta.title == detailed.title
                     && meta.artist == detailed.artist
                     && meta.album == detailed.album
@@ -2384,7 +2463,7 @@ impl UiManager {
                     && meta.genre == detailed.genre
             }) != Some(true)
             {
-                self.current_playing_track_metadata = Some(detailed);
+                self.playing_track.metadata = Some(detailed);
                 changed = true;
             }
         }
@@ -2470,12 +2549,8 @@ impl UiManager {
             self.request_library_view_data();
         }
 
-        let playing_track_path = self.current_playing_track_path.clone();
-        let playing_track_metadata = self.current_playing_track_metadata.clone();
-        self.update_display_for_active_collection(
-            playing_track_path.as_ref(),
-            playing_track_metadata.as_ref(),
-        );
+        self.refresh_playing_track_metadata();
+        self.update_display_for_active_collection();
 
         if let Some(warning) = db_sync_warning {
             self.library_status_text = warning.clone();
@@ -3139,17 +3214,15 @@ impl UiManager {
             .and_then(|playing_id| self.track_ids.iter().position(|id| id == playing_id));
         if self.active_playing_index.is_none() {
             self.playback_active = false;
-            self.current_playing_track_path = None;
-            self.current_playing_track_metadata = None;
+            self.playing_track = PlayingTrackState::default();
         }
 
         self.reset_filter_state();
 
         self.refresh_playlist_column_content_targets();
         self.apply_playlist_column_layout();
-        let playing_path = self.current_playing_track_path.clone();
-        let playing_metadata = self.current_playing_track_metadata.clone();
-        self.update_display_for_active_collection(playing_path.as_ref(), playing_metadata.as_ref());
+        self.refresh_playing_track_metadata();
+        self.update_display_for_active_collection();
         self.rebuild_track_model();
     }
 
@@ -4189,12 +4262,7 @@ impl UiManager {
         }
 
         self.display_target_priority = DisplayTargetPriority::Selection;
-        let playing_track_path = self.current_playing_track_path.clone();
-        let playing_track_metadata = self.current_playing_track_metadata.clone();
-        self.update_display_for_active_collection(
-            playing_track_path.as_ref(),
-            playing_track_metadata.as_ref(),
-        );
+        self.update_display_for_active_collection();
 
         self.sync_library_selection_to_ui();
         self.sync_library_add_to_playlist_ui();
@@ -4397,7 +4465,7 @@ impl UiManager {
                 } else {
                     self.resolve_library_cover_art_path(&track.path)
                 },
-                is_playing: self.current_playing_track_path.as_ref() == Some(&track.path),
+                is_playing: self.playing_track.path.as_ref() == Some(&track.path),
                 selected,
             },
             LibraryEntry::Artist(artist) => LibraryRowPresentation {
@@ -4752,12 +4820,7 @@ impl UiManager {
             self.library_add_to_dialog_visible = false;
             self.sync_library_add_to_playlist_ui();
         }
-        let playing_track_path = self.current_playing_track_path.clone();
-        let playing_track_metadata = self.current_playing_track_metadata.clone();
-        self.update_display_for_active_collection(
-            playing_track_path.as_ref(),
-            playing_track_metadata.as_ref(),
-        );
+        self.update_display_for_active_collection();
         self.sync_library_ui();
     }
 
@@ -4788,12 +4851,7 @@ impl UiManager {
         self.library_artist_prefetch_row_count = 0;
         self.pending_library_scroll_restore_row = None;
         self.prepare_library_view_transition();
-        let playing_track_path = self.current_playing_track_path.clone();
-        let playing_track_metadata = self.current_playing_track_metadata.clone();
-        self.update_display_for_active_collection(
-            playing_track_path.as_ref(),
-            playing_track_metadata.as_ref(),
-        );
+        self.update_display_for_active_collection();
         self.request_library_view_data();
         self.sync_library_ui();
     }
@@ -4830,12 +4888,7 @@ impl UiManager {
         }
         self.library_artist_prefetch_row_count = 0;
         self.prepare_library_view_transition();
-        let playing_track_path = self.current_playing_track_path.clone();
-        let playing_track_metadata = self.current_playing_track_metadata.clone();
-        self.update_display_for_active_collection(
-            playing_track_path.as_ref(),
-            playing_track_metadata.as_ref(),
-        );
+        self.update_display_for_active_collection();
         self.request_library_view_data();
         self.sync_library_ui();
     }
@@ -4978,12 +5031,7 @@ impl UiManager {
         self.reset_library_selection();
         self.library_add_to_dialog_visible = false;
         self.sync_library_add_to_playlist_ui();
-        let playing_track_path = self.current_playing_track_path.clone();
-        let playing_track_metadata = self.current_playing_track_metadata.clone();
-        self.update_display_for_active_collection(
-            playing_track_path.as_ref(),
-            playing_track_metadata.as_ref(),
-        );
+        self.update_display_for_active_collection();
         self.sync_library_ui();
     }
 
@@ -5064,7 +5112,7 @@ impl UiManager {
     }
 
     fn has_paused_playback_queue(&self) -> bool {
-        !self.playback_active && self.current_playing_track_path.is_some()
+        !self.playback_active && self.playing_track.path.is_some()
     }
 
     fn build_playlist_queue_request(
@@ -6177,13 +6225,8 @@ impl UiManager {
                             if self.apply_track_metadata_batch_updates(updates) {
                                 self.refresh_playlist_column_content_targets();
                                 self.apply_playlist_column_layout();
-                                let playing_track_path = self.current_playing_track_path.clone();
-                                let playing_track_metadata =
-                                    self.current_playing_track_metadata.clone();
-                                self.update_display_for_active_collection(
-                                    playing_track_path.as_ref(),
-                                    playing_track_metadata.as_ref(),
-                                );
+                                self.refresh_playing_track_metadata();
+                                self.update_display_for_active_collection();
                                 self.rebuild_track_model();
                             }
                         }
@@ -6300,16 +6343,15 @@ impl UiManager {
                             self.playback_active = false;
                             self.active_playing_index = None;
                             self.last_progress_at = None;
-                            let had_playing_track = self.current_playing_track_path.is_some();
-                            self.current_playing_track_path = None;
-                            self.current_playing_track_metadata = None;
+                            let had_playing_track = self.playing_track.path.is_some();
+                            self.playing_track = PlayingTrackState::default();
                             self.current_technical_metadata = None;
                             self.current_output_path_info = None;
                             self.library_playing_index = None;
                             if had_playing_track {
                                 self.display_target_priority = DisplayTargetPriority::Playing;
                             }
-                            self.update_display_for_active_collection(None, None);
+                            self.update_display_for_active_collection();
 
                             // Reset cached progress values
                             self.last_elapsed_ms = 0;
@@ -6365,40 +6407,22 @@ impl UiManager {
                                 playing_track_path.as_ref(),
                             );
 
-                            let previous_playing_track_path =
-                                self.current_playing_track_path.clone();
-                            let previous_playing_track_metadata =
-                                self.current_playing_track_metadata.clone();
-                            self.current_playing_track_path = playing_track_path.clone();
-                            self.current_playing_track_metadata = if let Some(meta) =
-                                playing_track_metadata.clone()
-                            {
-                                Some(meta)
-                            } else if self.current_playing_track_path == previous_playing_track_path
-                            {
-                                previous_playing_track_metadata
-                            } else {
-                                None
-                            };
-                            let playing_track_changed =
-                                previous_playing_track_path != self.current_playing_track_path;
+                            let playing_track_changed = self.set_playing_track(
+                                playing_track_path.clone(),
+                                playing_track_metadata.clone(),
+                            );
                             if playing_track_changed {
                                 self.display_target_priority = DisplayTargetPriority::Playing;
                             }
                             self.update_library_playing_index();
-                            let resolved_playing_metadata =
-                                self.current_playing_track_metadata.clone();
-
-                            self.update_display_for_active_collection(
-                                playing_track_path.as_ref(),
-                                resolved_playing_metadata.as_ref(),
-                            );
+                            self.update_display_for_active_collection();
                             if playing_track_changed {
                                 self.sync_library_ui();
                             }
 
                             let status_text = self
-                                .current_playing_track_metadata
+                                .playing_track
+                                .metadata
                                 .as_ref()
                                 .map(Self::status_text_from_detailed_metadata);
 
@@ -6447,13 +6471,7 @@ impl UiManager {
 
                             // Selection interaction is the most recent user change, so it
                             // temporarily owns metadata/cover-art display until playback changes.
-                            let playing_track_path = self.current_playing_track_path.clone();
-                            let playing_track_metadata =
-                                self.current_playing_track_metadata.clone();
-                            self.update_display_for_active_collection(
-                                playing_track_path.as_ref(),
-                                playing_track_metadata.as_ref(),
-                            );
+                            self.update_display_for_active_collection();
                             self.rebuild_track_model();
                         }
                         protocol::Message::Playlist(protocol::PlaylistMessage::OnPointerDown {
@@ -7282,6 +7300,42 @@ mod tests {
         let meta = meta.expect("fallback metadata should be synthesized from path");
         assert_eq!(meta.title, "Example Track");
         assert!(meta.artist.is_empty());
+    }
+
+    #[test]
+    fn test_resolve_metadata_for_track_path_from_sources_uses_library_when_playlist_missing() {
+        let path = PathBuf::from("library-only.mp3");
+        let metadata = UiManager::resolve_metadata_for_track_path_from_sources(
+            &path,
+            &[],
+            &[],
+            &[LibraryEntry::Track(make_library_track(
+                "track-library",
+                "Library Track",
+                "library-only.mp3",
+            ))],
+        )
+        .expect("library metadata should resolve");
+        assert_eq!(metadata.title, "Library Track");
+        assert_eq!(metadata.artist, "Library Track-artist");
+    }
+
+    #[test]
+    fn test_resolve_metadata_for_track_path_from_sources_prefers_playlist_cache_when_available() {
+        let path = PathBuf::from("shared.mp3");
+        let metadata = UiManager::resolve_metadata_for_track_path_from_sources(
+            &path,
+            &[PathBuf::from("shared.mp3")],
+            &[make_meta("Playlist Track")],
+            &[LibraryEntry::Track(make_library_track(
+                "track-library",
+                "Library Track",
+                "shared.mp3",
+            ))],
+        )
+        .expect("playlist metadata should resolve");
+        assert_eq!(metadata.title, "Playlist Track");
+        assert_eq!(metadata.artist, "Playlist Track-artist");
     }
 
     #[test]
