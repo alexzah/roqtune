@@ -51,6 +51,14 @@ window_height = 650
 # Playback volume (0.0 .. 1.0).
 volume = 1.0
 
+# Playback order startup preference.
+# Options: "default", "shuffle", "random"
+playback_order = "default"
+
+# Repeat startup preference.
+# Options: "off", "playlist", "track"
+repeat_mode = "off"
+
 # Per-leaf button cluster action order overrides.
 # Keep empty to use built-in defaults.
 button_cluster_instances = []

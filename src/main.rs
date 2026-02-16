@@ -32,7 +32,7 @@ use audio_player::AudioPlayer;
 use audio_probe::get_or_probe_output_device;
 use config::{
     BufferingConfig, ButtonClusterInstanceConfig, Config, LibraryConfig, OutputConfig,
-    PlaylistColumnConfig, ResamplerQuality, UiConfig,
+    PlaylistColumnConfig, ResamplerQuality, UiConfig, UiPlaybackOrder, UiRepeatMode,
 };
 use cpal::traits::{DeviceTrait, HostTrait};
 use db_manager::DbManager;
@@ -834,6 +834,8 @@ fn sanitize_config(config: Config) -> Config {
             window_width: clamped_window_width,
             window_height: clamped_window_height,
             volume: clamped_volume,
+            playback_order: config.ui.playback_order,
+            repeat_mode: config.ui.repeat_mode,
         },
         library: LibraryConfig {
             folders: sanitized_library_folders,
@@ -1647,6 +1649,24 @@ fn write_config_to_document(document: &mut DocumentMut, previous: &Config, confi
             f64::from(config.ui.volume),
             value,
         );
+        if !ui.contains_key("playback_order")
+            || previous.ui.playback_order != config.ui.playback_order
+        {
+            let playback_order = match config.ui.playback_order {
+                UiPlaybackOrder::Default => "default",
+                UiPlaybackOrder::Shuffle => "shuffle",
+                UiPlaybackOrder::Random => "random",
+            };
+            set_table_value_preserving_decor(ui, "playback_order", value(playback_order));
+        }
+        if !ui.contains_key("repeat_mode") || previous.ui.repeat_mode != config.ui.repeat_mode {
+            let repeat_mode = match config.ui.repeat_mode {
+                UiRepeatMode::Off => "off",
+                UiRepeatMode::Playlist => "playlist",
+                UiRepeatMode::Track => "track",
+            };
+            set_table_value_preserving_decor(ui, "repeat_mode", value(repeat_mode));
+        }
 
         if !ui.contains_key("button_cluster_instances")
             || previous.ui.button_cluster_instances != config.ui.button_cluster_instances
@@ -1951,6 +1971,8 @@ fn with_updated_layout(previous: &Config, layout: LayoutConfig) -> Config {
             window_width: previous.ui.window_width,
             window_height: previous.ui.window_height,
             volume: previous.ui.volume,
+            playback_order: previous.ui.playback_order,
+            repeat_mode: previous.ui.repeat_mode,
         },
         library: previous.library.clone(),
         buffering: previous.buffering.clone(),
@@ -2161,6 +2183,18 @@ fn apply_config_to_ui(
     const RESAMPLER_QUALITY_OPTIONS: [&str; 2] = ["High", "Highest"];
 
     ui.set_volume_level(config.ui.volume);
+    let playback_order_index = match config.ui.playback_order {
+        UiPlaybackOrder::Default => 0,
+        UiPlaybackOrder::Shuffle => 1,
+        UiPlaybackOrder::Random => 2,
+    };
+    let repeat_mode_index = match config.ui.repeat_mode {
+        UiRepeatMode::Off => 0,
+        UiRepeatMode::Playlist => 1,
+        UiRepeatMode::Track => 2,
+    };
+    ui.set_playback_order_index(playback_order_index);
+    ui.set_repeat_mode(repeat_mode_index);
     ui.set_sidebar_width_px(sidebar_width_from_window(config.ui.window_width));
     ui.set_layout_panel_options(ModelRc::from(Rc::new(VecModel::from(
         layout_panel_options(),
@@ -3444,35 +3478,93 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Wire up sequence selector
     let bus_sender_clone = bus_sender.clone();
+    let config_state_clone = Arc::clone(&config_state);
+    let config_file_clone = config_file.clone();
     ui.on_playback_order_changed(move |index| {
         debug!("Playback order changed: {}", index);
-        match index {
-            0 => {
+        let next_order = match index {
+            0 => Some(UiPlaybackOrder::Default),
+            1 => Some(UiPlaybackOrder::Shuffle),
+            2 => Some(UiPlaybackOrder::Random),
+            _ => None,
+        };
+        let Some(next_order) = next_order else {
+            debug!("Invalid playback order index: {}", index);
+            return;
+        };
+        match next_order {
+            UiPlaybackOrder::Default => {
                 let _ = bus_sender_clone.send(Message::Playlist(
                     PlaylistMessage::ChangePlaybackOrder(protocol::PlaybackOrder::Default),
                 ));
             }
-            1 => {
+            UiPlaybackOrder::Shuffle => {
                 let _ = bus_sender_clone.send(Message::Playlist(
                     PlaylistMessage::ChangePlaybackOrder(protocol::PlaybackOrder::Shuffle),
                 ));
             }
-            2 => {
+            UiPlaybackOrder::Random => {
                 let _ = bus_sender_clone.send(Message::Playlist(
                     PlaylistMessage::ChangePlaybackOrder(protocol::PlaybackOrder::Random),
                 ));
             }
-            _ => {
-                debug!("Invalid playback order index: {}", index);
+        }
+
+        let should_persist = {
+            let mut state = config_state_clone
+                .lock()
+                .expect("config state lock poisoned");
+            if state.ui.playback_order == next_order {
+                false
+            } else {
+                state.ui.playback_order = next_order;
+                true
             }
+        };
+        if should_persist {
+            let snapshot = {
+                let state = config_state_clone
+                    .lock()
+                    .expect("config state lock poisoned");
+                state.clone()
+            };
+            persist_state_files_with_config_path(&snapshot, &config_file_clone);
         }
     });
 
     // Wire up repeat toggle
     let bus_sender_clone = bus_sender.clone();
+    let config_state_clone = Arc::clone(&config_state);
+    let config_file_clone = config_file.clone();
     ui.on_toggle_repeat(move || {
         debug!("Repeat toggle clicked");
         let _ = bus_sender_clone.send(Message::Playlist(PlaylistMessage::ToggleRepeat));
+
+        let should_persist = {
+            let mut state = config_state_clone
+                .lock()
+                .expect("config state lock poisoned");
+            let next_repeat_mode = match state.ui.repeat_mode {
+                UiRepeatMode::Off => UiRepeatMode::Playlist,
+                UiRepeatMode::Playlist => UiRepeatMode::Track,
+                UiRepeatMode::Track => UiRepeatMode::Off,
+            };
+            if state.ui.repeat_mode == next_repeat_mode {
+                false
+            } else {
+                state.ui.repeat_mode = next_repeat_mode;
+                true
+            }
+        };
+        if should_persist {
+            let snapshot = {
+                let state = config_state_clone
+                    .lock()
+                    .expect("config state lock poisoned");
+                state.clone()
+            };
+            persist_state_files_with_config_path(&snapshot, &config_file_clone);
+        }
     });
 
     // Wire up seek handler
@@ -4382,6 +4474,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     window_width: previous_config.ui.window_width,
                     window_height: previous_config.ui.window_height,
                     volume: previous_config.ui.volume,
+                    playback_order: previous_config.ui.playback_order,
+                    repeat_mode: previous_config.ui.repeat_mode,
                 },
                 library: previous_config.library.clone(),
                 buffering: previous_config.buffering.clone(),
@@ -4476,6 +4570,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 window_width: previous_config.ui.window_width,
                 window_height: previous_config.ui.window_height,
                 volume: previous_config.ui.volume,
+                playback_order: previous_config.ui.playback_order,
+                repeat_mode: previous_config.ui.repeat_mode,
             },
             library: previous_config.library.clone(),
             buffering: previous_config.buffering.clone(),
@@ -4572,6 +4668,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 window_width: previous_config.ui.window_width,
                 window_height: previous_config.ui.window_height,
                 volume: previous_config.ui.volume,
+                playback_order: previous_config.ui.playback_order,
+                repeat_mode: previous_config.ui.repeat_mode,
             },
             library: previous_config.library.clone(),
             buffering: previous_config.buffering.clone(),
@@ -4670,6 +4768,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 window_width: previous_config.ui.window_width,
                 window_height: previous_config.ui.window_height,
                 volume: previous_config.ui.volume,
+                playback_order: previous_config.ui.playback_order,
+                repeat_mode: previous_config.ui.repeat_mode,
             },
             library: previous_config.library.clone(),
             buffering: previous_config.buffering.clone(),
@@ -4762,6 +4862,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 window_width: previous_config.ui.window_width,
                 window_height: previous_config.ui.window_height,
                 volume: previous_config.ui.volume,
+                playback_order: previous_config.ui.playback_order,
+                repeat_mode: previous_config.ui.repeat_mode,
             },
             library: previous_config.library.clone(),
             buffering: previous_config.buffering.clone(),
@@ -5160,6 +5262,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             window_width: state.ui.window_width,
                             window_height: state.ui.window_height,
                             volume: state.ui.volume,
+                            playback_order: state.ui.playback_order,
+                            repeat_mode: state.ui.repeat_mode,
                         },
                         library: state.library.clone(),
                         buffering: state.buffering.clone(),
@@ -5269,6 +5373,7 @@ mod tests {
 
     use crate::config::{
         BufferingConfig, Config, LibraryConfig, OutputConfig, PlaylistColumnConfig, UiConfig,
+        UiPlaybackOrder, UiRepeatMode,
     };
     use crate::layout::LayoutConfig;
     use slint::{Model, ModelRc, ModelTracker, VecModel};
@@ -6248,6 +6353,8 @@ mod tests {
                 window_width: 900,
                 window_height: 650,
                 volume: 1.0,
+                playback_order: UiPlaybackOrder::Default,
+                repeat_mode: UiRepeatMode::Off,
             },
             library: LibraryConfig::default(),
             buffering: BufferingConfig::default(),

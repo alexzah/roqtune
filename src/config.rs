@@ -81,6 +81,30 @@ pub struct UiConfig {
     pub window_height: u32,
     #[serde(default = "default_volume")]
     pub volume: f32,
+    #[serde(default)]
+    pub playback_order: UiPlaybackOrder,
+    #[serde(default)]
+    pub repeat_mode: UiRepeatMode,
+}
+
+/// Persisted playback-order preference for startup restore.
+#[derive(Debug, Clone, Copy, serde::Deserialize, serde::Serialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum UiPlaybackOrder {
+    #[default]
+    Default,
+    Shuffle,
+    Random,
+}
+
+/// Persisted repeat preference for startup restore.
+#[derive(Debug, Clone, Copy, serde::Deserialize, serde::Serialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum UiRepeatMode {
+    #[default]
+    Off,
+    Playlist,
+    Track,
 }
 
 /// Library indexing preferences persisted between sessions.
@@ -166,6 +190,8 @@ impl Default for UiConfig {
             window_width: default_window_width(),
             window_height: default_window_height(),
             volume: default_volume(),
+            playback_order: UiPlaybackOrder::Default,
+            repeat_mode: UiRepeatMode::Off,
         }
     }
 }
@@ -299,6 +325,7 @@ pub fn default_playlist_columns() -> Vec<PlaylistColumnConfig> {
 mod tests {
     use super::{
         default_playlist_columns, BufferingConfig, Config, LayoutConfig, ResamplerQuality,
+        UiPlaybackOrder, UiRepeatMode,
     };
 
     #[test]
@@ -327,6 +354,8 @@ mod tests {
         assert_eq!(config.ui.window_width, 900);
         assert_eq!(config.ui.window_height, 650);
         assert!((config.ui.volume - 1.0).abs() < f32::EPSILON);
+        assert_eq!(config.ui.playback_order, UiPlaybackOrder::Default);
+        assert_eq!(config.ui.repeat_mode, UiRepeatMode::Off);
         assert!(config.library.folders.is_empty());
         assert!(!config.library.online_metadata_enabled);
         assert!(config.library.online_metadata_prompt_pending);
@@ -372,6 +401,8 @@ decoder_request_chunk_ms = 1500
         assert_eq!(parsed.ui.window_width, 900);
         assert_eq!(parsed.ui.window_height, 650);
         assert!((parsed.ui.volume - 1.0).abs() < f32::EPSILON);
+        assert_eq!(parsed.ui.playback_order, UiPlaybackOrder::Default);
+        assert_eq!(parsed.ui.repeat_mode, UiRepeatMode::Off);
         assert!(parsed.library.folders.is_empty());
         assert!(!parsed.library.online_metadata_enabled);
         assert!(parsed.library.online_metadata_prompt_pending);
@@ -406,6 +437,8 @@ decoder_request_chunk_ms = 1500
         assert!(!config_text.contains("[[ui.playlist_columns]]"));
         assert!(!config_text.contains("playlist_album_art_column_min_width_px"));
         assert!(!config_text.contains("playlist_album_art_column_max_width_px"));
+        assert!(config_text.contains("playback_order"));
+        assert!(config_text.contains("repeat_mode"));
     }
 
     #[test]
@@ -475,6 +508,8 @@ decoder_request_chunk_ms = 1500
         assert_eq!(parsed.ui.window_width, defaults.ui.window_width);
         assert_eq!(parsed.ui.window_height, defaults.ui.window_height);
         assert!((parsed.ui.volume - defaults.ui.volume).abs() < f32::EPSILON);
+        assert_eq!(parsed.ui.playback_order, defaults.ui.playback_order);
+        assert_eq!(parsed.ui.repeat_mode, defaults.ui.repeat_mode);
         assert_eq!(parsed.library.folders, defaults.library.folders);
         assert_eq!(
             parsed.library.online_metadata_enabled,

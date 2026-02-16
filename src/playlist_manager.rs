@@ -15,7 +15,7 @@ use tokio::sync::broadcast::{Receiver, Sender};
 use uuid::Uuid;
 
 use crate::{
-    config::Config,
+    config::{Config, UiPlaybackOrder, UiRepeatMode},
     db_manager::DbManager,
     playlist::{Playlist, Track},
     protocol::{self, TrackIdentifier},
@@ -58,6 +58,7 @@ pub struct PlaylistManager {
     started_track_id: Option<String>,
     track_list_undo_stack: Vec<PlaylistTrackListSnapshot>,
     track_list_redo_stack: Vec<PlaylistTrackListSnapshot>,
+    playback_preferences_restored_from_config: bool,
 }
 
 impl PlaylistManager {
@@ -97,6 +98,7 @@ impl PlaylistManager {
             started_track_id: None,
             track_list_undo_stack: Vec::new(),
             track_list_redo_stack: Vec::new(),
+            playback_preferences_restored_from_config: false,
         }
     }
 
@@ -173,6 +175,31 @@ impl PlaylistManager {
             self.pending_rate_switch = None;
             self.pending_rate_switch_play_immediately = false;
         }
+    }
+
+    fn restore_playback_preferences_from_config(&mut self, config: &Config) -> bool {
+        let next_playback_order = match config.ui.playback_order {
+            UiPlaybackOrder::Default => protocol::PlaybackOrder::Default,
+            UiPlaybackOrder::Shuffle => protocol::PlaybackOrder::Shuffle,
+            UiPlaybackOrder::Random => protocol::PlaybackOrder::Random,
+        };
+        let next_repeat_mode = match config.ui.repeat_mode {
+            UiRepeatMode::Off => protocol::RepeatMode::Off,
+            UiRepeatMode::Playlist => protocol::RepeatMode::Playlist,
+            UiRepeatMode::Track => protocol::RepeatMode::Track,
+        };
+
+        let changed =
+            self.playback_order != next_playback_order || self.repeat_mode != next_repeat_mode;
+        self.playback_order = next_playback_order;
+        self.repeat_mode = next_repeat_mode;
+        self.editing_playlist
+            .set_playback_order(next_playback_order);
+        self.editing_playlist.set_repeat_mode(next_repeat_mode);
+        self.playback_playlist
+            .set_playback_order(next_playback_order);
+        self.playback_playlist.set_repeat_mode(next_repeat_mode);
+        changed
     }
 
     fn update_verified_output_rates(&mut self, mut rates: Vec<u32>) {
@@ -708,6 +735,14 @@ impl PlaylistManager {
                     protocol::Message::Config(protocol::ConfigMessage::ConfigChanged(config)) => {
                         let previous_sample_rate_auto = self.sample_rate_auto_enabled;
                         self.update_runtime_policy_from_config(&config);
+                        if !self.playback_preferences_restored_from_config {
+                            let playback_changed =
+                                self.restore_playback_preferences_from_config(&config);
+                            self.playback_preferences_restored_from_config = true;
+                            if playback_changed {
+                                self.broadcast_playlist_changed();
+                            }
+                        }
                         if self.playback_playlist.is_playing()
                             && previous_sample_rate_auto != self.sample_rate_auto_enabled
                         {
@@ -3137,6 +3172,55 @@ mod tests {
                 )
             },
         );
+    }
+
+    #[test]
+    fn test_config_changed_restores_playback_preferences_only_once() {
+        let mut harness = PlaylistManagerHarness::new();
+        harness.drain_messages();
+
+        let mut initial = Config::default();
+        initial.ui.playback_order = UiPlaybackOrder::Shuffle;
+        initial.ui.repeat_mode = UiRepeatMode::Track;
+        harness.send(protocol::Message::Config(
+            protocol::ConfigMessage::ConfigChanged(initial),
+        ));
+        let _ = wait_for_message(&mut harness.receiver, Duration::from_secs(1), |message| {
+            matches!(
+                message,
+                protocol::Message::Playlist(protocol::PlaylistMessage::PlaylistIndicesChanged {
+                    playback_order: protocol::PlaybackOrder::Shuffle,
+                    repeat_mode: protocol::RepeatMode::Track,
+                    ..
+                })
+            )
+        });
+        harness.drain_messages();
+
+        let mut later = Config::default();
+        later.ui.playback_order = UiPlaybackOrder::Random;
+        later.ui.repeat_mode = UiRepeatMode::Playlist;
+        harness.send(protocol::Message::Config(
+            protocol::ConfigMessage::ConfigChanged(later),
+        ));
+        harness.drain_messages();
+
+        let (id0, _) = harness.add_track("pm_cfg_restore_once_0");
+        harness.drain_messages();
+
+        harness.start_playlist_queue_from_ids(std::slice::from_ref(&id0), 0);
+        let _ = wait_for_message(&mut harness.receiver, Duration::from_secs(1), |message| {
+            matches!(
+                message,
+                protocol::Message::Playlist(protocol::PlaylistMessage::PlaylistIndicesChanged {
+                    is_playing: true,
+                    playing_index: Some(0),
+                    playback_order: protocol::PlaybackOrder::Shuffle,
+                    repeat_mode: protocol::RepeatMode::Track,
+                    ..
+                })
+            )
+        });
     }
 
     #[test]
