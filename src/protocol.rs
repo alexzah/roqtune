@@ -24,6 +24,7 @@ pub enum Message {
     Playback(PlaybackMessage),
     Metadata(MetadataMessage),
     Config(ConfigMessage),
+    Cast(CastMessage),
 }
 
 /// Track traversal strategy for next/previous operations.
@@ -480,6 +481,13 @@ pub enum PlaybackQueueSource {
     Library,
 }
 
+/// Active playback route selection.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PlaybackRoute {
+    Local,
+    Cast,
+}
+
 /// Immutable playback queue snapshot used to bootstrap playback state.
 #[derive(Debug, Clone)]
 pub struct PlaybackQueueRequest {
@@ -685,6 +693,74 @@ pub enum PlaybackMessage {
     PlaybackProgress { elapsed_ms: u64, total_ms: u64 },
     CoverArtChanged(Option<PathBuf>),
     MetadataDisplayChanged(Option<DetailedMetadata>),
+}
+
+/// One discoverable Google Cast target.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CastDeviceInfo {
+    /// Stable cast target id (UUID string from mDNS `id=` txt record when available).
+    pub id: String,
+    /// User-facing receiver name.
+    pub name: String,
+    /// Receiver model as reported by mDNS (`md=`), when available.
+    pub model: String,
+    /// Receiver host name.
+    pub host: String,
+    /// Receiver IPv4/IPv6 address.
+    pub address: String,
+    /// Cast control port (typically 8009).
+    pub port: u16,
+}
+
+/// High-level cast connection state.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CastConnectionState {
+    Disconnected,
+    Discovering,
+    Connecting,
+    Connected,
+}
+
+/// Cast media path used for the current track.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CastPlaybackPathKind {
+    Direct,
+    TranscodeWavPcm,
+}
+
+/// Cast subsystem commands and notifications.
+#[derive(Debug, Clone)]
+pub enum CastMessage {
+    DiscoverDevices,
+    DevicesUpdated(Vec<CastDeviceInfo>),
+    Connect {
+        device_id: String,
+    },
+    Disconnect,
+    ConnectionStateChanged {
+        state: CastConnectionState,
+        device: Option<CastDeviceInfo>,
+        reason: Option<String>,
+    },
+    LoadTrack {
+        track_id: String,
+        path: PathBuf,
+        start_offset_ms: u64,
+    },
+    Play,
+    Pause,
+    Stop,
+    SeekMs(u64),
+    SetVolume(f32),
+    PlaybackPathChanged {
+        kind: CastPlaybackPathKind,
+        description: String,
+    },
+    PlaybackError {
+        track_id: Option<String>,
+        message: String,
+        can_retry_with_transcode: bool,
+    },
 }
 
 /// Rich metadata used for UI display panels.

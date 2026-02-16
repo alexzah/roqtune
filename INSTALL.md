@@ -22,6 +22,12 @@ For Flatpak packaging:
 - Build release binary: `cargo build --release`
 - Run release build: `cargo run --release`
 
+### Chromecast Notes
+
+- Add a `Cast` button to a button cluster (default Utility preset includes it).
+- Direct cast streams original file bytes without modification.
+- Optional fallback (`Settings > Audio > Cast transcode fallback`) uses WAV PCM for receivers that reject direct streams.
+
 ## Flatpak (Local Bundle + Local Install)
 
 Use this command from the repo root:

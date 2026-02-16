@@ -1,6 +1,7 @@
 mod audio_decoder;
 mod audio_player;
 mod audio_probe;
+mod cast_manager;
 mod config;
 mod db_manager;
 mod layout;
@@ -30,8 +31,9 @@ use std::{
 use audio_decoder::AudioDecoder;
 use audio_player::AudioPlayer;
 use audio_probe::get_or_probe_output_device;
+use cast_manager::CastManager;
 use config::{
-    BufferingConfig, ButtonClusterInstanceConfig, Config, LibraryConfig, OutputConfig,
+    BufferingConfig, ButtonClusterInstanceConfig, CastConfig, Config, LibraryConfig, OutputConfig,
     PlaylistColumnConfig, ResamplerQuality, UiConfig, UiPlaybackOrder, UiRepeatMode,
 };
 use cpal::traits::{DeviceTrait, HostTrait};
@@ -49,7 +51,9 @@ use media_controls_manager::MediaControlsManager;
 use metadata_manager::MetadataManager;
 use playlist::Playlist;
 use playlist_manager::PlaylistManager;
-use protocol::{ConfigMessage, Message, MetadataMessage, PlaybackMessage, PlaylistMessage};
+use protocol::{
+    CastMessage, ConfigMessage, Message, MetadataMessage, PlaybackMessage, PlaylistMessage,
+};
 use slint::winit_030::{winit, EventResult as WinitEventResult, WinitWindowAccessor};
 use slint::{language::ColorScheme, ComponentHandle, LogicalSize, Model, ModelRc, VecModel};
 use tokio::sync::broadcast;
@@ -159,7 +163,7 @@ impl OutputRuntimeSignature {
 
 const IMPORT_CLUSTER_PRESET: [i32; 1] = [1];
 const TRANSPORT_CLUSTER_PRESET: [i32; 5] = [2, 3, 4, 5, 6];
-const UTILITY_CLUSTER_PRESET: [i32; 3] = [7, 8, 10];
+const UTILITY_CLUSTER_PRESET: [i32; 4] = [7, 8, 11, 10];
 const SUPPORTED_AUDIO_EXTENSIONS: [&str; 7] = ["mp3", "wav", "ogg", "flac", "aac", "m4a", "mp4"];
 const PLAYLIST_COLUMN_KIND_TEXT: i32 = 0;
 const PLAYLIST_COLUMN_KIND_ALBUM_ART: i32 = 1;
@@ -831,6 +835,7 @@ fn sanitize_config(config: Config) -> Config {
             resampler_quality: config.output.resampler_quality,
             dither_on_bitdepth_reduce: config.output.dither_on_bitdepth_reduce,
         },
+        cast: config.cast.clone(),
         ui: UiConfig {
             show_layout_edit_intro: config.ui.show_layout_edit_intro,
             show_tooltips: config.ui.show_tooltips,
@@ -935,7 +940,7 @@ fn sanitize_button_actions(actions: &[i32]) -> Vec<i32> {
     actions
         .iter()
         .copied()
-        .filter(|action| (1..=10).contains(action))
+        .filter(|action| (1..=11).contains(action))
         .collect()
 }
 
@@ -1857,6 +1862,7 @@ fn ensure_section_table(document: &mut DocumentMut, key: &str) {
 
 fn write_config_to_document(document: &mut DocumentMut, previous: &Config, config: &Config) {
     ensure_section_table(document, "output");
+    ensure_section_table(document, "cast");
     ensure_section_table(document, "ui");
     ensure_section_table(document, "library");
     ensure_section_table(document, "buffering");
@@ -1941,6 +1947,19 @@ fn write_config_to_document(document: &mut DocumentMut, previous: &Config, confi
                 value(config.output.dither_on_bitdepth_reduce),
             );
         }
+    }
+
+    {
+        let cast = document["cast"]
+            .as_table_mut()
+            .expect("cast should be a table");
+        set_table_scalar_if_changed(
+            cast,
+            "allow_transcode_fallback",
+            previous.cast.allow_transcode_fallback,
+            config.cast.allow_transcode_fallback,
+            value,
+        );
     }
 
     {
@@ -2286,6 +2305,7 @@ fn hydrate_ui_columns_from_layout(config: &mut Config) {
 fn with_updated_layout(previous: &Config, layout: LayoutConfig) -> Config {
     sanitize_config(Config {
         output: previous.output.clone(),
+        cast: previous.cast.clone(),
         ui: UiConfig {
             show_layout_edit_intro: previous.ui.show_layout_edit_intro,
             show_tooltips: previous.ui.show_tooltips,
@@ -2651,6 +2671,7 @@ fn apply_config_to_ui(
     };
     ui.global::<AppPalette>().set_color_scheme(color_scheme);
     ui.set_settings_dither_on_bitdepth_reduce(config.output.dither_on_bitdepth_reduce);
+    ui.set_settings_cast_allow_transcode_fallback(config.cast.allow_transcode_fallback);
     ui.set_settings_verified_sample_rates_summary(
         output_options.verified_sample_rates_summary.clone().into(),
     );
@@ -3958,7 +3979,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let config_file_clone = config_file.clone();
     let ui_handle_clone = ui.as_weak().clone();
     ui.on_add_control_cluster_button(move |leaf_id, action_id| {
-        if leaf_id.trim().is_empty() || !(1..=10).contains(&action_id) {
+        if leaf_id.trim().is_empty() || !(1..=11).contains(&action_id) {
             return;
         }
         let (next_config, workspace_width_px, workspace_height_px) = {
@@ -4883,6 +4904,25 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     });
 
+    let bus_sender_clone = bus_sender.clone();
+    ui.on_cast_refresh_devices(move || {
+        let _ = bus_sender_clone.send(Message::Cast(CastMessage::DiscoverDevices));
+    });
+
+    let bus_sender_clone = bus_sender.clone();
+    ui.on_cast_connect_device(move |device_id| {
+        let id = device_id.trim().to_string();
+        if id.is_empty() {
+            return;
+        }
+        let _ = bus_sender_clone.send(Message::Cast(CastMessage::Connect { device_id: id }));
+    });
+
+    let bus_sender_clone = bus_sender.clone();
+    ui.on_cast_disconnect(move || {
+        let _ = bus_sender_clone.send(Message::Cast(CastMessage::Disconnect));
+    });
+
     let tooltip_hover_generation = Arc::new(Mutex::new(0u64));
     let tooltip_hover_generation_clone = Arc::clone(&tooltip_hover_generation);
     let ui_handle_clone = ui.as_weak().clone();
@@ -4958,7 +4998,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
               dark_mode_enabled,
               sample_rate_mode_index,
               resampler_quality_index,
-              dither_on_bitdepth_reduce| {
+              dither_on_bitdepth_reduce,
+              cast_allow_transcode_fallback| {
             let previous_config = {
                 let state = config_state_clone
                     .lock()
@@ -5050,6 +5091,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     bits_per_sample_auto,
                     resampler_quality,
                     dither_on_bitdepth_reduce,
+                },
+                cast: CastConfig {
+                    allow_transcode_fallback: cast_allow_transcode_fallback,
                 },
                 ui: UiConfig {
                     show_layout_edit_intro: show_layout_edit_tutorial,
@@ -5147,6 +5191,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
         let next_config = sanitize_config(Config {
             output: previous_config.output.clone(),
+            cast: previous_config.cast.clone(),
             ui: UiConfig {
                 show_layout_edit_intro: previous_config.ui.show_layout_edit_intro,
                 show_tooltips: previous_config.ui.show_tooltips,
@@ -5245,6 +5290,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
         let next_config = sanitize_config(Config {
             output: previous_config.output.clone(),
+            cast: previous_config.cast.clone(),
             ui: UiConfig {
                 show_layout_edit_intro: previous_config.ui.show_layout_edit_intro,
                 show_tooltips: previous_config.ui.show_tooltips,
@@ -5345,6 +5391,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
         let next_config = sanitize_config(Config {
             output: previous_config.output.clone(),
+            cast: previous_config.cast.clone(),
             ui: UiConfig {
                 show_layout_edit_intro: previous_config.ui.show_layout_edit_intro,
                 show_tooltips: previous_config.ui.show_tooltips,
@@ -5439,6 +5486,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
         let next_config = sanitize_config(Config {
             output: previous_config.output.clone(),
+            cast: previous_config.cast.clone(),
             ui: UiConfig {
                 show_layout_edit_intro: previous_config.ui.show_layout_edit_intro,
                 show_tooltips: previous_config.ui.show_tooltips,
@@ -5598,6 +5646,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let mut media_controls_manager =
             MediaControlsManager::new(media_controls_bus_receiver, media_controls_bus_sender);
         media_controls_manager.run();
+    });
+
+    // Setup cast manager
+    let cast_manager_bus_receiver = bus_sender.subscribe();
+    let cast_manager_bus_sender = bus_sender.clone();
+    thread::spawn(move || {
+        let mut cast_manager = CastManager::new(cast_manager_bus_receiver, cast_manager_bus_sender);
+        cast_manager.run();
     });
 
     // Setup UI manager
@@ -5839,6 +5895,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     }
                     let updated = sanitize_config(Config {
                         output: state.output.clone(),
+                        cast: state.cast.clone(),
                         ui: UiConfig {
                             show_layout_edit_intro: state.ui.show_layout_edit_intro,
                             show_tooltips: state.ui.show_tooltips,
@@ -5941,6 +5998,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let _ = bus_sender_clone.send(Message::Playback(PlaybackMessage::SetVolume(
         config.ui.volume,
     )));
+
+    let bus_sender_clone = bus_sender.clone();
+    let _ = bus_sender_clone.send(Message::Cast(CastMessage::DiscoverDevices));
 
     ui.run()?;
 
@@ -6246,7 +6306,7 @@ mod tests {
         );
         assert!(
             slint_ui.contains(
-                "callback apply_settings(int, int, int, int, string, string, string, string, bool, bool, bool, bool, int, int, bool);"
+                "callback apply_settings(int, int, int, int, string, string, string, string, bool, bool, bool, bool, int, int, bool, bool);"
             ),
             "Apply settings callback should include auto-scroll, dark mode, sample-rate mode, resampler quality, and dither controls"
         );
@@ -6263,7 +6323,7 @@ mod tests {
     fn test_default_utility_button_cluster_preset_excludes_layout_editor_action() {
         assert_eq!(
             default_button_cluster_actions_by_index(2),
-            vec![7, 8, 10],
+            vec![7, 8, 11, 10],
             "Utility preset should not include layout editor by default"
         );
     }
@@ -6968,6 +7028,7 @@ mod tests {
                 resampler_quality: crate::config::ResamplerQuality::High,
                 dither_on_bitdepth_reduce: true,
             },
+            cast: crate::config::CastConfig::default(),
             ui: UiConfig {
                 show_layout_edit_intro: true,
                 show_tooltips: true,

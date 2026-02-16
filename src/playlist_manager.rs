@@ -35,6 +35,7 @@ pub struct PlaylistManager {
     active_playlist_id: String,
     playback_playlist: Playlist,
     playback_queue_source: Option<protocol::PlaybackQueueSource>,
+    playback_route: protocol::PlaybackRoute,
     playback_order: protocol::PlaybackOrder,
     repeat_mode: protocol::RepeatMode,
     bus_consumer: Receiver<protocol::Message>,
@@ -54,6 +55,7 @@ pub struct PlaylistManager {
     sample_rate_auto_enabled: bool,
     max_num_cached_tracks: usize,
     current_track_duration_ms: u64,
+    current_elapsed_ms: u64,
     last_seek_ms: u64,
     started_track_id: Option<String>,
     track_list_undo_stack: Vec<PlaylistTrackListSnapshot>,
@@ -75,6 +77,7 @@ impl PlaylistManager {
             active_playlist_id: String::new(),
             playback_playlist: playlist,
             playback_queue_source: None,
+            playback_route: protocol::PlaybackRoute::Local,
             playback_order: protocol::PlaybackOrder::Default,
             repeat_mode: protocol::RepeatMode::Off,
             bus_consumer,
@@ -94,6 +97,7 @@ impl PlaylistManager {
             sample_rate_auto_enabled: true,
             max_num_cached_tracks: 2,
             current_track_duration_ms: 0,
+            current_elapsed_ms: 0,
             last_seek_ms: u64::MAX,
             started_track_id: None,
             track_list_undo_stack: Vec::new(),
@@ -146,8 +150,23 @@ impl PlaylistManager {
         self.pending_rate_switch_play_immediately = false;
         self.playback_playlist.set_playing(true);
         self.playback_playlist.set_playing_track_index(Some(index));
+        self.current_elapsed_ms = 0;
 
         let track_id = self.playback_playlist.get_track_id(index);
+
+        if self.playback_route == protocol::PlaybackRoute::Cast {
+            let track = self.playback_playlist.get_track(index).clone();
+            let _ =
+                self.bus_producer
+                    .send(protocol::Message::Cast(protocol::CastMessage::LoadTrack {
+                        track_id: track_id.clone(),
+                        path: track.path,
+                        start_offset_ms: 0,
+                    }));
+            self.pending_start_track_id = Some(track_id);
+            self.broadcast_playlist_changed();
+            return;
+        }
 
         if self.cached_track_ids.get(&track_id) == Some(&0) {
             // Already cached at start, tell player to switch immediately
@@ -167,6 +186,66 @@ impl PlaylistManager {
             self.cache_tracks(true);
         }
         self.broadcast_playlist_changed();
+    }
+
+    fn handoff_to_cast_if_playing(&mut self) {
+        if self.playback_route != protocol::PlaybackRoute::Cast {
+            return;
+        }
+        if !self.playback_playlist.is_playing() {
+            return;
+        }
+        let Some(index) = self.playback_playlist.get_playing_track_index() else {
+            return;
+        };
+        if index >= self.playback_playlist.num_tracks() {
+            return;
+        }
+        let track = self.playback_playlist.get_track(index).clone();
+        self.stop_decoding();
+        let _ = self.bus_producer.send(protocol::Message::Playback(
+            protocol::PlaybackMessage::ClearPlayerCache,
+        ));
+        let _ = self
+            .bus_producer
+            .send(protocol::Message::Cast(protocol::CastMessage::LoadTrack {
+                track_id: track.id.clone(),
+                path: track.path,
+                start_offset_ms: self.current_elapsed_ms,
+            }));
+        self.pending_start_track_id = Some(track.id);
+        self.broadcast_playlist_changed();
+    }
+
+    fn handoff_back_to_local_if_playing(&mut self) -> bool {
+        if self.playback_route != protocol::PlaybackRoute::Local {
+            return false;
+        }
+        if !self.playback_playlist.is_playing() {
+            return false;
+        }
+        let Some(index) = self.playback_playlist.get_playing_track_index() else {
+            return false;
+        };
+        if index >= self.playback_playlist.num_tracks() {
+            return false;
+        }
+        let track = self.playback_playlist.get_track(index).clone();
+        let resume_offset_ms = self.current_elapsed_ms;
+
+        self.clear_cached_tracks();
+        let _ = self.bus_producer.send(protocol::Message::Audio(
+            protocol::AudioMessage::DecodeTracks(vec![TrackIdentifier {
+                id: track.id.clone(),
+                path: track.path,
+                play_immediately: true,
+                start_offset_ms: resume_offset_ms,
+            }]),
+        ));
+        self.requested_track_offsets
+            .insert(track.id.clone(), resume_offset_ms);
+        self.pending_start_track_id = Some(track.id);
+        true
     }
 
     fn update_runtime_policy_from_config(&mut self, config: &Config) {
@@ -803,6 +882,32 @@ impl PlaylistManager {
                         protocol::ConfigMessage::SetRuntimeOutputRate { .. }
                         | protocol::ConfigMessage::ClearRuntimeOutputRateOverride,
                     ) => {}
+                    protocol::Message::Cast(protocol::CastMessage::ConnectionStateChanged {
+                        state,
+                        ..
+                    }) => match state {
+                        protocol::CastConnectionState::Connected => {
+                            self.playback_route = protocol::PlaybackRoute::Cast;
+                            self.handoff_to_cast_if_playing();
+                        }
+                        protocol::CastConnectionState::Disconnected => {
+                            if self.playback_route == protocol::PlaybackRoute::Cast {
+                                let was_playing = self.playback_playlist.is_playing();
+                                self.playback_route = protocol::PlaybackRoute::Local;
+                                self.pending_start_track_id = None;
+                                self.started_track_id = None;
+                                if was_playing {
+                                    let resumed = self.handoff_back_to_local_if_playing();
+                                    if !resumed {
+                                        self.playback_playlist.set_playing(false);
+                                    }
+                                }
+                                self.broadcast_playlist_changed();
+                            }
+                        }
+                        protocol::CastConnectionState::Discovering
+                        | protocol::CastConnectionState::Connecting => {}
+                    },
                     protocol::Message::Playback(protocol::PlaybackMessage::Play) => {
                         debug!("PlaylistManager: Received play resume command");
                         let has_paused_track = !self.playback_playlist.is_playing()
@@ -813,6 +918,11 @@ impl PlaylistManager {
                                 .unwrap_or(false);
                         if has_paused_track {
                             debug!("PlaylistManager: Resuming playback");
+                            if self.playback_route == protocol::PlaybackRoute::Cast {
+                                let _ = self
+                                    .bus_producer
+                                    .send(protocol::Message::Cast(protocol::CastMessage::Play));
+                            }
                             self.playback_playlist.set_playing(true);
                             self.broadcast_playlist_changed();
                         }
@@ -832,8 +942,15 @@ impl PlaylistManager {
                         self.playback_playlist.set_playing(false);
                         self.playback_playlist.set_playing_track_index(None);
                         self.playback_queue_source = None;
-                        self.clear_cached_tracks();
-                        self.cache_tracks(false);
+                        if self.playback_route == protocol::PlaybackRoute::Cast {
+                            let _ = self
+                                .bus_producer
+                                .send(protocol::Message::Cast(protocol::CastMessage::Stop));
+                            self.clear_cached_tracks();
+                        } else {
+                            self.clear_cached_tracks();
+                            self.cache_tracks(false);
+                        }
                         let _ = self.bus_producer.send(protocol::Message::Config(
                             protocol::ConfigMessage::ClearRuntimeOutputRateOverride,
                         ));
@@ -844,6 +961,11 @@ impl PlaylistManager {
                     protocol::Message::Playback(protocol::PlaybackMessage::Pause) => {
                         debug!("PlaylistManager: Received pause command");
                         if self.playback_playlist.is_playing() {
+                            if self.playback_route == protocol::PlaybackRoute::Cast {
+                                let _ = self
+                                    .bus_producer
+                                    .send(protocol::Message::Cast(protocol::CastMessage::Pause));
+                            }
                             self.playback_playlist.set_playing(false);
                             self.broadcast_playlist_changed();
                         }
@@ -907,7 +1029,11 @@ impl PlaylistManager {
                                 if index < self.playback_playlist.num_tracks() {
                                     self.playback_playlist.set_playing_track_index(Some(index));
                                     self.playback_playlist.set_selected_indices(vec![index]);
-                                    self.cache_tracks(false);
+                                    if self.playback_route == protocol::PlaybackRoute::Cast {
+                                        self.play_playback_track(index);
+                                    } else {
+                                        self.cache_tracks(false);
+                                    }
                                     advanced = true;
                                 }
                             }
@@ -970,6 +1096,9 @@ impl PlaylistManager {
                     protocol::Message::Playback(protocol::PlaybackMessage::ReadyForPlayback(
                         id,
                     )) => {
+                        if self.playback_route == protocol::PlaybackRoute::Cast {
+                            continue;
+                        }
                         debug!(
                             "PlaylistManager: Received ready for playback command for track: {}",
                             id
@@ -1468,6 +1597,9 @@ impl PlaylistManager {
                         self.broadcast_active_playlist_column_width_overrides();
                     }
                     protocol::Message::Audio(protocol::AudioMessage::TrackCached(id, offset)) => {
+                        if self.playback_route == protocol::PlaybackRoute::Cast {
+                            continue;
+                        }
                         debug!(
                             "PlaylistManager: Received TrackCached: {} at offset {}",
                             id, offset
@@ -1489,6 +1621,9 @@ impl PlaylistManager {
                         }
                     }
                     protocol::Message::Audio(protocol::AudioMessage::TrackEvicted(id)) => {
+                        if self.playback_route == protocol::PlaybackRoute::Cast {
+                            continue;
+                        }
                         debug!("PlaylistManager: Received TrackEvicted: {}", id);
                         self.requested_track_offsets.remove(&id);
                         self.cached_track_ids.remove(&id);
@@ -1504,6 +1639,11 @@ impl PlaylistManager {
                         self.playback_order = order;
                         self.playback_playlist.set_playback_order(order);
                         self.editing_playlist.set_playback_order(order);
+
+                        if self.playback_route == protocol::PlaybackRoute::Cast {
+                            self.broadcast_playlist_changed();
+                            continue;
+                        }
 
                         // If something is playing, clear the "next" tracks and re-cache
                         if let Some(playing_idx) = self.playback_playlist.get_playing_track_index()
@@ -1542,6 +1682,12 @@ impl PlaylistManager {
                         );
                         self.current_track_duration_ms = meta.duration_ms;
                     }
+                    protocol::Message::Playback(protocol::PlaybackMessage::PlaybackProgress {
+                        elapsed_ms,
+                        ..
+                    }) => {
+                        self.current_elapsed_ms = elapsed_ms;
+                    }
                     protocol::Message::Playback(protocol::PlaybackMessage::Seek(percentage)) => {
                         let target_ms =
                             (percentage as f64 * self.current_track_duration_ms as f64) as u64;
@@ -1557,6 +1703,14 @@ impl PlaylistManager {
                             percentage * 100.0,
                             self.current_track_duration_ms
                         );
+
+                        if self.playback_route == protocol::PlaybackRoute::Cast {
+                            let _ = self.bus_producer.send(protocol::Message::Cast(
+                                protocol::CastMessage::SeekMs(target_ms),
+                            ));
+                            self.current_elapsed_ms = target_ms;
+                            continue;
+                        }
 
                         if let Some(playing_idx) = self.playback_playlist.get_playing_track_index()
                         {
@@ -1591,6 +1745,13 @@ impl PlaylistManager {
                                 ));
                                 self.requested_track_offsets.insert(track_id, target_ms);
                             }
+                        }
+                    }
+                    protocol::Message::Playback(protocol::PlaybackMessage::SetVolume(volume)) => {
+                        if self.playback_route == protocol::PlaybackRoute::Cast {
+                            let _ = self.bus_producer.send(protocol::Message::Cast(
+                                protocol::CastMessage::SetVolume(volume),
+                            ));
                         }
                     }
                     _ => trace!("PlaylistManager: ignoring unsupported message"),

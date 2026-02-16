@@ -95,6 +95,10 @@ export component AppWindow inherits Window {
                 root.show_settings_menu = false;
                 return accept;
             }
+            if (event.text == Key.Escape && root.show_cast_menu) {
+                root.show_cast_menu = false;
+                return accept;
+            }
             if (event.text == Key.Escape && root.show_viewer_panel_settings_menu) {
                 root.show_viewer_panel_settings_menu = false;
                 return accept;
@@ -249,6 +253,9 @@ export component AppWindow inherits Window {
     in-out property <bool> show_settings_menu: false;
     property <length> settings_menu_x: 0px;
     property <length> settings_menu_y: 0px;
+    in-out property <bool> show_cast_menu: false;
+    property <length> cast_menu_x: 0px;
+    property <length> cast_menu_y: 0px;
     in-out property <bool> show_control_cluster_menu: false;
     in-out property <string> control_cluster_menu_target_leaf_id: "";
     in-out property <[int]> control_cluster_menu_actions: [];
@@ -530,6 +537,7 @@ export component AppWindow inherits Window {
         if action-id == 8 { return "Repeat"; }
         if action-id == 9 { return "Layout Editor"; }
         if action-id == 10 { return "Settings"; }
+        if action-id == 11 { return "Cast"; }
         return "Unknown";
     }
 
@@ -594,6 +602,8 @@ export component AppWindow inherits Window {
                         button-actions: cluster-panel.actions;
                         playback-order-index: root.playback_order_index;
                         repeat-mode: root.repeat_mode;
+                        cast-connected: root.cast_connected;
+                        cast-connecting: root.cast_connecting;
                         collection-mode: root.collection_mode;
                         layout-edit-mode: root.layout_edit_mode;
                         action-invoked(action-id) => {
@@ -625,12 +635,25 @@ export component AppWindow inherits Window {
                             if (action-id == 10) {
                                 root.show_import_menu = false;
                                 root.show_library_folder_menu = false;
+                                root.show_cast_menu = false;
                                 root.show_settings_menu = true;
                                 root.settings_menu_x = min(root.width - 220px, max(8px, cluster-panel.x_px * 1px + 8px));
                                 root.settings_menu_y = min(
                                     root.height - 120px,
                                     max(8px, cluster-panel.y_px * 1px + cluster-panel.height_px * 1px + 4px)
                                 );
+                            }
+                            if (action-id == 11) {
+                                root.show_settings_menu = false;
+                                root.show_import_menu = false;
+                                root.show_library_folder_menu = false;
+                                root.show_cast_menu = true;
+                                root.cast_menu_x = min(root.width - 300px, max(8px, cluster-panel.x_px * 1px + 8px));
+                                root.cast_menu_y = min(
+                                    root.height - 260px,
+                                    max(8px, cluster-panel.y_px * 1px + cluster-panel.height_px * 1px + 4px)
+                                );
+                                root.cast_refresh_devices();
                             }
                         }
                         request-add-menu(cluster-leaf-id) => {
@@ -3031,6 +3054,111 @@ export component AppWindow inherits Window {
         }
     }
 
+    if root.show_cast_menu : Rectangle {
+        z: 149;
+        background: transparent;
+        TouchArea {
+            clicked => {
+                root.show_cast_menu = false;
+            }
+        }
+    }
+
+    if root.show_cast_menu : Rectangle {
+        z: 150;
+        x: root.cast_menu_x;
+        y: root.cast_menu_y;
+        width: 300px;
+        height: 250px;
+        border-radius: 6px;
+        background: root.ui_dark_mode ? #262626 : #f4f7fb;
+        border-width: 1px;
+        border-color: root.theme_border;
+
+        VerticalLayout {
+            padding: 8px;
+            spacing: 6px;
+
+            Text {
+                text: "Cast";
+                color: root.theme_text_primary;
+                font-size: 13px;
+                font-weight: 700;
+            }
+
+            Text {
+                text: root.cast_connection_label;
+                color: root.theme_text_muted;
+                font-size: 11px;
+                overflow: elide;
+            }
+
+            Rectangle { height: 1px; background: root.theme_border; }
+
+            ScrollView {
+                vertical-stretch: 1;
+                VerticalLayout {
+                    spacing: 2px;
+                    if root.cast_device_names.length == 0 : Rectangle {
+                        height: 28px;
+                        Text {
+                            x: 8px;
+                            width: parent.width - 16px;
+                            text: "No cast devices found";
+                            color: root.theme_text_muted;
+                            font-size: 11px;
+                            vertical-alignment: center;
+                            overflow: elide;
+                        }
+                    }
+                    for cast-device-label[index] in root.cast_device_names : Rectangle {
+                        height: 26px;
+                        border-radius: 4px;
+                        background: cast-device-ta.has-hover
+                            ? (root.ui_dark_mode ? #363636 : #dbe5f1)
+                            : transparent;
+                        Text {
+                            x: 8px;
+                            width: parent.width - 16px;
+                            text: cast-device-label;
+                            color: root.theme_text_primary;
+                            font-size: 11px;
+                            vertical-alignment: center;
+                            overflow: elide;
+                        }
+                        cast-device-ta := TouchArea {
+                            clicked => {
+                                if index < root.cast_device_ids.length {
+                                    root.cast_connect_device(root.cast_device_ids[index]);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            Rectangle { height: 1px; background: root.theme_border; }
+
+            HorizontalLayout {
+                spacing: 8px;
+                Button {
+                    text: "Refresh";
+                    clicked => { root.cast_refresh_devices(); }
+                }
+                Button {
+                    text: "Disconnect";
+                    enabled: root.cast_connected || root.cast_connecting;
+                    clicked => { root.cast_disconnect(); }
+                }
+                Rectangle { horizontal-stretch: 1; }
+                Button {
+                    text: "Close";
+                    clicked => { root.show_cast_menu = false; }
+                }
+            }
+        }
+    }
+
     if root.show_library_folder_menu : Rectangle {
         z: 150;
         x: root.library_folder_menu_x;
@@ -3654,7 +3782,8 @@ export component AppWindow inherits Window {
                             "Shuffle",
                             "Repeat",
                             "Layout Editor",
-                            "Settings"
+                            "Settings",
+                            "Cast"
                         ];
                         current-index <=> root.control_cluster_add_option_index;
                     }
@@ -4429,6 +4558,61 @@ export component AppWindow inherits Window {
                                     }
                                 }
                             }
+
+                            Rectangle {
+                                height: 32px;
+                                background: settings-cast-fallback-toggle-ta.has-hover
+                                    ? (root.ui_dark_mode ? #2d2d2d : #e9f0f8)
+                                    : transparent;
+                                border-radius: 4px;
+                                HorizontalLayout {
+                                    spacing: 10px;
+                                    cast-fallback-label-host := Rectangle {
+                                        width: settings-dialog-panel.label_column_width + 24px;
+                                        height: parent.height;
+                                        background: transparent;
+                                        Text {
+                                            text: "Cast transcode fallback";
+                                            color: root.theme_text_primary;
+                                            font-size: 12px;
+                                            vertical-alignment: center;
+                                            horizontal-alignment: left;
+                                        }
+                                        settings-cast-fallback-label-tooltip-ta := TooltipHoverArea {
+                                            tooltip-text: "When direct cast is unsupported by the receiver, fall back to WAV PCM transcoding. Off preserves original source or fails.";
+                                            tooltip_hover_changed(is-hovered, tooltip, anchor-x-px, anchor-y-px) => {
+                                                root.tooltip_hover_changed(is-hovered, tooltip, anchor-x-px, anchor-y-px);
+                                            }
+                                        }
+                                    }
+                                    Rectangle {
+                                        width: settings-dialog-panel.control_max_width;
+                                        height: parent.height;
+                                        background: transparent;
+                                        settings-cast-fallback-toggle := Switch {
+                                            x: parent.width - self.width - 8px;
+                                            y: (parent.height - self.height) / 2;
+                                            width: 36px;
+                                            text: "";
+                                            checked <=> root.settings_cast_allow_transcode_fallback;
+                                        }
+                                    }
+                                    Rectangle { horizontal-stretch: 1; }
+                                }
+                                settings-cast-fallback-toggle-ta := TouchArea {
+                                    changed has-hover => {
+                                        root.tooltip_hover_changed(
+                                            self.has-hover,
+                                            "When direct cast is unsupported by the receiver, fall back to WAV PCM transcoding. Off preserves original source or fails.",
+                                            floor((cast-fallback-label-host.absolute-position.x + cast-fallback-label-host.width / 2) / 1px),
+                                            floor((cast-fallback-label-host.absolute-position.y + cast-fallback-label-host.height) / 1px)
+                                        );
+                                    }
+                                    clicked => {
+                                        settings-cast-fallback-toggle.checked = !settings-cast-fallback-toggle.checked;
+                                    }
+                                }
+                            }
                         }
                     }
 
@@ -4628,7 +4812,8 @@ export component AppWindow inherits Window {
                             root.settings_dark_mode,
                             root.settings_sample_rate_mode_index,
                             root.settings_resampler_quality_index,
-                            root.settings_dither_on_bitdepth_reduce
+                            root.settings_dither_on_bitdepth_reduce,
+                            root.settings_cast_allow_transcode_fallback
                         );
                         root.show_settings_dialog = false;
                     }
@@ -4642,6 +4827,7 @@ export component AppWindow inherits Window {
             && root.show_tooltips_enabled
             && root.tooltip_text != ""
             && !root.show_settings_menu
+            && !root.show_cast_menu
             && !root.show_library_folder_menu
             && !root.show_import_menu
             && !root.show_library_context_menu
@@ -4722,6 +4908,11 @@ export component AppWindow inherits Window {
     in-out property <bool> show_settings_dialog: false;
     in-out property <bool> show_settings_restart_notice: false;
     in-out property <string> settings_restart_notice_message: "";
+    in-out property <bool> cast_connected: false;
+    in-out property <bool> cast_connecting: false;
+    in-out property <string> cast_connection_label: "Not Connected";
+    in-out property <[string]> cast_device_names: [];
+    in-out property <[string]> cast_device_ids: [];
     in-out property <[string]> playlist_visible_column_headers: [];
     in-out property <[int]> playlist_visible_column_kinds: [];
     in-out property <int> playlist_row_height_px: 30;
@@ -4750,6 +4941,7 @@ export component AppWindow inherits Window {
     in-out property <bool> settings_auto_scroll_to_playing_track: true;
     in-out property <bool> settings_dark_mode: true;
     in-out property <bool> settings_dither_on_bitdepth_reduce: true;
+    in-out property <bool> settings_cast_allow_transcode_fallback: false;
     in-out property <bool> show_tooltips_enabled: true;
     in-out property <int> settings_dialog_tab_index: 0;
     in-out property <bool> show_tooltip: false;
@@ -4878,7 +5070,10 @@ export component AppWindow inherits Window {
     callback layout_redo_last_action();
     callback reset_layout_default();
     callback open_settings();
+    callback cast_refresh_devices();
+    callback cast_connect_device(string);
+    callback cast_disconnect();
     callback open_external_url(string);
     callback tooltip_hover_changed(bool, string, int, int);
-    callback apply_settings(int, int, int, int, string, string, string, string, bool, bool, bool, bool, int, int, bool);
+    callback apply_settings(int, int, int, int, string, string, string, string, bool, bool, bool, bool, int, int, bool, bool);
 }

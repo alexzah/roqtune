@@ -8,6 +8,9 @@ pub struct Config {
     /// Audio output and device preferences.
     pub output: OutputConfig,
     #[serde(default)]
+    /// Cast playback preferences.
+    pub cast: CastConfig,
+    #[serde(default)]
     /// UI preferences.
     pub ui: UiConfig,
     #[serde(default)]
@@ -38,6 +41,14 @@ pub struct OutputConfig {
     pub resampler_quality: ResamplerQuality,
     #[serde(default = "default_true")]
     pub dither_on_bitdepth_reduce: bool,
+}
+
+/// Cast playback preferences persisted between sessions.
+#[derive(Debug, Clone, serde::Deserialize, serde::Serialize, Default)]
+pub struct CastConfig {
+    /// Enable sender-side transcoding fallback for receivers that reject direct source streams.
+    #[serde(default)]
+    pub allow_transcode_fallback: bool,
 }
 
 /// Resampler quality profile used when sample-rate conversion is required.
@@ -344,6 +355,7 @@ mod tests {
         assert!(config.output.bits_per_sample_auto);
         assert_eq!(config.output.resampler_quality, ResamplerQuality::High);
         assert!(config.output.dither_on_bitdepth_reduce);
+        assert!(!config.cast.allow_transcode_fallback);
 
         assert!(config.ui.show_layout_edit_intro);
         assert!(config.ui.show_tooltips);
@@ -392,6 +404,7 @@ decoder_request_chunk_ms = 1500
         assert!(parsed.output.bits_per_sample_auto);
         assert_eq!(parsed.output.resampler_quality, ResamplerQuality::High);
         assert!(parsed.output.dither_on_bitdepth_reduce);
+        assert!(!parsed.cast.allow_transcode_fallback);
         assert_eq!(parsed.ui.layout, LayoutConfig::default());
         assert!(parsed.ui.show_layout_edit_intro);
         assert!(parsed.ui.show_tooltips);
@@ -441,6 +454,7 @@ decoder_request_chunk_ms = 1500
         assert!(!config_text.contains("playlist_album_art_column_max_width_px"));
         assert!(config_text.contains("playback_order"));
         assert!(config_text.contains("repeat_mode"));
+        assert!(config_text.contains("allow_transcode_fallback"));
     }
 
     #[test]

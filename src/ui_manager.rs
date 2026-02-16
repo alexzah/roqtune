@@ -71,6 +71,12 @@ pub struct UiManager {
     display_target_priority: DisplayTargetPriority,
     current_technical_metadata: Option<protocol::TechnicalMetadata>,
     current_output_path_info: Option<protocol::OutputPathInfo>,
+    cast_connected: bool,
+    cast_connecting: bool,
+    cast_device_name: String,
+    cast_playback_path_description: String,
+    cast_device_ids: Vec<String>,
+    cast_device_names: Vec<String>,
     playlist_columns: Vec<PlaylistColumnConfig>,
     playlist_column_content_targets_px: Vec<u32>,
     playlist_column_target_widths_px: HashMap<String, u32>,
@@ -895,6 +901,12 @@ impl UiManager {
             display_target_priority: DisplayTargetPriority::Playing,
             current_technical_metadata: None,
             current_output_path_info: None,
+            cast_connected: false,
+            cast_connecting: false,
+            cast_device_name: String::new(),
+            cast_playback_path_description: String::new(),
+            cast_device_ids: Vec::new(),
+            cast_device_names: Vec::new(),
             playlist_columns: config::default_playlist_columns(),
             playlist_column_content_targets_px: Vec::new(),
             playlist_column_target_widths_px: HashMap::new(),
@@ -1026,17 +1038,35 @@ impl UiManager {
     }
 
     fn render_technical_info_text(&self) -> String {
+        let cast_route_prefix = if self.cast_connected {
+            if !self.cast_playback_path_description.is_empty() {
+                self.cast_playback_path_description.clone()
+            } else if !self.cast_device_name.is_empty() {
+                format!("Casting: Connected ({})", self.cast_device_name)
+            } else {
+                "Casting: Connected".to_string()
+            }
+        } else if self.cast_connecting {
+            "Casting: Connecting...".to_string()
+        } else {
+            String::new()
+        };
+
         let meta = match self.current_technical_metadata.as_ref() {
             Some(m) => m,
-            None => return String::new(),
+            None => return cast_route_prefix,
         };
         let path_info = match self.current_output_path_info.as_ref() {
             Some(p) => p,
             None => {
-                return format!(
+                let source_text = format!(
                     "Source: {} ({} bit, {} kbps)",
                     meta.format, meta.bits_per_sample, meta.bitrate_kbps
-                )
+                );
+                if cast_route_prefix.is_empty() {
+                    return source_text;
+                }
+                return format!("{} | {}", cast_route_prefix, source_text);
             }
         };
 
@@ -1094,13 +1124,53 @@ impl UiManager {
             transforms.join(" / ")
         };
 
-        format!("Source: {} | {}", source_info, transform_str)
+        let local_text = format!("Source: {} | {}", source_info, transform_str);
+        if cast_route_prefix.is_empty() {
+            local_text
+        } else {
+            format!("{} | {}", cast_route_prefix, local_text)
+        }
     }
 
     fn refresh_technical_info_ui(&self) {
         let info_text = self.render_technical_info_text();
         let _ = self.ui.upgrade_in_event_loop(move |ui| {
             ui.set_technical_info(info_text.into());
+        });
+    }
+
+    fn sync_cast_state_to_ui(&self) {
+        let connected = self.cast_connected;
+        let connecting = self.cast_connecting;
+        let label = if connected {
+            if self.cast_device_name.is_empty() {
+                "Connected".to_string()
+            } else {
+                format!("Connected: {}", self.cast_device_name)
+            }
+        } else if connecting {
+            "Connecting...".to_string()
+        } else {
+            "Not Connected".to_string()
+        };
+        let device_names = self
+            .cast_device_names
+            .iter()
+            .cloned()
+            .map(slint::SharedString::from)
+            .collect::<Vec<_>>();
+        let device_ids = self
+            .cast_device_ids
+            .iter()
+            .cloned()
+            .map(slint::SharedString::from)
+            .collect::<Vec<_>>();
+        let _ = self.ui.upgrade_in_event_loop(move |ui| {
+            ui.set_cast_connected(connected);
+            ui.set_cast_connecting(connecting);
+            ui.set_cast_connection_label(label.into());
+            ui.set_cast_device_names(ModelRc::from(Rc::new(VecModel::from(device_names))));
+            ui.set_cast_device_ids(ModelRc::from(Rc::new(VecModel::from(device_ids))));
         });
     }
 
@@ -6141,6 +6211,8 @@ impl UiManager {
     /// Starts the blocking UI event loop that listens for bus messages.
     pub fn run(&mut self) {
         self.sync_library_ui();
+        self.sync_cast_state_to_ui();
+        self.refresh_technical_info_ui();
         self.sync_library_add_to_playlist_ui();
         self.sync_library_root_counts_to_ui();
         self.request_library_root_counts();
@@ -6911,6 +6983,87 @@ impl UiManager {
                         ) => {
                             self.current_output_path_info = Some(path_info);
                             self.refresh_technical_info_ui();
+                        }
+                        protocol::Message::Cast(protocol::CastMessage::DevicesUpdated(devices)) => {
+                            self.cast_device_ids =
+                                devices.iter().map(|device| device.id.clone()).collect();
+                            self.cast_device_names = devices
+                                .iter()
+                                .map(|device| {
+                                    if device.model.trim().is_empty() {
+                                        device.name.clone()
+                                    } else {
+                                        format!("{} ({})", device.name, device.model)
+                                    }
+                                })
+                                .collect();
+                            self.sync_cast_state_to_ui();
+                        }
+                        protocol::Message::Cast(
+                            protocol::CastMessage::ConnectionStateChanged {
+                                state,
+                                device,
+                                reason,
+                            },
+                        ) => {
+                            self.cast_connected = state == protocol::CastConnectionState::Connected;
+                            self.cast_connecting = state
+                                == protocol::CastConnectionState::Connecting
+                                || state == protocol::CastConnectionState::Discovering;
+                            self.cast_device_name =
+                                device.map(|device| device.name).unwrap_or_default();
+                            if !self.cast_connected {
+                                self.cast_playback_path_description.clear();
+                            }
+                            if let Some(reason) = reason {
+                                let trimmed = reason.trim();
+                                if !trimmed.is_empty() {
+                                    self.library_status_text = trimmed.to_string();
+                                    self.show_library_toast(trimmed);
+                                }
+                            }
+                            self.sync_cast_state_to_ui();
+                            self.refresh_technical_info_ui();
+                        }
+                        protocol::Message::Cast(protocol::CastMessage::PlaybackPathChanged {
+                            kind,
+                            description,
+                        }) => {
+                            self.cast_playback_path_description = if description.trim().is_empty() {
+                                match kind {
+                                    protocol::CastPlaybackPathKind::Direct => {
+                                        "Casting: Direct (unmodified source stream)".to_string()
+                                    }
+                                    protocol::CastPlaybackPathKind::TranscodeWavPcm => {
+                                        "Casting: Transcode (WAV PCM)".to_string()
+                                    }
+                                }
+                            } else {
+                                description
+                            };
+                            self.refresh_technical_info_ui();
+                        }
+                        protocol::Message::Cast(protocol::CastMessage::PlaybackError {
+                            track_id,
+                            message,
+                            can_retry_with_transcode,
+                        }) => {
+                            let mut trimmed = message.trim().to_string();
+                            if let Some(track_id) = track_id {
+                                if !track_id.trim().is_empty() {
+                                    trimmed = format!("{} [track: {}]", trimmed, track_id);
+                                }
+                            }
+                            if can_retry_with_transcode {
+                                trimmed = format!(
+                                    "{} (direct cast failed; transcode fallback available)",
+                                    trimmed
+                                );
+                            }
+                            if !trimmed.is_empty() {
+                                self.library_status_text = trimmed.clone();
+                                self.show_library_toast(trimmed);
+                            }
                         }
                         protocol::Message::Playback(protocol::PlaybackMessage::Stop) => {
                             self.playback_active = false;

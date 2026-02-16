@@ -35,6 +35,11 @@ resampler_quality = "high"
 # Apply TPDF dither when converting float output to lower bit-depth integer formats.
 dither_on_bitdepth_reduce = true
 
+[cast]
+# Enable sender-side fallback transcoding during casting.
+# Disabled by default to preserve source-path integrity (direct stream).
+allow_transcode_fallback = false
+
 [ui]
 # Show the layout editor intro dialog the next time it is opened.
 show_layout_edit_intro = true
