@@ -41,6 +41,8 @@ pub struct OutputConfig {
     pub resampler_quality: ResamplerQuality,
     #[serde(default = "default_true")]
     pub dither_on_bitdepth_reduce: bool,
+    #[serde(default = "default_true")]
+    pub downmix_higher_channel_tracks: bool,
 }
 
 /// Cast playback preferences persisted between sessions.
@@ -183,6 +185,7 @@ impl Default for OutputConfig {
             bits_per_sample_auto: true,
             resampler_quality: ResamplerQuality::High,
             dither_on_bitdepth_reduce: true,
+            downmix_higher_channel_tracks: true,
         }
     }
 }
@@ -355,6 +358,7 @@ mod tests {
         assert!(config.output.bits_per_sample_auto);
         assert_eq!(config.output.resampler_quality, ResamplerQuality::High);
         assert!(config.output.dither_on_bitdepth_reduce);
+        assert!(config.output.downmix_higher_channel_tracks);
         assert!(!config.cast.allow_transcode_fallback);
 
         assert!(config.ui.show_layout_edit_intro);
@@ -404,6 +408,7 @@ decoder_request_chunk_ms = 1500
         assert!(parsed.output.bits_per_sample_auto);
         assert_eq!(parsed.output.resampler_quality, ResamplerQuality::High);
         assert!(parsed.output.dither_on_bitdepth_reduce);
+        assert!(parsed.output.downmix_higher_channel_tracks);
         assert!(!parsed.cast.allow_transcode_fallback);
         assert_eq!(parsed.ui.layout, LayoutConfig::default());
         assert!(parsed.ui.show_layout_edit_intro);
@@ -499,6 +504,10 @@ decoder_request_chunk_ms = 1500
         assert_eq!(
             parsed.output.dither_on_bitdepth_reduce,
             defaults.output.dither_on_bitdepth_reduce
+        );
+        assert_eq!(
+            parsed.output.downmix_higher_channel_tracks,
+            defaults.output.downmix_higher_channel_tracks
         );
 
         assert_eq!(

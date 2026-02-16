@@ -834,6 +834,7 @@ fn sanitize_config(config: Config) -> Config {
             bits_per_sample_auto: config.output.bits_per_sample_auto,
             resampler_quality: config.output.resampler_quality,
             dither_on_bitdepth_reduce: config.output.dither_on_bitdepth_reduce,
+            downmix_higher_channel_tracks: config.output.downmix_higher_channel_tracks,
         },
         cast: config.cast.clone(),
         ui: UiConfig {
@@ -1947,6 +1948,16 @@ fn write_config_to_document(document: &mut DocumentMut, previous: &Config, confi
                 value(config.output.dither_on_bitdepth_reduce),
             );
         }
+        if !output.contains_key("downmix_higher_channel_tracks")
+            || previous.output.downmix_higher_channel_tracks
+                != config.output.downmix_higher_channel_tracks
+        {
+            set_table_value_preserving_decor(
+                output,
+                "downmix_higher_channel_tracks",
+                value(config.output.downmix_higher_channel_tracks),
+            );
+        }
     }
 
     {
@@ -2671,6 +2682,7 @@ fn apply_config_to_ui(
     };
     ui.global::<AppPalette>().set_color_scheme(color_scheme);
     ui.set_settings_dither_on_bitdepth_reduce(config.output.dither_on_bitdepth_reduce);
+    ui.set_settings_downmix_higher_channel_tracks(config.output.downmix_higher_channel_tracks);
     ui.set_settings_cast_allow_transcode_fallback(config.cast.allow_transcode_fallback);
     ui.set_settings_verified_sample_rates_summary(
         output_options.verified_sample_rates_summary.clone().into(),
@@ -4999,6 +5011,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
               sample_rate_mode_index,
               resampler_quality_index,
               dither_on_bitdepth_reduce,
+              downmix_higher_channel_tracks,
               cast_allow_transcode_fallback| {
             let previous_config = {
                 let state = config_state_clone
@@ -5091,6 +5104,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     bits_per_sample_auto,
                     resampler_quality,
                     dither_on_bitdepth_reduce,
+                    downmix_higher_channel_tracks,
                 },
                 cast: CastConfig {
                     allow_transcode_fallback: cast_allow_transcode_fallback,
@@ -6306,9 +6320,9 @@ mod tests {
         );
         assert!(
             slint_ui.contains(
-                "callback apply_settings(int, int, int, int, string, string, string, string, bool, bool, bool, bool, int, int, bool, bool);"
+                "callback apply_settings(int, int, int, int, string, string, string, string, bool, bool, bool, bool, int, int, bool, bool, bool);"
             ),
-            "Apply settings callback should include auto-scroll, dark mode, sample-rate mode, resampler quality, and dither controls"
+            "Apply settings callback should include auto-scroll, dark mode, sample-rate mode, resampler quality, dither, and downmix controls"
         );
         assert!(
             slint_ui.contains("label: \"Output Sample Rate\"")
@@ -7027,6 +7041,7 @@ mod tests {
                 bits_per_sample_auto: true,
                 resampler_quality: crate::config::ResamplerQuality::High,
                 dither_on_bitdepth_reduce: true,
+                downmix_higher_channel_tracks: true,
             },
             cast: crate::config::CastConfig::default(),
             ui: UiConfig {

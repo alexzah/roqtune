@@ -625,8 +625,15 @@ pub struct OutputPathInfo {
     pub source_channel_count: u16,
     pub output_stream: OutputStreamInfo,
     pub resampled: bool,
-    pub remixed_channels: bool,
+    pub channel_transform: Option<ChannelTransformKind>,
     pub dithered: bool,
+}
+
+/// Channel-transform strategy used when source/output channel counts differ.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ChannelTransformKind {
+    Downmix,
+    ChannelMap,
 }
 
 /// Audio payload delivered from decoder to player.

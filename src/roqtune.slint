@@ -4561,6 +4561,61 @@ export component AppWindow inherits Window {
 
                             Rectangle {
                                 height: 32px;
+                                background: settings-downmix-toggle-ta.has-hover
+                                    ? (root.ui_dark_mode ? #2d2d2d : #e9f0f8)
+                                    : transparent;
+                                border-radius: 4px;
+                                HorizontalLayout {
+                                    spacing: 10px;
+                                    downmix-label-host := Rectangle {
+                                        width: settings-dialog-panel.label_column_width + 24px;
+                                        height: parent.height;
+                                        background: transparent;
+                                        Text {
+                                            text: "Downmix tracks with higher channel counts";
+                                            color: root.theme_text_primary;
+                                            font-size: 12px;
+                                            vertical-alignment: center;
+                                            horizontal-alignment: left;
+                                        }
+                                        settings-downmix-label-tooltip-ta := TooltipHoverArea {
+                                            tooltip-text: "When source channels exceed output channels, use weighted downmixing instead of legacy channel mapping.";
+                                            tooltip_hover_changed(is-hovered, tooltip, anchor-x-px, anchor-y-px) => {
+                                                root.tooltip_hover_changed(is-hovered, tooltip, anchor-x-px, anchor-y-px);
+                                            }
+                                        }
+                                    }
+                                    Rectangle {
+                                        width: settings-dialog-panel.control_max_width;
+                                        height: parent.height;
+                                        background: transparent;
+                                        settings-downmix-toggle := Switch {
+                                            x: parent.width - self.width - 8px;
+                                            y: (parent.height - self.height) / 2;
+                                            width: 36px;
+                                            text: "";
+                                            checked <=> root.settings_downmix_higher_channel_tracks;
+                                        }
+                                    }
+                                    Rectangle { horizontal-stretch: 1; }
+                                }
+                                settings-downmix-toggle-ta := TouchArea {
+                                    changed has-hover => {
+                                        root.tooltip_hover_changed(
+                                            self.has-hover,
+                                            "When source channels exceed output channels, use weighted downmixing instead of legacy channel mapping.",
+                                            floor((downmix-label-host.absolute-position.x + downmix-label-host.width / 2) / 1px),
+                                            floor((downmix-label-host.absolute-position.y + downmix-label-host.height) / 1px)
+                                        );
+                                    }
+                                    clicked => {
+                                        settings-downmix-toggle.checked = !settings-downmix-toggle.checked;
+                                    }
+                                }
+                            }
+
+                            Rectangle {
+                                height: 32px;
                                 background: settings-cast-fallback-toggle-ta.has-hover
                                     ? (root.ui_dark_mode ? #2d2d2d : #e9f0f8)
                                     : transparent;
@@ -4813,6 +4868,7 @@ export component AppWindow inherits Window {
                             root.settings_sample_rate_mode_index,
                             root.settings_resampler_quality_index,
                             root.settings_dither_on_bitdepth_reduce,
+                            root.settings_downmix_higher_channel_tracks,
                             root.settings_cast_allow_transcode_fallback
                         );
                         root.show_settings_dialog = false;
@@ -4941,6 +4997,7 @@ export component AppWindow inherits Window {
     in-out property <bool> settings_auto_scroll_to_playing_track: true;
     in-out property <bool> settings_dark_mode: true;
     in-out property <bool> settings_dither_on_bitdepth_reduce: true;
+    in-out property <bool> settings_downmix_higher_channel_tracks: true;
     in-out property <bool> settings_cast_allow_transcode_fallback: false;
     in-out property <bool> show_tooltips_enabled: true;
     in-out property <int> settings_dialog_tab_index: 0;
@@ -5075,5 +5132,5 @@ export component AppWindow inherits Window {
     callback cast_disconnect();
     callback open_external_url(string);
     callback tooltip_hover_changed(bool, string, int, int);
-    callback apply_settings(int, int, int, int, string, string, string, string, bool, bool, bool, bool, int, int, bool, bool);
+    callback apply_settings(int, int, int, int, string, string, string, string, bool, bool, bool, bool, int, int, bool, bool, bool);
 }

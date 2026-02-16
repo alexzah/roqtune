@@ -4,8 +4,8 @@
 //! stream, and emits playback progress/track lifecycle notifications.
 
 use crate::protocol::{
-    AudioMessage, AudioPacket, ConfigMessage, Message, OutputPathInfo, OutputSampleFormat,
-    OutputStreamInfo, PlaybackMessage, TrackStarted,
+    AudioMessage, AudioPacket, ChannelTransformKind, ConfigMessage, Message, OutputPathInfo,
+    OutputSampleFormat, OutputStreamInfo, PlaybackMessage, TrackStarted,
 };
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use log::{debug, error, warn};
@@ -64,6 +64,7 @@ pub struct AudioPlayer {
     target_channels: Arc<AtomicUsize>,
     target_bits_per_sample: u16,
     dither_on_bitdepth_reduce: bool,
+    downmix_higher_channel_tracks: bool,
     target_output_device_name: Arc<Mutex<Option<String>>>,
     output_stream_info: Arc<Mutex<Option<OutputStreamInfo>>>,
     sample_queue: Arc<Mutex<VecDeque<AudioQueueEntry>>>,
@@ -187,14 +188,24 @@ impl AudioPlayer {
         metadata: &crate::protocol::TechnicalMetadata,
         stream_info: &OutputStreamInfo,
         dither_enabled: bool,
+        downmix_higher_channel_tracks: bool,
     ) -> OutputPathInfo {
         let output_float = matches!(stream_info.sample_format, OutputSampleFormat::F32);
+        let channel_transform = if metadata.channel_count != stream_info.channel_count {
+            if metadata.channel_count > stream_info.channel_count && downmix_higher_channel_tracks {
+                Some(ChannelTransformKind::Downmix)
+            } else {
+                Some(ChannelTransformKind::ChannelMap)
+            }
+        } else {
+            None
+        };
         OutputPathInfo {
             source_sample_rate_hz: metadata.sample_rate_hz,
             source_channel_count: metadata.channel_count,
             output_stream: stream_info.clone(),
             resampled: metadata.sample_rate_hz != stream_info.sample_rate_hz,
-            remixed_channels: metadata.channel_count != stream_info.channel_count,
+            channel_transform,
             dithered: dither_enabled && !output_float,
         }
     }
@@ -340,6 +351,7 @@ impl AudioPlayer {
             target_channels: target_channels.clone(),
             target_bits_per_sample: 24,
             dither_on_bitdepth_reduce: true,
+            downmix_higher_channel_tracks: true,
             target_output_device_name,
             output_stream_info: Arc::new(Mutex::new(None)),
             current_track_id: current_track_id.clone(),
@@ -871,6 +883,7 @@ impl AudioPlayer {
             metadata,
             &stream_info,
             self.dither_on_bitdepth_reduce,
+            self.downmix_higher_channel_tracks,
         );
         let _ = self
             .bus_sender
@@ -1087,6 +1100,8 @@ impl AudioPlayer {
                             config.buffering.player_request_interval_ms.max(20) as usize,
                             Ordering::Relaxed,
                         );
+                        self.downmix_higher_channel_tracks =
+                            config.output.downmix_higher_channel_tracks;
                         let next_output_signature = Self::output_signature_from_config(&config);
                         if self.last_output_signature.as_ref() != Some(&next_output_signature) {
                             let previous_sample_rate =

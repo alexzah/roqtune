@@ -77,6 +77,7 @@ struct DecodeWorker {
     target_bits_per_sample: u16,
     resampler_quality: ResamplerQuality,
     dither_on_bitdepth_reduce: bool,
+    downmix_higher_channel_tracks: bool,
     decoder_request_chunk_ms: u32,
     decode_generation: u64,
 }
@@ -103,6 +104,7 @@ impl DecodeWorker {
             target_bits_per_sample: 16,
             resampler_quality: ResamplerQuality::High,
             dither_on_bitdepth_reduce: true,
+            downmix_higher_channel_tracks: true,
             decoder_request_chunk_ms: BufferingConfig::default().decoder_request_chunk_ms,
             decode_generation: 0,
         }
@@ -184,6 +186,7 @@ impl DecodeWorker {
                 self.target_bits_per_sample = config.output.bits_per_sample;
                 self.resampler_quality = config.output.resampler_quality;
                 self.dither_on_bitdepth_reduce = config.output.dither_on_bitdepth_reduce;
+                self.downmix_higher_channel_tracks = config.output.downmix_higher_channel_tracks;
                 self.decoder_request_chunk_ms = config.buffering.decoder_request_chunk_ms;
                 self.resampler = None;
                 self.resampler_flushed = false;
@@ -459,7 +462,11 @@ impl DecodeWorker {
         }
     }
 
-    fn remap_channels(samples: &[f32], source_channels: usize, target_channels: usize) -> Vec<f32> {
+    fn channel_map_channels(
+        samples: &[f32],
+        source_channels: usize,
+        target_channels: usize,
+    ) -> Vec<f32> {
         if source_channels == 0 || target_channels == 0 {
             return Vec::new();
         }
@@ -492,6 +499,115 @@ impl DecodeWorker {
         remapped
     }
 
+    fn downmix_channels(
+        samples: &[f32],
+        source_channels: usize,
+        target_channels: usize,
+    ) -> Vec<f32> {
+        if source_channels == 0 || target_channels == 0 {
+            return Vec::new();
+        }
+        if source_channels <= target_channels {
+            return Self::channel_map_channels(samples, source_channels, target_channels);
+        }
+
+        const CENTER_GAIN: f32 = 0.707_106_77;
+        const SURROUND_GAIN: f32 = 0.5;
+        const LFE_GAIN: f32 = 0.25;
+        let frame_count = samples.len() / source_channels;
+        let mut downmixed = Vec::with_capacity(frame_count * target_channels);
+
+        if target_channels == 1 {
+            for frame_index in 0..frame_count {
+                let frame_start = frame_index * source_channels;
+                let frame = &samples[frame_start..frame_start + source_channels];
+
+                let mut mono = frame[0];
+                if source_channels > 1 {
+                    mono += frame[1];
+                    mono *= 0.5;
+                }
+                if source_channels > 2 {
+                    mono += frame[2] * CENTER_GAIN * 0.5;
+                }
+                if source_channels > 3 {
+                    mono += frame[3] * LFE_GAIN;
+                }
+                if source_channels > 4 {
+                    for sample in &frame[4..] {
+                        mono += *sample * SURROUND_GAIN * 0.5;
+                    }
+                }
+
+                downmixed.push(mono.clamp(-1.0, 1.0));
+            }
+            return downmixed;
+        }
+
+        if target_channels == 2 {
+            for frame_index in 0..frame_count {
+                let frame_start = frame_index * source_channels;
+                let frame = &samples[frame_start..frame_start + source_channels];
+
+                let mut left = frame[0];
+                let mut right = frame.get(1).copied().unwrap_or(frame[0]);
+
+                if source_channels > 2 {
+                    let center = frame[2];
+                    left += center * CENTER_GAIN;
+                    right += center * CENTER_GAIN;
+                }
+                if source_channels > 3 {
+                    let lfe = frame[3];
+                    left += lfe * LFE_GAIN;
+                    right += lfe * LFE_GAIN;
+                }
+                for (idx, sample) in frame.iter().enumerate().skip(4) {
+                    if idx % 2 == 0 {
+                        left += *sample * SURROUND_GAIN;
+                    } else {
+                        right += *sample * SURROUND_GAIN;
+                    }
+                }
+
+                downmixed.push(left.clamp(-1.0, 1.0));
+                downmixed.push(right.clamp(-1.0, 1.0));
+            }
+            return downmixed;
+        }
+
+        let mut mixed_frame = vec![0.0f32; target_channels];
+        for frame_index in 0..frame_count {
+            let frame_start = frame_index * source_channels;
+            let frame = &samples[frame_start..frame_start + source_channels];
+
+            mixed_frame.fill(0.0);
+            mixed_frame[..target_channels].copy_from_slice(&frame[..target_channels]);
+            for (in_channel, sample) in frame.iter().enumerate().skip(target_channels) {
+                let out_channel = in_channel % target_channels;
+                mixed_frame[out_channel] += *sample * CENTER_GAIN;
+            }
+            for sample in &mixed_frame {
+                downmixed.push(sample.clamp(-1.0, 1.0));
+            }
+        }
+
+        downmixed
+    }
+
+    fn transform_channels(
+        samples: &[f32],
+        source_channels: usize,
+        target_channels: usize,
+        downmix_higher_channel_tracks: bool,
+    ) -> Vec<f32> {
+        if source_channels > target_channels && downmix_higher_channel_tracks {
+            Self::downmix_channels(samples, source_channels, target_channels)
+        } else {
+            Self::channel_map_channels(samples, source_channels, target_channels)
+        }
+    }
+
     fn decode_one_packet_into_buffer(&mut self) -> bool {
         let mut decoded_samples: Option<Vec<f32>> = None;
         let mut exhausted_input = false;
@@ -516,10 +632,11 @@ impl DecodeWorker {
                             let duration = decoded.capacity() as u64;
                             let mut sample_buffer = SampleBuffer::<f32>::new(duration, *spec);
                             sample_buffer.copy_interleaved_ref(decoded);
-                            let mapped = Self::remap_channels(
+                            let mapped = Self::transform_channels(
                                 sample_buffer.samples(),
                                 active.source_channels.max(1) as usize,
                                 target_channels,
+                                self.downmix_higher_channel_tracks,
                             );
                             decoded_samples = Some(mapped);
                         }
@@ -1150,5 +1267,23 @@ mod tests {
             !inflight.load(Ordering::Relaxed),
             "worker should clear inflight even for stale requests"
         );
+    }
+
+    #[test]
+    fn test_transform_channels_downmixes_when_enabled_for_higher_channel_source() {
+        let samples = vec![0.3, 0.2, 0.1, 0.0, 0.2, 0.1];
+        let transformed = DecodeWorker::transform_channels(&samples, 6, 2, true);
+
+        assert_eq!(transformed.len(), 2);
+        assert!(transformed[0] > 0.3);
+        assert!(transformed[1] > 0.2);
+    }
+
+    #[test]
+    fn test_transform_channels_uses_channel_map_when_downmix_disabled() {
+        let samples = vec![0.3, 0.2, 0.1, 0.0, 0.2, 0.1];
+        let transformed = DecodeWorker::transform_channels(&samples, 6, 2, false);
+
+        assert_eq!(transformed, vec![0.3, 0.2]);
     }
 }

@@ -1075,10 +1075,14 @@ impl UiManager {
                 Self::format_rate_hz_text(path_info.output_stream.sample_rate_hz)
             ));
         }
-        if path_info.remixed_channels {
+        if let Some(channel_transform) = path_info.channel_transform {
+            let label = match channel_transform {
+                protocol::ChannelTransformKind::Downmix => "Downmix",
+                protocol::ChannelTransformKind::ChannelMap => "Channel map",
+            };
             transforms.push(format!(
-                "Channel map: {}ch -> {}ch",
-                path_info.source_channel_count, path_info.output_stream.channel_count
+                "{}: {}ch -> {}ch",
+                label, path_info.source_channel_count, path_info.output_stream.channel_count
             ));
         }
         if path_info.dithered {

@@ -35,6 +35,10 @@ resampler_quality = "high"
 # Apply TPDF dither when converting float output to lower bit-depth integer formats.
 dither_on_bitdepth_reduce = true
 
+# When source channels exceed output channels, use a weighted downmix matrix.
+# If false, channels are mapped/truncated using the legacy channel-map path.
+downmix_higher_channel_tracks = true
+
 [cast]
 # Enable sender-side fallback transcoding during casting.
 # Disabled by default to preserve source-path integrity (direct stream).
