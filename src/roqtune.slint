@@ -87,6 +87,10 @@ export component AppWindow inherits Window {
                 root.show_import_menu = false;
                 return accept;
             }
+            if (event.text == Key.Escape && root.show_library_folder_menu) {
+                root.show_library_folder_menu = false;
+                return accept;
+            }
             if (event.text == Key.Escape && root.show_settings_menu) {
                 root.show_settings_menu = false;
                 return accept;
@@ -237,6 +241,11 @@ export component AppWindow inherits Window {
     property <length> import_menu_height: 104px;
     property <length> import_menu_x: 0px;
     property <length> import_menu_y: 0px;
+    in-out property <bool> show_library_folder_menu: false;
+    property <length> library_folder_menu_width: 196px;
+    property <length> library_folder_menu_height: 70px;
+    property <length> library_folder_menu_x: 0px;
+    property <length> library_folder_menu_y: 0px;
     in-out property <bool> show_settings_menu: false;
     property <length> settings_menu_x: 0px;
     property <length> settings_menu_y: 0px;
@@ -590,6 +599,7 @@ export component AppWindow inherits Window {
                         action-invoked(action-id) => {
                             if (action-id == 1 && root.collection_mode == 0) {
                                 root.show_settings_menu = false;
+                                root.show_library_folder_menu = false;
                                 root.show_import_menu = true;
                                 root.import_menu_x = min(
                                     root.width - root.import_menu_width,
@@ -614,6 +624,7 @@ export component AppWindow inherits Window {
                             if (action-id == 9) { root.open_layout_editor(); }
                             if (action-id == 10) {
                                 root.show_import_menu = false;
+                                root.show_library_folder_menu = false;
                                 root.show_settings_menu = true;
                                 root.settings_menu_x = min(root.width - 220px, max(8px, cluster-panel.x_px * 1px + 8px));
                                 root.settings_menu_y = min(
@@ -712,6 +723,7 @@ export component AppWindow inherits Window {
                                 }
                                 clicked => {
                                     root.show_settings_menu = false;
+                                    root.show_library_folder_menu = false;
                                     root.show_import_menu = true;
                                     root.import_menu_x = min(
                                         root.width - root.import_menu_width,
@@ -785,6 +797,32 @@ export component AppWindow inherits Window {
                                     root.tooltip_hover_changed(is-hovered, tooltip, anchor-x-px, anchor-y-px);
                                 }
                                 clicked => { root.open_global_library_search(); }
+                            }
+                            library-switcher-folder-button := PlayerButton {
+                                icon-text: "+";
+                                font-size: 18px;
+                                tooltip-text: "Library folder options";
+                                tooltip_hover_changed(is-hovered, tooltip, anchor-x-px, anchor-y-px) => {
+                                    root.tooltip_hover_changed(is-hovered, tooltip, anchor-x-px, anchor-y-px);
+                                }
+                                clicked => {
+                                    root.show_settings_menu = false;
+                                    root.show_import_menu = false;
+                                    root.show_library_folder_menu = true;
+                                    root.library_folder_menu_x = min(
+                                        root.width - root.library_folder_menu_width,
+                                        max(8px, library-switcher-folder-button.absolute-position.x)
+                                    );
+                                    root.library_folder_menu_y = min(
+                                        root.height - root.library_folder_menu_height,
+                                        max(
+                                            8px,
+                                            library-switcher-folder-button.absolute-position.y
+                                                + library-switcher-folder-button.height
+                                                + 4px
+                                        )
+                                    );
+                                }
                             }
                             PlayerButton {
                                 icon-text: "↻";
@@ -2983,6 +3021,78 @@ export component AppWindow inherits Window {
         }
     }
 
+    if root.show_library_folder_menu : Rectangle {
+        z: 149;
+        background: transparent;
+        TouchArea {
+            clicked => {
+                root.show_library_folder_menu = false;
+            }
+        }
+    }
+
+    if root.show_library_folder_menu : Rectangle {
+        z: 150;
+        x: root.library_folder_menu_x;
+        y: root.library_folder_menu_y;
+        width: root.library_folder_menu_width;
+        height: root.library_folder_menu_height;
+        border-radius: 6px;
+        background: root.ui_dark_mode ? #262626 : #f4f7fb;
+        border-width: 1px;
+        border-color: root.theme_border;
+
+        VerticalLayout {
+            padding: 4px;
+            spacing: 2px;
+
+            Rectangle {
+                height: 28px;
+                border-radius: 4px;
+                background: library-menu-add-folder-ta.has-hover
+                    ? (root.ui_dark_mode ? #363636 : #dbe5f1)
+                    : transparent;
+                Text {
+                    x: 10px;
+                    width: parent.width - 20px;
+                    text: "Add folder";
+                    color: root.theme_text_primary;
+                    font-size: 12px;
+                    vertical-alignment: center;
+                }
+                library-menu-add-folder-ta := TouchArea {
+                    clicked => {
+                        root.show_library_folder_menu = false;
+                        root.library_add_folder();
+                    }
+                }
+            }
+
+            Rectangle {
+                height: 28px;
+                border-radius: 4px;
+                background: library-menu-configure-folders-ta.has-hover
+                    ? (root.ui_dark_mode ? #363636 : #dbe5f1)
+                    : transparent;
+                Text {
+                    x: 10px;
+                    width: parent.width - 20px;
+                    text: "Configure folders ...";
+                    color: root.theme_text_primary;
+                    font-size: 12px;
+                    vertical-alignment: center;
+                }
+                library-menu-configure-folders-ta := TouchArea {
+                    clicked => {
+                        root.show_library_folder_menu = false;
+                        root.open_settings();
+                        root.settings_dialog_tab_index = 2;
+                    }
+                }
+            }
+        }
+    }
+
     if root.show_import_menu : Rectangle {
         z: 149;
         background: transparent;
@@ -4532,6 +4642,7 @@ export component AppWindow inherits Window {
             && root.show_tooltips_enabled
             && root.tooltip_text != ""
             && !root.show_settings_menu
+            && !root.show_library_folder_menu
             && !root.show_import_menu
             && !root.show_library_context_menu
             && !root.show_playlist_track_context_menu

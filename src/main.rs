@@ -6133,6 +6133,26 @@ mod tests {
     }
 
     #[test]
+    fn test_library_folder_menu_exposes_add_and_configure_actions() {
+        let slint_ui = include_str!("roqtune.slint");
+        assert!(
+            slint_ui.contains("in-out property <bool> show_library_folder_menu: false;"),
+            "App window should expose library folder menu state"
+        );
+        assert!(
+            slint_ui.contains("text: \"Add folder\"")
+                && slint_ui.contains("root.library_add_folder();"),
+            "Library folder menu should expose a direct Add folder action"
+        );
+        assert!(
+            slint_ui.contains("text: \"Configure folders ...\"")
+                && slint_ui.contains("root.open_settings();")
+                && slint_ui.contains("root.settings_dialog_tab_index = 2;"),
+            "Library folder menu should open settings directly to the Library tab"
+        );
+    }
+
+    #[test]
     fn test_settings_menu_exposes_layout_edit_toggle_and_settings_entry() {
         let slint_ui = include_str!("roqtune.slint");
         assert!(
