@@ -115,6 +115,7 @@ pub struct UiManager {
     library_scroll_positions: HashMap<LibraryScrollViewKey, usize>,
     pending_library_scroll_restore_row: Option<usize>,
     library_scroll_restore_token: i32,
+    library_scroll_center_token: i32,
     library_artist_row_indices: HashMap<String, Vec<usize>>,
     library_last_prefetch_entities: Vec<protocol::LibraryEnrichmentEntity>,
     library_last_background_entities: Vec<protocol::LibraryEnrichmentEntity>,
@@ -900,6 +901,7 @@ impl UiManager {
             library_scroll_positions: HashMap::new(),
             pending_library_scroll_restore_row: None,
             library_scroll_restore_token: 0,
+            library_scroll_center_token: 0,
             library_artist_row_indices: HashMap::new(),
             library_last_prefetch_entities: Vec::new(),
             library_last_background_entities: Vec::new(),
@@ -2505,12 +2507,12 @@ impl UiManager {
         let Some(view_index) = self.map_library_source_to_view_index(source_index) else {
             return;
         };
-        self.library_scroll_restore_token = self.library_scroll_restore_token.wrapping_add(1);
-        let token = self.library_scroll_restore_token;
+        self.library_scroll_center_token = self.library_scroll_center_token.wrapping_add(1);
+        let token = self.library_scroll_center_token;
         let row = view_index as i32;
         let _ = self.ui.upgrade_in_event_loop(move |ui| {
             ui.set_library_scroll_target_row(row);
-            ui.set_library_scroll_restore_token(token);
+            ui.set_library_scroll_center_token(token);
         });
     }
 
@@ -4997,16 +4999,39 @@ impl UiManager {
     ) -> Option<protocol::PlaybackQueueRequest> {
         let preferred_source_index =
             preferred_view_index.and_then(|view_index| self.map_view_to_source_index(view_index));
-        let selected_set: HashSet<usize> = self.selected_indices.iter().copied().collect();
+        let (tracks, start_index) = Self::build_playlist_queue_snapshot(
+            &self.track_ids,
+            &self.track_paths,
+            &self.view_indices,
+            &self.selected_indices,
+            preferred_source_index,
+        )?;
+        Some(protocol::PlaybackQueueRequest {
+            source: protocol::PlaybackQueueSource::Playlist {
+                playlist_id: self.active_playlist_id.clone(),
+            },
+            tracks,
+            start_index,
+        })
+    }
+
+    fn build_playlist_queue_snapshot(
+        track_ids: &[String],
+        track_paths: &[PathBuf],
+        view_indices: &[usize],
+        selected_indices: &[usize],
+        preferred_source_index: Option<usize>,
+    ) -> Option<(Vec<protocol::RestoredTrack>, usize)> {
+        let selected_set: HashSet<usize> = selected_indices.iter().copied().collect();
         let mut selected_start_index = None;
         let mut explicit_start_index = None;
-        let mut tracks = Vec::with_capacity(self.view_indices.len());
+        let mut tracks = Vec::with_capacity(view_indices.len());
 
-        for source_index in self.view_indices.iter().copied() {
-            let Some(track_id) = self.track_ids.get(source_index) else {
+        for source_index in view_indices.iter().copied() {
+            let Some(track_id) = track_ids.get(source_index) else {
                 continue;
             };
-            let Some(track_path) = self.track_paths.get(source_index) else {
+            let Some(track_path) = track_paths.get(source_index) else {
                 continue;
             };
             let queue_index = tracks.len();
@@ -5027,12 +5052,25 @@ impl UiManager {
         }
 
         let start_index = explicit_start_index.or(selected_start_index).unwrap_or(0);
-        Some(protocol::PlaybackQueueRequest {
-            source: protocol::PlaybackQueueSource::Playlist {
-                playlist_id: self.active_playlist_id.clone(),
-            },
-            tracks,
-            start_index,
+        Some((tracks, start_index))
+    }
+
+    fn resolve_active_playing_source_index(
+        track_paths: &[PathBuf],
+        is_playing_active_playlist: bool,
+        playing_index: Option<usize>,
+        playing_track_path: Option<&PathBuf>,
+    ) -> Option<usize> {
+        if !is_playing_active_playlist {
+            return None;
+        }
+        if let Some(index) = playing_index.filter(|index| *index < track_paths.len()) {
+            return Some(index);
+        }
+        playing_track_path.and_then(|playing_path| {
+            track_paths
+                .iter()
+                .position(|candidate| candidate == playing_path)
         })
     }
 
@@ -6243,19 +6281,12 @@ impl UiManager {
                             self.selected_indices = selected_indices_clone.clone();
                             let is_playing_active_playlist =
                                 playing_playlist_id.as_ref() == Some(&self.active_playlist_id);
-                            let active_playing_index_from_path =
-                                playing_track_path.as_ref().and_then(|playing_path| {
-                                    self.track_paths
-                                        .iter()
-                                        .position(|candidate| candidate == playing_path)
-                                });
-                            self.active_playing_index = if is_playing_active_playlist {
-                                active_playing_index_from_path.or_else(|| {
-                                    playing_index.filter(|index| *index < self.track_paths.len())
-                                })
-                            } else {
-                                None
-                            };
+                            self.active_playing_index = Self::resolve_active_playing_source_index(
+                                &self.track_paths,
+                                is_playing_active_playlist,
+                                playing_index,
+                                playing_track_path.as_ref(),
+                            );
 
                             let previous_playing_track_path =
                                 self.current_playing_track_path.clone();
@@ -6804,6 +6835,93 @@ mod tests {
                 PathBuf::from("b.mp3")
             ]
         );
+    }
+
+    #[test]
+    fn test_build_playlist_queue_snapshot_uses_rendered_view_order() {
+        let track_ids = vec![
+            "t0".to_string(),
+            "t1".to_string(),
+            "t2".to_string(),
+            "t3".to_string(),
+        ];
+        let track_paths = vec![
+            PathBuf::from("a.mp3"),
+            PathBuf::from("b.mp3"),
+            PathBuf::from("c.mp3"),
+            PathBuf::from("d.mp3"),
+        ];
+        let view_indices = vec![2usize, 0, 3];
+        let selected_indices = vec![0usize];
+
+        let (tracks, start_index) = UiManager::build_playlist_queue_snapshot(
+            &track_ids,
+            &track_paths,
+            &view_indices,
+            &selected_indices,
+            None,
+        )
+        .expect("queue snapshot should exist");
+
+        assert_eq!(tracks.len(), 3);
+        assert_eq!(tracks[0].id, "t2");
+        assert_eq!(tracks[1].id, "t0");
+        assert_eq!(tracks[2].id, "t3");
+        assert_eq!(start_index, 1);
+    }
+
+    #[test]
+    fn test_build_playlist_queue_snapshot_preferred_source_index_overrides_selection() {
+        let track_ids = vec!["t0".to_string(), "t1".to_string(), "t2".to_string()];
+        let track_paths = vec![
+            PathBuf::from("a.mp3"),
+            PathBuf::from("b.mp3"),
+            PathBuf::from("c.mp3"),
+        ];
+        let view_indices = vec![2usize, 0, 1];
+        let selected_indices = vec![0usize, 1];
+
+        let (_, start_index) = UiManager::build_playlist_queue_snapshot(
+            &track_ids,
+            &track_paths,
+            &view_indices,
+            &selected_indices,
+            Some(2),
+        )
+        .expect("queue snapshot should exist");
+
+        assert_eq!(start_index, 0);
+    }
+
+    #[test]
+    fn test_resolve_active_playing_source_index_prefers_playing_index_over_path_match() {
+        let track_paths = vec![
+            PathBuf::from("a.mp3"),
+            PathBuf::from("b.mp3"),
+            PathBuf::from("a.mp3"),
+            PathBuf::from("c.mp3"),
+        ];
+        let playing_path = PathBuf::from("a.mp3");
+        let resolved = UiManager::resolve_active_playing_source_index(
+            &track_paths,
+            true,
+            Some(2),
+            Some(&playing_path),
+        );
+        assert_eq!(resolved, Some(2));
+    }
+
+    #[test]
+    fn test_resolve_active_playing_source_index_falls_back_to_path_when_index_missing() {
+        let track_paths = vec![PathBuf::from("a.mp3"), PathBuf::from("b.mp3")];
+        let playing_path = PathBuf::from("b.mp3");
+        let resolved = UiManager::resolve_active_playing_source_index(
+            &track_paths,
+            true,
+            None,
+            Some(&playing_path),
+        );
+        assert_eq!(resolved, Some(1));
     }
 
     #[test]

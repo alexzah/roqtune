@@ -2686,6 +2686,58 @@ mod tests {
     }
 
     #[test]
+    fn test_repeat_playlist_does_not_wrap_early_for_long_queue() {
+        let mut harness = PlaylistManagerHarness::new();
+        let mut ids = Vec::new();
+        for index in 0..30usize {
+            let (id, _) = harness.add_track(&format!("pm_repeat_long_{index}"));
+            ids.push(id);
+        }
+        harness.drain_messages();
+
+        harness.start_playlist_queue_from_ids(&ids, 0);
+        let _ = wait_for_message(&mut harness.receiver, Duration::from_secs(1), |message| {
+            matches!(
+                message,
+                protocol::Message::Playlist(protocol::PlaylistMessage::PlaylistIndicesChanged {
+                    is_playing: true,
+                    playing_index: Some(0),
+                    ..
+                })
+            )
+        });
+
+        harness.send(protocol::Message::Playlist(
+            protocol::PlaylistMessage::ToggleRepeat,
+        ));
+        let _ = wait_for_message(&mut harness.receiver, Duration::from_secs(1), |message| {
+            matches!(
+                message,
+                protocol::Message::Playlist(protocol::PlaylistMessage::RepeatModeChanged(
+                    protocol::RepeatMode::Playlist
+                ))
+            )
+        });
+
+        for index in 0..10usize {
+            harness.send(protocol::Message::Playback(
+                protocol::PlaybackMessage::TrackFinished(ids[index].clone()),
+            ));
+            let expected_next_index = index + 1;
+            let _ = wait_for_message(&mut harness.receiver, Duration::from_secs(1), |message| {
+                matches!(
+                    message,
+                    protocol::Message::Playlist(protocol::PlaylistMessage::PlaylistIndicesChanged {
+                        is_playing: true,
+                        playing_index: Some(next_index),
+                        ..
+                    }) if *next_index == expected_next_index
+                )
+            });
+        }
+    }
+
+    #[test]
     fn test_repeat_track_replays_same_track_on_finish() {
         let mut harness = PlaylistManagerHarness::new();
         let (id0, _) = harness.add_track("pm_repeat_track_0");

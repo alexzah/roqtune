@@ -242,6 +242,7 @@ export component AppWindow inherits Window {
     in-out property <int> playlist_scroll_center_token: 0;
     in-out property <int> library_scroll_target_row: 0;
     in-out property <int> library_scroll_restore_token: 0;
+    in-out property <int> library_scroll_center_token: 0;
     in-out property <[LibraryRowData]> library_model: [];
     in-out property <bool> show_library_context_menu: false;
     property <length> library_context_menu_x: 0px;
@@ -1270,10 +1271,16 @@ export component AppWindow inherits Window {
                             property <int> center-token: root.playlist_scroll_center_token;
                             changed center-token => {
                                 let row-height = self.row-height;
+                                let scroll-offset-y = max(0px, -self.viewport-y);
+                                let first-visible-row = max(0, floor(scroll-offset-y / row-height));
                                 let visible-rows = max(
                                     1,
                                     floor((self.height + row-height - 1px) / row-height)
                                 );
+                                if root.playlist_scroll_target_row >= first-visible-row
+                                        && root.playlist_scroll_target_row < first-visible-row + visible-rows {
+                                    return;
+                                }
                                 let max-first-row = max(0, root.track_model.length - visible-rows);
                                 let centered-first-row = min(
                                     max-first-row,
@@ -1638,9 +1645,27 @@ export component AppWindow inherits Window {
                                 : root.library_root_index == 0 ? 32
                                 : 34;
                             property <int> restore-token: root.library_scroll_restore_token;
+                            property <int> center-token: root.library_scroll_center_token;
                             changed restore-token => {
                                 let clamped-row = min(max(0, root.library_scroll_target_row), max(0, root.library_model.length - 1));
                                 self.viewport-y = 0px - clamped-row * (self.row-height-px * 1px);
+                            }
+                            changed center-token => {
+                                let row-height = self.row-height-px * 1px;
+                                let clamped-row = min(max(0, root.library_scroll_target_row), max(0, root.library_model.length - 1));
+                                let scroll-offset-y = max(0px, -self.viewport-y);
+                                let first-visible-row = max(0, floor(scroll-offset-y / row-height));
+                                let visible-rows = max(1, floor((self.height + row-height - 1px) / row-height));
+                                if clamped-row >= first-visible-row
+                                        && clamped-row < first-visible-row + visible-rows {
+                                    return;
+                                }
+                                let max-first-row = max(0, root.library_model.length - visible-rows);
+                                let centered-first-row = min(
+                                    max-first-row,
+                                    max(0, clamped-row - floor(visible-rows / 2))
+                                );
+                                self.viewport-y = 0px - centered-first-row * row-height;
                             }
                             changed viewport-y => {
                                 let scroll-offset-y = max(0px, -self.viewport-y);
