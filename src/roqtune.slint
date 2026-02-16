@@ -237,6 +237,8 @@ export component AppWindow inherits Window {
     in-out property <string> viewer_panel_settings_target_leaf_id: "";
     in-out property <int> viewer_panel_settings_target_panel_kind: root.panel_kind_none;
     in-out property <int> viewer_panel_settings_display_priority_index: 0;
+    in-out property <int> viewer_panel_settings_metadata_source_index: 0;
+    in-out property <int> viewer_panel_settings_image_source_index: 0;
     in-out property <length> viewer_panel_settings_x: 0px;
     in-out property <length> viewer_panel_settings_y: 0px;
     property <[string]> viewer_panel_display_priority_options: [
@@ -245,6 +247,15 @@ export component AppWindow inherits Window {
         "Prefer Now Playing",
         "Selection Only",
         "Now Playing Only"
+    ];
+    property <[string]> viewer_panel_metadata_source_options: [
+        "Track (Default)",
+        "Album Description",
+        "Artist Bio"
+    ];
+    property <[string]> viewer_panel_image_source_options: [
+        "Album Art (Default)",
+        "Artist Image"
     ];
     in-out property <int> sidebar_width_px: 220;
     in-out property <int> collection_mode: 0; // 0: Playlist, 1: Library
@@ -344,7 +355,7 @@ export component AppWindow inherits Window {
         "Playlist Switcher",
         "Track List",
         "Metadata Viewer",
-        "Album Art Viewer",
+        "Image Metadata Viewer",
         "Status Bar"
     ];
     property <[int]> layout_panel_submenu_codes: [
@@ -460,7 +471,7 @@ export component AppWindow inherits Window {
             return "Metadata Viewer";
         }
         if panel-kind == root.panel_kind_album_art_viewer {
-            return "Album Art Viewer";
+            return "Image Metadata Viewer";
         }
         if panel-kind == root.panel_kind_spacer {
             return "Spacer";
@@ -2729,7 +2740,7 @@ export component AppWindow inherits Window {
         x: root.viewer_panel_settings_x;
         y: root.viewer_panel_settings_y;
         width: 360px;
-        height: 138px;
+        height: 176px;
         border-radius: 6px;
         background: #262626;
         border-width: 1px;
@@ -2741,7 +2752,7 @@ export component AppWindow inherits Window {
 
             Text {
                 text: (root.viewer_panel_settings_target_panel_kind == root.panel_kind_album_art_viewer
-                    ? "Album Art Viewer"
+                    ? "Image Metadata Viewer"
                     : "Metadata Viewer") + " Settings";
                 color: #eee;
                 font-size: 13px;
@@ -2785,6 +2796,72 @@ export component AppWindow inherits Window {
                             root.set_viewer_panel_display_priority(
                                 root.viewer_panel_settings_target_leaf_id,
                                 root.viewer_panel_settings_display_priority_index
+                            );
+                        }
+                    }
+                }
+            }
+
+            if root.viewer_panel_settings_target_panel_kind == root.panel_kind_metadata_viewer : HorizontalLayout {
+                spacing: 8px;
+                Rectangle {
+                    horizontal-stretch: 1;
+                    height: 24px;
+                    background: transparent;
+                    Text {
+                        text: "Metadata Source";
+                        color: #ddd;
+                        font-size: 12px;
+                        vertical-alignment: center;
+                        horizontal-alignment: left;
+                        width: parent.width;
+                    }
+                }
+                Rectangle {
+                    width: 190px;
+                    height: 30px;
+                    ComboBox {
+                        width: parent.width;
+                        height: parent.height;
+                        model: root.viewer_panel_metadata_source_options;
+                        current-index <=> root.viewer_panel_settings_metadata_source_index;
+                        selected(_) => {
+                            root.set_viewer_panel_metadata_source(
+                                root.viewer_panel_settings_target_leaf_id,
+                                root.viewer_panel_settings_metadata_source_index
+                            );
+                        }
+                    }
+                }
+            }
+
+            if root.viewer_panel_settings_target_panel_kind == root.panel_kind_album_art_viewer : HorizontalLayout {
+                spacing: 8px;
+                Rectangle {
+                    horizontal-stretch: 1;
+                    height: 24px;
+                    background: transparent;
+                    Text {
+                        text: "Image Source";
+                        color: #ddd;
+                        font-size: 12px;
+                        vertical-alignment: center;
+                        horizontal-alignment: left;
+                        width: parent.width;
+                    }
+                }
+                Rectangle {
+                    width: 190px;
+                    height: 30px;
+                    ComboBox {
+                        width: parent.width;
+                        height: parent.height;
+                        model: root.viewer_panel_image_source_options;
+                        current-index <=> root.viewer_panel_settings_image_source_index;
+                        selected(_) => {
+                            root.set_viewer_panel_image_source(
+                                root.viewer_panel_settings_target_leaf_id,
+                                root.viewer_panel_settings_image_source_index
                             );
                         }
                     }
@@ -4544,6 +4621,8 @@ export component AppWindow inherits Window {
     callback add_control_cluster_button(string, int);
     callback remove_control_cluster_button(string, int);
     callback set_viewer_panel_display_priority(string, int);
+    callback set_viewer_panel_metadata_source(string, int);
+    callback set_viewer_panel_image_source(string, int);
     callback window_resized(int, int);
     callback layout_workspace_resized(int, int);
     callback open_layout_editor();

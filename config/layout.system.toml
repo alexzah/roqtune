@@ -79,16 +79,25 @@ custom = false
 # leaf_id = "n8"
 # actions = [1, 2, 3]
 #
-# Optional per-leaf metadata/album-art viewer behavior overrides.
+# Optional per-leaf metadata/image-metadata viewer behavior overrides.
 # display_priority options:
 # - "default"
 # - "prefer_selection"
 # - "prefer_now_playing"
 # - "selection_only"
 # - "now_playing_only"
+# metadata_source options:
+# - "track"
+# - "album_description"
+# - "artist_bio"
+# image_source options:
+# - "album_art"
+# - "artist_image"
 # [[viewer_panel_instances]]
 # leaf_id = "l1"
 # display_priority = "default"
+# metadata_source = "track"
+# image_source = "album_art"
 
 [root]
 node_type = "split"

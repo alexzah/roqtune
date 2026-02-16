@@ -39,8 +39,8 @@ use db_manager::DbManager;
 use layout::{
     add_root_leaf_if_empty, compute_tree_layout_metrics, delete_leaf, first_leaf_id,
     replace_leaf_panel, sanitize_layout_config, set_split_ratio, split_leaf, LayoutConfig,
-    LayoutNode, LayoutPanelKind, SplitAxis, ViewerPanelDisplayPriority, ViewerPanelInstanceConfig,
-    SPLITTER_THICKNESS_PX,
+    LayoutNode, LayoutPanelKind, SplitAxis, ViewerPanelDisplayPriority, ViewerPanelImageSource,
+    ViewerPanelInstanceConfig, ViewerPanelMetadataSource, SPLITTER_THICKNESS_PX,
 };
 use library_enrichment_manager::LibraryEnrichmentManager;
 use library_manager::LibraryManager;
@@ -987,18 +987,30 @@ fn sanitize_viewer_panel_instances(
 ) -> Vec<ViewerPanelInstanceConfig> {
     let leaf_ids = viewer_panel_leaf_ids(layout);
     let mut priority_by_leaf: HashMap<&str, ViewerPanelDisplayPriority> = HashMap::new();
+    let mut metadata_source_by_leaf: HashMap<&str, ViewerPanelMetadataSource> = HashMap::new();
+    let mut image_source_by_leaf: HashMap<&str, ViewerPanelImageSource> = HashMap::new();
     for instance in instances {
         let leaf_id = instance.leaf_id.trim();
         if leaf_id.is_empty() {
             continue;
         }
         priority_by_leaf.insert(leaf_id, instance.display_priority);
+        metadata_source_by_leaf.insert(leaf_id, instance.metadata_source);
+        image_source_by_leaf.insert(leaf_id, instance.image_source);
     }
 
     leaf_ids
         .into_iter()
         .map(|leaf_id| ViewerPanelInstanceConfig {
             display_priority: priority_by_leaf
+                .get(leaf_id.as_str())
+                .copied()
+                .unwrap_or_default(),
+            metadata_source: metadata_source_by_leaf
+                .get(leaf_id.as_str())
+                .copied()
+                .unwrap_or_default(),
+            image_source: image_source_by_leaf
                 .get(leaf_id.as_str())
                 .copied()
                 .unwrap_or_default(),
@@ -1433,7 +1445,7 @@ fn layout_panel_options() -> Vec<slint::SharedString> {
         "Playlist Switcher".into(),
         "Track List".into(),
         "Metadata Viewer".into(),
-        "Album Art Viewer".into(),
+        "Image Metadata Viewer".into(),
         "Spacer".into(),
         "Status Bar".into(),
         "Import Button Cluster".into(),
@@ -1498,6 +1510,66 @@ fn remove_button_cluster_instance_for_leaf(
     instances.retain(|instance| instance.leaf_id != leaf_id);
 }
 
+fn upsert_viewer_panel_display_priority_for_leaf(
+    instances: &mut Vec<ViewerPanelInstanceConfig>,
+    leaf_id: &str,
+    display_priority: ViewerPanelDisplayPriority,
+) {
+    if let Some(existing) = instances
+        .iter_mut()
+        .find(|instance| instance.leaf_id == leaf_id)
+    {
+        existing.display_priority = display_priority;
+        return;
+    }
+    instances.push(ViewerPanelInstanceConfig {
+        leaf_id: leaf_id.to_string(),
+        display_priority,
+        metadata_source: ViewerPanelMetadataSource::default(),
+        image_source: ViewerPanelImageSource::default(),
+    });
+}
+
+fn upsert_viewer_panel_metadata_source_for_leaf(
+    instances: &mut Vec<ViewerPanelInstanceConfig>,
+    leaf_id: &str,
+    metadata_source: ViewerPanelMetadataSource,
+) {
+    if let Some(existing) = instances
+        .iter_mut()
+        .find(|instance| instance.leaf_id == leaf_id)
+    {
+        existing.metadata_source = metadata_source;
+        return;
+    }
+    instances.push(ViewerPanelInstanceConfig {
+        leaf_id: leaf_id.to_string(),
+        display_priority: ViewerPanelDisplayPriority::default(),
+        metadata_source,
+        image_source: ViewerPanelImageSource::default(),
+    });
+}
+
+fn upsert_viewer_panel_image_source_for_leaf(
+    instances: &mut Vec<ViewerPanelInstanceConfig>,
+    leaf_id: &str,
+    image_source: ViewerPanelImageSource,
+) {
+    if let Some(existing) = instances
+        .iter_mut()
+        .find(|instance| instance.leaf_id == leaf_id)
+    {
+        existing.image_source = image_source;
+        return;
+    }
+    instances.push(ViewerPanelInstanceConfig {
+        leaf_id: leaf_id.to_string(),
+        display_priority: ViewerPanelDisplayPriority::default(),
+        metadata_source: ViewerPanelMetadataSource::default(),
+        image_source,
+    });
+}
+
 fn apply_control_cluster_menu_actions_for_leaf(ui: &AppWindow, config: &Config, leaf_id: &str) {
     let actions =
         button_cluster_actions_for_leaf(&config.ui.layout.button_cluster_instances, leaf_id);
@@ -1549,14 +1621,69 @@ fn viewer_panel_display_priority_from_code(priority: i32) -> ViewerPanelDisplayP
     }
 }
 
+fn viewer_panel_metadata_source_to_code(source: ViewerPanelMetadataSource) -> i32 {
+    match source {
+        ViewerPanelMetadataSource::Track => 0,
+        ViewerPanelMetadataSource::AlbumDescription => 1,
+        ViewerPanelMetadataSource::ArtistBio => 2,
+    }
+}
+
+fn viewer_panel_metadata_source_from_code(source: i32) -> ViewerPanelMetadataSource {
+    match source {
+        1 => ViewerPanelMetadataSource::AlbumDescription,
+        2 => ViewerPanelMetadataSource::ArtistBio,
+        _ => ViewerPanelMetadataSource::Track,
+    }
+}
+
+fn viewer_panel_image_source_to_code(source: ViewerPanelImageSource) -> i32 {
+    match source {
+        ViewerPanelImageSource::AlbumArt => 0,
+        ViewerPanelImageSource::ArtistImage => 1,
+    }
+}
+
+fn viewer_panel_image_source_from_code(source: i32) -> ViewerPanelImageSource {
+    match source {
+        1 => ViewerPanelImageSource::ArtistImage,
+        _ => ViewerPanelImageSource::AlbumArt,
+    }
+}
+
+fn viewer_panel_instance_for_leaf<'a>(
+    instances: &'a [ViewerPanelInstanceConfig],
+    leaf_id: &str,
+) -> Option<&'a ViewerPanelInstanceConfig> {
+    instances
+        .iter()
+        .find(|instance| instance.leaf_id == leaf_id)
+}
+
 fn viewer_panel_display_priority_for_leaf(
     instances: &[ViewerPanelInstanceConfig],
     leaf_id: &str,
 ) -> ViewerPanelDisplayPriority {
-    instances
-        .iter()
-        .find(|instance| instance.leaf_id == leaf_id)
+    viewer_panel_instance_for_leaf(instances, leaf_id)
         .map(|instance| instance.display_priority)
+        .unwrap_or_default()
+}
+
+fn viewer_panel_metadata_source_for_leaf(
+    instances: &[ViewerPanelInstanceConfig],
+    leaf_id: &str,
+) -> ViewerPanelMetadataSource {
+    viewer_panel_instance_for_leaf(instances, leaf_id)
+        .map(|instance| instance.metadata_source)
+        .unwrap_or_default()
+}
+
+fn viewer_panel_image_source_for_leaf(
+    instances: &[ViewerPanelInstanceConfig],
+    leaf_id: &str,
+) -> ViewerPanelImageSource {
+    viewer_panel_instance_for_leaf(instances, leaf_id)
+        .map(|instance| instance.image_source)
         .unwrap_or_default()
 }
 
@@ -1593,6 +1720,11 @@ fn apply_viewer_panel_views_to_ui(
                     &config.ui.layout.viewer_panel_instances,
                     &leaf.id,
                 ));
+            let metadata_source =
+                viewer_panel_metadata_source_to_code(viewer_panel_metadata_source_for_leaf(
+                    &config.ui.layout.viewer_panel_instances,
+                    &leaf.id,
+                ));
             if let Some(existing) = existing_metadata_by_leaf.get(&leaf.id) {
                 return LayoutMetadataViewerPanelModel {
                     leaf_id: leaf.id.clone().into(),
@@ -1602,6 +1734,7 @@ fn apply_viewer_panel_views_to_ui(
                     height_px: leaf.height,
                     visible: true,
                     display_priority,
+                    metadata_source,
                     display_title: existing.display_title.clone(),
                     display_artist: existing.display_artist.clone(),
                     display_album: existing.display_album.clone(),
@@ -1617,6 +1750,7 @@ fn apply_viewer_panel_views_to_ui(
                 height_px: leaf.height,
                 visible: true,
                 display_priority,
+                metadata_source,
                 display_title: default_display_title.clone(),
                 display_artist: default_display_artist.clone(),
                 display_album: default_display_album.clone(),
@@ -1636,6 +1770,11 @@ fn apply_viewer_panel_views_to_ui(
                     &config.ui.layout.viewer_panel_instances,
                     &leaf.id,
                 ));
+            let image_source =
+                viewer_panel_image_source_to_code(viewer_panel_image_source_for_leaf(
+                    &config.ui.layout.viewer_panel_instances,
+                    &leaf.id,
+                ));
             if let Some(existing) = existing_album_art_by_leaf.get(&leaf.id) {
                 return LayoutAlbumArtViewerPanelModel {
                     leaf_id: leaf.id.clone().into(),
@@ -1645,6 +1784,7 @@ fn apply_viewer_panel_views_to_ui(
                     height_px: leaf.height,
                     visible: true,
                     display_priority,
+                    image_source,
                     art_source: existing.art_source.clone(),
                     has_art: existing.has_art,
                 };
@@ -1657,6 +1797,7 @@ fn apply_viewer_panel_views_to_ui(
                 height_px: leaf.height,
                 visible: true,
                 display_priority,
+                image_source,
                 art_source: default_art_source.clone(),
                 has_art: default_has_art,
             }
@@ -3888,14 +4029,24 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         {
             return;
         }
-        let priority_index = {
+        let (priority_index, metadata_source_index, image_source_index) = {
             let state = config_state_clone
                 .lock()
                 .expect("config state lock poisoned");
-            viewer_panel_display_priority_to_code(viewer_panel_display_priority_for_leaf(
-                &state.ui.layout.viewer_panel_instances,
-                &leaf_id,
-            ))
+            (
+                viewer_panel_display_priority_to_code(viewer_panel_display_priority_for_leaf(
+                    &state.ui.layout.viewer_panel_instances,
+                    &leaf_id,
+                )),
+                viewer_panel_metadata_source_to_code(viewer_panel_metadata_source_for_leaf(
+                    &state.ui.layout.viewer_panel_instances,
+                    &leaf_id,
+                )),
+                viewer_panel_image_source_to_code(viewer_panel_image_source_for_leaf(
+                    &state.ui.layout.viewer_panel_instances,
+                    &leaf_id,
+                )),
+            )
         };
         if let Some(ui) = ui_handle_clone.upgrade() {
             ui.set_control_cluster_menu_target_leaf_id("".into());
@@ -3903,6 +4054,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             ui.set_viewer_panel_settings_target_leaf_id(leaf_id.clone());
             ui.set_viewer_panel_settings_target_panel_kind(panel_kind);
             ui.set_viewer_panel_settings_display_priority_index(priority_index);
+            ui.set_viewer_panel_settings_metadata_source_index(metadata_source_index);
+            ui.set_viewer_panel_settings_image_source_index(image_source_index);
             ui.set_viewer_panel_settings_x(x_px.max(8) as f32);
             ui.set_viewer_panel_settings_y(y_px.max(8) as f32);
             ui.set_show_viewer_panel_settings_menu(true);
@@ -3927,24 +4080,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 .lock()
                 .expect("config state lock poisoned");
             let mut next_config = state.clone();
-            if let Some(instance) = next_config
-                .ui
-                .layout
-                .viewer_panel_instances
-                .iter_mut()
-                .find(|instance| instance.leaf_id == leaf_id_text)
-            {
-                instance.display_priority = display_priority;
-            } else {
-                next_config
-                    .ui
-                    .layout
-                    .viewer_panel_instances
-                    .push(ViewerPanelInstanceConfig {
-                        leaf_id: leaf_id_text.clone(),
-                        display_priority,
-                    });
-            }
+            upsert_viewer_panel_display_priority_for_leaf(
+                &mut next_config.ui.layout.viewer_panel_instances,
+                &leaf_id_text,
+                display_priority,
+            );
             next_config = sanitize_config(next_config);
             *state = next_config.clone();
             let (workspace_width_px, workspace_height_px) =
@@ -3969,10 +4109,156 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         )));
         if let Some(ui) = ui_handle_clone.upgrade() {
             apply_layout_to_ui(&ui, &next_config, workspace_width_px, workspace_height_px);
-            ui.set_viewer_panel_settings_target_leaf_id(leaf_id_text.into());
+            ui.set_viewer_panel_settings_target_leaf_id(leaf_id_text.clone().into());
             ui.set_viewer_panel_settings_display_priority_index(
                 viewer_panel_display_priority_to_code(display_priority),
             );
+            ui.set_viewer_panel_settings_metadata_source_index(
+                viewer_panel_metadata_source_to_code(viewer_panel_metadata_source_for_leaf(
+                    &next_config.ui.layout.viewer_panel_instances,
+                    &leaf_id_text,
+                )),
+            );
+            ui.set_viewer_panel_settings_image_source_index(viewer_panel_image_source_to_code(
+                viewer_panel_image_source_for_leaf(
+                    &next_config.ui.layout.viewer_panel_instances,
+                    &leaf_id_text,
+                ),
+            ));
+            ui.set_show_viewer_panel_settings_menu(true);
+        }
+    });
+
+    let bus_sender_clone = bus_sender.clone();
+    let config_state_clone = Arc::clone(&config_state);
+    let output_options_clone = Arc::clone(&output_options);
+    let runtime_output_override_clone = Arc::clone(&runtime_output_override);
+    let config_file_clone = config_file.clone();
+    let layout_workspace_size_clone = Arc::clone(&layout_workspace_size);
+    let ui_handle_clone = ui.as_weak().clone();
+    ui.on_set_viewer_panel_metadata_source(move |leaf_id, source_code| {
+        let leaf_id_text = leaf_id.to_string();
+        if leaf_id_text.trim().is_empty() {
+            return;
+        }
+        let metadata_source = viewer_panel_metadata_source_from_code(source_code);
+        let (next_config, workspace_width_px, workspace_height_px) = {
+            let mut state = config_state_clone
+                .lock()
+                .expect("config state lock poisoned");
+            let mut next_config = state.clone();
+            upsert_viewer_panel_metadata_source_for_leaf(
+                &mut next_config.ui.layout.viewer_panel_instances,
+                &leaf_id_text,
+                metadata_source,
+            );
+            next_config = sanitize_config(next_config);
+            *state = next_config.clone();
+            let (workspace_width_px, workspace_height_px) =
+                workspace_size_snapshot(&layout_workspace_size_clone);
+            (next_config, workspace_width_px, workspace_height_px)
+        };
+        persist_state_files_with_config_path(&next_config, &config_file_clone);
+        let output_options_snapshot = {
+            let options = output_options_clone
+                .lock()
+                .expect("output options lock poisoned");
+            options.clone()
+        };
+        let runtime_override = runtime_output_override_snapshot(&runtime_output_override_clone);
+        let runtime_config = resolve_runtime_config(
+            &next_config,
+            &output_options_snapshot,
+            Some(&runtime_override),
+        );
+        let _ = bus_sender_clone.send(Message::Config(ConfigMessage::ConfigChanged(
+            runtime_config,
+        )));
+        if let Some(ui) = ui_handle_clone.upgrade() {
+            apply_layout_to_ui(&ui, &next_config, workspace_width_px, workspace_height_px);
+            ui.set_viewer_panel_settings_target_leaf_id(leaf_id_text.clone().into());
+            ui.set_viewer_panel_settings_display_priority_index(
+                viewer_panel_display_priority_to_code(viewer_panel_display_priority_for_leaf(
+                    &next_config.ui.layout.viewer_panel_instances,
+                    &leaf_id_text,
+                )),
+            );
+            ui.set_viewer_panel_settings_metadata_source_index(
+                viewer_panel_metadata_source_to_code(metadata_source),
+            );
+            ui.set_viewer_panel_settings_image_source_index(viewer_panel_image_source_to_code(
+                viewer_panel_image_source_for_leaf(
+                    &next_config.ui.layout.viewer_panel_instances,
+                    &leaf_id_text,
+                ),
+            ));
+            ui.set_show_viewer_panel_settings_menu(true);
+        }
+    });
+
+    let bus_sender_clone = bus_sender.clone();
+    let config_state_clone = Arc::clone(&config_state);
+    let output_options_clone = Arc::clone(&output_options);
+    let runtime_output_override_clone = Arc::clone(&runtime_output_override);
+    let config_file_clone = config_file.clone();
+    let layout_workspace_size_clone = Arc::clone(&layout_workspace_size);
+    let ui_handle_clone = ui.as_weak().clone();
+    ui.on_set_viewer_panel_image_source(move |leaf_id, source_code| {
+        let leaf_id_text = leaf_id.to_string();
+        if leaf_id_text.trim().is_empty() {
+            return;
+        }
+        let image_source = viewer_panel_image_source_from_code(source_code);
+        let (next_config, workspace_width_px, workspace_height_px) = {
+            let mut state = config_state_clone
+                .lock()
+                .expect("config state lock poisoned");
+            let mut next_config = state.clone();
+            upsert_viewer_panel_image_source_for_leaf(
+                &mut next_config.ui.layout.viewer_panel_instances,
+                &leaf_id_text,
+                image_source,
+            );
+            next_config = sanitize_config(next_config);
+            *state = next_config.clone();
+            let (workspace_width_px, workspace_height_px) =
+                workspace_size_snapshot(&layout_workspace_size_clone);
+            (next_config, workspace_width_px, workspace_height_px)
+        };
+        persist_state_files_with_config_path(&next_config, &config_file_clone);
+        let output_options_snapshot = {
+            let options = output_options_clone
+                .lock()
+                .expect("output options lock poisoned");
+            options.clone()
+        };
+        let runtime_override = runtime_output_override_snapshot(&runtime_output_override_clone);
+        let runtime_config = resolve_runtime_config(
+            &next_config,
+            &output_options_snapshot,
+            Some(&runtime_override),
+        );
+        let _ = bus_sender_clone.send(Message::Config(ConfigMessage::ConfigChanged(
+            runtime_config,
+        )));
+        if let Some(ui) = ui_handle_clone.upgrade() {
+            apply_layout_to_ui(&ui, &next_config, workspace_width_px, workspace_height_px);
+            ui.set_viewer_panel_settings_target_leaf_id(leaf_id_text.clone().into());
+            ui.set_viewer_panel_settings_display_priority_index(
+                viewer_panel_display_priority_to_code(viewer_panel_display_priority_for_leaf(
+                    &next_config.ui.layout.viewer_panel_instances,
+                    &leaf_id_text,
+                )),
+            );
+            ui.set_viewer_panel_settings_metadata_source_index(
+                viewer_panel_metadata_source_to_code(viewer_panel_metadata_source_for_leaf(
+                    &next_config.ui.layout.viewer_panel_instances,
+                    &leaf_id_text,
+                )),
+            );
+            ui.set_viewer_panel_settings_image_source_index(viewer_panel_image_source_to_code(
+                image_source,
+            ));
             ui.set_show_viewer_panel_settings_menu(true);
         }
     });

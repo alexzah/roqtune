@@ -175,6 +175,30 @@ pub enum ViewerPanelDisplayPriority {
     NowPlayingOnly,
 }
 
+/// Metadata payload source for metadata viewer panels.
+#[derive(Debug, Clone, Copy, serde::Deserialize, serde::Serialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum ViewerPanelMetadataSource {
+    /// Render track metadata (title, artist, album, and tags).
+    #[default]
+    Track,
+    /// Render album internet description from enrichment payloads.
+    AlbumDescription,
+    /// Render artist internet biography from enrichment payloads.
+    ArtistBio,
+}
+
+/// Image payload source for image-metadata viewer panels.
+#[derive(Debug, Clone, Copy, serde::Deserialize, serde::Serialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum ViewerPanelImageSource {
+    /// Render track album art.
+    #[default]
+    AlbumArt,
+    /// Render artist image from enrichment payloads.
+    ArtistImage,
+}
+
 /// Per-leaf metadata/album-art viewer configuration persisted with layout preferences.
 #[derive(Debug, Clone, serde::Deserialize, serde::Serialize, PartialEq, Eq)]
 pub struct ViewerPanelInstanceConfig {
@@ -183,6 +207,12 @@ pub struct ViewerPanelInstanceConfig {
     /// Display-target resolution strategy.
     #[serde(default)]
     pub display_priority: ViewerPanelDisplayPriority,
+    /// Metadata source strategy for metadata viewers.
+    #[serde(default)]
+    pub metadata_source: ViewerPanelMetadataSource,
+    /// Image source strategy for image metadata viewers.
+    #[serde(default)]
+    pub image_source: ViewerPanelImageSource,
 }
 
 /// Persistent layout preferences.

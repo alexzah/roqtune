@@ -244,6 +244,13 @@ struct LibraryRowPresentation {
     selected: bool,
 }
 
+#[derive(Clone, Debug, Default)]
+struct ViewerTrackContext {
+    artist: String,
+    album: String,
+    album_artist: String,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum DisplayTargetPriority {
     Selection,
@@ -269,6 +276,11 @@ const VIEWER_DISPLAY_PRIORITY_PREFER_SELECTION: i32 = 1;
 const VIEWER_DISPLAY_PRIORITY_PREFER_NOW_PLAYING: i32 = 2;
 const VIEWER_DISPLAY_PRIORITY_SELECTION_ONLY: i32 = 3;
 const VIEWER_DISPLAY_PRIORITY_NOW_PLAYING_ONLY: i32 = 4;
+const VIEWER_METADATA_SOURCE_TRACK: i32 = 0;
+const VIEWER_METADATA_SOURCE_ALBUM_DESCRIPTION: i32 = 1;
+const VIEWER_METADATA_SOURCE_ARTIST_BIO: i32 = 2;
+const VIEWER_IMAGE_SOURCE_ALBUM_ART: i32 = 0;
+const VIEWER_IMAGE_SOURCE_ARTIST_IMAGE: i32 = 1;
 const LIBRARY_ITEM_KIND_SONG: i32 = 0;
 const LIBRARY_ITEM_KIND_ARTIST: i32 = 1;
 const LIBRARY_ITEM_KIND_ALBUM: i32 = 2;
@@ -2221,6 +2233,149 @@ impl UiManager {
         }
     }
 
+    fn viewer_panel_metadata_source_index(source_code: i32) -> usize {
+        match source_code {
+            VIEWER_METADATA_SOURCE_ALBUM_DESCRIPTION => 1,
+            VIEWER_METADATA_SOURCE_ARTIST_BIO => 2,
+            VIEWER_METADATA_SOURCE_TRACK => 0,
+            _ => 0,
+        }
+    }
+
+    fn viewer_panel_image_source_index(source_code: i32) -> usize {
+        match source_code {
+            VIEWER_IMAGE_SOURCE_ARTIST_IMAGE => 1,
+            VIEWER_IMAGE_SOURCE_ALBUM_ART => 0,
+            _ => 0,
+        }
+    }
+
+    fn viewer_track_context_for_display_target(
+        &self,
+        display_path: Option<&PathBuf>,
+        display_metadata: Option<&protocol::DetailedMetadata>,
+    ) -> ViewerTrackContext {
+        if let Some(path) = display_path {
+            if let Some(index) = self
+                .track_paths
+                .iter()
+                .position(|candidate| candidate == path)
+            {
+                if let Some(metadata) = self.track_metadata.get(index) {
+                    let artist = metadata.artist.trim().to_string();
+                    let album = metadata.album.trim().to_string();
+                    let album_artist = if metadata.album_artist.trim().is_empty() {
+                        artist.clone()
+                    } else {
+                        metadata.album_artist.trim().to_string()
+                    };
+                    return ViewerTrackContext {
+                        artist,
+                        album,
+                        album_artist,
+                    };
+                }
+            }
+
+            if let Some(library_track) = self.library_entries.iter().find_map(|entry| match entry {
+                LibraryEntry::Track(track) if &track.path == path => Some(track),
+                _ => None,
+            }) {
+                let artist = library_track.artist.trim().to_string();
+                let album = library_track.album.trim().to_string();
+                let album_artist = if library_track.album_artist.trim().is_empty() {
+                    artist.clone()
+                } else {
+                    library_track.album_artist.trim().to_string()
+                };
+                return ViewerTrackContext {
+                    artist,
+                    album,
+                    album_artist,
+                };
+            }
+        }
+
+        if let Some(metadata) = display_metadata {
+            let artist = metadata.artist.trim().to_string();
+            let album = metadata.album.trim().to_string();
+            let album_artist = artist.clone();
+            return ViewerTrackContext {
+                artist,
+                album,
+                album_artist,
+            };
+        }
+
+        ViewerTrackContext::default()
+    }
+
+    fn viewer_artist_entity_for_track_context(
+        context: &ViewerTrackContext,
+    ) -> Option<protocol::LibraryEnrichmentEntity> {
+        (!context.artist.is_empty()).then(|| protocol::LibraryEnrichmentEntity::Artist {
+            artist: context.artist.clone(),
+        })
+    }
+
+    fn viewer_album_entity_for_track_context(
+        context: &ViewerTrackContext,
+    ) -> Option<protocol::LibraryEnrichmentEntity> {
+        if context.album.is_empty() || context.album_artist.is_empty() {
+            return None;
+        }
+        Some(protocol::LibraryEnrichmentEntity::Album {
+            album: context.album.clone(),
+            album_artist: context.album_artist.clone(),
+        })
+    }
+
+    fn viewer_metadata_from_artist_bio_payload(
+        context: &ViewerTrackContext,
+        payload: &protocol::LibraryEnrichmentPayload,
+    ) -> Option<protocol::DetailedMetadata> {
+        if payload.status != protocol::LibraryEnrichmentStatus::Ready
+            || payload.blurb.trim().is_empty()
+        {
+            return None;
+        }
+        let title = if context.artist.is_empty() {
+            "Artist Bio".to_string()
+        } else {
+            context.artist.clone()
+        };
+        Some(protocol::DetailedMetadata {
+            title,
+            artist: payload.blurb.clone(),
+            album: String::new(),
+            date: String::new(),
+            genre: payload.source_name.clone(),
+        })
+    }
+
+    fn viewer_metadata_from_album_description_payload(
+        context: &ViewerTrackContext,
+        payload: &protocol::LibraryEnrichmentPayload,
+    ) -> Option<protocol::DetailedMetadata> {
+        if payload.status != protocol::LibraryEnrichmentStatus::Ready
+            || payload.blurb.trim().is_empty()
+        {
+            return None;
+        }
+        let title = if context.album.is_empty() {
+            "Album Description".to_string()
+        } else {
+            context.album.clone()
+        };
+        Some(protocol::DetailedMetadata {
+            title,
+            artist: payload.blurb.clone(),
+            album: String::new(),
+            date: String::new(),
+            genre: payload.source_name.clone(),
+        })
+    }
+
     fn resolve_active_collection_display_target_with_mode(
         &self,
         mode: DisplayTargetResolutionMode,
@@ -2280,8 +2435,11 @@ impl UiManager {
 
     fn refresh_viewer_panel_models(
         &self,
-        metadata_by_priority: Vec<Option<protocol::DetailedMetadata>>,
-        cover_art_paths_by_priority: Vec<Option<PathBuf>>,
+        track_metadata_by_priority: Vec<Option<protocol::DetailedMetadata>>,
+        album_description_by_priority: Vec<Option<protocol::DetailedMetadata>>,
+        artist_bio_by_priority: Vec<Option<protocol::DetailedMetadata>>,
+        album_art_paths_by_priority: Vec<Option<PathBuf>>,
+        artist_image_paths_by_priority: Vec<Option<PathBuf>>,
     ) {
         let _ = self.ui.upgrade_in_event_loop(move |ui| {
             let metadata_model = ui.get_layout_metadata_viewer_panels();
@@ -2297,10 +2455,21 @@ impl UiManager {
                     let priority_index =
                         UiManager::viewer_panel_priority_index(row_data.display_priority);
                     row_data.display_priority = priority_index as i32;
-                    if let Some(metadata) = metadata_by_priority
-                        .get(priority_index)
-                        .and_then(|value| value.as_ref())
-                    {
+                    let metadata_source_index =
+                        UiManager::viewer_panel_metadata_source_index(row_data.metadata_source);
+                    row_data.metadata_source = metadata_source_index as i32;
+                    let metadata = match metadata_source_index {
+                        1 => album_description_by_priority
+                            .get(priority_index)
+                            .and_then(|value| value.as_ref()),
+                        2 => artist_bio_by_priority
+                            .get(priority_index)
+                            .and_then(|value| value.as_ref()),
+                        _ => track_metadata_by_priority
+                            .get(priority_index)
+                            .and_then(|value| value.as_ref()),
+                    };
+                    if let Some(metadata) = metadata {
                         row_data.display_title = metadata.title.as_str().into();
                         row_data.display_artist = metadata.artist.as_str().into();
                         row_data.display_album = metadata.album.as_str().into();
@@ -2330,10 +2499,15 @@ impl UiManager {
                     let priority_index =
                         UiManager::viewer_panel_priority_index(row_data.display_priority);
                     row_data.display_priority = priority_index as i32;
-                    let art_path = cover_art_paths_by_priority
-                        .get(priority_index)
-                        .cloned()
-                        .unwrap_or(None);
+                    let image_source_index =
+                        UiManager::viewer_panel_image_source_index(row_data.image_source);
+                    row_data.image_source = image_source_index as i32;
+                    let art_path = match image_source_index {
+                        1 => artist_image_paths_by_priority.get(priority_index),
+                        _ => album_art_paths_by_priority.get(priority_index),
+                    }
+                    .cloned()
+                    .unwrap_or(None);
                     let art_source = art_path
                         .as_ref()
                         .and_then(|path| UiManager::try_load_cover_art_image(path))
@@ -2359,8 +2533,11 @@ impl UiManager {
             VIEWER_DISPLAY_PRIORITY_SELECTION_ONLY,
             VIEWER_DISPLAY_PRIORITY_NOW_PLAYING_ONLY,
         ];
-        let mut metadata_by_priority = Vec::with_capacity(priority_codes.len());
+        let mut track_metadata_by_priority = Vec::with_capacity(priority_codes.len());
         let mut display_paths_by_priority = Vec::with_capacity(priority_codes.len());
+        let mut display_contexts_by_priority = Vec::with_capacity(priority_codes.len());
+        let mut album_entities_by_priority = Vec::with_capacity(priority_codes.len());
+        let mut artist_entities_by_priority = Vec::with_capacity(priority_codes.len());
         for priority_code in priority_codes {
             let mode = Self::display_resolution_mode_from_priority_code(
                 priority_code,
@@ -2372,12 +2549,21 @@ impl UiManager {
                     playing_track_path,
                     playing_track_metadata,
                 );
+            let display_context = self.viewer_track_context_for_display_target(
+                display_path.as_ref(),
+                display_metadata.as_ref(),
+            );
+            let album_entity = Self::viewer_album_entity_for_track_context(&display_context);
+            let artist_entity = Self::viewer_artist_entity_for_track_context(&display_context);
             display_paths_by_priority.push(display_path);
-            metadata_by_priority.push(display_metadata);
+            track_metadata_by_priority.push(display_metadata);
+            display_contexts_by_priority.push(display_context);
+            album_entities_by_priority.push(album_entity);
+            artist_entities_by_priority.push(artist_entity);
         }
 
         let mut cover_art_cache: HashMap<Option<PathBuf>, Option<PathBuf>> = HashMap::new();
-        let mut cover_art_paths_by_priority = Vec::with_capacity(display_paths_by_priority.len());
+        let mut album_art_paths_by_priority = Vec::with_capacity(display_paths_by_priority.len());
         for display_path in &display_paths_by_priority {
             let cache_key = display_path.clone();
             let entry = cover_art_cache.entry(cache_key.clone()).or_insert_with(|| {
@@ -2387,9 +2573,65 @@ impl UiManager {
                     None
                 }
             });
-            cover_art_paths_by_priority.push(entry.clone());
+            album_art_paths_by_priority.push(entry.clone());
         }
-        self.refresh_viewer_panel_models(metadata_by_priority, cover_art_paths_by_priority);
+
+        let mut album_description_by_priority = Vec::with_capacity(priority_codes.len());
+        let mut artist_bio_by_priority = Vec::with_capacity(priority_codes.len());
+        let mut artist_image_paths_by_priority = Vec::with_capacity(priority_codes.len());
+        for index in 0..priority_codes.len() {
+            let context = display_contexts_by_priority
+                .get(index)
+                .cloned()
+                .unwrap_or_default();
+            let album_entity = album_entities_by_priority.get(index).cloned().flatten();
+            let artist_entity = artist_entities_by_priority.get(index).cloned().flatten();
+
+            if let Some(entity) = album_entity.as_ref() {
+                self.request_enrichment(
+                    entity.clone(),
+                    protocol::LibraryEnrichmentPriority::Interactive,
+                );
+            }
+            if let Some(entity) = artist_entity.as_ref() {
+                self.request_enrichment(
+                    entity.clone(),
+                    protocol::LibraryEnrichmentPriority::Interactive,
+                );
+            }
+
+            let album_description = album_entity
+                .as_ref()
+                .and_then(|entity| self.library_enrichment.get(entity))
+                .and_then(|payload| {
+                    Self::viewer_metadata_from_album_description_payload(&context, payload)
+                });
+            album_description_by_priority.push(album_description);
+
+            let artist_bio = artist_entity
+                .as_ref()
+                .and_then(|entity| self.library_enrichment.get(entity))
+                .and_then(|payload| {
+                    Self::viewer_metadata_from_artist_bio_payload(&context, payload)
+                });
+            artist_bio_by_priority.push(artist_bio);
+
+            let artist_image_path = artist_entity.as_ref().and_then(|entity| match entity {
+                protocol::LibraryEnrichmentEntity::Artist { artist } => {
+                    self.artist_enrichment_image_path(artist)
+                }
+                _ => None,
+            });
+            artist_image_paths_by_priority.push(artist_image_path);
+        }
+
+        self.refresh_viewer_panel_models(
+            track_metadata_by_priority,
+            album_description_by_priority,
+            artist_bio_by_priority,
+            album_art_paths_by_priority,
+            artist_image_paths_by_priority,
+        );
     }
 
     fn update_library_playing_index(&mut self) {
@@ -6176,6 +6418,7 @@ impl UiManager {
                                     self.clear_enrichment_retry_state(&entity);
                                 }
                                 self.library_enrichment.insert(entity.clone(), payload);
+                                self.update_display_for_active_collection();
 
                                 let mut updated = false;
                                 if let protocol::LibraryEnrichmentEntity::Artist { artist } =
