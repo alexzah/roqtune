@@ -2,7 +2,7 @@
 
 use crate::config::{
     default_playlist_album_art_column_max_width_px, default_playlist_album_art_column_min_width_px,
-    default_playlist_columns, PlaylistColumnConfig,
+    default_playlist_columns, ButtonClusterInstanceConfig, PlaylistColumnConfig,
 };
 use std::collections::HashSet;
 
@@ -158,7 +158,35 @@ pub enum LayoutNode {
     },
 }
 
+/// Display-target resolution strategy for metadata/album-art viewer panels.
+#[derive(Debug, Clone, Copy, serde::Deserialize, serde::Serialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum ViewerPanelDisplayPriority {
+    /// Follow the latest event source (selection or now playing).
+    #[default]
+    Default,
+    /// Prefer current selection, then fallback to now playing.
+    PreferSelection,
+    /// Prefer now playing, then fallback to current selection.
+    PreferNowPlaying,
+    /// Only render selection context.
+    SelectionOnly,
+    /// Only render now-playing context.
+    NowPlayingOnly,
+}
+
+/// Per-leaf metadata/album-art viewer configuration persisted with layout preferences.
+#[derive(Debug, Clone, serde::Deserialize, serde::Serialize, PartialEq, Eq)]
+pub struct ViewerPanelInstanceConfig {
+    /// Layout leaf identifier that owns this viewer.
+    pub leaf_id: String,
+    /// Display-target resolution strategy.
+    #[serde(default)]
+    pub display_priority: ViewerPanelDisplayPriority,
+}
+
 /// Persistent layout preferences.
+/// This is the only persisted home for layout-owned settings (`layout.toml`).
 #[derive(Debug, Clone, PartialEq, serde::Serialize)]
 pub struct LayoutConfig {
     /// Layout schema version.
@@ -169,6 +197,12 @@ pub struct LayoutConfig {
     pub playlist_album_art_column_max_width_px: u32,
     /// Ordered playlist column list (built-ins + custom columns).
     pub playlist_columns: Vec<PlaylistColumnConfig>,
+    /// Per-leaf button-cluster settings.
+    #[serde(default)]
+    pub button_cluster_instances: Vec<ButtonClusterInstanceConfig>,
+    /// Per-leaf metadata/album-art viewer panel settings.
+    #[serde(default)]
+    pub viewer_panel_instances: Vec<ViewerPanelInstanceConfig>,
     /// Root node of the split-tree.
     pub root: LayoutNode,
     /// Runtime-only leaf selection used in edit mode.
@@ -185,6 +219,8 @@ impl Default for LayoutConfig {
             playlist_album_art_column_max_width_px: default_playlist_album_art_column_max_width_px(
             ),
             playlist_columns: default_playlist_columns(),
+            button_cluster_instances: Vec::new(),
+            viewer_panel_instances: Vec::new(),
             root: build_default_layout_root(),
             selected_leaf_id: None,
         }
@@ -208,6 +244,10 @@ struct LayoutConfigV2Wire {
     playlist_album_art_column_max_width_px: u32,
     #[serde(default = "default_playlist_columns")]
     playlist_columns: Vec<PlaylistColumnConfig>,
+    #[serde(default)]
+    button_cluster_instances: Vec<ButtonClusterInstanceConfig>,
+    #[serde(default)]
+    viewer_panel_instances: Vec<ViewerPanelInstanceConfig>,
     #[serde(default = "default_layout_root_for_wire")]
     root: LayoutNode,
 }
@@ -238,6 +278,8 @@ impl<'de> serde::Deserialize<'de> for LayoutConfig {
                 playlist_album_art_column_min_width_px: v2.playlist_album_art_column_min_width_px,
                 playlist_album_art_column_max_width_px: v2.playlist_album_art_column_max_width_px,
                 playlist_columns: v2.playlist_columns,
+                button_cluster_instances: v2.button_cluster_instances,
+                viewer_panel_instances: v2.viewer_panel_instances,
                 root: v2.root,
                 selected_leaf_id: None,
             },
@@ -554,6 +596,8 @@ fn migrate_legacy_layout(legacy: &LegacyLayoutConfig) -> LayoutConfig {
         playlist_album_art_column_min_width_px: default_playlist_album_art_column_min_width_px(),
         playlist_album_art_column_max_width_px: default_playlist_album_art_column_max_width_px(),
         playlist_columns: default_playlist_columns(),
+        button_cluster_instances: Vec::new(),
+        viewer_panel_instances: Vec::new(),
         root,
         selected_leaf_id: None,
     }
@@ -753,6 +797,8 @@ pub fn sanitize_layout_config(
         playlist_album_art_column_min_width_px: config.playlist_album_art_column_min_width_px,
         playlist_album_art_column_max_width_px: config.playlist_album_art_column_max_width_px,
         playlist_columns: config.playlist_columns.clone(),
+        button_cluster_instances: config.button_cluster_instances.clone(),
+        viewer_panel_instances: config.viewer_panel_instances.clone(),
         root,
         selected_leaf_id: selected,
     }
@@ -957,6 +1003,8 @@ pub fn add_root_leaf_if_empty(layout: &LayoutConfig, panel: LayoutPanelKind) -> 
             playlist_album_art_column_min_width_px: layout.playlist_album_art_column_min_width_px,
             playlist_album_art_column_max_width_px: layout.playlist_album_art_column_max_width_px,
             playlist_columns: layout.playlist_columns.clone(),
+            button_cluster_instances: layout.button_cluster_instances.clone(),
+            viewer_panel_instances: layout.viewer_panel_instances.clone(),
             root,
             selected_leaf_id: None,
         },
@@ -1277,6 +1325,8 @@ mod tests {
             playlist_album_art_column_max_width_px:
                 crate::config::default_playlist_album_art_column_max_width_px(),
             playlist_columns: crate::config::default_playlist_columns(),
+            button_cluster_instances: Vec::new(),
+            viewer_panel_instances: Vec::new(),
             root: LayoutNode::Split {
                 id: "split-root".to_string(),
                 axis: SplitAxis::Vertical,

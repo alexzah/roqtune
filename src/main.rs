@@ -33,14 +33,14 @@ use audio_probe::get_or_probe_output_device;
 use config::{
     BufferingConfig, ButtonClusterInstanceConfig, Config, LibraryConfig, OutputConfig,
     PlaylistColumnConfig, ResamplerQuality, UiConfig, UiPlaybackOrder, UiRepeatMode,
-    ViewerPanelDisplayPriority, ViewerPanelInstanceConfig,
 };
 use cpal::traits::{DeviceTrait, HostTrait};
 use db_manager::DbManager;
 use layout::{
     add_root_leaf_if_empty, compute_tree_layout_metrics, delete_leaf, first_leaf_id,
     replace_leaf_panel, sanitize_layout_config, set_split_ratio, split_leaf, LayoutConfig,
-    LayoutNode, LayoutPanelKind, SplitAxis, SPLITTER_THICKNESS_PX,
+    LayoutNode, LayoutPanelKind, SplitAxis, ViewerPanelDisplayPriority, ViewerPanelInstanceConfig,
+    SPLITTER_THICKNESS_PX,
 };
 use library_enrichment_manager::LibraryEnrichmentManager;
 use library_manager::LibraryManager;
@@ -53,7 +53,7 @@ use protocol::{ConfigMessage, Message, MetadataMessage, PlaybackMessage, Playlis
 use slint::winit_030::{winit, EventResult as WinitEventResult, WinitWindowAccessor};
 use slint::{ComponentHandle, LogicalSize, Model, ModelRc, VecModel};
 use tokio::sync::broadcast;
-use toml_edit::{value, Array, ArrayOfTables, DocumentMut, Item, Table};
+use toml_edit::{value, Array, DocumentMut, Item, Table};
 use ui_manager::{UiManager, UiState};
 
 slint::include_modules!();
@@ -763,10 +763,14 @@ fn sanitize_config(config: Config) -> Config {
         clamped_window_width,
         clamped_window_height,
     );
-    let sanitized_button_cluster_instances =
-        sanitize_button_cluster_instances(&sanitized_layout, &config.ui.button_cluster_instances);
-    let sanitized_viewer_panel_instances =
-        sanitize_viewer_panel_instances(&sanitized_layout, &config.ui.viewer_panel_instances);
+    let sanitized_button_cluster_instances = sanitize_button_cluster_instances(
+        &sanitized_layout,
+        &sanitized_layout.button_cluster_instances,
+    );
+    let sanitized_viewer_panel_instances = sanitize_viewer_panel_instances(
+        &sanitized_layout,
+        &sanitized_layout.viewer_panel_instances,
+    );
     let clamped_volume = config.ui.volume.clamp(0.0, 1.0);
     let mut clamped_album_art_column_min_width_px = config
         .ui
@@ -785,6 +789,8 @@ fn sanitize_config(config: Config) -> Config {
     sanitized_layout.playlist_album_art_column_min_width_px = clamped_album_art_column_min_width_px;
     sanitized_layout.playlist_album_art_column_max_width_px = clamped_album_art_column_max_width_px;
     sanitized_layout.playlist_columns = sanitized_playlist_columns.clone();
+    sanitized_layout.button_cluster_instances = sanitized_button_cluster_instances;
+    sanitized_layout.viewer_panel_instances = sanitized_viewer_panel_instances;
     let clamped_low_watermark = config.buffering.player_low_watermark_ms.max(500);
     let clamped_target = config
         .buffering
@@ -832,8 +838,6 @@ fn sanitize_config(config: Config) -> Config {
             playlist_album_art_column_min_width_px: clamped_album_art_column_min_width_px,
             playlist_album_art_column_max_width_px: clamped_album_art_column_max_width_px,
             layout: sanitized_layout,
-            button_cluster_instances: sanitized_button_cluster_instances,
-            viewer_panel_instances: sanitized_viewer_panel_instances,
             playlist_columns: sanitized_playlist_columns,
             window_width: clamped_window_width,
             window_height: clamped_window_height,
@@ -1495,7 +1499,8 @@ fn remove_button_cluster_instance_for_leaf(
 }
 
 fn apply_control_cluster_menu_actions_for_leaf(ui: &AppWindow, config: &Config, leaf_id: &str) {
-    let actions = button_cluster_actions_for_leaf(&config.ui.button_cluster_instances, leaf_id);
+    let actions =
+        button_cluster_actions_for_leaf(&config.ui.layout.button_cluster_instances, leaf_id);
     ui.set_control_cluster_menu_actions(ModelRc::from(Rc::new(VecModel::from(actions))));
 }
 
@@ -1516,7 +1521,7 @@ fn apply_button_cluster_views_to_ui(
             height_px: leaf.height,
             visible: true,
             actions: ModelRc::from(Rc::new(VecModel::from(button_cluster_actions_for_leaf(
-                &config.ui.button_cluster_instances,
+                &config.ui.layout.button_cluster_instances,
                 &leaf.id,
             )))),
         })
@@ -1583,9 +1588,11 @@ fn apply_viewer_panel_views_to_ui(
         .iter()
         .filter(|leaf| leaf.panel == LayoutPanelKind::MetadataViewer)
         .map(|leaf| {
-            let display_priority = viewer_panel_display_priority_to_code(
-                viewer_panel_display_priority_for_leaf(&config.ui.viewer_panel_instances, &leaf.id),
-            );
+            let display_priority =
+                viewer_panel_display_priority_to_code(viewer_panel_display_priority_for_leaf(
+                    &config.ui.layout.viewer_panel_instances,
+                    &leaf.id,
+                ));
             if let Some(existing) = existing_metadata_by_leaf.get(&leaf.id) {
                 return LayoutMetadataViewerPanelModel {
                     leaf_id: leaf.id.clone().into(),
@@ -1624,9 +1631,11 @@ fn apply_viewer_panel_views_to_ui(
         .iter()
         .filter(|leaf| leaf.panel == LayoutPanelKind::AlbumArtViewer)
         .map(|leaf| {
-            let display_priority = viewer_panel_display_priority_to_code(
-                viewer_panel_display_priority_for_leaf(&config.ui.viewer_panel_instances, &leaf.id),
-            );
+            let display_priority =
+                viewer_panel_display_priority_to_code(viewer_panel_display_priority_for_leaf(
+                    &config.ui.layout.viewer_panel_instances,
+                    &leaf.id,
+                ));
             if let Some(existing) = existing_album_art_by_leaf.get(&leaf.id) {
                 return LayoutAlbumArtViewerPanelModel {
                     leaf_id: leaf.id.clone().into(),
@@ -1815,7 +1824,14 @@ fn write_config_to_document(document: &mut DocumentMut, previous: &Config, confi
             config.ui.auto_scroll_to_playing_track,
             value,
         );
+        // Layout-owned state is persisted in layout.toml only.
+        ui.remove("button_cluster_instances");
+        ui.remove("playlist_columns");
+        ui.remove("playlist_album_art_column_min_width_px");
+        ui.remove("playlist_album_art_column_max_width_px");
+        ui.remove("layout");
         ui.remove("auto_center_playing_track");
+        ui.remove("viewer_panel_instances");
         set_table_scalar_if_changed(
             ui,
             "window_width",
@@ -1854,51 +1870,6 @@ fn write_config_to_document(document: &mut DocumentMut, previous: &Config, confi
                 UiRepeatMode::Track => "track",
             };
             set_table_value_preserving_decor(ui, "repeat_mode", value(repeat_mode));
-        }
-
-        if !ui.contains_key("button_cluster_instances")
-            || previous.ui.button_cluster_instances != config.ui.button_cluster_instances
-        {
-            let mut button_instances = ArrayOfTables::new();
-            for instance in &config.ui.button_cluster_instances {
-                let mut instance_table = Table::new();
-                instance_table["leaf_id"] = value(instance.leaf_id.clone());
-                let mut actions = Array::new();
-                for action in &instance.actions {
-                    actions.push(i64::from(*action));
-                }
-                instance_table["actions"] = value(actions);
-                button_instances.push(instance_table);
-            }
-            set_table_value_preserving_decor(
-                ui,
-                "button_cluster_instances",
-                Item::ArrayOfTables(button_instances),
-            );
-        }
-
-        if !ui.contains_key("viewer_panel_instances")
-            || previous.ui.viewer_panel_instances != config.ui.viewer_panel_instances
-        {
-            let mut viewer_instances = ArrayOfTables::new();
-            for instance in &config.ui.viewer_panel_instances {
-                let mut instance_table = Table::new();
-                instance_table["leaf_id"] = value(instance.leaf_id.clone());
-                let display_priority = match instance.display_priority {
-                    ViewerPanelDisplayPriority::Default => "default",
-                    ViewerPanelDisplayPriority::PreferSelection => "prefer_selection",
-                    ViewerPanelDisplayPriority::PreferNowPlaying => "prefer_now_playing",
-                    ViewerPanelDisplayPriority::SelectionOnly => "selection_only",
-                    ViewerPanelDisplayPriority::NowPlayingOnly => "now_playing_only",
-                };
-                instance_table["display_priority"] = value(display_priority);
-                viewer_instances.push(instance_table);
-            }
-            set_table_value_preserving_decor(
-                ui,
-                "viewer_panel_instances",
-                Item::ArrayOfTables(viewer_instances),
-            );
         }
     }
 
@@ -2156,6 +2127,47 @@ fn load_layout_file(path: &Path) -> LayoutConfig {
     }
 }
 
+#[derive(Default)]
+struct LegacyLayoutOverrides {
+    button_cluster_instances: Vec<ButtonClusterInstanceConfig>,
+    viewer_panel_instances: Vec<ViewerPanelInstanceConfig>,
+    playlist_album_art_column_min_width_px: Option<u32>,
+    playlist_album_art_column_max_width_px: Option<u32>,
+    playlist_columns: Vec<PlaylistColumnConfig>,
+}
+
+fn load_legacy_layout_overrides(config_content: &str) -> LegacyLayoutOverrides {
+    #[derive(serde::Deserialize, Default)]
+    struct LegacyUiSection {
+        #[serde(default)]
+        button_cluster_instances: Vec<ButtonClusterInstanceConfig>,
+        #[serde(default)]
+        viewer_panel_instances: Vec<ViewerPanelInstanceConfig>,
+        #[serde(default)]
+        playlist_album_art_column_min_width_px: Option<u32>,
+        #[serde(default)]
+        playlist_album_art_column_max_width_px: Option<u32>,
+        #[serde(default)]
+        playlist_columns: Vec<PlaylistColumnConfig>,
+    }
+
+    #[derive(serde::Deserialize, Default)]
+    struct LegacyConfigWire {
+        #[serde(default)]
+        ui: LegacyUiSection,
+    }
+
+    toml::from_str::<LegacyConfigWire>(config_content)
+        .map(|wire| LegacyLayoutOverrides {
+            button_cluster_instances: wire.ui.button_cluster_instances,
+            viewer_panel_instances: wire.ui.viewer_panel_instances,
+            playlist_album_art_column_min_width_px: wire.ui.playlist_album_art_column_min_width_px,
+            playlist_album_art_column_max_width_px: wire.ui.playlist_album_art_column_max_width_px,
+            playlist_columns: wire.ui.playlist_columns,
+        })
+        .unwrap_or_default()
+}
+
 fn hydrate_ui_columns_from_layout(config: &mut Config) {
     config.ui.playlist_album_art_column_min_width_px =
         config.ui.layout.playlist_album_art_column_min_width_px;
@@ -2178,8 +2190,6 @@ fn with_updated_layout(previous: &Config, layout: LayoutConfig) -> Config {
                 .ui
                 .playlist_album_art_column_max_width_px,
             layout,
-            button_cluster_instances: previous.ui.button_cluster_instances.clone(),
-            viewer_panel_instances: previous.ui.viewer_panel_instances.clone(),
             playlist_columns: previous.ui.playlist_columns.clone(),
             window_width: previous.ui.window_width,
             window_height: previous.ui.window_height,
@@ -2611,7 +2621,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .unwrap();
     }
 
-    if !layout_file.exists() {
+    let layout_file_previously_existed = layout_file.exists();
+    if !layout_file_previously_existed {
         let default_layout = LayoutConfig::default();
         info!(
             "Layout file not found. Creating default layout file. path={}",
@@ -2625,8 +2636,39 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     let config_content = std::fs::read_to_string(config_file.clone()).unwrap();
+    let legacy_layout_overrides = load_legacy_layout_overrides(&config_content);
     let mut config = sanitize_config(toml::from_str::<Config>(&config_content).unwrap_or_default());
     config.ui.layout = load_layout_file(&layout_file);
+    if !layout_file_previously_existed {
+        if let Some(min_width_px) = legacy_layout_overrides.playlist_album_art_column_min_width_px {
+            config.ui.layout.playlist_album_art_column_min_width_px = min_width_px;
+        }
+        if let Some(max_width_px) = legacy_layout_overrides.playlist_album_art_column_max_width_px {
+            config.ui.layout.playlist_album_art_column_max_width_px = max_width_px;
+        }
+        if !legacy_layout_overrides.playlist_columns.is_empty() {
+            config.ui.layout.playlist_columns = legacy_layout_overrides.playlist_columns.clone();
+        }
+    }
+    if config.ui.layout.button_cluster_instances.is_empty()
+        && !legacy_layout_overrides.button_cluster_instances.is_empty()
+    {
+        info!(
+            "Migrating {} legacy button cluster settings from config.toml to layout.toml",
+            legacy_layout_overrides.button_cluster_instances.len()
+        );
+        config.ui.layout.button_cluster_instances =
+            legacy_layout_overrides.button_cluster_instances.clone();
+    }
+    if config.ui.layout.viewer_panel_instances.is_empty()
+        && !legacy_layout_overrides.viewer_panel_instances.is_empty()
+    {
+        info!(
+            "Migrating {} legacy viewer panel settings from config.toml to layout.toml",
+            legacy_layout_overrides.viewer_panel_instances.len()
+        );
+        config.ui.layout.viewer_panel_instances = legacy_layout_overrides.viewer_panel_instances;
+    }
     hydrate_ui_columns_from_layout(&mut config);
     let config = sanitize_config(config);
     let initial_output_options = detect_output_settings_options(&config);
@@ -3840,11 +3882,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 .lock()
                 .expect("config state lock poisoned");
             let mut next_config = state.clone();
-            let mut actions =
-                button_cluster_actions_for_leaf(&next_config.ui.button_cluster_instances, &leaf_id);
+            let mut actions = button_cluster_actions_for_leaf(
+                &next_config.ui.layout.button_cluster_instances,
+                &leaf_id,
+            );
             actions.push(action_id);
             upsert_button_cluster_actions_for_leaf(
-                &mut next_config.ui.button_cluster_instances,
+                &mut next_config.ui.layout.button_cluster_instances,
                 &leaf_id,
                 actions,
             );
@@ -3878,14 +3922,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 .lock()
                 .expect("config state lock poisoned");
             let mut next_config = state.clone();
-            let mut actions =
-                button_cluster_actions_for_leaf(&next_config.ui.button_cluster_instances, &leaf_id);
+            let mut actions = button_cluster_actions_for_leaf(
+                &next_config.ui.layout.button_cluster_instances,
+                &leaf_id,
+            );
             if index >= actions.len() {
                 return;
             }
             actions.remove(index);
             upsert_button_cluster_actions_for_leaf(
-                &mut next_config.ui.button_cluster_instances,
+                &mut next_config.ui.layout.button_cluster_instances,
                 &leaf_id,
                 actions,
             );
@@ -3921,7 +3967,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 .lock()
                 .expect("config state lock poisoned");
             viewer_panel_display_priority_to_code(viewer_panel_display_priority_for_leaf(
-                &state.ui.viewer_panel_instances,
+                &state.ui.layout.viewer_panel_instances,
                 &leaf_id,
             ))
         };
@@ -3957,6 +4003,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             let mut next_config = state.clone();
             if let Some(instance) = next_config
                 .ui
+                .layout
                 .viewer_panel_instances
                 .iter_mut()
                 .find(|instance| instance.leaf_id == leaf_id_text)
@@ -3965,6 +4012,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             } else {
                 next_config
                     .ui
+                    .layout
                     .viewer_panel_instances
                     .push(ViewerPanelInstanceConfig {
                         leaf_id: leaf_id_text.clone(),
@@ -4227,14 +4275,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         if panel == LayoutPanelKind::ButtonCluster {
             if let Some(actions) = preset_actions {
                 upsert_button_cluster_actions_for_leaf(
-                    &mut next.ui.button_cluster_instances,
+                    &mut next.ui.layout.button_cluster_instances,
                     &selected_leaf_id,
                     actions,
                 );
             }
         } else {
             remove_button_cluster_instance_for_leaf(
-                &mut next.ui.button_cluster_instances,
+                &mut next.ui.layout.button_cluster_instances,
                 &selected_leaf_id,
             );
         }
@@ -4298,7 +4346,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         if panel == LayoutPanelKind::ButtonCluster {
             if let (Some(new_leaf_id), Some(actions)) = (added_leaf_id, preset_actions) {
                 upsert_button_cluster_actions_for_leaf(
-                    &mut next.ui.button_cluster_instances,
+                    &mut next.ui.layout.button_cluster_instances,
                     &new_leaf_id,
                     actions,
                 );
@@ -4386,7 +4434,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         if panel == LayoutPanelKind::ButtonCluster {
             if let (Some(new_leaf_id), Some(actions)) = (added_leaf_id, preset_actions) {
                 upsert_button_cluster_actions_for_leaf(
-                    &mut next.ui.button_cluster_instances,
+                    &mut next.ui.layout.button_cluster_instances,
                     &new_leaf_id,
                     actions,
                 );
@@ -4784,8 +4832,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         .ui
                         .playlist_album_art_column_max_width_px,
                     layout: previous_config.ui.layout.clone(),
-                    button_cluster_instances: previous_config.ui.button_cluster_instances.clone(),
-                    viewer_panel_instances: previous_config.ui.viewer_panel_instances.clone(),
                     playlist_columns: previous_config.ui.playlist_columns.clone(),
                     window_width: previous_config.ui.window_width,
                     window_height: previous_config.ui.window_height,
@@ -4881,8 +4927,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     .ui
                     .playlist_album_art_column_max_width_px,
                 layout: previous_config.ui.layout.clone(),
-                button_cluster_instances: previous_config.ui.button_cluster_instances.clone(),
-                viewer_panel_instances: previous_config.ui.viewer_panel_instances.clone(),
                 playlist_columns: updated_columns,
                 window_width: previous_config.ui.window_width,
                 window_height: previous_config.ui.window_height,
@@ -4980,8 +5024,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     .ui
                     .playlist_album_art_column_max_width_px,
                 layout: previous_config.ui.layout.clone(),
-                button_cluster_instances: previous_config.ui.button_cluster_instances.clone(),
-                viewer_panel_instances: previous_config.ui.viewer_panel_instances.clone(),
                 playlist_columns: updated_columns,
                 window_width: previous_config.ui.window_width,
                 window_height: previous_config.ui.window_height,
@@ -5081,8 +5123,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     .ui
                     .playlist_album_art_column_max_width_px,
                 layout: previous_config.ui.layout.clone(),
-                button_cluster_instances: previous_config.ui.button_cluster_instances.clone(),
-                viewer_panel_instances: previous_config.ui.viewer_panel_instances.clone(),
                 playlist_columns: updated_columns,
                 window_width: previous_config.ui.window_width,
                 window_height: previous_config.ui.window_height,
@@ -5176,8 +5216,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     .ui
                     .playlist_album_art_column_max_width_px,
                 layout: previous_config.ui.layout.clone(),
-                button_cluster_instances: previous_config.ui.button_cluster_instances.clone(),
-                viewer_panel_instances: previous_config.ui.viewer_panel_instances.clone(),
                 playlist_columns: updated_columns,
                 window_width: previous_config.ui.window_width,
                 window_height: previous_config.ui.window_height,
@@ -5577,8 +5615,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 .ui
                                 .playlist_album_art_column_max_width_px,
                             layout: state.ui.layout.clone(),
-                            button_cluster_instances: state.ui.button_cluster_instances.clone(),
-                            viewer_panel_instances: state.ui.viewer_panel_instances.clone(),
                             playlist_columns: reordered_columns,
                             window_width: state.ui.window_width,
                             window_height: state.ui.window_height,
@@ -6672,8 +6708,6 @@ mod tests {
                 playlist_album_art_column_min_width_px: 16,
                 playlist_album_art_column_max_width_px: 480,
                 layout: LayoutConfig::default(),
-                button_cluster_instances: Vec::new(),
-                viewer_panel_instances: Vec::new(),
                 playlist_columns: crate::config::default_playlist_columns(),
                 window_width: 900,
                 window_height: 650,
@@ -6813,6 +6847,10 @@ decoder_request_chunk_ms = 1500
         assert!(serialized.contains("# buffering comment"));
         assert!(serialized.contains("output_device_name = \"My Device\""));
         assert!(serialized.contains("volume = 0.55"));
+        assert!(
+            !serialized.contains("button_cluster_instances"),
+            "layout-owned button cluster settings should not be persisted in config.toml"
+        );
     }
 
     #[test]
@@ -6840,21 +6878,22 @@ decoder_request_chunk_ms = 1500
     }
 
     #[test]
-    fn test_serialize_config_with_preserved_comments_updates_button_clusters_to_aot() {
+    fn test_serialize_config_with_preserved_comments_strips_layout_owned_ui_keys() {
         let existing = include_str!("../config/config.system.toml");
         let mut config: Config =
             toml::from_str(existing).expect("system config template should parse");
-        config.ui.button_cluster_instances = vec![crate::config::ButtonClusterInstanceConfig {
-            leaf_id: "n8".to_string(),
-            actions: vec![1, 2, 3],
-        }];
+        config.ui.layout.button_cluster_instances =
+            vec![crate::config::ButtonClusterInstanceConfig {
+                leaf_id: "n8".to_string(),
+                actions: vec![1, 2, 3],
+            }];
 
         let serialized = serialize_config_with_preserved_comments(existing, &config)
             .expect("comment-preserving serialization should succeed");
 
         assert!(
-            serialized.contains("[[ui.button_cluster_instances]]"),
-            "button cluster list should upgrade to array-of-tables when populated.\nserialized=\n{}",
+            !serialized.contains("button_cluster_instances"),
+            "button cluster settings should not be persisted in config.toml.\nserialized=\n{}",
             serialized
         );
         assert!(
@@ -6865,13 +6904,31 @@ decoder_request_chunk_ms = 1500
             !serialized.contains("playlist_album_art_column_min_width_px"),
             "playlist album art width fields should not be persisted in config.toml"
         );
+        assert!(
+            !serialized.contains("playlist_album_art_column_max_width_px"),
+            "playlist album art width fields should not be persisted in config.toml"
+        );
+        assert!(
+            !serialized.contains("viewer_panel_instances"),
+            "viewer panel settings should not be persisted in config.toml"
+        );
         let parsed_back: toml_edit::DocumentMut = serialized
             .parse()
             .expect("serialized config should remain valid TOML");
         assert!(parsed_back
             .get("ui")
             .and_then(|item| item.as_table())
+            .and_then(|table| table.get("button_cluster_instances"))
+            .is_none());
+        assert!(parsed_back
+            .get("ui")
+            .and_then(|item| item.as_table())
             .and_then(|table| table.get("playlist_columns"))
+            .is_none());
+        assert!(parsed_back
+            .get("ui")
+            .and_then(|item| item.as_table())
+            .and_then(|table| table.get("viewer_panel_instances"))
             .is_none());
     }
 
@@ -6900,6 +6957,10 @@ panel = "track_list"
         let mut layout: LayoutConfig =
             toml::from_str(existing).expect("existing layout should parse");
         layout.playlist_album_art_column_max_width_px = 512;
+        layout.button_cluster_instances = vec![crate::config::ButtonClusterInstanceConfig {
+            leaf_id: "n8".to_string(),
+            actions: vec![1, 2, 3],
+        }];
 
         let serialized = serialize_layout_with_preserved_comments(existing, &layout)
             .expect("comment-preserving layout serialization should succeed");
@@ -6908,6 +6969,7 @@ panel = "track_list"
         assert!(serialized.contains("# album art width comment"));
         assert!(serialized.contains("# root comment"));
         assert!(serialized.contains("playlist_album_art_column_max_width_px = 512"));
+        assert!(serialized.contains("[[button_cluster_instances]]"));
     }
 
     #[test]

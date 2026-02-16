@@ -42,7 +42,8 @@ show_layout_edit_intro = true
 show_tooltips = true
 # Automatically scroll track-list views to keep the playing track centered.
 auto_scroll_to_playing_track = true
-# Layout tree + playlist column data is persisted separately in `layout.toml`.
+# Layout-owned settings are persisted separately in `layout.toml`:
+# split tree, panel instances, per-leaf button cluster actions, and playlist columns.
 
 # Main window size on startup.
 window_width = 900
@@ -58,10 +59,6 @@ playback_order = "default"
 # Repeat startup preference.
 # Options: "off", "playlist", "track"
 repeat_mode = "off"
-
-# Per-leaf button cluster action order overrides.
-# Keep empty to use built-in defaults.
-button_cluster_instances = []
 
 [library]
 # Folders recursively scanned into Library mode.

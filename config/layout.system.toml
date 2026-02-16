@@ -72,6 +72,24 @@ format = "{album_art}"
 enabled = false
 custom = false
 
+# Optional per-leaf button cluster action overrides.
+# Each entry targets one `button_cluster` leaf id from the layout tree.
+# Uncomment and edit to customize action order for a specific leaf.
+# [[button_cluster_instances]]
+# leaf_id = "n8"
+# actions = [1, 2, 3]
+#
+# Optional per-leaf metadata/album-art viewer behavior overrides.
+# display_priority options:
+# - "default"
+# - "prefer_selection"
+# - "prefer_now_playing"
+# - "selection_only"
+# - "now_playing_only"
+# [[viewer_panel_instances]]
+# leaf_id = "l1"
+# display_priority = "default"
+
 [root]
 node_type = "split"
 id = "n17"

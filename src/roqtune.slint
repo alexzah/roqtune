@@ -2767,7 +2767,7 @@ export component AppWindow inherits Window {
                     label-tooltip-ta := TooltipHoverArea {
                         width: parent.width;
                         height: parent.height;
-                        tooltip-text: "Balanced (Default): latest event wins (selection or playback). Prefer Selection: selection first, then now playing. Prefer Now Playing: now playing first, then selection. Selection Only and Now Playing Only force a single source.";
+                        tooltip-text: "Balanced (Default): latest event wins (selection or playback).\nPrefer Selection: selection first, then now playing.\nPrefer Now Playing: now playing first, then selection.\nSelection Only: only selection is shown.\nNow Playing Only: only now playing is shown.";
                         tooltip_hover_changed(is-hovered, tooltip, anchor-x-px, anchor-y-px) => {
                             root.tooltip_hover_changed(is-hovered, tooltip, anchor-x-px, anchor-y-px);
                         }
