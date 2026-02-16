@@ -4559,6 +4559,15 @@ impl UiManager {
         let scroll_restore_token = self.library_scroll_restore_token;
         self.library_artist_row_indices = artist_row_indices;
         let collection_mode = self.collection_mode;
+        let library_playing_view_index = self
+            .library_playing_index
+            .and_then(|playing_index| {
+                library_view_indices
+                    .iter()
+                    .position(|source_index| *source_index == playing_index)
+            })
+            .map(|index| index as i32)
+            .unwrap_or(-1);
         let online_prompt_visible = self.collection_mode == COLLECTION_MODE_LIBRARY
             && self.library_online_metadata_prompt_pending;
 
@@ -4587,6 +4596,7 @@ impl UiManager {
             ui.set_library_detail_header_source_visible(detail_header_source_visible);
             ui.set_library_detail_header_loading(detail_header_loading);
             ui.set_library_online_prompt_visible(online_prompt_visible);
+            ui.set_library_playing_track_index(library_playing_view_index);
             Self::update_or_replace_library_model(&ui, rows);
         });
         if let Some(restore_row) = scroll_restore_row {

@@ -1059,10 +1059,31 @@ export component AppWindow inherits Window {
 
                     track-list-container := Rectangle {
                         clip: true;
+                        property <length> stack-base-y: 6px;
+                        property <length> stack-gap-y: 6px;
+                        property <int> first-visible-row: max(
+                            0,
+                            floor(max(0px, -track-list.viewport-y) / track-list.row-height)
+                        );
+                        property <int> visible-row-count: max(
+                            1,
+                            floor((track-list.height + track-list.row-height - 1px) / track-list.row-height)
+                        );
+                        property <bool> has-playing-row: root.playing_track_index >= 0
+                            && root.playing_track_index < root.track_model.length;
+                        property <bool> playing-above-viewport: self.has-playing-row
+                            && root.playing_track_index < self.first-visible-row;
+                        property <bool> playing-below-viewport: self.has-playing-row
+                            && root.playing_track_index >= self.first-visible-row + self.visible-row-count;
+                        property <bool> show-scroll-to-playing-toast: self.playing-above-viewport
+                            || self.playing-below-viewport;
+                        property <length> scroll-toast-y: self.stack-base-y
+                            + (root.playlist_filter_active ? (26px + self.stack-gap-y) : 0px)
+                            + (root.playlist_search_visible ? (30px + self.stack-gap-y) : 0px);
 
                         if root.playlist_filter_active : Rectangle {
                             x: max(8px, parent.width - self.width - 8px);
-                            y: 6px;
+                            y: track-list-container.stack-base-y;
                             width: 156px;
                             height: 26px;
                             border-radius: 4px;
@@ -1154,7 +1175,8 @@ export component AppWindow inherits Window {
 
                         if root.playlist_search_visible : Rectangle {
                             x: max(8px, parent.width - self.width - 8px);
-                            y: root.playlist_filter_active ? 38px : 6px;
+                            y: track-list-container.stack-base-y
+                                + (root.playlist_filter_active ? (26px + track-list-container.stack-gap-y) : 0px);
                             width: 320px;
                             height: 30px;
                             border-radius: 4px;
@@ -1196,6 +1218,48 @@ export component AppWindow inherits Window {
                                     clicked => {
                                         root.close_playlist_search();
                                         root.refocus_main();
+                                    }
+                                }
+                            }
+                        }
+
+                        if track-list-container.show-scroll-to-playing-toast : Rectangle {
+                            x: max(8px, parent.width - self.width - 8px);
+                            y: track-list-container.scroll-toast-y;
+                            width: max(146px, min(parent.width - 16px, playlist-scroll-toast-text.preferred-width + 24px));
+                            height: 26px;
+                            border-radius: 4px;
+                            border-width: 1px;
+                            border-color: #4d6f90;
+                            background: #1f3347e8;
+                            z: 6;
+
+                            playlist-scroll-toast-text := Text {
+                                text: (track-list-container.playing-above-viewport ? "↑ " : "↓ ") + "Scroll to playing";
+                                color: #dcecff;
+                                font-size: 11px;
+                                horizontal-alignment: center;
+                                vertical-alignment: center;
+                                overflow: elide;
+                            }
+
+                            playlist-scroll-toast-ta := TouchArea {
+                                mouse-cursor: pointer;
+                                clicked => {
+                                    if (track-list-container.has-playing-row) {
+                                        let max-first-row = max(
+                                            0,
+                                            root.track_model.length - track-list-container.visible-row-count
+                                        );
+                                        let centered-first-row = min(
+                                            max-first-row,
+                                            max(
+                                                0,
+                                                root.playing_track_index
+                                                    - floor(track-list-container.visible-row-count / 2)
+                                            )
+                                        );
+                                        track-list.viewport-y = 0px - centered-first-row * track-list.row-height;
                                     }
                                 }
                             }
@@ -1523,8 +1587,36 @@ export component AppWindow inherits Window {
 
                     Rectangle { height: 1px; background: #333; }
 
+                    library-list-container := Rectangle {
+                        vertical-stretch: 1;
+                        clip: true;
+                        property <int> first-visible-row: max(
+                            0,
+                            floor(max(0px, -library-list-view.viewport-y) / (library-list-view.row-height-px * 1px))
+                        );
+                        property <int> visible-row-count: max(
+                            1,
+                            floor(
+                                (
+                                    library-list-view.height
+                                    + (library-list-view.row-height-px * 1px)
+                                    - 1px
+                                ) / (library-list-view.row-height-px * 1px)
+                            )
+                        );
+                        property <bool> has-playing-row: root.library_playing_track_index >= 0
+                            && root.library_playing_track_index < root.library_model.length;
+                        property <bool> playing-above-viewport: self.has-playing-row
+                            && root.library_playing_track_index < self.first-visible-row;
+                        property <bool> playing-below-viewport: self.has-playing-row
+                            && root.library_playing_track_index >= self.first-visible-row + self.visible-row-count;
+                        property <bool> show-scroll-to-playing-toast: self.playing-above-viewport
+                            || self.playing-below-viewport;
+
                         library-list-view := ListView {
-                            vertical-stretch: 1;
+                            y: 0px;
+                            width: parent.width;
+                            height: parent.height;
                             property <int> row-height-px: root.library_root_index == 2 ? 38
                                 : root.library_root_index == 0 ? 32
                                 : 34;
@@ -1605,6 +1697,49 @@ export component AppWindow inherits Window {
                                 }
                             }
                         }
+
+                        if library-list-container.show-scroll-to-playing-toast : Rectangle {
+                            x: max(8px, parent.width - self.width - 8px);
+                            y: 6px;
+                            width: max(146px, min(parent.width - 16px, library-scroll-toast-text.preferred-width + 24px));
+                            height: 26px;
+                            border-radius: 4px;
+                            border-width: 1px;
+                            border-color: #4d6f90;
+                            background: #1f3347e8;
+                            z: 6;
+
+                            library-scroll-toast-text := Text {
+                                text: (library-list-container.playing-above-viewport ? "↑ " : "↓ ") + "Scroll to playing";
+                                color: #dcecff;
+                                font-size: 11px;
+                                horizontal-alignment: center;
+                                vertical-alignment: center;
+                                overflow: elide;
+                            }
+
+                            library-scroll-toast-ta := TouchArea {
+                                mouse-cursor: pointer;
+                                clicked => {
+                                    if (library-list-container.has-playing-row) {
+                                        let max-first-row = max(
+                                            0,
+                                            root.library_model.length - library-list-container.visible-row-count
+                                        );
+                                        let centered-first-row = min(
+                                            max-first-row,
+                                            max(
+                                                0,
+                                                root.library_playing_track_index
+                                                    - floor(library-list-container.visible-row-count / 2)
+                                            )
+                                        );
+                                        library-list-view.viewport-y = 0px - centered-first-row * (library-list-view.row-height-px * 1px);
+                                    }
+                                }
+                            }
+                        }
+                    }
                     }
 
                 }
@@ -3997,6 +4132,7 @@ export component AppWindow inherits Window {
     in-out property <int> repeat_mode: 0; // 0: Off, 1: Playlist, 2: Track
     in-out property <int> selected_track_index: -1;
     in-out property <int> playing_track_index: -1;
+    in-out property <int> library_playing_track_index: -1;
     in-out property <bool> playlist_filter_active: false;
     in-out property <bool> playlist_filter_blocked_feedback: false;
     in-out property <bool> playlist_search_visible: false;
