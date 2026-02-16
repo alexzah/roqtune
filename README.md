@@ -57,7 +57,7 @@ The app is organized into cooperating runtime components connected through an ev
 - `src/audio_player.rs`: output stream, queue management, and playback progress.
 - `src/ui_manager.rs`: applies bus events to UI state and metadata/cover-art updates.
 - `src/layout.rs`: layout tree model and edit operations.
-- `src/db_manager.rs`: SQLite persistence for playlists, tracks, and playlist UI metadata.
+- `src/db_manager.rs`: SQLite persistence for playlists, library index/cache data, and UI metadata.
 
 ## Data and Config Files
 
@@ -65,7 +65,7 @@ The app is organized into cooperating runtime components connected through an ev
 
 - Config file: `<config_dir>/roqtune/config.toml`
 - UI Layout file: `<config_dir>/roqtune/layout.toml`
-- Playlist database (SQLite 3): `<data_dir>/roqtune/playlist.db`
+- App-state database (SQLite 3): `<data_dir>/roqtune/roqtune.db`
 - Cover art cache: `<cache_dir>/roqtune/covers/`
 - Artist enrichment image cache: `<cache_dir>/roqtune/library_enrichment/images/`
 - Output probe cache: `<cache_dir>/roqtune/output_probe_cache.json`
@@ -74,7 +74,7 @@ Common Linux defaults:
 
 - `~/.config/roqtune/config.toml`
 - `~/.config/roqtune/layout.toml`
-- `~/.local/share/roqtune/playlist.db`
+- `~/.local/share/roqtune/roqtune.db`
 - `~/.cache/roqtune/covers/`
 
 System templates in this repo:
@@ -91,4 +91,3 @@ System templates in this repo:
 ## AI Disclosure
 - The core event bus architecture, technology choices, and initial implementation were created by hand with minimal AI input
 - AI agents were heavily used for feature implementations, resulting in enormous time / effort savings over what I could do by hand
-

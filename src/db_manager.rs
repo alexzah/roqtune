@@ -9,11 +9,11 @@ use crate::protocol::{
 use rusqlite::{params, Connection, OptionalExtension};
 use std::{
     collections::{HashMap, HashSet},
-    path::PathBuf,
+    path::{Path, PathBuf},
 };
 use uuid::Uuid;
 
-/// Database gateway for playlist and track persistence.
+/// Database gateway for app-state persistence.
 pub struct DbManager {
     conn: Connection,
 }
@@ -68,6 +68,33 @@ pub struct LibraryTrackMetadataUpdate {
 }
 
 impl DbManager {
+    const DB_FILE_NAME: &'static str = "roqtune.db";
+    const LEGACY_DB_FILE_NAME: &'static str = "playlist.db";
+
+    fn migrate_legacy_db_file(data_dir: &Path) -> Result<(), std::io::Error> {
+        let legacy_db_path = data_dir.join(Self::LEGACY_DB_FILE_NAME);
+        let db_path = data_dir.join(Self::DB_FILE_NAME);
+        if db_path.exists() || !legacy_db_path.exists() {
+            return Ok(());
+        }
+
+        std::fs::rename(&legacy_db_path, &db_path)?;
+
+        for suffix in ["-wal", "-shm"] {
+            let legacy_sidecar = data_dir.join(format!("{}{}", Self::LEGACY_DB_FILE_NAME, suffix));
+            if !legacy_sidecar.exists() {
+                continue;
+            }
+            let db_sidecar = data_dir.join(format!("{}{}", Self::DB_FILE_NAME, suffix));
+            if db_sidecar.exists() {
+                continue;
+            }
+            std::fs::rename(legacy_sidecar, db_sidecar)?;
+        }
+
+        Ok(())
+    }
+
     fn enrichment_entity_parts(entity: &LibraryEnrichmentEntity) -> (String, String) {
         match entity {
             LibraryEnrichmentEntity::Artist { artist } => ("artist".to_string(), artist.clone()),
@@ -185,7 +212,10 @@ impl DbManager {
             std::fs::create_dir_all(&data_dir).expect("Could not create data directory");
         }
 
-        let db_path = data_dir.join("playlist.db");
+        Self::migrate_legacy_db_file(&data_dir)
+            .map_err(|err| rusqlite::Error::ToSqlConversionFailure(Box::new(err)))?;
+
+        let db_path = data_dir.join(Self::DB_FILE_NAME);
         let conn = Connection::open(db_path)?;
         Self::configure_connection_pragmas(&conn);
 
@@ -1691,6 +1721,14 @@ mod tests {
     use super::DbManager;
     use crate::protocol::PlaylistColumnWidthOverride;
     use rusqlite::Connection;
+    use std::{fs, path::PathBuf};
+    use uuid::Uuid;
+
+    fn unique_temp_test_dir(prefix: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("{prefix}_{}", Uuid::new_v4()));
+        fs::create_dir_all(&dir).expect("should create test temp directory");
+        dir
+    }
 
     #[test]
     fn test_set_and_get_playlist_column_order_round_trip() {
@@ -1891,5 +1929,31 @@ mod tests {
             .expect("track query should work after migration");
         assert_eq!(tracks.len(), 1);
         assert_eq!(tracks[0].id, "legacy-track");
+    }
+
+    #[test]
+    fn test_migrate_legacy_db_file_renames_playlist_db_and_sidecars() {
+        let temp_dir = unique_temp_test_dir("roqtune_legacy_db_migration");
+        let legacy_db_path = temp_dir.join(DbManager::LEGACY_DB_FILE_NAME);
+        let legacy_wal_path = temp_dir.join(format!("{}-wal", DbManager::LEGACY_DB_FILE_NAME));
+        let legacy_shm_path = temp_dir.join(format!("{}-shm", DbManager::LEGACY_DB_FILE_NAME));
+        fs::write(&legacy_db_path, b"legacy-db").expect("should create legacy db file");
+        fs::write(&legacy_wal_path, b"legacy-wal").expect("should create legacy wal file");
+        fs::write(&legacy_shm_path, b"legacy-shm").expect("should create legacy shm file");
+
+        DbManager::migrate_legacy_db_file(&temp_dir).expect("legacy db migration should succeed");
+
+        let next_db_path = temp_dir.join(DbManager::DB_FILE_NAME);
+        let next_wal_path = temp_dir.join(format!("{}-wal", DbManager::DB_FILE_NAME));
+        let next_shm_path = temp_dir.join(format!("{}-shm", DbManager::DB_FILE_NAME));
+
+        assert!(next_db_path.exists());
+        assert!(next_wal_path.exists());
+        assert!(next_shm_path.exists());
+        assert!(!legacy_db_path.exists());
+        assert!(!legacy_wal_path.exists());
+        assert!(!legacy_shm_path.exists());
+
+        fs::remove_dir_all(&temp_dir).expect("should clean up test temp directory");
     }
 }
