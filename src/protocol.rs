@@ -211,7 +211,7 @@ pub enum LibraryMessage {
     RequestScan,
     RequestRootCounts,
     #[allow(dead_code)]
-    RequestSongs,
+    RequestTracks,
     #[allow(dead_code)]
     RequestArtists,
     #[allow(dead_code)]
@@ -227,16 +227,16 @@ pub enum LibraryMessage {
         artist: String,
     },
     #[allow(dead_code)]
-    RequestAlbumSongs {
+    RequestAlbumTracks {
         album: String,
         album_artist: String,
     },
     #[allow(dead_code)]
-    RequestGenreSongs {
+    RequestGenreTracks {
         genre: String,
     },
     #[allow(dead_code)]
-    RequestDecadeSongs {
+    RequestDecadeTracks {
         decade: String,
     },
     DrainScanProgressQueue,
@@ -284,33 +284,33 @@ pub enum LibraryMessage {
         genres: usize,
         decades: usize,
     },
-    SongsResult(Vec<LibrarySong>),
+    TracksResult(Vec<LibraryTrack>),
     ArtistsResult(Vec<LibraryArtist>),
     AlbumsResult(Vec<LibraryAlbum>),
     GenresResult(Vec<LibraryGenre>),
     DecadesResult(Vec<LibraryDecade>),
     GlobalSearchDataResult {
-        tracks: Vec<LibrarySong>,
+        tracks: Vec<LibraryTrack>,
         artists: Vec<LibraryArtist>,
         albums: Vec<LibraryAlbum>,
     },
     ArtistDetailResult {
         artist: String,
         albums: Vec<LibraryAlbum>,
-        tracks: Vec<LibrarySong>,
+        tracks: Vec<LibraryTrack>,
     },
-    AlbumSongsResult {
+    AlbumTracksResult {
         album: String,
         album_artist: String,
-        tracks: Vec<LibrarySong>,
+        tracks: Vec<LibraryTrack>,
     },
-    GenreSongsResult {
+    GenreTracksResult {
         genre: String,
-        tracks: Vec<LibrarySong>,
+        tracks: Vec<LibraryTrack>,
     },
-    DecadeSongsResult {
+    DecadeTracksResult {
         decade: String,
-        tracks: Vec<LibrarySong>,
+        tracks: Vec<LibraryTrack>,
     },
     LibraryPageResult {
         request_id: u64,
@@ -438,7 +438,7 @@ pub enum MetadataMessage {
 /// Selection item used to resolve library items to concrete track paths.
 #[derive(Debug, Clone, serde::Deserialize, serde::Serialize)]
 pub enum LibrarySelectionSpec {
-    Song { path: PathBuf },
+    Track { path: PathBuf },
     Artist { artist: String },
     Album { album: String, album_artist: String },
     Genre { genre: String },
@@ -493,9 +493,9 @@ pub struct PlaylistInfo {
     pub name: String,
 }
 
-/// One indexed song entry in the music library.
+/// One indexed track entry in the music library.
 #[derive(Debug, Clone, serde::Deserialize, serde::Serialize)]
-pub struct LibrarySong {
+pub struct LibraryTrack {
     pub id: String,
     pub path: PathBuf,
     pub title: String,
@@ -527,7 +527,7 @@ pub enum LibraryViewQuery {
 pub struct LibraryAlbum {
     pub album: String,
     pub album_artist: String,
-    pub song_count: u32,
+    pub track_count: u32,
     pub representative_track_path: Option<PathBuf>,
 }
 
@@ -536,27 +536,27 @@ pub struct LibraryAlbum {
 pub struct LibraryArtist {
     pub artist: String,
     pub album_count: u32,
-    pub song_count: u32,
+    pub track_count: u32,
 }
 
 /// One genre aggregate entry in the indexed music library.
 #[derive(Debug, Clone, serde::Deserialize, serde::Serialize)]
 pub struct LibraryGenre {
     pub genre: String,
-    pub song_count: u32,
+    pub track_count: u32,
 }
 
 /// One decade aggregate entry in the indexed music library.
 #[derive(Debug, Clone, serde::Deserialize, serde::Serialize)]
 pub struct LibraryDecade {
     pub decade: String,
-    pub song_count: u32,
+    pub track_count: u32,
 }
 
 /// Generic paged-entry payload for library pagination requests.
 #[derive(Debug, Clone)]
 pub enum LibraryEntryPayload {
-    Song(LibrarySong),
+    Track(LibraryTrack),
     Artist(LibraryArtist),
     Album(LibraryAlbum),
     Genre(LibraryGenre),

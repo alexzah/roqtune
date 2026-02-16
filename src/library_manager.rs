@@ -132,7 +132,7 @@ impl LibraryManager {
         tracks
     }
 
-    fn stable_library_song_id(path: &Path) -> String {
+    fn stable_library_track_id(path: &Path) -> String {
         let mut hasher = std::collections::hash_map::DefaultHasher::new();
         path.hash(&mut hasher);
         format!("lib-{:x}", hasher.finish())
@@ -229,7 +229,7 @@ impl LibraryManager {
     fn fallback_scan_stub(
         file_path: &Path,
         path_string: String,
-        song_id: String,
+        track_id: String,
         modified_unix_ms: i64,
         file_size_bytes: i64,
         scan_started_unix_ms: i64,
@@ -239,7 +239,7 @@ impl LibraryManager {
         let album = "Unknown Album".to_string();
         let album_artist = artist.clone();
         LibraryTrackScanStub {
-            song_id,
+            track_id,
             path: path_string,
             title: title.clone(),
             artist: artist.clone(),
@@ -366,7 +366,7 @@ impl LibraryManager {
         for file_path in all_files {
             let path_string = file_path.to_string_lossy().to_string();
             let (modified_unix_ms, file_size_bytes) = Self::file_scan_state(&file_path);
-            let song_id = Self::stable_library_song_id(&file_path);
+            let track_id = Self::stable_library_track_id(&file_path);
             scanned_paths.insert(path_string.clone());
             discovered = discovered.saturating_add(1);
 
@@ -383,7 +383,7 @@ impl LibraryManager {
                 scan_stubs_batch.push(Self::fallback_scan_stub(
                     &file_path,
                     path_string.clone(),
-                    song_id,
+                    track_id,
                     modified_unix_ms,
                     file_size_bytes,
                     scan_started_unix_ms,
@@ -544,12 +544,12 @@ impl LibraryManager {
         );
     }
 
-    fn publish_songs(&self) {
-        match self.db_manager.get_library_songs() {
+    fn publish_tracks(&self) {
+        match self.db_manager.get_library_tracks() {
             Ok(tracks) => {
                 let _ = self
                     .bus_producer
-                    .send(Message::Library(LibraryMessage::SongsResult(tracks)));
+                    .send(Message::Library(LibraryMessage::TracksResult(tracks)));
             }
             Err(err) => self.send_scan_failed(format!("Failed to load tracks: {}", err)),
         }
@@ -600,7 +600,7 @@ impl LibraryManager {
     }
 
     fn publish_global_search_data(&self) {
-        let tracks = match self.db_manager.get_library_songs() {
+        let tracks = match self.db_manager.get_library_tracks() {
             Ok(tracks) => tracks,
             Err(err) => {
                 self.send_scan_failed(format!("Failed to load tracks: {}", err));
@@ -632,7 +632,7 @@ impl LibraryManager {
     }
 
     fn publish_root_counts(&self) {
-        let tracks = match self.db_manager.get_library_songs_count() {
+        let tracks = match self.db_manager.get_library_tracks_count() {
             Ok(count) => count,
             Err(err) => {
                 warn!("Failed to load tracks count: {}", err);
@@ -694,15 +694,15 @@ impl LibraryManager {
         }
     }
 
-    fn publish_album_songs(&self, album: String, album_artist: String) {
+    fn publish_album_tracks(&self, album: String, album_artist: String) {
         match self
             .db_manager
-            .get_library_album_songs(&album, &album_artist)
+            .get_library_album_tracks(&album, &album_artist)
         {
             Ok(tracks) => {
                 let _ =
                     self.bus_producer
-                        .send(Message::Library(LibraryMessage::AlbumSongsResult {
+                        .send(Message::Library(LibraryMessage::AlbumTracksResult {
                             album,
                             album_artist,
                             tracks,
@@ -712,12 +712,12 @@ impl LibraryManager {
         }
     }
 
-    fn publish_genre_songs(&self, genre: String) {
-        match self.db_manager.get_library_genre_songs(&genre) {
+    fn publish_genre_tracks(&self, genre: String) {
+        match self.db_manager.get_library_genre_tracks(&genre) {
             Ok(tracks) => {
                 let _ =
                     self.bus_producer
-                        .send(Message::Library(LibraryMessage::GenreSongsResult {
+                        .send(Message::Library(LibraryMessage::GenreTracksResult {
                             genre,
                             tracks,
                         }));
@@ -726,12 +726,12 @@ impl LibraryManager {
         }
     }
 
-    fn publish_decade_songs(&self, decade: String) {
-        match self.db_manager.get_library_decade_songs(&decade) {
+    fn publish_decade_tracks(&self, decade: String) {
+        match self.db_manager.get_library_decade_tracks(&decade) {
             Ok(tracks) => {
                 let _ =
                     self.bus_producer
-                        .send(Message::Library(LibraryMessage::DecadeSongsResult {
+                        .send(Message::Library(LibraryMessage::DecadeTracksResult {
                             decade,
                             tracks,
                         }));
@@ -752,12 +752,12 @@ impl LibraryManager {
         let result: Result<(usize, Vec<protocol::LibraryEntryPayload>), String> = match view {
             protocol::LibraryViewQuery::Tracks => self
                 .db_manager
-                .get_library_songs_page(offset, limit)
+                .get_library_tracks_page(offset, limit)
                 .map(|(rows, total)| {
                     (
                         total,
                         rows.into_iter()
-                            .map(protocol::LibraryEntryPayload::Song)
+                            .map(protocol::LibraryEntryPayload::Track)
                             .collect(),
                     )
                 })
@@ -812,13 +812,13 @@ impl LibraryManager {
                 .map_err(|err| format!("Failed to load decades page: {}", err)),
             protocol::LibraryViewQuery::GlobalSearch => self
                 .db_manager
-                .get_library_songs()
+                .get_library_tracks()
                 .and_then(|tracks| {
                     let artists = self.db_manager.get_library_artists()?;
                     let albums = self.db_manager.get_library_albums()?;
                     let mut entries: Vec<protocol::LibraryEntryPayload> =
                         Vec::with_capacity(tracks.len() + artists.len() + albums.len());
-                    entries.extend(tracks.into_iter().map(protocol::LibraryEntryPayload::Song));
+                    entries.extend(tracks.into_iter().map(protocol::LibraryEntryPayload::Track));
                     entries.extend(
                         artists
                             .into_iter()
@@ -827,8 +827,8 @@ impl LibraryManager {
                     entries.extend(albums.into_iter().map(protocol::LibraryEntryPayload::Album));
                     entries.sort_by(|left, right| {
                         let left_key = match left {
-                            protocol::LibraryEntryPayload::Song(song) => {
-                                song.title.to_ascii_lowercase()
+                            protocol::LibraryEntryPayload::Track(track) => {
+                                track.title.to_ascii_lowercase()
                             }
                             protocol::LibraryEntryPayload::Artist(artist) => {
                                 artist.artist.to_ascii_lowercase()
@@ -844,8 +844,8 @@ impl LibraryManager {
                             }
                         };
                         let right_key = match right {
-                            protocol::LibraryEntryPayload::Song(song) => {
-                                song.title.to_ascii_lowercase()
+                            protocol::LibraryEntryPayload::Track(track) => {
+                                track.title.to_ascii_lowercase()
                             }
                             protocol::LibraryEntryPayload::Artist(artist) => {
                                 artist.artist.to_ascii_lowercase()
@@ -863,14 +863,14 @@ impl LibraryManager {
                         let left_kind_rank = match left {
                             protocol::LibraryEntryPayload::Artist(_) => 0,
                             protocol::LibraryEntryPayload::Album(_) => 1,
-                            protocol::LibraryEntryPayload::Song(_) => 2,
+                            protocol::LibraryEntryPayload::Track(_) => 2,
                             protocol::LibraryEntryPayload::Genre(_) => 3,
                             protocol::LibraryEntryPayload::Decade(_) => 4,
                         };
                         let right_kind_rank = match right {
                             protocol::LibraryEntryPayload::Artist(_) => 0,
                             protocol::LibraryEntryPayload::Album(_) => 1,
-                            protocol::LibraryEntryPayload::Song(_) => 2,
+                            protocol::LibraryEntryPayload::Track(_) => 2,
                             protocol::LibraryEntryPayload::Genre(_) => 3,
                             protocol::LibraryEntryPayload::Decade(_) => 4,
                         };
@@ -893,7 +893,7 @@ impl LibraryManager {
                         .into_iter()
                         .skip(offset)
                         .take(limit)
-                        .map(protocol::LibraryEntryPayload::Song)
+                        .map(protocol::LibraryEntryPayload::Track)
                         .collect();
                     (total, rows)
                 })
@@ -903,42 +903,42 @@ impl LibraryManager {
                 album_artist,
             } => self
                 .db_manager
-                .get_library_album_songs(&album, &album_artist)
+                .get_library_album_tracks(&album, &album_artist)
                 .map(|tracks| {
                     let total = tracks.len();
                     let rows = tracks
                         .into_iter()
                         .skip(offset)
                         .take(limit)
-                        .map(protocol::LibraryEntryPayload::Song)
+                        .map(protocol::LibraryEntryPayload::Track)
                         .collect();
                     (total, rows)
                 })
                 .map_err(|err| format!("Failed to load album detail page: {}", err)),
             protocol::LibraryViewQuery::GenreDetail { genre } => self
                 .db_manager
-                .get_library_genre_songs(&genre)
+                .get_library_genre_tracks(&genre)
                 .map(|tracks| {
                     let total = tracks.len();
                     let rows = tracks
                         .into_iter()
                         .skip(offset)
                         .take(limit)
-                        .map(protocol::LibraryEntryPayload::Song)
+                        .map(protocol::LibraryEntryPayload::Track)
                         .collect();
                     (total, rows)
                 })
                 .map_err(|err| format!("Failed to load genre detail page: {}", err)),
             protocol::LibraryViewQuery::DecadeDetail { decade } => self
                 .db_manager
-                .get_library_decade_songs(&decade)
+                .get_library_decade_tracks(&decade)
                 .map(|tracks| {
                     let total = tracks.len();
                     let rows = tracks
                         .into_iter()
                         .skip(offset)
                         .take(limit)
-                        .map(protocol::LibraryEntryPayload::Song)
+                        .map(protocol::LibraryEntryPayload::Track)
                         .collect();
                     (total, rows)
                 })
@@ -968,7 +968,7 @@ impl LibraryManager {
 
         for selection in selections {
             match selection {
-                protocol::LibrarySelectionSpec::Song { path } => {
+                protocol::LibrarySelectionSpec::Track { path } => {
                     let dedupe_key = path.to_string_lossy().to_string();
                     if seen_paths.insert(dedupe_key) {
                         resolved_paths.push(path);
@@ -979,10 +979,10 @@ impl LibraryManager {
                         .db_manager
                         .get_library_artist_detail(&artist)
                         .map_err(|err| format!("Failed to resolve artist '{}': {}", artist, err))?;
-                    for song in tracks {
-                        let dedupe_key = song.path.to_string_lossy().to_string();
+                    for track in tracks {
+                        let dedupe_key = track.path.to_string_lossy().to_string();
                         if seen_paths.insert(dedupe_key) {
-                            resolved_paths.push(song.path);
+                            resolved_paths.push(track.path);
                         }
                     }
                 }
@@ -992,41 +992,41 @@ impl LibraryManager {
                 } => {
                     let tracks = self
                         .db_manager
-                        .get_library_album_songs(&album, &album_artist)
+                        .get_library_album_tracks(&album, &album_artist)
                         .map_err(|err| {
                             format!(
                                 "Failed to resolve album '{} / {}': {}",
                                 album, album_artist, err
                             )
                         })?;
-                    for song in tracks {
-                        let dedupe_key = song.path.to_string_lossy().to_string();
+                    for track in tracks {
+                        let dedupe_key = track.path.to_string_lossy().to_string();
                         if seen_paths.insert(dedupe_key) {
-                            resolved_paths.push(song.path);
+                            resolved_paths.push(track.path);
                         }
                     }
                 }
                 protocol::LibrarySelectionSpec::Genre { genre } => {
                     let tracks = self
                         .db_manager
-                        .get_library_genre_songs(&genre)
+                        .get_library_genre_tracks(&genre)
                         .map_err(|err| format!("Failed to resolve genre '{}': {}", genre, err))?;
-                    for song in tracks {
-                        let dedupe_key = song.path.to_string_lossy().to_string();
+                    for track in tracks {
+                        let dedupe_key = track.path.to_string_lossy().to_string();
                         if seen_paths.insert(dedupe_key) {
-                            resolved_paths.push(song.path);
+                            resolved_paths.push(track.path);
                         }
                     }
                 }
                 protocol::LibrarySelectionSpec::Decade { decade } => {
                     let tracks = self
                         .db_manager
-                        .get_library_decade_songs(&decade)
+                        .get_library_decade_tracks(&decade)
                         .map_err(|err| format!("Failed to resolve decade '{}': {}", decade, err))?;
-                    for song in tracks {
-                        let dedupe_key = song.path.to_string_lossy().to_string();
+                    for track in tracks {
+                        let dedupe_key = track.path.to_string_lossy().to_string();
                         if seen_paths.insert(dedupe_key) {
-                            resolved_paths.push(song.path);
+                            resolved_paths.push(track.path);
                         }
                     }
                 }
@@ -1165,8 +1165,8 @@ impl LibraryManager {
                     Message::Library(LibraryMessage::RequestRootCounts) => {
                         self.publish_root_counts();
                     }
-                    Message::Library(LibraryMessage::RequestSongs) => {
-                        self.publish_songs();
+                    Message::Library(LibraryMessage::RequestTracks) => {
+                        self.publish_tracks();
                     }
                     Message::Library(LibraryMessage::RequestArtists) => {
                         self.publish_artists();
@@ -1186,17 +1186,17 @@ impl LibraryManager {
                     Message::Library(LibraryMessage::RequestArtistDetail { artist }) => {
                         self.publish_artist_detail(artist);
                     }
-                    Message::Library(LibraryMessage::RequestAlbumSongs {
+                    Message::Library(LibraryMessage::RequestAlbumTracks {
                         album,
                         album_artist,
                     }) => {
-                        self.publish_album_songs(album, album_artist);
+                        self.publish_album_tracks(album, album_artist);
                     }
-                    Message::Library(LibraryMessage::RequestGenreSongs { genre }) => {
-                        self.publish_genre_songs(genre);
+                    Message::Library(LibraryMessage::RequestGenreTracks { genre }) => {
+                        self.publish_genre_tracks(genre);
                     }
-                    Message::Library(LibraryMessage::RequestDecadeSongs { decade }) => {
-                        self.publish_decade_songs(decade);
+                    Message::Library(LibraryMessage::RequestDecadeTracks { decade }) => {
+                        self.publish_decade_tracks(decade);
                     }
                     Message::Library(LibraryMessage::DrainScanProgressQueue) => {}
                     Message::Library(LibraryMessage::RequestLibraryPage {

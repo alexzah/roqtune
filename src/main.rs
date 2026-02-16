@@ -5551,16 +5551,16 @@ mod tests {
         let nested = base.join("nested");
         let deep = nested.join("deep");
         std::fs::create_dir_all(&deep).expect("test directories should be created");
-        std::fs::write(base.join("song_b.flac"), b"").expect("should write flac fixture");
+        std::fs::write(base.join("track_b.flac"), b"").expect("should write flac fixture");
         std::fs::write(base.join("ignore.txt"), b"").expect("should write text fixture");
-        std::fs::write(nested.join("song_a.MP3"), b"").expect("should write mp3 fixture");
-        std::fs::write(deep.join("song_c.wav"), b"").expect("should write wav fixture");
+        std::fs::write(nested.join("track_a.MP3"), b"").expect("should write mp3 fixture");
+        std::fs::write(deep.join("track_c.wav"), b"").expect("should write wav fixture");
 
         let imported = collect_audio_files_from_folder(&base);
         let mut expected = vec![
-            nested.join("song_a.MP3"),
-            base.join("song_b.flac"),
-            deep.join("song_c.wav"),
+            nested.join("track_a.MP3"),
+            base.join("track_b.flac"),
+            deep.join("track_c.wav"),
         ];
         expected.sort_unstable();
         assert_eq!(imported, expected);
