@@ -1,4 +1,4 @@
-import { Button, ComboBox, VerticalBox, StandardTableView, ScrollView, LineEdit, ListView, Switch } from "std-widgets.slint";
+import { Button, ComboBox, VerticalBox, StandardTableView, ScrollView, LineEdit, ListView, Switch, Palette } from "std-widgets.slint";
 
 import {
     LayoutAlbumArtViewerPanelModel,
@@ -17,6 +17,10 @@ import { ModeTabs } from "ui/components/tabs.slint";
 import { LibraryRow } from "ui/components/library.slint";
 import { SettingsDropdownControl } from "ui/components/settings.slint";
 import { StatusBar } from "ui/components/status.slint";
+
+export global AppPalette {
+    in-out property <ColorScheme> color-scheme <=> Palette.color-scheme;
+}
 
 export component AppWindow inherits Window {
     preferred-width: 900px;
@@ -3896,7 +3900,7 @@ export component AppWindow inherits Window {
                 Rectangle { height: 1px; background: #343434; }
 
                 ModeTabs {
-                    labels: ["General", "Library"];
+                    labels: ["General", "Audio", "Library"];
                     selected_index: root.settings_dialog_tab_index;
                     selected(tab_index) => {
                         root.settings_dialog_tab_index = tab_index;
@@ -3908,6 +3912,206 @@ export component AppWindow inherits Window {
                     clip: true;
 
                     if root.settings_dialog_tab_index == 0 : ScrollView {
+                        width: parent.width;
+                        height: parent.height;
+
+                        VerticalLayout {
+                            alignment: start;
+                            spacing: 8px;
+
+                            Text {
+                                text: "Behavior";
+                                color: #ddd;
+                                font-size: 12px;
+                                font-weight: 700;
+                            }
+
+                            Rectangle {
+                                height: 32px;
+                                background: settings-layout-intro-toggle-ta.has-hover ? #2d2d2d : transparent;
+                                border-radius: 4px;
+                                HorizontalLayout {
+                                    spacing: 10px;
+                                    Text {
+                                        text: "Show layout editing mode tutorial";
+                                        color: #ddd;
+                                        font-size: 12px;
+                                        width: settings-dialog-panel.label_column_width + 24px;
+                                        vertical-alignment: center;
+                                        horizontal-alignment: left;
+                                    }
+                                    Rectangle {
+                                        width: settings-dialog-panel.control_max_width;
+                                        height: parent.height;
+                                        background: transparent;
+                                        settings-layout-intro-toggle := Switch {
+                                            x: parent.width - self.width - 8px;
+                                            y: (parent.height - self.height) / 2;
+                                            width: 36px;
+                                            text: "";
+                                            checked <=> root.settings_show_layout_edit_tutorial;
+                                        }
+                                    }
+                                    Rectangle { horizontal-stretch: 1; }
+                                }
+                                settings-layout-intro-toggle-ta := TouchArea {
+                                    clicked => {
+                                        settings-layout-intro-toggle.checked = !settings-layout-intro-toggle.checked;
+                                    }
+                                }
+                            }
+
+                            Rectangle {
+                                height: 32px;
+                                background: settings-tooltips-toggle-ta.has-hover ? #2d2d2d : transparent;
+                                border-radius: 4px;
+                                HorizontalLayout {
+                                    spacing: 10px;
+                                    Text {
+                                        text: "Show tooltips";
+                                        color: #ddd;
+                                        font-size: 12px;
+                                        width: settings-dialog-panel.label_column_width + 24px;
+                                        vertical-alignment: center;
+                                        horizontal-alignment: left;
+                                    }
+                                    Rectangle {
+                                        width: settings-dialog-panel.control_max_width;
+                                        height: parent.height;
+                                        background: transparent;
+                                        settings-tooltips-toggle := Switch {
+                                            x: parent.width - self.width - 8px;
+                                            y: (parent.height - self.height) / 2;
+                                            width: 36px;
+                                            text: "";
+                                            checked <=> root.settings_show_tooltips;
+                                        }
+                                    }
+                                    Rectangle { horizontal-stretch: 1; }
+                                }
+                                settings-tooltips-toggle-ta := TouchArea {
+                                    clicked => {
+                                        settings-tooltips-toggle.checked = !settings-tooltips-toggle.checked;
+                                    }
+                                }
+                            }
+
+                            Rectangle {
+                                height: 32px;
+                                background: settings-auto-scroll-toggle-ta.has-hover ? #2d2d2d : transparent;
+                                border-radius: 4px;
+                                HorizontalLayout {
+                                    spacing: 10px;
+                                    auto-scroll-label-host := Rectangle {
+                                        width: settings-dialog-panel.label_column_width + 24px;
+                                        height: parent.height;
+                                        background: transparent;
+                                        Text {
+                                            text: "Auto scroll to playing track";
+                                            color: #ddd;
+                                            font-size: 12px;
+                                            width: parent.width;
+                                            height: parent.height;
+                                            vertical-alignment: center;
+                                            horizontal-alignment: left;
+                                        }
+                                    }
+                                    Rectangle {
+                                        width: settings-dialog-panel.control_max_width;
+                                        height: parent.height;
+                                        background: transparent;
+                                        settings-auto-scroll-toggle := Switch {
+                                            x: parent.width - self.width - 8px;
+                                            y: (parent.height - self.height) / 2;
+                                            width: 36px;
+                                            text: "";
+                                            checked <=> root.settings_auto_scroll_to_playing_track;
+                                        }
+                                    }
+                                    Rectangle { horizontal-stretch: 1; }
+                                }
+                                settings-auto-scroll-toggle-ta := TouchArea {
+                                    changed has-hover => {
+                                        root.tooltip_hover_changed(
+                                            self.has-hover,
+                                            "When enabled, track list views auto-scroll to keep the playing track centered.",
+                                            floor((auto-scroll-label-host.absolute-position.x + auto-scroll-label-host.width / 2) / 1px),
+                                            floor((auto-scroll-label-host.absolute-position.y + auto-scroll-label-host.height) / 1px)
+                                        );
+                                    }
+                                    clicked => {
+                                        settings-auto-scroll-toggle.checked = !settings-auto-scroll-toggle.checked;
+                                    }
+                                }
+                            }
+
+                            Rectangle { height: 1px; background: #343434; }
+
+                            Text {
+                                text: "Appearance";
+                                color: #ddd;
+                                font-size: 12px;
+                                font-weight: 700;
+                            }
+
+                            Rectangle {
+                                height: 32px;
+                                background: settings-theme-toggle-ta.has-hover ? #2d2d2d : transparent;
+                                border-radius: 4px;
+                                HorizontalLayout {
+                                    spacing: 10px;
+                                    theme-label-host := Rectangle {
+                                        width: settings-dialog-panel.label_column_width + 24px;
+                                        height: parent.height;
+                                        background: transparent;
+                                        Text {
+                                            text: "Dark mode";
+                                            color: #ddd;
+                                            font-size: 12px;
+                                            width: parent.width;
+                                            height: parent.height;
+                                            vertical-alignment: center;
+                                            horizontal-alignment: left;
+                                        }
+                                        settings-theme-label-tooltip-ta := TooltipHoverArea {
+                                            tooltip-text: "Switches Fluent widget palette between dark and light mode.";
+                                            tooltip_hover_changed(is-hovered, tooltip, anchor-x-px, anchor-y-px) => {
+                                                root.tooltip_hover_changed(is-hovered, tooltip, anchor-x-px, anchor-y-px);
+                                            }
+                                        }
+                                    }
+                                    Rectangle {
+                                        width: settings-dialog-panel.control_max_width;
+                                        height: parent.height;
+                                        background: transparent;
+                                        settings-theme-toggle := Switch {
+                                            x: parent.width - self.width - 8px;
+                                            y: (parent.height - self.height) / 2;
+                                            width: 36px;
+                                            text: "";
+                                            checked <=> root.settings_dark_mode;
+                                        }
+                                    }
+                                    Rectangle { horizontal-stretch: 1; }
+                                }
+                                settings-theme-toggle-ta := TouchArea {
+                                    changed has-hover => {
+                                        root.tooltip_hover_changed(
+                                            self.has-hover,
+                                            "Switches Fluent widget palette between dark and light mode.",
+                                            floor((theme-label-host.absolute-position.x + theme-label-host.width / 2) / 1px),
+                                            floor((theme-label-host.absolute-position.y + theme-label-host.height) / 1px)
+                                        );
+                                    }
+                                    clicked => {
+                                        settings-theme-toggle.checked = !settings-theme-toggle.checked;
+                                    }
+                                }
+                            }
+                        }
+                    }
+
+                    if root.settings_dialog_tab_index == 1 : ScrollView {
                         width: parent.width;
                         height: parent.height;
 
@@ -4078,131 +4282,10 @@ export component AppWindow inherits Window {
                                     }
                                 }
                             }
-
-                            Rectangle { height: 1px; background: #343434; }
-
-                            Rectangle {
-                                height: 32px;
-                                background: settings-layout-intro-toggle-ta.has-hover ? #2d2d2d : transparent;
-                                border-radius: 4px;
-                                HorizontalLayout {
-                                    spacing: 10px;
-                                    Text {
-                                        text: "Show layout editing mode tutorial";
-                                        color: #ddd;
-                                        font-size: 12px;
-                                        width: settings-dialog-panel.label_column_width + 24px;
-                                        vertical-alignment: center;
-                                        horizontal-alignment: left;
-                                    }
-                                    Rectangle {
-                                        width: settings-dialog-panel.control_max_width;
-                                        height: parent.height;
-                                        background: transparent;
-                                        settings-layout-intro-toggle := Switch {
-                                            x: parent.width - self.width - 8px;
-                                            y: (parent.height - self.height) / 2;
-                                            width: 36px;
-                                            text: "";
-                                            checked <=> root.settings_show_layout_edit_tutorial;
-                                        }
-                                    }
-                                    Rectangle { horizontal-stretch: 1; }
-                                }
-                                settings-layout-intro-toggle-ta := TouchArea {
-                                    clicked => {
-                                        settings-layout-intro-toggle.checked = !settings-layout-intro-toggle.checked;
-                                    }
-                                }
-                            }
-
-                            Rectangle {
-                                height: 32px;
-                                background: settings-tooltips-toggle-ta.has-hover ? #2d2d2d : transparent;
-                                border-radius: 4px;
-                                HorizontalLayout {
-                                    spacing: 10px;
-                                    Text {
-                                        text: "Show tooltips";
-                                        color: #ddd;
-                                        font-size: 12px;
-                                        width: settings-dialog-panel.label_column_width + 24px;
-                                        vertical-alignment: center;
-                                        horizontal-alignment: left;
-                                    }
-                                    Rectangle {
-                                        width: settings-dialog-panel.control_max_width;
-                                        height: parent.height;
-                                        background: transparent;
-                                        settings-tooltips-toggle := Switch {
-                                            x: parent.width - self.width - 8px;
-                                            y: (parent.height - self.height) / 2;
-                                            width: 36px;
-                                            text: "";
-                                            checked <=> root.settings_show_tooltips;
-                                        }
-                                    }
-                                    Rectangle { horizontal-stretch: 1; }
-                                }
-                                settings-tooltips-toggle-ta := TouchArea {
-                                    clicked => {
-                                        settings-tooltips-toggle.checked = !settings-tooltips-toggle.checked;
-                                    }
-                                }
-                            }
-
-                            Rectangle {
-                                height: 32px;
-                                background: settings-auto-scroll-toggle-ta.has-hover ? #2d2d2d : transparent;
-                                border-radius: 4px;
-                                HorizontalLayout {
-                                    spacing: 10px;
-                                    auto-scroll-label-host := Rectangle {
-                                        width: settings-dialog-panel.label_column_width + 24px;
-                                        height: parent.height;
-                                        background: transparent;
-                                        Text {
-                                            text: "Auto scroll to playing track";
-                                            color: #ddd;
-                                            font-size: 12px;
-                                            width: parent.width;
-                                            height: parent.height;
-                                            vertical-alignment: center;
-                                            horizontal-alignment: left;
-                                        }
-                                    }
-                                    Rectangle {
-                                        width: settings-dialog-panel.control_max_width;
-                                        height: parent.height;
-                                        background: transparent;
-                                        settings-auto-scroll-toggle := Switch {
-                                            x: parent.width - self.width - 8px;
-                                            y: (parent.height - self.height) / 2;
-                                            width: 36px;
-                                            text: "";
-                                            checked <=> root.settings_auto_scroll_to_playing_track;
-                                        }
-                                    }
-                                    Rectangle { horizontal-stretch: 1; }
-                                }
-                                settings-auto-scroll-toggle-ta := TouchArea {
-                                    changed has-hover => {
-                                        root.tooltip_hover_changed(
-                                            self.has-hover,
-                                            "When enabled, track list views auto-scroll to keep the playing track centered.",
-                                            floor((auto-scroll-label-host.absolute-position.x + auto-scroll-label-host.width / 2) / 1px),
-                                            floor((auto-scroll-label-host.absolute-position.y + auto-scroll-label-host.height) / 1px)
-                                        );
-                                    }
-                                    clicked => {
-                                        settings-auto-scroll-toggle.checked = !settings-auto-scroll-toggle.checked;
-                                    }
-                                }
-                            }
                         }
                     }
 
-                    if root.settings_dialog_tab_index == 1 : VerticalLayout {
+                    if root.settings_dialog_tab_index == 2 : VerticalLayout {
                         width: parent.width;
                         height: parent.height;
                         spacing: 8px;
@@ -4356,7 +4439,7 @@ export component AppWindow inherits Window {
                             Rectangle { horizontal-stretch: 1; }
                         }
                     }
-            }
+                }
 
             Rectangle { height: 1px; background: #343434; }
 
@@ -4389,6 +4472,7 @@ export component AppWindow inherits Window {
                             root.settings_show_layout_edit_tutorial,
                             root.settings_show_tooltips,
                             root.settings_auto_scroll_to_playing_track,
+                            root.settings_dark_mode,
                             root.settings_sample_rate_mode_index,
                             root.settings_resampler_quality_index,
                             root.settings_dither_on_bitdepth_reduce
@@ -4510,6 +4594,7 @@ export component AppWindow inherits Window {
     in-out property <bool> settings_show_layout_edit_tutorial: true;
     in-out property <bool> settings_show_tooltips: true;
     in-out property <bool> settings_auto_scroll_to_playing_track: true;
+    in-out property <bool> settings_dark_mode: true;
     in-out property <bool> settings_dither_on_bitdepth_reduce: true;
     in-out property <bool> show_tooltips_enabled: true;
     in-out property <int> settings_dialog_tab_index: 0;
@@ -4641,5 +4726,5 @@ export component AppWindow inherits Window {
     callback open_settings();
     callback open_external_url(string);
     callback tooltip_hover_changed(bool, string, int, int);
-    callback apply_settings(int, int, int, int, string, string, string, string, bool, bool, bool, int, int, bool);
+    callback apply_settings(int, int, int, int, string, string, string, string, bool, bool, bool, bool, int, int, bool);
 }

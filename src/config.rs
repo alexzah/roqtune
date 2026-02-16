@@ -62,6 +62,8 @@ pub struct UiConfig {
     pub show_tooltips: bool,
     #[serde(default = "default_true")]
     pub auto_scroll_to_playing_track: bool,
+    #[serde(default = "default_true")]
+    pub dark_mode: bool,
     /// Runtime playlist-column width minimum loaded from `layout.toml`.
     #[serde(skip, default = "default_playlist_album_art_column_min_width_px")]
     pub playlist_album_art_column_min_width_px: u32,
@@ -180,6 +182,7 @@ impl Default for UiConfig {
             show_layout_edit_intro: true,
             show_tooltips: true,
             auto_scroll_to_playing_track: true,
+            dark_mode: true,
             playlist_album_art_column_min_width_px: default_playlist_album_art_column_min_width_px(
             ),
             playlist_album_art_column_max_width_px: default_playlist_album_art_column_max_width_px(
@@ -345,6 +348,7 @@ mod tests {
         assert!(config.ui.show_layout_edit_intro);
         assert!(config.ui.show_tooltips);
         assert!(config.ui.auto_scroll_to_playing_track);
+        assert!(config.ui.dark_mode);
         assert_eq!(config.ui.playlist_album_art_column_min_width_px, 16);
         assert_eq!(config.ui.playlist_album_art_column_max_width_px, 480);
         assert_eq!(config.ui.layout, LayoutConfig::default());
@@ -392,6 +396,7 @@ decoder_request_chunk_ms = 1500
         assert!(parsed.ui.show_layout_edit_intro);
         assert!(parsed.ui.show_tooltips);
         assert!(parsed.ui.auto_scroll_to_playing_track);
+        assert!(parsed.ui.dark_mode);
         assert_eq!(parsed.ui.playlist_album_art_column_min_width_px, 16);
         assert_eq!(parsed.ui.playlist_album_art_column_max_width_px, 480);
         assert_eq!(parsed.ui.playlist_columns, default_playlist_columns());
@@ -491,6 +496,7 @@ decoder_request_chunk_ms = 1500
             parsed.ui.auto_scroll_to_playing_track,
             defaults.ui.auto_scroll_to_playing_track
         );
+        assert_eq!(parsed.ui.dark_mode, defaults.ui.dark_mode);
         assert_eq!(
             parsed.ui.playlist_album_art_column_min_width_px,
             defaults.ui.playlist_album_art_column_min_width_px

@@ -51,7 +51,7 @@ use playlist::Playlist;
 use playlist_manager::PlaylistManager;
 use protocol::{ConfigMessage, Message, MetadataMessage, PlaybackMessage, PlaylistMessage};
 use slint::winit_030::{winit, EventResult as WinitEventResult, WinitWindowAccessor};
-use slint::{ComponentHandle, LogicalSize, Model, ModelRc, VecModel};
+use slint::{language::ColorScheme, ComponentHandle, LogicalSize, Model, ModelRc, VecModel};
 use tokio::sync::broadcast;
 use toml_edit::{value, Array, DocumentMut, Item, Table};
 use ui_manager::{UiManager, UiState};
@@ -835,6 +835,7 @@ fn sanitize_config(config: Config) -> Config {
             show_layout_edit_intro: config.ui.show_layout_edit_intro,
             show_tooltips: config.ui.show_tooltips,
             auto_scroll_to_playing_track: config.ui.auto_scroll_to_playing_track,
+            dark_mode: config.ui.dark_mode,
             playlist_album_art_column_min_width_px: clamped_album_art_column_min_width_px,
             playlist_album_art_column_max_width_px: clamped_album_art_column_max_width_px,
             layout: sanitized_layout,
@@ -1965,6 +1966,13 @@ fn write_config_to_document(document: &mut DocumentMut, previous: &Config, confi
             config.ui.auto_scroll_to_playing_track,
             value,
         );
+        set_table_scalar_if_changed(
+            ui,
+            "dark_mode",
+            previous.ui.dark_mode,
+            config.ui.dark_mode,
+            value,
+        );
         // Layout-owned state is persisted in layout.toml only.
         ui.remove("button_cluster_instances");
         ui.remove("playlist_columns");
@@ -2282,6 +2290,7 @@ fn with_updated_layout(previous: &Config, layout: LayoutConfig) -> Config {
             show_layout_edit_intro: previous.ui.show_layout_edit_intro,
             show_tooltips: previous.ui.show_tooltips,
             auto_scroll_to_playing_track: previous.ui.auto_scroll_to_playing_track,
+            dark_mode: previous.ui.dark_mode,
             playlist_album_art_column_min_width_px: previous
                 .ui
                 .playlist_album_art_column_min_width_px,
@@ -2633,6 +2642,13 @@ fn apply_config_to_ui(
     ui.set_settings_show_layout_edit_tutorial(config.ui.show_layout_edit_intro);
     ui.set_settings_show_tooltips(config.ui.show_tooltips);
     ui.set_settings_auto_scroll_to_playing_track(config.ui.auto_scroll_to_playing_track);
+    ui.set_settings_dark_mode(config.ui.dark_mode);
+    let color_scheme = if config.ui.dark_mode {
+        ColorScheme::Dark
+    } else {
+        ColorScheme::Light
+    };
+    ui.global::<AppPalette>().set_color_scheme(color_scheme);
     ui.set_settings_dither_on_bitdepth_reduce(config.output.dither_on_bitdepth_reduce);
     ui.set_settings_verified_sample_rates_summary(
         output_options.verified_sample_rates_summary.clone().into(),
@@ -4938,6 +4954,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
               show_layout_edit_tutorial,
               show_tooltips_enabled,
               auto_scroll_to_playing_track,
+              dark_mode_enabled,
               sample_rate_mode_index,
               resampler_quality_index,
               dither_on_bitdepth_reduce| {
@@ -5037,6 +5054,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     show_layout_edit_intro: show_layout_edit_tutorial,
                     show_tooltips: show_tooltips_enabled,
                     auto_scroll_to_playing_track,
+                    dark_mode: dark_mode_enabled,
                     playlist_album_art_column_min_width_px: previous_config
                         .ui
                         .playlist_album_art_column_min_width_px,
@@ -5132,6 +5150,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 show_layout_edit_intro: previous_config.ui.show_layout_edit_intro,
                 show_tooltips: previous_config.ui.show_tooltips,
                 auto_scroll_to_playing_track: previous_config.ui.auto_scroll_to_playing_track,
+                dark_mode: previous_config.ui.dark_mode,
                 playlist_album_art_column_min_width_px: previous_config
                     .ui
                     .playlist_album_art_column_min_width_px,
@@ -5229,6 +5248,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 show_layout_edit_intro: previous_config.ui.show_layout_edit_intro,
                 show_tooltips: previous_config.ui.show_tooltips,
                 auto_scroll_to_playing_track: previous_config.ui.auto_scroll_to_playing_track,
+                dark_mode: previous_config.ui.dark_mode,
                 playlist_album_art_column_min_width_px: previous_config
                     .ui
                     .playlist_album_art_column_min_width_px,
@@ -5328,6 +5348,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 show_layout_edit_intro: previous_config.ui.show_layout_edit_intro,
                 show_tooltips: previous_config.ui.show_tooltips,
                 auto_scroll_to_playing_track: previous_config.ui.auto_scroll_to_playing_track,
+                dark_mode: previous_config.ui.dark_mode,
                 playlist_album_art_column_min_width_px: previous_config
                     .ui
                     .playlist_album_art_column_min_width_px,
@@ -5421,6 +5442,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 show_layout_edit_intro: previous_config.ui.show_layout_edit_intro,
                 show_tooltips: previous_config.ui.show_tooltips,
                 auto_scroll_to_playing_track: previous_config.ui.auto_scroll_to_playing_track,
+                dark_mode: previous_config.ui.dark_mode,
                 playlist_album_art_column_min_width_px: previous_config
                     .ui
                     .playlist_album_art_column_min_width_px,
@@ -5820,6 +5842,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             show_layout_edit_intro: state.ui.show_layout_edit_intro,
                             show_tooltips: state.ui.show_tooltips,
                             auto_scroll_to_playing_track: state.ui.auto_scroll_to_playing_track,
+                            dark_mode: state.ui.dark_mode,
                             playlist_album_art_column_min_width_px: state
                                 .ui
                                 .playlist_album_art_column_min_width_px,
@@ -6127,7 +6150,7 @@ mod tests {
         assert!(
             slint_ui.contains("quick-layout-toggle := Switch {")
                 && slint_ui.contains("checked: root.layout_edit_mode;")
-                && slint_ui.contains("width: 18px;"),
+                && slint_ui.contains("width: 36px;"),
             "Settings action menu layout mode control should use compact switch control"
         );
         assert!(
@@ -6154,9 +6177,13 @@ mod tests {
             "Settings dialog should expose auto-scroll playing-track setting"
         );
         assert!(
+            slint_ui.contains("in-out property <bool> settings_dark_mode: true;"),
+            "Settings dialog should expose persisted dark-mode setting"
+        );
+        assert!(
             slint_ui.contains("in-out property <int> settings_dialog_tab_index: 0;")
-                && slint_ui.contains("labels: [\"General\", \"Library\"];"),
-            "Settings dialog should expose and render General/Library tabs"
+                && slint_ui.contains("labels: [\"General\", \"Audio\", \"Library\"];"),
+            "Settings dialog should expose and render General/Audio/Library tabs"
         );
         assert!(
             slint_ui.contains("text: \"Show layout editing mode tutorial\""),
@@ -6170,7 +6197,7 @@ mod tests {
             "General tab tutorial row should keep compact right-aligned switch binding"
         );
         assert!(
-            slint_ui.contains("if root.settings_dialog_tab_index == 1 : VerticalLayout {")
+            slint_ui.contains("if root.settings_dialog_tab_index == 2 : VerticalLayout {")
                 && slint_ui.contains("text: \"Library Folders\"")
                 && slint_ui.contains("text: \"Add Folder\"")
                 && slint_ui.contains("text: \"Rescan\""),
@@ -6191,16 +6218,23 @@ mod tests {
             "General tab should expose auto-scroll playing-track toggle row"
         );
         assert!(
+            slint_ui.contains("text: \"Appearance\"")
+                && slint_ui.contains("text: \"Dark mode\"")
+                && slint_ui.contains("checked <=> root.settings_dark_mode;"),
+            "General tab should expose appearance section with dark-mode toggle"
+        );
+        assert!(
             slint_ui.contains(
-                "callback apply_settings(int, int, int, int, string, string, string, string, bool, bool, bool, int, int, bool);"
+                "callback apply_settings(int, int, int, int, string, string, string, string, bool, bool, bool, bool, int, int, bool);"
             ),
-            "Apply settings callback should include auto-scroll, sample-rate mode, resampler quality, and dither controls"
+            "Apply settings callback should include auto-scroll, dark mode, sample-rate mode, resampler quality, and dither controls"
         );
         assert!(
             slint_ui.contains("label: \"Output Sample Rate\"")
                 && slint_ui.contains("options: root.settings_sample_rate_mode_options;")
-                && slint_ui.contains("selected_index <=> root.settings_sample_rate_mode_index;"),
-            "General tab should expose Match Content and Manual sample-rate mode selector"
+                && slint_ui.contains("selected_index <=> root.settings_sample_rate_mode_index;")
+                && slint_ui.contains("if root.settings_dialog_tab_index == 1 : ScrollView {"),
+            "Audio tab should expose Match Content and Manual sample-rate mode selector"
         );
     }
 
@@ -6303,7 +6337,7 @@ mod tests {
         );
         assert!(
             menu_ui.contains("column-toggle := Switch {")
-                && menu_ui.contains("width: 18px;")
+                && menu_ui.contains("width: 36px;")
                 && menu_ui.contains("font-size: 12px;"),
             "Column header menu should use compact switch controls with consistent label sizing"
         );
@@ -6917,6 +6951,7 @@ mod tests {
                 show_layout_edit_intro: true,
                 show_tooltips: true,
                 auto_scroll_to_playing_track: true,
+                dark_mode: true,
                 playlist_album_art_column_min_width_px: 16,
                 playlist_album_art_column_max_width_px: 480,
                 layout: LayoutConfig::default(),
