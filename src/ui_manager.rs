@@ -84,6 +84,8 @@ pub struct UiManager {
     filter_sort_direction: Option<PlaylistSortDirection>,
     filter_search_query: String,
     filter_search_visible: bool,
+    auto_center_playing_track: bool,
+    playlist_scroll_center_token: i32,
     playback_active: bool,
     processed_message_count: u64,
     lagged_message_count: u64,
@@ -868,6 +870,8 @@ impl UiManager {
             filter_sort_direction: None,
             filter_search_query: String::new(),
             filter_search_visible: false,
+            auto_center_playing_track: true,
+            playlist_scroll_center_token: 0,
             playback_active: false,
             processed_message_count: 0,
             lagged_message_count: 0,
@@ -2479,6 +2483,58 @@ impl UiManager {
         self.view_indices
             .iter()
             .position(|&candidate| candidate == source_index)
+    }
+
+    fn map_library_source_to_view_index(&self, source_index: usize) -> Option<usize> {
+        if self.library_view_indices.is_empty() {
+            return (source_index < self.library_entries.len()).then_some(source_index);
+        }
+        self.library_view_indices
+            .iter()
+            .position(|&candidate| candidate == source_index)
+    }
+
+    fn center_playlist_view_on_playing_track(&mut self) {
+        let Some(source_index) = self.active_playing_index else {
+            return;
+        };
+        let Some(view_index) = self.map_source_to_view_index(source_index) else {
+            return;
+        };
+        self.playlist_scroll_center_token = self.playlist_scroll_center_token.wrapping_add(1);
+        let token = self.playlist_scroll_center_token;
+        let row = view_index as i32;
+        let _ = self.ui.upgrade_in_event_loop(move |ui| {
+            ui.set_playlist_scroll_target_row(row);
+            ui.set_playlist_scroll_center_token(token);
+        });
+    }
+
+    fn center_library_view_on_playing_track(&mut self) {
+        let Some(source_index) = self.library_playing_index else {
+            return;
+        };
+        let Some(view_index) = self.map_library_source_to_view_index(source_index) else {
+            return;
+        };
+        self.library_scroll_restore_token = self.library_scroll_restore_token.wrapping_add(1);
+        let token = self.library_scroll_restore_token;
+        let row = view_index as i32;
+        let _ = self.ui.upgrade_in_event_loop(move |ui| {
+            ui.set_library_scroll_target_row(row);
+            ui.set_library_scroll_restore_token(token);
+        });
+    }
+
+    fn center_active_collection_on_playing_track_change(&mut self) {
+        if !self.auto_center_playing_track {
+            return;
+        }
+        if self.collection_mode == COLLECTION_MODE_LIBRARY {
+            self.center_library_view_on_playing_track();
+        } else {
+            self.center_playlist_view_on_playing_track();
+        }
     }
 
     fn map_library_view_to_source_index(&self, view_index: usize) -> Option<usize> {
@@ -6005,6 +6061,7 @@ impl UiManager {
                         protocol::Message::Playback(
                             protocol::PlaybackMessage::PlayTrackByIndex(index),
                         ) => {
+                            let previous_active_playing_index = self.active_playing_index;
                             self.active_playing_index = Some(index);
                             self.playback_active = true;
                             let status_text = self
@@ -6016,6 +6073,9 @@ impl UiManager {
                                 ui.set_status_text(status_text);
                             });
                             self.rebuild_track_model();
+                            if previous_active_playing_index != self.active_playing_index {
+                                self.center_active_collection_on_playing_track_change();
+                            }
                         }
                         protocol::Message::Playback(protocol::PlaybackMessage::Play) => {
                             self.playback_active = true;
@@ -6114,6 +6174,7 @@ impl UiManager {
                             playlist_id,
                         }) => {
                             let is_active_playlist = playlist_id == self.active_playlist_id;
+                            let previous_active_playing_index = self.active_playing_index;
                             self.active_playing_index = if is_active_playlist {
                                 Some(index)
                             } else {
@@ -6130,6 +6191,9 @@ impl UiManager {
                                 ui.set_status_text(status_text);
                             });
                             self.rebuild_track_model();
+                            if previous_active_playing_index != self.active_playing_index {
+                                self.center_active_collection_on_playing_track_change();
+                            }
                         }
                         protocol::Message::Playlist(
                             protocol::PlaylistMessage::PlaylistIndicesChanged {
@@ -6147,6 +6211,7 @@ impl UiManager {
                             if !is_playing {
                                 self.last_progress_at = None;
                             }
+                            let previous_active_playing_index = self.active_playing_index;
                             let selected_indices_clone = selected_indices.clone();
                             self.selected_indices = selected_indices_clone.clone();
                             let is_playing_active_playlist =
@@ -6208,6 +6273,11 @@ impl UiManager {
                                 ui.set_playback_order_index(order_int);
                             });
                             self.rebuild_track_model();
+                            if previous_playing_track_path != self.current_playing_track_path
+                                || previous_active_playing_index != self.active_playing_index
+                            {
+                                self.center_active_collection_on_playing_track_change();
+                            }
                         }
                         protocol::Message::Playlist(
                             protocol::PlaylistMessage::SelectionChanged(indices),
@@ -6378,6 +6448,7 @@ impl UiManager {
                         protocol::Message::Config(protocol::ConfigMessage::ConfigChanged(
                             config,
                         )) => {
+                            self.auto_center_playing_track = config.ui.auto_center_playing_track;
                             self.library_online_metadata_enabled =
                                 config.library.online_metadata_enabled;
                             self.library_online_metadata_prompt_pending =

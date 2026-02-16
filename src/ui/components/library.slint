@@ -5,7 +5,14 @@ export component LibraryRow inherits Rectangle {
     in property <bool> is-hover;
 
     height: 34px;
-    background: root.data.selected ? #2f3f56 : is-hover ? #333 : transparent;
+    property <brush> idle-background: root.data.selected ? #2f3f56
+        : root.data.is_playing ? #203345
+        : transparent;
+    background: is-hover
+        ? root.data.selected ? #394c67
+        : root.data.is_playing ? #2a4258
+        : #333
+        : root.idle-background;
     border-radius: 2px;
 
     HorizontalLayout {
@@ -67,7 +74,7 @@ export component LibraryRow inherits Rectangle {
 
                 Text {
                     text: root.data.primary;
-                    color: #ddd;
+                    color: root.data.selected ? #ececec : root.data.is_playing ? #d7e9ff : #ddd;
                     font-size: 12px;
                     overflow: elide;
                     horizontal-alignment: left;
@@ -77,7 +84,7 @@ export component LibraryRow inherits Rectangle {
             }
             Text {
                 text: root.data.secondary;
-                color: #888;
+                color: root.data.selected ? #bcc7d8 : root.data.is_playing ? #9eb6d3 : #888;
                 font-size: 11px;
                 overflow: elide;
                 horizontal-alignment: left;

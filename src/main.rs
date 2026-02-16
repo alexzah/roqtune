@@ -827,6 +827,7 @@ fn sanitize_config(config: Config) -> Config {
         ui: UiConfig {
             show_layout_edit_intro: config.ui.show_layout_edit_intro,
             show_tooltips: config.ui.show_tooltips,
+            auto_center_playing_track: config.ui.auto_center_playing_track,
             playlist_album_art_column_min_width_px: clamped_album_art_column_min_width_px,
             playlist_album_art_column_max_width_px: clamped_album_art_column_max_width_px,
             layout: sanitized_layout,
@@ -1623,6 +1624,13 @@ fn write_config_to_document(document: &mut DocumentMut, previous: &Config, confi
         );
         set_table_scalar_if_changed(
             ui,
+            "auto_center_playing_track",
+            previous.ui.auto_center_playing_track,
+            config.ui.auto_center_playing_track,
+            value,
+        );
+        set_table_scalar_if_changed(
+            ui,
             "window_width",
             i64::from(previous.ui.window_width),
             i64::from(config.ui.window_width),
@@ -1939,6 +1947,7 @@ fn with_updated_layout(previous: &Config, layout: LayoutConfig) -> Config {
         ui: UiConfig {
             show_layout_edit_intro: previous.ui.show_layout_edit_intro,
             show_tooltips: previous.ui.show_tooltips,
+            auto_center_playing_track: previous.ui.auto_center_playing_track,
             playlist_album_art_column_min_width_px: previous
                 .ui
                 .playlist_album_art_column_min_width_px,
@@ -2275,6 +2284,7 @@ fn apply_config_to_ui(
     ui.set_settings_resampler_quality_index(resampler_quality_index);
     ui.set_settings_show_layout_edit_tutorial(config.ui.show_layout_edit_intro);
     ui.set_settings_show_tooltips(config.ui.show_tooltips);
+    ui.set_settings_auto_center_playing_track(config.ui.auto_center_playing_track);
     ui.set_settings_dither_on_bitdepth_reduce(config.output.dither_on_bitdepth_reduce);
     ui.set_settings_verified_sample_rates_summary(
         output_options.verified_sample_rates_summary.clone().into(),
@@ -4327,6 +4337,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
               bits_custom_value,
               show_layout_edit_tutorial,
               show_tooltips_enabled,
+              auto_center_playing_track,
               sample_rate_mode_index,
               resampler_quality_index,
               dither_on_bitdepth_reduce| {
@@ -4425,6 +4436,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 ui: UiConfig {
                     show_layout_edit_intro: show_layout_edit_tutorial,
                     show_tooltips: show_tooltips_enabled,
+                    auto_center_playing_track,
                     playlist_album_art_column_min_width_px: previous_config
                         .ui
                         .playlist_album_art_column_min_width_px,
@@ -4518,6 +4530,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             ui: UiConfig {
                 show_layout_edit_intro: previous_config.ui.show_layout_edit_intro,
                 show_tooltips: previous_config.ui.show_tooltips,
+                auto_center_playing_track: previous_config.ui.auto_center_playing_track,
                 playlist_album_art_column_min_width_px: previous_config
                     .ui
                     .playlist_album_art_column_min_width_px,
@@ -4613,6 +4626,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             ui: UiConfig {
                 show_layout_edit_intro: previous_config.ui.show_layout_edit_intro,
                 show_tooltips: previous_config.ui.show_tooltips,
+                auto_center_playing_track: previous_config.ui.auto_center_playing_track,
                 playlist_album_art_column_min_width_px: previous_config
                     .ui
                     .playlist_album_art_column_min_width_px,
@@ -4710,6 +4724,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             ui: UiConfig {
                 show_layout_edit_intro: previous_config.ui.show_layout_edit_intro,
                 show_tooltips: previous_config.ui.show_tooltips,
+                auto_center_playing_track: previous_config.ui.auto_center_playing_track,
                 playlist_album_art_column_min_width_px: previous_config
                     .ui
                     .playlist_album_art_column_min_width_px,
@@ -4801,6 +4816,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             ui: UiConfig {
                 show_layout_edit_intro: previous_config.ui.show_layout_edit_intro,
                 show_tooltips: previous_config.ui.show_tooltips,
+                auto_center_playing_track: previous_config.ui.auto_center_playing_track,
                 playlist_album_art_column_min_width_px: previous_config
                     .ui
                     .playlist_album_art_column_min_width_px,
@@ -5198,6 +5214,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         ui: UiConfig {
                             show_layout_edit_intro: state.ui.show_layout_edit_intro,
                             show_tooltips: state.ui.show_tooltips,
+                            auto_center_playing_track: state.ui.auto_center_playing_track,
                             playlist_album_art_column_min_width_px: state
                                 .ui
                                 .playlist_album_art_column_min_width_px,
@@ -5506,6 +5523,10 @@ mod tests {
             "Settings dialog should expose tooltip settings and runtime state"
         );
         assert!(
+            slint_ui.contains("in-out property <bool> settings_auto_center_playing_track: true;"),
+            "Settings dialog should expose auto-center playing-track setting"
+        );
+        assert!(
             slint_ui.contains("in-out property <int> settings_dialog_tab_index: 0;")
                 && slint_ui.contains("labels: [\"General\", \"Library\"];"),
             "Settings dialog should expose and render General/Library tabs"
@@ -5538,10 +5559,15 @@ mod tests {
             "General tab should expose tooltip visibility toggle row"
         );
         assert!(
+            slint_ui.contains("text: \"Auto-center playing track on change\"")
+                && slint_ui.contains("checked <=> root.settings_auto_center_playing_track;"),
+            "General tab should expose auto-center playing-track toggle row"
+        );
+        assert!(
             slint_ui.contains(
-                "callback apply_settings(int, int, int, int, string, string, string, string, bool, bool, int, int, bool);"
+                "callback apply_settings(int, int, int, int, string, string, string, string, bool, bool, bool, int, int, bool);"
             ),
-            "Apply settings callback should include sample-rate mode, resampler quality, and dither controls"
+            "Apply settings callback should include auto-center, sample-rate mode, resampler quality, and dither controls"
         );
         assert!(
             slint_ui.contains("label: \"Output Sample Rate\"")
@@ -6263,6 +6289,7 @@ mod tests {
             ui: UiConfig {
                 show_layout_edit_intro: true,
                 show_tooltips: true,
+                auto_center_playing_track: true,
                 playlist_album_art_column_min_width_px: 16,
                 playlist_album_art_column_max_width_px: 480,
                 layout: LayoutConfig::default(),

@@ -242,6 +242,8 @@ export component AppWindow inherits Window {
     in-out property <bool> library_detail_header_source_visible: false;
     in-out property <bool> library_detail_header_loading: false;
     in-out property <bool> library_online_prompt_visible: false;
+    in-out property <int> playlist_scroll_target_row: 0;
+    in-out property <int> playlist_scroll_center_token: 0;
     in-out property <int> library_scroll_target_row: 0;
     in-out property <int> library_scroll_restore_token: 0;
     in-out property <[LibraryRowData]> library_model: [];
@@ -1270,6 +1272,23 @@ export component AppWindow inherits Window {
                             height: parent.height;
                             property <length> row-height: max(30px, root.playlist_row_height_px * 1px);
                             property <length> header-height: 28px;
+                            property <int> center-token: root.playlist_scroll_center_token;
+                            changed center-token => {
+                                let row-height = self.row-height;
+                                let visible-rows = max(
+                                    1,
+                                    floor((self.height + row-height - 1px) / row-height)
+                                );
+                                let max-first-row = max(0, root.track_model.length - visible-rows);
+                                let centered-first-row = min(
+                                    max-first-row,
+                                    max(
+                                        0,
+                                        root.playlist_scroll_target_row - floor(visible-rows / 2)
+                                    )
+                                );
+                                self.viewport-y = 0px - centered-first-row * row-height;
+                            }
                             for track[i] in root.track_model : TrackRow {
                                 data: track;
                                 is-playing: root.playing_track_index == i;
@@ -3887,6 +3906,59 @@ export component AppWindow inherits Window {
                                     }
                                 }
                             }
+
+                            Rectangle {
+                                height: 32px;
+                                background: settings-auto-center-toggle-ta.has-hover ? #2d2d2d : transparent;
+                                border-radius: 4px;
+                                HorizontalLayout {
+                                    spacing: 10px;
+                                    auto-center-label-host := Rectangle {
+                                        width: settings-dialog-panel.label_column_width + 24px;
+                                        height: parent.height;
+                                        background: transparent;
+                                        Text {
+                                            text: "Auto-center playing track on change";
+                                            color: #ddd;
+                                            font-size: 12px;
+                                            vertical-alignment: center;
+                                            horizontal-alignment: left;
+                                        }
+                                        settings-auto-center-tooltip-ta := TooltipHoverArea {
+                                            tooltip-text: "When enabled, track list views auto-scroll to keep the newly playing track centered.";
+                                            tooltip_hover_changed(is-hovered, tooltip, anchor-x-px, anchor-y-px) => {
+                                                root.tooltip_hover_changed(is-hovered, tooltip, anchor-x-px, anchor-y-px);
+                                            }
+                                        }
+                                    }
+                                    Rectangle {
+                                        width: settings-dialog-panel.control_max_width;
+                                        height: parent.height;
+                                        background: transparent;
+                                        settings-auto-center-toggle := Switch {
+                                            x: parent.width - self.width - 8px;
+                                            y: (parent.height - self.height) / 2;
+                                            width: 18px;
+                                            text: "";
+                                            checked <=> root.settings_auto_center_playing_track;
+                                        }
+                                    }
+                                    Rectangle { horizontal-stretch: 1; }
+                                }
+                                settings-auto-center-toggle-ta := TouchArea {
+                                    changed has-hover => {
+                                        root.tooltip_hover_changed(
+                                            self.has-hover,
+                                            "When enabled, track list views auto-scroll to keep the newly playing track centered.",
+                                            floor((auto-center-label-host.absolute-position.x + auto-center-label-host.width / 2) / 1px),
+                                            floor((auto-center-label-host.absolute-position.y + auto-center-label-host.height) / 1px)
+                                        );
+                                    }
+                                    clicked => {
+                                        settings-auto-center-toggle.checked = !settings-auto-center-toggle.checked;
+                                    }
+                                }
+                            }
                         }
                     }
 
@@ -4076,6 +4148,7 @@ export component AppWindow inherits Window {
                             root.settings_bits_per_sample_custom_value,
                             root.settings_show_layout_edit_tutorial,
                             root.settings_show_tooltips,
+                            root.settings_auto_center_playing_track,
                             root.settings_sample_rate_mode_index,
                             root.settings_resampler_quality_index,
                             root.settings_dither_on_bitdepth_reduce
@@ -4196,6 +4269,7 @@ export component AppWindow inherits Window {
     in-out property <string> settings_verified_sample_rates_summary: "Verified rates: (none)";
     in-out property <bool> settings_show_layout_edit_tutorial: true;
     in-out property <bool> settings_show_tooltips: true;
+    in-out property <bool> settings_auto_center_playing_track: true;
     in-out property <bool> settings_dither_on_bitdepth_reduce: true;
     in-out property <bool> show_tooltips_enabled: true;
     in-out property <int> settings_dialog_tab_index: 0;
@@ -4324,5 +4398,5 @@ export component AppWindow inherits Window {
     callback open_settings();
     callback open_external_url(string);
     callback tooltip_hover_changed(bool, string, int, int);
-    callback apply_settings(int, int, int, int, string, string, string, string, bool, bool, int, int, bool);
+    callback apply_settings(int, int, int, int, string, string, string, string, bool, bool, bool, int, int, bool);
 }

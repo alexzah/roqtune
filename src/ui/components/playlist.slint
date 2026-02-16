@@ -96,7 +96,12 @@ export component TrackRow inherits Rectangle {
     }
 
     height: root.row-height;
-    background: data.selected ? #3d3d3d : is-hover ? #333 : transparent;
+    property <brush> idle-background: data.selected ? #3d3d3d : root.is-playing ? #24384f : transparent;
+    background: is-hover
+        ? data.selected ? #474747
+        : root.is-playing ? #2f4965
+        : #333
+        : root.idle-background;
     animate background { duration: 100ms; }
 
     HorizontalLayout {
@@ -139,7 +144,12 @@ export component TrackRow inherits Rectangle {
                 x: 0px;
                 width: parent.width;
                 text: column-value;
-                color: (index < root.headers.length && root.headers[index] == "Title") ? #eee : #aaa;
+                color: data.selected ? #ececec
+                    : root.is-playing
+                        ? (index < root.headers.length && root.headers[index] == "Title")
+                            ? #d7e9ff
+                            : #b5c9e3
+                        : (index < root.headers.length && root.headers[index] == "Title") ? #eee : #aaa;
                 font-size: 13px;
                 vertical-alignment: center;
                 overflow: elide;

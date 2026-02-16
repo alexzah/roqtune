@@ -59,6 +59,8 @@ pub struct UiConfig {
     pub show_layout_edit_intro: bool,
     #[serde(default = "default_true")]
     pub show_tooltips: bool,
+    #[serde(default = "default_true")]
+    pub auto_center_playing_track: bool,
     /// Runtime playlist-column width minimum loaded from `layout.toml`.
     #[serde(skip, default = "default_playlist_album_art_column_min_width_px")]
     pub playlist_album_art_column_min_width_px: u32,
@@ -155,6 +157,7 @@ impl Default for UiConfig {
         Self {
             show_layout_edit_intro: true,
             show_tooltips: true,
+            auto_center_playing_track: true,
             playlist_album_art_column_min_width_px: default_playlist_album_art_column_min_width_px(
             ),
             playlist_album_art_column_max_width_px: default_playlist_album_art_column_max_width_px(
@@ -318,6 +321,7 @@ mod tests {
 
         assert!(config.ui.show_layout_edit_intro);
         assert!(config.ui.show_tooltips);
+        assert!(config.ui.auto_center_playing_track);
         assert_eq!(config.ui.playlist_album_art_column_min_width_px, 16);
         assert_eq!(config.ui.playlist_album_art_column_max_width_px, 480);
         assert_eq!(config.ui.layout, LayoutConfig::default());
@@ -365,6 +369,7 @@ decoder_request_chunk_ms = 1500
         assert!(parsed.ui.button_cluster_instances.is_empty());
         assert!(parsed.ui.show_layout_edit_intro);
         assert!(parsed.ui.show_tooltips);
+        assert!(parsed.ui.auto_center_playing_track);
         assert_eq!(parsed.ui.playlist_album_art_column_min_width_px, 16);
         assert_eq!(parsed.ui.playlist_album_art_column_max_width_px, 480);
         assert_eq!(parsed.ui.playlist_columns, default_playlist_columns());
@@ -457,6 +462,10 @@ decoder_request_chunk_ms = 1500
             defaults.ui.show_layout_edit_intro
         );
         assert_eq!(parsed.ui.show_tooltips, defaults.ui.show_tooltips);
+        assert_eq!(
+            parsed.ui.auto_center_playing_track,
+            defaults.ui.auto_center_playing_track
+        );
         assert_eq!(
             parsed.ui.playlist_album_art_column_min_width_px,
             defaults.ui.playlist_album_art_column_min_width_px

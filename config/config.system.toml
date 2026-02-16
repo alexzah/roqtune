@@ -40,6 +40,8 @@ dither_on_bitdepth_reduce = true
 show_layout_edit_intro = true
 # Show hover tooltips for icon-driven controls.
 show_tooltips = true
+# Automatically center track-list views on the newly playing track.
+auto_center_playing_track = true
 # Layout tree + playlist column data is persisted separately in `layout.toml`.
 
 # Main window size on startup.
