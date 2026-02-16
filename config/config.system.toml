@@ -60,10 +60,6 @@ button_cluster_instances = []
 # Leave empty if you only use playlists.
 folders = []
 
-# Show the one-time first-start library setup prompt.
-# This is set to false once you skip or add folders.
-show_first_start_prompt = true
-
 # Enable internet lookups for artist/album detail blurbs and artist images.
 # Display-only: this does not modify your track metadata files.
 online_metadata_enabled = false

@@ -91,10 +91,6 @@ export component AppWindow inherits Window {
                 root.properties_cancel();
                 return accept;
             }
-            if (event.text == Key.Escape && root.show_library_first_start_dialog) {
-                root.library_skip_first_start();
-                return accept;
-            }
             if (event.text == Key.Escape && root.layout_edit_mode) {
                 root.show_layout_editor_dialog = false;
                 root.show_layout_leaf_context_menu = false;
@@ -266,7 +262,6 @@ export component AppWindow inherits Window {
     in-out property <string> properties_target_title: "";
     in-out property <[MetadataEditorField]> properties_fields: [];
     in-out property <bool> properties_save_enabled: false;
-    in-out property <bool> show_library_first_start_dialog: false;
     in-out property <[string]> settings_library_folders: [];
     in-out property <int> settings_library_selected_folder_index: -1;
     in-out property <bool> settings_library_online_metadata_enabled: false;
@@ -1609,6 +1604,7 @@ export component AppWindow inherits Window {
                     library-list-container := Rectangle {
                         vertical-stretch: 1;
                         clip: true;
+                        property <bool> has-configured-folders: root.settings_library_folders.length > 0;
                         property <int> first-visible-row: max(
                             0,
                             floor(max(0px, -library-list-view.viewport-y) / (library-list-view.row-height-px * 1px))
@@ -1623,7 +1619,8 @@ export component AppWindow inherits Window {
                                 ) / (library-list-view.row-height-px * 1px)
                             )
                         );
-                        property <bool> has-playing-row: root.library_playing_track_index >= 0
+                        property <bool> has-playing-row: self.has-configured-folders
+                            && root.library_playing_track_index >= 0
                             && root.library_playing_track_index < root.library_model.length;
                         property <bool> playing-above-viewport: self.has-playing-row
                             && root.library_playing_track_index < self.first-visible-row;
@@ -1636,6 +1633,7 @@ export component AppWindow inherits Window {
                             y: 0px;
                             width: parent.width;
                             height: parent.height;
+                            visible: library-list-container.has-configured-folders;
                             property <int> row-height-px: root.library_root_index == 2 ? 38
                                 : root.library_root_index == 0 ? 32
                                 : 34;
@@ -1717,7 +1715,58 @@ export component AppWindow inherits Window {
                             }
                         }
 
-                        if library-list-container.show-scroll-to-playing-toast : Rectangle {
+                        if !library-list-container.has-configured-folders : Rectangle {
+                            x: 12px;
+                            y: 12px;
+                            width: max(0px, parent.width - 24px);
+                            height: max(0px, parent.height - 24px);
+                            border-radius: 8px;
+                            border-width: 1px;
+                            border-color: #3c3c3c;
+                            background: #202020;
+
+                            Rectangle {
+                                width: min(parent.width - 28px, 540px);
+                                height: 170px;
+                                x: (parent.width - self.width) / 2;
+                                y: (parent.height - self.height) / 2;
+
+                                VerticalLayout {
+                                    spacing: 12px;
+
+                                    Text {
+                                        text: "Add folders to get started";
+                                        color: #f0f0f0;
+                                        font-size: 26px;
+                                        font-weight: 800;
+                                        horizontal-alignment: center;
+                                    }
+
+                                    Text {
+                                        text: "Library mode stays empty until at least one music folder is configured.";
+                                        color: #adadad;
+                                        font-size: 13px;
+                                        horizontal-alignment: center;
+                                        wrap: word-wrap;
+                                    }
+
+                                    HorizontalLayout {
+                                        Rectangle { horizontal-stretch: 1; }
+                                        Button {
+                                            text: "Add Folder";
+                                            primary: true;
+                                            clicked => {
+                                                root.library_add_folder();
+                                            }
+                                        }
+                                        Rectangle { horizontal-stretch: 1; }
+                                    }
+                                }
+                            }
+                        }
+
+                        if library-list-container.has-configured-folders
+                                && library-list-container.show-scroll-to-playing-toast : Rectangle {
                             x: max(8px, parent.width - self.width - 8px);
                             y: 6px;
                             width: max(146px, min(parent.width - 16px, library-scroll-toast-text.preferred-width + 24px));
@@ -3301,63 +3350,6 @@ export component AppWindow inherits Window {
         }
     }
 
-    if root.show_library_first_start_dialog : Rectangle {
-        background: #00000088;
-        z: 111;
-
-        TouchArea {}
-
-        Rectangle {
-            width: min(root.width - 40px, 520px);
-            height: 220px;
-            x: (parent.width - self.width) / 2;
-            y: (parent.height - self.height) / 2;
-            border-radius: 6px;
-            background: #242424;
-            border-width: 1px;
-            border-color: #3b3b3b;
-
-            VerticalLayout {
-                padding: 16px;
-                spacing: 12px;
-
-                Text {
-                    text: "Set Up Your Library";
-                    color: #eee;
-                    font-size: 16px;
-                    font-weight: 700;
-                }
-
-                Text {
-                    text: "Add folders to enable Library mode browsing. You can skip this and keep using playlists only.";
-                    color: #bbb;
-                    font-size: 12px;
-                    wrap: word-wrap;
-                }
-
-                Rectangle { vertical-stretch: 1; }
-
-                HorizontalLayout {
-                    spacing: 10px;
-                    Button {
-                        text: "Skip For Now";
-                        clicked => {
-                            root.library_skip_first_start();
-                        }
-                    }
-                    Rectangle { horizontal-stretch: 1; }
-                    Button {
-                        text: "Add Folder";
-                        primary: true;
-                        clicked => {
-                            root.library_add_folder();
-                        }
-                    }
-                }
-            }
-        }
-    }
-
     if root.show_custom_column_dialog : Rectangle {
         background: #00000088;
         z: 110;
@@ -4326,7 +4318,6 @@ export component AppWindow inherits Window {
     callback library_remove_folder(int);
     callback library_rescan();
     callback settings_select_library_folder(int);
-    callback library_skip_first_start();
     callback library_online_metadata_prompt_accept();
     callback library_online_metadata_prompt_deny();
     callback settings_set_library_online_metadata_enabled(bool);

@@ -11,7 +11,7 @@ pub struct Config {
     /// UI preferences.
     pub ui: UiConfig,
     #[serde(default)]
-    /// Library indexing and first-start preferences.
+    /// Library indexing preferences.
     pub library: LibraryConfig,
     #[serde(default)]
     /// Decoder/player buffering behavior.
@@ -88,8 +88,6 @@ pub struct UiConfig {
 pub struct LibraryConfig {
     #[serde(default)]
     pub folders: Vec<String>,
-    #[serde(default = "default_true")]
-    pub show_first_start_prompt: bool,
     #[serde(default)]
     pub online_metadata_enabled: bool,
     #[serde(default = "default_true")]
@@ -187,7 +185,6 @@ impl Default for LibraryConfig {
     fn default() -> Self {
         Self {
             folders: Vec::new(),
-            show_first_start_prompt: true,
             online_metadata_enabled: false,
             online_metadata_prompt_pending: true,
             artist_image_cache_ttl_days: default_artist_image_cache_ttl_days(),
@@ -331,7 +328,6 @@ mod tests {
         assert_eq!(config.ui.window_height, 650);
         assert!((config.ui.volume - 1.0).abs() < f32::EPSILON);
         assert!(config.library.folders.is_empty());
-        assert!(config.library.show_first_start_prompt);
         assert!(!config.library.online_metadata_enabled);
         assert!(config.library.online_metadata_prompt_pending);
         assert_eq!(config.library.artist_image_cache_ttl_days, 30);
@@ -377,7 +373,6 @@ decoder_request_chunk_ms = 1500
         assert_eq!(parsed.ui.window_height, 650);
         assert!((parsed.ui.volume - 1.0).abs() < f32::EPSILON);
         assert!(parsed.library.folders.is_empty());
-        assert!(parsed.library.show_first_start_prompt);
         assert!(!parsed.library.online_metadata_enabled);
         assert!(parsed.library.online_metadata_prompt_pending);
         assert_eq!(parsed.library.artist_image_cache_ttl_days, 30);
@@ -481,10 +476,6 @@ decoder_request_chunk_ms = 1500
         assert_eq!(parsed.ui.window_height, defaults.ui.window_height);
         assert!((parsed.ui.volume - defaults.ui.volume).abs() < f32::EPSILON);
         assert_eq!(parsed.library.folders, defaults.library.folders);
-        assert_eq!(
-            parsed.library.show_first_start_prompt,
-            defaults.library.show_first_start_prompt
-        );
         assert_eq!(
             parsed.library.online_metadata_enabled,
             defaults.library.online_metadata_enabled

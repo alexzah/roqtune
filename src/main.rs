@@ -338,7 +338,6 @@ fn add_library_folders_to_config_and_scan(
         if added == 0 {
             return 0;
         }
-        next.library.show_first_start_prompt = false;
         next = sanitize_config(next);
         *state = next.clone();
         (next, added)
@@ -362,7 +361,6 @@ fn add_library_folders_to_config_and_scan(
             workspace_width_px,
             workspace_height_px,
         );
-        ui.set_show_library_first_start_dialog(false);
     }
 
     let runtime_override = runtime_output_override_snapshot(&context.runtime_output_override);
@@ -839,7 +837,6 @@ fn sanitize_config(config: Config) -> Config {
         },
         library: LibraryConfig {
             folders: sanitized_library_folders,
-            show_first_start_prompt: config.library.show_first_start_prompt,
             online_metadata_enabled: config.library.online_metadata_enabled,
             online_metadata_prompt_pending: config.library.online_metadata_prompt_pending,
             artist_image_cache_ttl_days: clamped_artist_image_cache_ttl_days,
@@ -1677,13 +1674,7 @@ fn write_config_to_document(document: &mut DocumentMut, previous: &Config, confi
         let library = document["library"]
             .as_table_mut()
             .expect("library should be a table");
-        set_table_scalar_if_changed(
-            library,
-            "show_first_start_prompt",
-            previous.library.show_first_start_prompt,
-            config.library.show_first_start_prompt,
-            value,
-        );
+        library.remove("show_first_start_prompt");
         set_table_scalar_if_changed(
             library,
             "online_metadata_enabled",
@@ -2420,9 +2411,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         initial_workspace_width_px,
         initial_workspace_height_px,
     );
-    ui.set_show_library_first_start_dialog(
-        config.library.show_first_start_prompt && config.library.folders.is_empty(),
-    );
     let config_state = Arc::new(Mutex::new(config.clone()));
     let output_options = Arc::new(Mutex::new(initial_output_options.clone()));
     let output_device_inventory = Arc::new(Mutex::new(snapshot_output_device_names(
@@ -2767,7 +2755,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
             let mut next = state.clone();
             next.library.folders.remove(index as usize);
-            next.library.show_first_start_prompt = false;
             next = sanitize_config(next);
             *state = next.clone();
             next
@@ -2817,60 +2804,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let _ = bus_sender_clone.send(Message::Library(
             protocol::LibraryMessage::ClearEnrichmentCache,
         ));
-    });
-
-    let config_state_clone = Arc::clone(&config_state);
-    let output_options_clone = Arc::clone(&output_options);
-    let runtime_output_override_clone = Arc::clone(&runtime_output_override);
-    let last_runtime_signature_clone = Arc::clone(&last_runtime_signature);
-    let config_file_clone = config_file.clone();
-    let layout_workspace_size_clone = Arc::clone(&layout_workspace_size);
-    let ui_handle_clone = ui.as_weak().clone();
-    let bus_sender_clone = bus_sender.clone();
-    ui.on_library_skip_first_start(move || {
-        let next_config = {
-            let mut state = config_state_clone
-                .lock()
-                .expect("config state lock poisoned");
-            let mut next = state.clone();
-            next.library.show_first_start_prompt = false;
-            next = sanitize_config(next);
-            *state = next.clone();
-            next
-        };
-        persist_state_files_with_config_path(&next_config, &config_file_clone);
-
-        let options_snapshot = {
-            let options = output_options_clone
-                .lock()
-                .expect("output options lock poisoned");
-            options.clone()
-        };
-        let (workspace_width_px, workspace_height_px) =
-            workspace_size_snapshot(&layout_workspace_size_clone);
-        if let Some(ui) = ui_handle_clone.upgrade() {
-            apply_config_to_ui(
-                &ui,
-                &next_config,
-                &options_snapshot,
-                workspace_width_px,
-                workspace_height_px,
-            );
-            ui.set_show_library_first_start_dialog(false);
-        }
-
-        let runtime_override = runtime_output_override_snapshot(&runtime_output_override_clone);
-        let runtime_config =
-            resolve_runtime_config(&next_config, &options_snapshot, Some(&runtime_override));
-        {
-            let mut last_runtime = last_runtime_signature_clone
-                .lock()
-                .expect("runtime signature lock poisoned");
-            *last_runtime = OutputRuntimeSignature::from_output(&runtime_config.output);
-        }
-        let _ = bus_sender_clone.send(Message::Config(ConfigMessage::ConfigChanged(
-            runtime_config,
-        )));
     });
 
     let bus_sender_clone = bus_sender.clone();
@@ -5483,6 +5416,23 @@ mod tests {
     }
 
     #[test]
+    fn test_library_view_shows_add_folder_cta_when_no_folders_are_configured() {
+        let slint_ui = include_str!("roqtune.slint");
+        assert!(
+            slint_ui.contains(
+                "property <bool> has-configured-folders: root.settings_library_folders.length > 0;"
+            ),
+            "Library list container should detect when no folders are configured"
+        );
+        assert!(
+            slint_ui.contains("if !library-list-container.has-configured-folders : Rectangle {")
+                && slint_ui.contains("text: \"Add folders to get started\"")
+                && slint_ui.contains("root.library_add_folder();"),
+            "Library view should expose an in-view call-to-action to add folders"
+        );
+    }
+
+    #[test]
     fn test_settings_menu_exposes_layout_edit_toggle_and_settings_entry() {
         let slint_ui = include_str!("roqtune.slint");
         assert!(
@@ -6591,7 +6541,6 @@ volume = 1.0
 
 [library]
 folders = []
-show_first_start_prompt = true
 online_metadata_enabled = false
 online_metadata_prompt_pending = true
 artist_image_cache_ttl_days = 30
