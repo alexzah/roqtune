@@ -60,7 +60,7 @@ pub struct UiConfig {
     pub show_layout_edit_intro: bool,
     #[serde(default = "default_true")]
     pub show_tooltips: bool,
-    #[serde(default = "default_true", alias = "auto_center_playing_track")]
+    #[serde(default = "default_true")]
     pub auto_scroll_to_playing_track: bool,
     /// Runtime playlist-column width minimum loaded from `layout.toml`.
     #[serde(skip, default = "default_playlist_album_art_column_min_width_px")]
@@ -324,7 +324,7 @@ pub fn default_playlist_columns() -> Vec<PlaylistColumnConfig> {
 mod tests {
     use super::{
         default_playlist_columns, BufferingConfig, Config, LayoutConfig, ResamplerQuality,
-        UiConfig, UiPlaybackOrder, UiRepeatMode,
+        UiPlaybackOrder, UiRepeatMode,
     };
 
     #[test]
@@ -540,12 +540,5 @@ decoder_request_chunk_ms = 1500
             parsed.buffering.decoder_request_chunk_ms,
             defaults.buffering.decoder_request_chunk_ms
         );
-    }
-
-    #[test]
-    fn test_ui_auto_scroll_to_playing_track_supports_legacy_key_alias() {
-        let parsed: UiConfig =
-            toml::from_str("auto_center_playing_track = false").expect("config should parse");
-        assert!(!parsed.auto_scroll_to_playing_track);
     }
 }

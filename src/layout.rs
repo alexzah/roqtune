@@ -1,4 +1,4 @@
-//! Split-tree layout data model, migration, actions, and geometry.
+//! Split-tree layout data model, actions, and geometry.
 
 use crate::config::{
     default_playlist_album_art_column_max_width_px, default_playlist_album_art_column_min_width_px,
@@ -228,13 +228,6 @@ impl Default for LayoutConfig {
 }
 
 #[derive(Debug, serde::Deserialize)]
-#[serde(untagged)]
-enum LayoutConfigWire {
-    V2(LayoutConfigV2Wire),
-    Legacy(LegacyLayoutConfig),
-}
-
-#[derive(Debug, serde::Deserialize)]
 struct LayoutConfigV2Wire {
     #[serde(default = "default_layout_version", rename = "version")]
     _version: u32,
@@ -252,40 +245,22 @@ struct LayoutConfigV2Wire {
     root: LayoutNode,
 }
 
-#[derive(Debug, Clone, serde::Deserialize)]
-struct LegacyLayoutConfig {
-    #[serde(default = "default_region_panels")]
-    region_panels: [LayoutPanelKind; 5],
-    #[serde(default = "legacy_default_top_size_px")]
-    top_size_px: u32,
-    #[serde(default = "legacy_default_left_size_px")]
-    left_size_px: u32,
-    #[serde(default = "legacy_default_right_size_px")]
-    right_size_px: u32,
-    #[serde(default = "legacy_default_bottom_size_px")]
-    bottom_size_px: u32,
-}
-
 impl<'de> serde::Deserialize<'de> for LayoutConfig {
     fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
     where
         D: serde::Deserializer<'de>,
     {
-        let wire = LayoutConfigWire::deserialize(deserializer)?;
-        let config = match wire {
-            LayoutConfigWire::V2(v2) => LayoutConfig {
-                version: LAYOUT_VERSION,
-                playlist_album_art_column_min_width_px: v2.playlist_album_art_column_min_width_px,
-                playlist_album_art_column_max_width_px: v2.playlist_album_art_column_max_width_px,
-                playlist_columns: v2.playlist_columns,
-                button_cluster_instances: v2.button_cluster_instances,
-                viewer_panel_instances: v2.viewer_panel_instances,
-                root: v2.root,
-                selected_leaf_id: None,
-            },
-            LayoutConfigWire::Legacy(legacy) => migrate_legacy_layout(&legacy),
-        };
-        Ok(config)
+        let v2 = LayoutConfigV2Wire::deserialize(deserializer)?;
+        Ok(LayoutConfig {
+            version: LAYOUT_VERSION,
+            playlist_album_art_column_min_width_px: v2.playlist_album_art_column_min_width_px,
+            playlist_album_art_column_max_width_px: v2.playlist_album_art_column_max_width_px,
+            playlist_columns: v2.playlist_columns,
+            button_cluster_instances: v2.button_cluster_instances,
+            viewer_panel_instances: v2.viewer_panel_instances,
+            root: v2.root,
+            selected_leaf_id: None,
+        })
     }
 }
 
@@ -329,32 +304,6 @@ fn default_layout_version() -> u32 {
 
 fn default_layout_root_for_wire() -> LayoutNode {
     build_default_layout_root()
-}
-
-fn legacy_default_top_size_px() -> u32 {
-    74
-}
-
-fn legacy_default_left_size_px() -> u32 {
-    220
-}
-
-fn legacy_default_right_size_px() -> u32 {
-    230
-}
-
-fn legacy_default_bottom_size_px() -> u32 {
-    24
-}
-
-fn default_region_panels() -> [LayoutPanelKind; 5] {
-    [
-        LayoutPanelKind::ControlBar,
-        LayoutPanelKind::PlaylistSwitcher,
-        LayoutPanelKind::TrackList,
-        LayoutPanelKind::AlbumArtPane,
-        LayoutPanelKind::StatusBar,
-    ]
 }
 
 fn default_control_stack_subtree(next: &mut dyn FnMut() -> String) -> LayoutNode {
@@ -490,116 +439,6 @@ fn build_default_layout_root() -> LayoutNode {
                 panel: LayoutPanelKind::StatusBar,
             }),
         }),
-    }
-}
-
-fn migrate_legacy_layout(legacy: &LegacyLayoutConfig) -> LayoutConfig {
-    let mut id_counter: u32 = 1;
-    let mut next_id = || {
-        let id = format!("m{}", id_counter);
-        id_counter = id_counter.saturating_add(1);
-        id
-    };
-    let leaf = |panel: LayoutPanelKind, next_id: &mut dyn FnMut() -> String| -> LayoutNode {
-        if panel == LayoutPanelKind::None {
-            LayoutNode::Empty
-        } else {
-            LayoutNode::Leaf {
-                id: next_id(),
-                panel,
-            }
-        }
-    };
-    let combine = |axis: SplitAxis,
-                   ratio: f32,
-                   first: LayoutNode,
-                   second: LayoutNode,
-                   next_id: &mut dyn FnMut() -> String| {
-        match (&first, &second) {
-            (LayoutNode::Empty, LayoutNode::Empty) => LayoutNode::Empty,
-            (LayoutNode::Empty, _) => second,
-            (_, LayoutNode::Empty) => first,
-            _ => LayoutNode::Split {
-                id: next_id(),
-                axis,
-                ratio: ratio.clamp(0.05, 0.95),
-                min_first_px: 24,
-                min_second_px: 24,
-                first: Box::new(first),
-                second: Box::new(second),
-            },
-        }
-    };
-
-    let top = leaf(legacy.region_panels[0], &mut next_id);
-    let left = leaf(legacy.region_panels[1], &mut next_id);
-    let center = leaf(legacy.region_panels[2], &mut next_id);
-    let right = leaf(legacy.region_panels[3], &mut next_id);
-    let bottom = leaf(legacy.region_panels[4], &mut next_id);
-
-    let middle_right_total = ((900u32
-        .saturating_sub(legacy.left_size_px)
-        .saturating_sub(SPLITTER_THICKNESS_PX as u32))
-    .max(200)) as f32;
-    let center_width = middle_right_total - legacy.right_size_px as f32;
-    let center_ratio = if middle_right_total > 0.0 {
-        (center_width / middle_right_total).clamp(0.05, 0.95)
-    } else {
-        0.67
-    };
-    let center_right = combine(
-        SplitAxis::Vertical,
-        center_ratio,
-        center,
-        right,
-        &mut next_id,
-    );
-
-    let middle_total = (900u32.saturating_sub(SPLITTER_THICKNESS_PX as u32)).max(200) as f32;
-    let left_ratio = if middle_total > 0.0 {
-        (legacy.left_size_px as f32 / middle_total).clamp(0.05, 0.95)
-    } else {
-        0.28
-    };
-    let middle = combine(
-        SplitAxis::Vertical,
-        left_ratio,
-        left,
-        center_right,
-        &mut next_id,
-    );
-
-    let upper_total = ((650u32
-        .saturating_sub(legacy.bottom_size_px)
-        .saturating_sub(SPLITTER_THICKNESS_PX as u32))
-    .max(120)) as f32;
-    let top_ratio = if upper_total > 0.0 {
-        (legacy.top_size_px as f32 / upper_total).clamp(0.05, 0.95)
-    } else {
-        0.12
-    };
-    let top_middle = combine(SplitAxis::Horizontal, top_ratio, top, middle, &mut next_id);
-
-    let bottom_total = 650f32.max(120.0);
-    let upper_ratio =
-        ((bottom_total - legacy.bottom_size_px as f32) / bottom_total).clamp(0.05, 0.95);
-    let root = combine(
-        SplitAxis::Horizontal,
-        upper_ratio,
-        top_middle,
-        bottom,
-        &mut next_id,
-    );
-
-    LayoutConfig {
-        version: LAYOUT_VERSION,
-        playlist_album_art_column_min_width_px: default_playlist_album_art_column_min_width_px(),
-        playlist_album_art_column_max_width_px: default_playlist_album_art_column_max_width_px(),
-        playlist_columns: default_playlist_columns(),
-        button_cluster_instances: Vec::new(),
-        viewer_panel_instances: Vec::new(),
-        root,
-        selected_leaf_id: None,
     }
 }
 

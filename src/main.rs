@@ -1830,7 +1830,6 @@ fn write_config_to_document(document: &mut DocumentMut, previous: &Config, confi
         ui.remove("playlist_album_art_column_min_width_px");
         ui.remove("playlist_album_art_column_max_width_px");
         ui.remove("layout");
-        ui.remove("auto_center_playing_track");
         ui.remove("viewer_panel_instances");
         set_table_scalar_if_changed(
             ui,
@@ -2125,47 +2124,6 @@ fn load_layout_file(path: &Path) -> LayoutConfig {
             LayoutConfig::default()
         }
     }
-}
-
-#[derive(Default)]
-struct LegacyLayoutOverrides {
-    button_cluster_instances: Vec<ButtonClusterInstanceConfig>,
-    viewer_panel_instances: Vec<ViewerPanelInstanceConfig>,
-    playlist_album_art_column_min_width_px: Option<u32>,
-    playlist_album_art_column_max_width_px: Option<u32>,
-    playlist_columns: Vec<PlaylistColumnConfig>,
-}
-
-fn load_legacy_layout_overrides(config_content: &str) -> LegacyLayoutOverrides {
-    #[derive(serde::Deserialize, Default)]
-    struct LegacyUiSection {
-        #[serde(default)]
-        button_cluster_instances: Vec<ButtonClusterInstanceConfig>,
-        #[serde(default)]
-        viewer_panel_instances: Vec<ViewerPanelInstanceConfig>,
-        #[serde(default)]
-        playlist_album_art_column_min_width_px: Option<u32>,
-        #[serde(default)]
-        playlist_album_art_column_max_width_px: Option<u32>,
-        #[serde(default)]
-        playlist_columns: Vec<PlaylistColumnConfig>,
-    }
-
-    #[derive(serde::Deserialize, Default)]
-    struct LegacyConfigWire {
-        #[serde(default)]
-        ui: LegacyUiSection,
-    }
-
-    toml::from_str::<LegacyConfigWire>(config_content)
-        .map(|wire| LegacyLayoutOverrides {
-            button_cluster_instances: wire.ui.button_cluster_instances,
-            viewer_panel_instances: wire.ui.viewer_panel_instances,
-            playlist_album_art_column_min_width_px: wire.ui.playlist_album_art_column_min_width_px,
-            playlist_album_art_column_max_width_px: wire.ui.playlist_album_art_column_max_width_px,
-            playlist_columns: wire.ui.playlist_columns,
-        })
-        .unwrap_or_default()
 }
 
 fn hydrate_ui_columns_from_layout(config: &mut Config) {
@@ -2621,8 +2579,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .unwrap();
     }
 
-    let layout_file_previously_existed = layout_file.exists();
-    if !layout_file_previously_existed {
+    if !layout_file.exists() {
         let default_layout = LayoutConfig::default();
         info!(
             "Layout file not found. Creating default layout file. path={}",
@@ -2636,39 +2593,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     let config_content = std::fs::read_to_string(config_file.clone()).unwrap();
-    let legacy_layout_overrides = load_legacy_layout_overrides(&config_content);
     let mut config = sanitize_config(toml::from_str::<Config>(&config_content).unwrap_or_default());
     config.ui.layout = load_layout_file(&layout_file);
-    if !layout_file_previously_existed {
-        if let Some(min_width_px) = legacy_layout_overrides.playlist_album_art_column_min_width_px {
-            config.ui.layout.playlist_album_art_column_min_width_px = min_width_px;
-        }
-        if let Some(max_width_px) = legacy_layout_overrides.playlist_album_art_column_max_width_px {
-            config.ui.layout.playlist_album_art_column_max_width_px = max_width_px;
-        }
-        if !legacy_layout_overrides.playlist_columns.is_empty() {
-            config.ui.layout.playlist_columns = legacy_layout_overrides.playlist_columns.clone();
-        }
-    }
-    if config.ui.layout.button_cluster_instances.is_empty()
-        && !legacy_layout_overrides.button_cluster_instances.is_empty()
-    {
-        info!(
-            "Migrating {} legacy button cluster settings from config.toml to layout.toml",
-            legacy_layout_overrides.button_cluster_instances.len()
-        );
-        config.ui.layout.button_cluster_instances =
-            legacy_layout_overrides.button_cluster_instances.clone();
-    }
-    if config.ui.layout.viewer_panel_instances.is_empty()
-        && !legacy_layout_overrides.viewer_panel_instances.is_empty()
-    {
-        info!(
-            "Migrating {} legacy viewer panel settings from config.toml to layout.toml",
-            legacy_layout_overrides.viewer_panel_instances.len()
-        );
-        config.ui.layout.viewer_panel_instances = legacy_layout_overrides.viewer_panel_instances;
-    }
     hydrate_ui_columns_from_layout(&mut config);
     let config = sanitize_config(config);
     let initial_output_options = detect_output_settings_options(&config);
