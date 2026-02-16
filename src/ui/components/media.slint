@@ -1,6 +1,9 @@
+import { Palette } from "std-widgets.slint";
+
 export component VolumeSliderControl inherits Rectangle {
     in-out property <float> value: 1.0;
     callback changed(float);
+    private property <bool> dark: Palette.color-scheme == ColorScheme.dark;
 
     private property <length> icon-slot-width: 18px;
     private property <length> track-height: 6px;
@@ -20,7 +23,7 @@ export component VolumeSliderControl inherits Rectangle {
                 width: parent.width;
                 height: parent.height;
                 text: "🔊";
-                color: #888;
+                color: root.dark ? #888 : #5f6d7c;
                 font-size: max(9px, min(12px, root.height * 0.45));
                 horizontal-alignment: center;
                 vertical-alignment: center;
@@ -38,7 +41,7 @@ export component VolumeSliderControl inherits Rectangle {
                 width: parent.width;
                 height: root.track-height;
                 border-radius: 3px;
-                background: #333;
+                background: root.dark ? #333 : #d1dae6;
             }
 
             Rectangle {
@@ -97,12 +100,12 @@ export component VolumeSliderControl inherits Rectangle {
                 y: max(0px, volume-track.y - self.height - 2px);
                 z: 10;
                 border-radius: 3px;
-                background: #1f1f1f;
+                background: root.dark ? #1f1f1f : #f4f7fb;
                 border-width: 1px;
-                border-color: #3a3a3a;
+                border-color: root.dark ? #3a3a3a : #c8d2dd;
                 Text {
                     text: floor(root.value * 100) + "%";
-                    color: #ddd;
+                    color: root.dark ? #ddd : #263544;
                     font-size: 8px;
                     horizontal-alignment: center;
                     vertical-alignment: center;
@@ -117,9 +120,10 @@ export component SeekBarControl inherits Rectangle {
     in property <string> elapsed-text: "0:00";
     in property <string> total-text: "0:00";
     callback seek-requested(float);
+    private property <bool> dark: Palette.color-scheme == ColorScheme.dark;
 
     height: 32px;
-    background: #242424;
+    background: root.dark ? #242424 : #f3f6fb;
     HorizontalLayout {
         padding-left: 12px;
         padding-right: 12px;
@@ -129,7 +133,7 @@ export component SeekBarControl inherits Rectangle {
 
         Text {
             text: root.elapsed-text;
-            color: #888;
+            color: root.dark ? #888 : #5f6d7c;
             font-size: 12px;
             vertical-alignment: center;
             horizontal-alignment: right;
@@ -139,7 +143,7 @@ export component SeekBarControl inherits Rectangle {
         seekbar := Rectangle {
             height: 6px;
             border-radius: 3px;
-            background: #333;
+            background: root.dark ? #333 : #d1dae6;
             horizontal-stretch: 1;
             Rectangle {
                 x: 0;
@@ -157,9 +161,11 @@ export component SeekBarControl inherits Rectangle {
                 y: (parent.height - self.height) / 2;
                 background: white;
                 border-radius: 6px;
+                border-width: 1px;
+                border-color: root.dark ? #111111 : #4f6174;
                 drop-shadow-offset-y: 1px;
                 drop-shadow-blur: 2px;
-                drop-shadow-color: #00000080;
+                drop-shadow-color: root.dark ? #00000080 : #00000033;
                 animate x { duration: 150ms; easing: ease-out; }
             }
             states [
@@ -184,7 +190,7 @@ export component SeekBarControl inherits Rectangle {
 
         Text {
             text: root.total-text;
-            color: #888;
+            color: root.dark ? #888 : #5f6d7c;
             font-size: 12px;
             vertical-alignment: center;
             width: 45px;
@@ -203,13 +209,14 @@ export component MetadataViewer inherits Rectangle {
         || root.display-album != ""
         || root.display-date != ""
         || root.display-genre != "";
+    private property <bool> dark: Palette.color-scheme == ColorScheme.dark;
 
     background: transparent;
     if root.has-metadata : VerticalLayout {
         spacing: 4px;
         if root.display-title != "" : Text {
             text: root.display-title;
-            color: #eee;
+            color: root.dark ? #eee : #243444;
             font-size: 14px;
             font-weight: 700;
             wrap: word-wrap;
@@ -217,14 +224,14 @@ export component MetadataViewer inherits Rectangle {
         }
         if root.display-artist != "" : Text {
             text: root.display-artist;
-            color: #ccc;
+            color: root.dark ? #ccc : #4d5d6d;
             font-size: 13px;
             wrap: word-wrap;
             overflow: elide;
         }
         if root.display-album != "" : Text {
             text: root.display-album;
-            color: #aaa;
+            color: root.dark ? #aaa : #627182;
             font-size: 12px;
             wrap: word-wrap;
             overflow: elide;
@@ -233,12 +240,12 @@ export component MetadataViewer inherits Rectangle {
             spacing: 8px;
             if root.display-date != "" : Text {
                 text: root.display-date;
-                color: #888;
+                color: root.dark ? #888 : #6f7d8c;
                 font-size: 11px;
             }
             if root.display-genre != "" : Text {
                 text: root.display-genre;
-                color: #888;
+                color: root.dark ? #888 : #6f7d8c;
                 font-size: 11px;
                 horizontal-stretch: 1;
                 overflow: elide;
@@ -253,7 +260,7 @@ export component MetadataViewer inherits Rectangle {
 
         Text {
             text: "No track selected";
-            color: #7c7c7c;
+            color: root.dark ? #7c7c7c : #6f7d8c;
             font-size: 14px;
             font-weight: 600;
             horizontal-alignment: center;
@@ -265,10 +272,11 @@ export component MetadataViewer inherits Rectangle {
 export component AlbumArtViewer inherits Rectangle {
     in property <image> art-source;
     in property <bool> has-art: false;
+    private property <bool> dark: Palette.color-scheme == ColorScheme.dark;
 
     vertical-stretch: 1;
     height: 100px;
-    background: #202020;
+    background: root.dark ? #202020 : #f4f7fb;
     border-radius: 4px;
 
     if root.has-art : Image {
@@ -285,8 +293,8 @@ export component AlbumArtViewer inherits Rectangle {
         y: (parent.height - self.height) / 2;
         border-radius: 6px;
         border-width: 1px;
-        border-color: #393939;
-        background: #292929;
+        border-color: root.dark ? #393939 : #c7d0db;
+        background: root.dark ? #292929 : #ecf1f8;
 
         Rectangle {
             x: 8px;
@@ -295,13 +303,13 @@ export component AlbumArtViewer inherits Rectangle {
             height: parent.height - 16px;
             border-radius: 4px;
             border-width: 1px;
-            border-color: #454545;
-            background: #2f2f2f;
+            border-color: root.dark ? #454545 : #c1ccd9;
+            background: root.dark ? #2f2f2f : #e2eaf4;
 
             Text {
                 text: "♪";
                 y: parent.height / 2 - 14px;
-                color: #8d8d8d;
+                color: root.dark ? #8d8d8d : #6b7786;
                 font-size: 24px;
                 horizontal-alignment: center;
                 vertical-alignment: center;
@@ -310,7 +318,7 @@ export component AlbumArtViewer inherits Rectangle {
             Text {
                 text: "No album art";
                 y: parent.height / 2 + 8px;
-                color: #767676;
+                color: root.dark ? #767676 : #6b7786;
                 font-size: 11px;
                 horizontal-alignment: center;
                 vertical-alignment: center;

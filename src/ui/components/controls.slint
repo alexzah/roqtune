@@ -1,3 +1,5 @@
+import { Palette } from "std-widgets.slint";
+
 export component TooltipHoverArea inherits TouchArea {
     in property <string> tooltip-text: "";
     in property <bool> tooltip-enabled: true;
@@ -30,7 +32,12 @@ export component TooltipHoverArea inherits TouchArea {
 export component PlayerButton inherits Rectangle {
     width: 32px;
     height: 32px;
-    background: touch-area.pressed ? #444 : touch-area.has-hover ? #666 : transparent;
+    private property <bool> dark: Palette.color-scheme == ColorScheme.dark;
+    background: touch-area.pressed
+        ? (root.dark ? #444 : #d4dde8)
+        : touch-area.has-hover
+            ? (root.dark ? #666 : #e2e9f1)
+            : transparent;
     animate background { duration: 150ms; }
     in property <string> icon-text;
     in property <string> tooltip-text: "";
@@ -42,7 +49,7 @@ export component PlayerButton inherits Rectangle {
     Text {
         text: root.icon-text;
         font-size: root.font-size;
-        color: root.is-primary ? #2a6def : #eee;
+        color: root.is-primary ? #2a6def : (root.dark ? #eee : #263443);
         horizontal-alignment: center;
         vertical-alignment: center;
         opacity: root.enabled ? 1.0 : 0.5;
@@ -216,6 +223,7 @@ export component ButtonCluster inherits Rectangle {
     callback action-invoked(int);
     callback request-add-menu(string);
     callback tooltip_hover_changed(bool, string, int, int);
+    private property <bool> dark: Palette.color-scheme == ColorScheme.dark;
 
     width: max(32px, button-actions.length * 32px + max(0, button-actions.length - 1) * 8px);
     height: 32px;
@@ -225,11 +233,13 @@ export component ButtonCluster inherits Rectangle {
         height: 32px;
         border-radius: 3px;
         border-width: 1px;
-        border-color: #3d3d3d;
-        background: empty-cluster-ta.has-hover ? #333 : #2a2a2a;
+        border-color: root.dark ? #3d3d3d : #c3cdd9;
+        background: empty-cluster-ta.has-hover
+            ? (root.dark ? #333 : #dde5ef)
+            : (root.dark ? #2a2a2a : #eef3f9);
         Text {
             text: "…";
-            color: #999;
+            color: root.dark ? #999 : #5e6d7d;
             font-size: 16px;
             horizontal-alignment: center;
             vertical-alignment: center;

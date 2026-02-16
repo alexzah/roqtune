@@ -1,17 +1,23 @@
+import { Palette } from "std-widgets.slint";
 import { LibraryRowData } from "../types.slint";
 
 export component LibraryRow inherits Rectangle {
     in property <LibraryRowData> data;
     in property <bool> is-hover;
+    private property <bool> dark: Palette.color-scheme == ColorScheme.dark;
 
     height: 34px;
-    property <brush> idle-background: root.data.selected ? #2f3f56
-        : root.data.is_playing ? #203345
+    property <brush> idle-background: root.data.selected
+        ? (root.dark ? #2f3f56 : #d8e6f8)
+        : root.data.is_playing
+            ? (root.dark ? #203345 : #d1e2f7)
         : transparent;
     background: is-hover
-        ? root.data.selected ? #394c67
-        : root.data.is_playing ? #2a4258
-        : #333
+        ? root.data.selected
+            ? (root.dark ? #394c67 : #cbddf2)
+            : root.data.is_playing
+                ? (root.dark ? #2a4258 : #c4d9f1)
+                : (root.dark ? #333 : #e5edf7)
         : root.idle-background;
     border-radius: 2px;
 
@@ -24,7 +30,7 @@ export component LibraryRow inherits Rectangle {
             width: 28px;
             Text {
                 text: root.data.leading;
-                color: #8fa7c6;
+                color: root.dark ? #8fa7c6 : #42658d;
                 font-size: 11px;
                 horizontal-alignment: right;
                 vertical-alignment: center;
@@ -36,8 +42,8 @@ export component LibraryRow inherits Rectangle {
             height: 24px;
             border-radius: 2px;
             border-width: 1px;
-            border-color: #3a3a3a;
-            background: #1f1f1f;
+            border-color: root.dark ? #3a3a3a : #c8d1dc;
+            background: root.dark ? #1f1f1f : #f4f7fb;
 
             if root.data.has_album_art : Image {
                 width: parent.width;
@@ -52,7 +58,7 @@ export component LibraryRow inherits Rectangle {
                     : root.data.item_kind == 3 ? "♬"
                     : root.data.item_kind == 4 ? "◷"
                     : "▦";
-                color: #8fa7c6;
+                color: root.dark ? #8fa7c6 : #42658d;
                 font-size: 11px;
                 horizontal-alignment: center;
                 vertical-alignment: center;
@@ -67,14 +73,18 @@ export component LibraryRow inherits Rectangle {
 
                 if root.data.item_kind == 0 && root.data.is_playing : Text {
                     text: "▶";
-                    color: #8fb8ff;
+                    color: root.dark ? #8fb8ff : #2d5f98;
                     font-size: 10px;
                     vertical-alignment: center;
                 }
 
                 Text {
                     text: root.data.primary;
-                    color: root.data.selected ? #ececec : root.data.is_playing ? #d7e9ff : #ddd;
+                    color: root.data.selected
+                        ? (root.dark ? #ececec : #203142)
+                        : root.data.is_playing
+                            ? (root.dark ? #d7e9ff : #245077)
+                            : (root.dark ? #ddd : #243444);
                     font-size: 12px;
                     overflow: elide;
                     horizontal-alignment: left;
@@ -84,7 +94,11 @@ export component LibraryRow inherits Rectangle {
             }
             Text {
                 text: root.data.secondary;
-                color: root.data.selected ? #bcc7d8 : root.data.is_playing ? #9eb6d3 : #888;
+                color: root.data.selected
+                    ? (root.dark ? #bcc7d8 : #4f667f)
+                    : root.data.is_playing
+                        ? (root.dark ? #9eb6d3 : #436588)
+                        : (root.dark ? #888 : #647385);
                 font-size: 11px;
                 overflow: elide;
                 horizontal-alignment: left;

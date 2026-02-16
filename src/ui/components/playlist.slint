@@ -1,4 +1,4 @@
-import { LineEdit } from "std-widgets.slint";
+import { LineEdit, Palette } from "std-widgets.slint";
 
 import { TrackRowData } from "../types.slint";
 import { ContextMenu } from "menus.slint";
@@ -15,15 +15,20 @@ export component PlaylistRow inherits Rectangle {
 
     property <length> menu-x;
     property <length> menu-y;
+    private property <bool> dark: Palette.color-scheme == ColorScheme.dark;
 
     height: 24px;
-    background: is-active ? #3d3d3d : ta.has-hover ? #333 : transparent;
+    background: is-active
+        ? (root.dark ? #3d3d3d : #d9e5f5)
+        : ta.has-hover
+            ? (root.dark ? #333 : #e5ecf5)
+            : transparent;
     border-radius: 2px;
 
     if !is-editing : Text {
         x: 8px;
         text: root.name;
-        color: is-active ? #eee : #aaa;
+        color: is-active ? (root.dark ? #eee : #223445) : (root.dark ? #aaa : #5a6877);
         font-size: 13px;
         vertical-alignment: center;
         horizontal-alignment: left;
@@ -87,6 +92,7 @@ export component TrackRow inherits Rectangle {
     in property <[int]> column-widths-px: [];
     in property <length> row-height: 30px;
     in property <length> null-column-width: 120px;
+    private property <bool> dark: Palette.color-scheme == ColorScheme.dark;
 
     pure function column-width-for-index(index: int) -> length {
         if index >= 0 && index < root.column-widths-px.length {
@@ -96,11 +102,17 @@ export component TrackRow inherits Rectangle {
     }
 
     height: root.row-height;
-    property <brush> idle-background: data.selected ? #3d3d3d : root.is-playing ? #24384f : transparent;
+    property <brush> idle-background: data.selected
+        ? (root.dark ? #3d3d3d : #dce8f7)
+        : root.is-playing
+            ? (root.dark ? #24384f : #d4e6fb)
+            : transparent;
     background: is-hover
-        ? data.selected ? #474747
-        : root.is-playing ? #2f4965
-        : #333
+        ? data.selected
+            ? (root.dark ? #474747 : #d2deed)
+            : root.is-playing
+                ? (root.dark ? #2f4965 : #c8ddf5)
+                : (root.dark ? #333 : #e5ecf5)
         : root.idle-background;
     animate background { duration: 100ms; }
 
@@ -131,7 +143,7 @@ export component TrackRow inherits Rectangle {
                 width: max(16px, min(parent.width, root.height - 8px));
                 height: self.width;
                 border-radius: 2px;
-                background: #2a2a2a;
+                background: root.dark ? #2a2a2a : #e3ebf5;
                 Image {
                     source: root.data.album_art;
                     width: parent.width;
@@ -144,12 +156,14 @@ export component TrackRow inherits Rectangle {
                 x: 0px;
                 width: parent.width;
                 text: column-value;
-                color: data.selected ? #ececec
+                color: data.selected ? (root.dark ? #ececec : #1f2f3f)
                     : root.is-playing
                         ? (index < root.headers.length && root.headers[index] == "Title")
-                            ? #d7e9ff
-                            : #b5c9e3
-                        : (index < root.headers.length && root.headers[index] == "Title") ? #eee : #aaa;
+                            ? (root.dark ? #d7e9ff : #21496f)
+                            : (root.dark ? #b5c9e3 : #406487)
+                        : (index < root.headers.length && root.headers[index] == "Title")
+                            ? (root.dark ? #eee : #243444)
+                            : (root.dark ? #aaa : #5a6877);
                 font-size: 13px;
                 vertical-alignment: center;
                 overflow: elide;

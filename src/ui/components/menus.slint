@@ -1,28 +1,29 @@
-import { Button, Switch } from "std-widgets.slint";
+import { Button, Switch, Palette } from "std-widgets.slint";
 
 export component ContextMenu inherits PopupWindow {
     callback rename();
     callback delete();
     in property <bool> is-playlist: false;
+    private property <bool> dark: Palette.color-scheme == ColorScheme.dark;
     width: 120px;
     height: is-playlist ? 56px : 32px;
 
     Rectangle {
-        background: #333;
+        background: root.dark ? #333 : #f0f4fa;
         border-width: 1px;
-        border-color: #444;
+        border-color: root.dark ? #444 : #c7d1dd;
 
         VerticalLayout {
             padding: 4px;
             spacing: 4px;
             Rectangle {
                 height: 24px;
-                background: item-ta-rename.has-hover ? #444 : transparent;
+                background: item-ta-rename.has-hover ? (root.dark ? #444 : #e1e9f2) : transparent;
                 border-radius: 2px;
                 Text {
                     x: 8px;
                     text: "Rename";
-                    color: #eee;
+                    color: root.dark ? #eee : #253444;
                     font-size: 13px;
                     vertical-alignment: center;
                 }
@@ -34,7 +35,7 @@ export component ContextMenu inherits PopupWindow {
             }
             if is-playlist : Rectangle {
                 height: 24px;
-                background: item-ta-delete.has-hover ? #444 : transparent;
+                background: item-ta-delete.has-hover ? (root.dark ? #444 : #f3e3e3) : transparent;
                 border-radius: 2px;
                 Text {
                     x: 8px;
@@ -60,14 +61,15 @@ export component ColumnHeaderMenu inherits PopupWindow {
     callback toggle-column(int);
     callback delete-column(int);
     callback add-custom();
+    private property <bool> dark: Palette.color-scheme == ColorScheme.dark;
 
     width: 220px;
     height: 16px + labels.length * 24px + 32px;
 
     Rectangle {
-        background: #2f2f2f;
+        background: root.dark ? #2f2f2f : #f3f6fb;
         border-width: 1px;
-        border-color: #454545;
+        border-color: root.dark ? #454545 : #c7d1dd;
         border-radius: 4px;
 
         VerticalLayout {
@@ -78,7 +80,7 @@ export component ColumnHeaderMenu inherits PopupWindow {
                 property <bool> is-custom: i < root.custom.length && root.custom[i];
                 height: 22px;
                 border-radius: 2px;
-                background: column-item-ta.has-hover ? #3d3d3d : transparent;
+                background: column-item-ta.has-hover ? (root.dark ? #3d3d3d : #e2eaf4) : transparent;
                 column-toggle := Switch {
                     x: 6px;
                     y: (parent.height - self.height) / 2;
@@ -91,7 +93,7 @@ export component ColumnHeaderMenu inherits PopupWindow {
                 }
                 Text {
                     text: label;
-                    color: #ddd;
+                    color: root.dark ? #ddd : #253444;
                     font-size: 12px;
                     vertical-alignment: center;
                     horizontal-alignment: left;
@@ -129,16 +131,16 @@ export component ColumnHeaderMenu inherits PopupWindow {
 
             Rectangle {
                 height: 1px;
-                background: #3c3c3c;
+                background: root.dark ? #3c3c3c : #d4dce7;
             }
 
             Rectangle {
                 height: 22px;
                 border-radius: 2px;
-                background: custom-item-ta.has-hover ? #3d3d3d : transparent;
+                background: custom-item-ta.has-hover ? (root.dark ? #3d3d3d : #e2eaf4) : transparent;
                 Text {
                     text: "Custom...";
-                    color: #ddd;
+                    color: root.dark ? #ddd : #253444;
                     font-size: 12px;
                     vertical-alignment: center;
                     horizontal-alignment: left;
@@ -160,6 +162,7 @@ export component ConfirmationDialog inherits Rectangle {
     in property <string> message: "Are you sure?";
     in property <bool> is-visible: false;
     in property <string> confirm-button-text: "Delete";
+    private property <bool> dark: Palette.color-scheme == ColorScheme.dark;
 
     visible: is-visible;
     background: #00000080;
@@ -172,9 +175,9 @@ export component ConfirmationDialog inherits Rectangle {
         height: min(240px, max(140px, root.height - 24px));
         x: max(0px, (parent.width - self.width) / 2);
         y: max(0px, (parent.height - self.height) / 2);
-        background: #282828;
+        background: root.dark ? #282828 : #f6f8fc;
         border-width: 1px;
-        border-color: #444;
+        border-color: root.dark ? #444 : #c7d1dd;
         border-radius: 4px;
 
         VerticalLayout {
@@ -183,7 +186,7 @@ export component ConfirmationDialog inherits Rectangle {
 
             Text {
                 text: root.message;
-                color: #eee;
+                color: root.dark ? #eee : #253444;
                 font-size: 14px;
                 horizontal-alignment: center;
                 wrap: word-wrap;
@@ -213,6 +216,7 @@ export component InfoDialog inherits Rectangle {
     callback dismissed();
     in property <string> message: "";
     in property <bool> is-visible: false;
+    private property <bool> dark: Palette.color-scheme == ColorScheme.dark;
 
     visible: is-visible;
     background: #00000080;
@@ -222,9 +226,9 @@ export component InfoDialog inherits Rectangle {
     Rectangle {
         width: 430px;
         height: 180px;
-        background: #282828;
+        background: root.dark ? #282828 : #f6f8fc;
         border-width: 1px;
-        border-color: #444;
+        border-color: root.dark ? #444 : #c7d1dd;
         border-radius: 4px;
 
         VerticalLayout {
@@ -233,7 +237,7 @@ export component InfoDialog inherits Rectangle {
 
             Text {
                 text: "Restart Required";
-                color: #eee;
+                color: root.dark ? #eee : #253444;
                 font-size: 16px;
                 font-weight: 700;
                 horizontal-alignment: left;
@@ -241,7 +245,7 @@ export component InfoDialog inherits Rectangle {
 
             Text {
                 text: root.message;
-                color: #ddd;
+                color: root.dark ? #ddd : #425365;
                 font-size: 13px;
                 wrap: word-wrap;
                 vertical-stretch: 1;

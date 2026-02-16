@@ -2642,6 +2642,7 @@ fn apply_config_to_ui(
     ui.set_settings_show_layout_edit_tutorial(config.ui.show_layout_edit_intro);
     ui.set_settings_show_tooltips(config.ui.show_tooltips);
     ui.set_settings_auto_scroll_to_playing_track(config.ui.auto_scroll_to_playing_track);
+    ui.set_ui_dark_mode(config.ui.dark_mode);
     ui.set_settings_dark_mode(config.ui.dark_mode);
     let color_scheme = if config.ui.dark_mode {
         ColorScheme::Dark

@@ -1,4 +1,4 @@
-import { ComboBox, LineEdit } from "std-widgets.slint";
+import { ComboBox, LineEdit, Palette } from "std-widgets.slint";
 import { TooltipHoverArea } from "controls.slint";
 
 export component SettingsDropdownControl inherits Rectangle {
@@ -15,6 +15,7 @@ export component SettingsDropdownControl inherits Rectangle {
     in property <length> control_max_width: 320px;
     in property <length> control_height: 32px;
     callback tooltip_hover_changed(bool, string, int, int);
+    private property <bool> dark: Palette.color-scheme == ColorScheme.dark;
 
     property <length> control_width: min(
         root.control_max_width,
@@ -38,7 +39,9 @@ export component SettingsDropdownControl inherits Rectangle {
                 background: transparent;
                 Text {
                     text: root.label;
-                    color: root.enabled ? #ddd : #9f9f9f;
+                    color: root.enabled
+                        ? (root.dark ? #ddd : #253444)
+                        : (root.dark ? #9f9f9f : #7e8a96);
                     font-size: 12px;
                     vertical-alignment: center;
                     horizontal-alignment: left;
