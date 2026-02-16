@@ -19,6 +19,8 @@
 
 ## Quick Start
 
+Detailed installation and packaging instructions live in [`INSTALL.md`](INSTALL.md).
+
 ### Prerequisites
 
 - Rust toolchain with Cargo (`rustup` recommended)

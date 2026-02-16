@@ -1,1 +1,4 @@
 /target
+/flatpak/.build
+/flatpak/.repo
+/flatpak/dist

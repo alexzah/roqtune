@@ -1,0 +1,20 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<component type="desktop-application">
+  <id>io.github.roqtune.Roqtune</id>
+  <name>roqtune</name>
+  <summary>Configurable desktop music player</summary>
+  <metadata_license>CC0-1.0</metadata_license>
+  <project_license>MIT</project_license>
+  <launchable type="desktop-id">io.github.roqtune.Roqtune.desktop</launchable>
+  <icon type="stock">io.github.roqtune.Roqtune</icon>
+  <description>
+    <p>
+      roqtune is a fast and customizable desktop music player built with Rust and Slint.
+      It supports playlist-focused playback, a browsable library mode, and configurable UI layouts.
+    </p>
+  </description>
+  <developer id="io.github.roqtune">
+    <name>roqtune</name>
+  </developer>
+  <url type="homepage">https://github.com/roqtune/roqtune</url>
+</component>
