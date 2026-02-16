@@ -206,6 +206,8 @@ export component AppWindow inherits Window {
     in-out property <int> playlist_columns_available_width_px: 0;
     in-out property <[LayoutButtonClusterPanelModel]> layout_button_cluster_panels: [];
     in-out property <bool> show_import_menu: false;
+    property <length> import_menu_width: 176px;
+    property <length> import_menu_height: 104px;
     property <length> import_menu_x: 0px;
     property <length> import_menu_y: 0px;
     in-out property <bool> show_settings_menu: false;
@@ -530,14 +532,18 @@ export component AppWindow inherits Window {
                         button-actions: cluster-panel.actions;
                         playback-order-index: root.playback_order_index;
                         repeat-mode: root.repeat_mode;
+                        collection-mode: root.collection_mode;
                         layout-edit-mode: root.layout_edit_mode;
                         action-invoked(action-id) => {
-                            if (action-id == 1) {
+                            if (action-id == 1 && root.collection_mode == 0) {
                                 root.show_settings_menu = false;
                                 root.show_import_menu = true;
-                                root.import_menu_x = min(root.width - 168px, max(8px, cluster-panel.x_px * 1px + 8px));
+                                root.import_menu_x = min(
+                                    root.width - root.import_menu_width,
+                                    max(8px, cluster-panel.x_px * 1px + 8px)
+                                );
                                 root.import_menu_y = min(
-                                    root.height - 96px,
+                                    root.height - root.import_menu_height,
                                     max(8px, cluster-panel.y_px * 1px + cluster-panel.height_px * 1px + 4px)
                                 );
                             }
@@ -644,14 +650,30 @@ export component AppWindow inherits Window {
                                 vertical-alignment: center;
                             }
                             Rectangle { horizontal-stretch: 1; }
-                            PlayerButton {
+                            playlist-switcher-import-button := PlayerButton {
                                 icon-text: "+";
                                 font-size: 18px;
-                                tooltip-text: "Create playlist";
+                                tooltip-text: "Import tracks or folders";
                                 tooltip_hover_changed(is-hovered, tooltip, anchor-x-px, anchor-y-px) => {
                                     root.tooltip_hover_changed(is-hovered, tooltip, anchor-x-px, anchor-y-px);
                                 }
-                                clicked => { root.create_playlist(); }
+                                clicked => {
+                                    root.show_settings_menu = false;
+                                    root.show_import_menu = true;
+                                    root.import_menu_x = min(
+                                        root.width - root.import_menu_width,
+                                        max(8px, playlist-switcher-import-button.absolute-position.x)
+                                    );
+                                    root.import_menu_y = min(
+                                        root.height - root.import_menu_height,
+                                        max(
+                                            8px,
+                                            playlist-switcher-import-button.absolute-position.y
+                                                + playlist-switcher-import-button.height
+                                                + 4px
+                                        )
+                                    );
+                                }
                             }
                         }
 
@@ -1271,17 +1293,10 @@ export component AppWindow inherits Window {
                             property <int> center-token: root.playlist_scroll_center_token;
                             changed center-token => {
                                 let row-height = self.row-height;
-                                let scroll-offset-y = max(0px, -self.viewport-y);
-                                let first-visible-row = max(0, floor(scroll-offset-y / row-height));
-                                let visible-rows = max(
-                                    1,
-                                    floor(self.height / row-height)
-                                );
-                                let margin-rows = max(1, floor(visible-rows / 5));
-                                let inner-start-row = first-visible-row + margin-rows;
-                                let inner-end-row = first-visible-row + visible-rows - margin-rows;
-                                if root.playlist_scroll_target_row >= inner-start-row
-                                        && root.playlist_scroll_target_row < inner-end-row {
+                                let first-visible-row = track-list-container.first-visible-row;
+                                let visible-rows = track-list-container.visible-row-count;
+                                if root.playlist_scroll_target_row >= first-visible-row
+                                        && root.playlist_scroll_target_row < first-visible-row + visible-rows {
                                     return;
                                 }
                                 let max-first-row = max(0, root.track_model.length - visible-rows);
@@ -1652,14 +1667,10 @@ export component AppWindow inherits Window {
                             changed center-token => {
                                 let row-height = self.row-height-px * 1px;
                                 let clamped-row = min(max(0, root.library_scroll_target_row), max(0, root.library_model.length - 1));
-                                let scroll-offset-y = max(0px, -self.viewport-y);
-                                let first-visible-row = max(0, floor(scroll-offset-y / row-height));
-                                let visible-rows = max(1, floor(self.height / row-height));
-                                let margin-rows = max(1, floor(visible-rows / 5));
-                                let inner-start-row = first-visible-row + margin-rows;
-                                let inner-end-row = first-visible-row + visible-rows - margin-rows;
-                                if clamped-row >= inner-start-row
-                                        && clamped-row < inner-end-row {
+                                let first-visible-row = library-list-container.first-visible-row;
+                                let visible-rows = library-list-container.visible-row-count;
+                                if clamped-row >= first-visible-row
+                                        && clamped-row < first-visible-row + visible-rows {
                                     return;
                                 }
                                 let max-first-row = max(0, root.library_model.length - visible-rows);
@@ -2761,8 +2772,8 @@ export component AppWindow inherits Window {
         z: 150;
         x: root.import_menu_x;
         y: root.import_menu_y;
-        width: 160px;
-        height: 70px;
+        width: root.import_menu_width;
+        height: root.import_menu_height;
         border-radius: 6px;
         background: #262626;
         border-width: 1px;
@@ -2799,7 +2810,7 @@ export component AppWindow inherits Window {
                 Text {
                     x: 10px;
                     width: parent.width - 20px;
-                    text: "Add folder";
+                    text: "Add folders";
                     color: #ddd;
                     font-size: 12px;
                     vertical-alignment: center;
@@ -2808,6 +2819,26 @@ export component AppWindow inherits Window {
                     clicked => {
                         root.show_import_menu = false;
                         root.open_folder();
+                    }
+                }
+            }
+
+            Rectangle {
+                height: 28px;
+                border-radius: 4px;
+                background: create-playlist-ta.has-hover ? #363636 : transparent;
+                Text {
+                    x: 10px;
+                    width: parent.width - 20px;
+                    text: "Create new playlist";
+                    color: #ddd;
+                    font-size: 12px;
+                    vertical-alignment: center;
+                }
+                create-playlist-ta := TouchArea {
+                    clicked => {
+                        root.show_import_menu = false;
+                        root.create_playlist();
                     }
                 }
             }

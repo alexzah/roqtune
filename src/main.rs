@@ -5511,8 +5511,10 @@ mod tests {
             "App window should expose import menu state"
         );
         assert!(
-            slint_ui.contains("text: \"Add files\"") && slint_ui.contains("text: \"Add folder\""),
-            "Import menu should expose both Add files and Add folder actions"
+            slint_ui.contains("text: \"Add files\"")
+                && slint_ui.contains("text: \"Add folders\"")
+                && slint_ui.contains("text: \"Create new playlist\""),
+            "Import menu should expose Add files, Add folders, and Create new playlist actions"
         );
         assert!(
             slint_ui.contains("callback open_folder();"),
