@@ -25,21 +25,21 @@ playlist_album_art_column_max_width_px = 480
 # Built-in columns should keep `custom = false`.
 # Custom user columns use `custom = true`.
 [[playlist_columns]]
+name = "Track #"
+format = "{track_number}"
+enabled = false
+custom = false
+
+[[playlist_columns]]
 name = "Title"
 format = "{title}"
 enabled = true
 custom = false
 
 [[playlist_columns]]
-name = "Artist"
-format = "{artist}"
-enabled = true
-custom = false
-
-[[playlist_columns]]
-name = "Album"
-format = "{album}"
-enabled = true
+name = "Album Art"
+format = "{album_art}"
+enabled = false
 custom = false
 
 [[playlist_columns]]
@@ -61,15 +61,15 @@ enabled = false
 custom = false
 
 [[playlist_columns]]
-name = "Track #"
-format = "{track_number}"
-enabled = false
+name = "Artist"
+format = "{artist}"
+enabled = true
 custom = false
 
 [[playlist_columns]]
-name = "Album Art"
-format = "{album_art}"
-enabled = false
+name = "Album"
+format = "{album}"
+enabled = true
 custom = false
 
 # Optional per-leaf button cluster action overrides.
@@ -79,25 +79,16 @@ custom = false
 # leaf_id = "n8"
 # actions = [1, 2, 3]
 #
-# Optional per-leaf metadata/image-metadata viewer behavior overrides.
+# Optional per-leaf metadata/album-art viewer behavior overrides.
 # display_priority options:
 # - "default"
 # - "prefer_selection"
 # - "prefer_now_playing"
 # - "selection_only"
 # - "now_playing_only"
-# metadata_source options:
-# - "track"
-# - "album_description"
-# - "artist_bio"
-# image_source options:
-# - "album_art"
-# - "artist_image"
 # [[viewer_panel_instances]]
 # leaf_id = "l1"
 # display_priority = "default"
-# metadata_source = "track"
-# image_source = "album_art"
 
 [root]
 node_type = "split"
@@ -107,6 +98,10 @@ ratio = 0.09
 min_first_px = 64
 min_second_px = 120
 
+[[button_cluster_instances]]
+leaf_id = "n8"
+actions = [10]
+
 [root.first]
 node_type = "split"
 id = "n16"
@@ -115,18 +110,32 @@ ratio = 0.29
 min_first_px = 32
 min_second_px = 28
 
+[[button_cluster_instances]]
+leaf_id = "n9"
+actions = [2, 3, 4, 5, 6]
+
 [root.first.first]
 node_type = "split"
 id = "n15"
 axis = "vertical"
-ratio = 0.08
+ratio = 0.05
 min_first_px = 32
 min_second_px = 240
+
+[[button_cluster_instances]]
+leaf_id = "n10"
+actions = [7, 8]
 
 [root.first.first.first]
 node_type = "leaf"
 id = "n8"
 panel = "button_cluster"
+
+[[viewer_panel_instances]]
+leaf_id = "l1"
+display_priority = "default"
+metadata_source = "track"
+image_source = "album_art"
 
 [root.first.first.second]
 node_type = "split"
@@ -135,6 +144,12 @@ axis = "vertical"
 ratio = 0.62
 min_first_px = 180
 min_second_px = 110
+
+[[viewer_panel_instances]]
+leaf_id = "l2"
+display_priority = "default"
+metadata_source = "track"
+image_source = "album_art"
 
 [root.first.first.second.first]
 node_type = "leaf"
@@ -145,7 +160,7 @@ panel = "button_cluster"
 node_type = "split"
 id = "n13"
 axis = "vertical"
-ratio = 0.70
+ratio = 0.7
 min_first_px = 120
 min_second_px = 90
 
@@ -184,7 +199,7 @@ min_second_px = 220
 node_type = "split"
 id = "s2"
 axis = "horizontal"
-ratio = 0.38
+ratio = 0.41
 min_first_px = 24
 min_second_px = 24
 
