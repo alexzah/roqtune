@@ -1277,8 +1277,11 @@ export component AppWindow inherits Window {
                                     1,
                                     floor((self.height + row-height - 1px) / row-height)
                                 );
-                                if root.playlist_scroll_target_row >= first-visible-row
-                                        && root.playlist_scroll_target_row < first-visible-row + visible-rows {
+                                let margin-rows = max(1, floor(visible-rows / 5));
+                                let inner-start-row = first-visible-row + margin-rows;
+                                let inner-end-row = first-visible-row + visible-rows - margin-rows;
+                                if root.playlist_scroll_target_row >= inner-start-row
+                                        && root.playlist_scroll_target_row < inner-end-row {
                                     return;
                                 }
                                 let max-first-row = max(0, root.track_model.length - visible-rows);
@@ -1656,8 +1659,11 @@ export component AppWindow inherits Window {
                                 let scroll-offset-y = max(0px, -self.viewport-y);
                                 let first-visible-row = max(0, floor(scroll-offset-y / row-height));
                                 let visible-rows = max(1, floor((self.height + row-height - 1px) / row-height));
-                                if clamped-row >= first-visible-row
-                                        && clamped-row < first-visible-row + visible-rows {
+                                let margin-rows = max(1, floor(visible-rows / 5));
+                                let inner-start-row = first-visible-row + margin-rows;
+                                let inner-end-row = first-visible-row + visible-rows - margin-rows;
+                                if clamped-row >= inner-start-row
+                                        && clamped-row < inner-end-row {
                                     return;
                                 }
                                 let max-first-row = max(0, root.library_model.length - visible-rows);
