@@ -1065,7 +1065,7 @@ export component AppWindow inherits Window {
                         );
                         property <int> visible-row-count: max(
                             1,
-                            floor((track-list.height + track-list.row-height - 1px) / track-list.row-height)
+                            floor(track-list.height / track-list.row-height)
                         );
                         property <bool> has-playing-row: root.playing_track_index >= 0
                             && root.playing_track_index < root.track_model.length;
@@ -1275,7 +1275,7 @@ export component AppWindow inherits Window {
                                 let first-visible-row = max(0, floor(scroll-offset-y / row-height));
                                 let visible-rows = max(
                                     1,
-                                    floor((self.height + row-height - 1px) / row-height)
+                                    floor(self.height / row-height)
                                 );
                                 let margin-rows = max(1, floor(visible-rows / 5));
                                 let inner-start-row = first-visible-row + margin-rows;
@@ -1622,11 +1622,7 @@ export component AppWindow inherits Window {
                         property <int> visible-row-count: max(
                             1,
                             floor(
-                                (
-                                    library-list-view.height
-                                    + (library-list-view.row-height-px * 1px)
-                                    - 1px
-                                ) / (library-list-view.row-height-px * 1px)
+                                library-list-view.height / (library-list-view.row-height-px * 1px)
                             )
                         );
                         property <bool> has-playing-row: self.has-configured-folders
@@ -1658,7 +1654,7 @@ export component AppWindow inherits Window {
                                 let clamped-row = min(max(0, root.library_scroll_target_row), max(0, root.library_model.length - 1));
                                 let scroll-offset-y = max(0px, -self.viewport-y);
                                 let first-visible-row = max(0, floor(scroll-offset-y / row-height));
-                                let visible-rows = max(1, floor((self.height + row-height - 1px) / row-height));
+                                let visible-rows = max(1, floor(self.height / row-height));
                                 let margin-rows = max(1, floor(visible-rows / 5));
                                 let inner-start-row = first-visible-row + margin-rows;
                                 let inner-end-row = first-visible-row + visible-rows - margin-rows;
