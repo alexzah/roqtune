@@ -24,7 +24,7 @@ use tokio::sync::broadcast::{Receiver, Sender};
 use crate::metadata_tags;
 use crate::protocol::{
     CastConnectionState, CastDeviceInfo, CastMessage, CastPlaybackPathKind, Message,
-    PlaybackMessage, TrackStarted,
+    PlaybackMessage, TechnicalMetadata, TrackStarted,
 };
 
 const CAST_DEFAULT_MEDIA_RECEIVER_APP_ID: &str = "CC1AD845";
@@ -477,6 +477,7 @@ struct CastTrackInfo {
     artist: String,
     album: String,
     duration_ms: Option<u64>,
+    source_technical_metadata: Option<TechnicalMetadata>,
     album_art_path: Option<PathBuf>,
     album_art_content_type: Option<String>,
 }
@@ -1115,12 +1116,22 @@ fn extract_embedded_cover_art_to_cache(track_path: &Path) -> Option<(PathBuf, St
     Some((cache_path, content_type))
 }
 
-fn probe_track_duration_ms(path: &Path) -> Option<u64> {
+fn probe_track_technical_metadata(path: &Path) -> Option<TechnicalMetadata> {
     use lofty::file::AudioFile;
     use symphonia::core::formats::FormatOptions;
     use symphonia::core::io::MediaSourceStream;
     use symphonia::core::meta::MetadataOptions;
     use symphonia::core::probe::Hint;
+
+    let format_name = path
+        .extension()
+        .and_then(|ext| ext.to_str())
+        .unwrap_or("AUDIO")
+        .to_ascii_uppercase();
+    let mut sample_rate_hz = 44_100u32;
+    let mut channel_count = 2u16;
+    let mut bits_per_sample = 16u16;
+    let mut duration_ms = 0u64;
 
     let file = File::open(path).ok()?;
     let mss = MediaSourceStream::new(Box::new(file), Default::default());
@@ -1135,20 +1146,81 @@ fn probe_track_duration_ms(path: &Path) -> Option<u64> {
         .ok()?;
     if let Some(track) = probed.format.default_track() {
         let codec = &track.codec_params;
+        if let Some(rate) = codec.sample_rate {
+            sample_rate_hz = rate.max(1);
+        }
+        if let Some(channels) = codec.channels {
+            channel_count = (channels.count() as u16).max(1);
+        }
+        if let Some(bits) = codec.bits_per_sample {
+            bits_per_sample = (bits as u16).max(1);
+        }
         if let (Some(sample_rate), Some(n_frames)) = (codec.sample_rate, codec.n_frames) {
             if sample_rate > 0 && n_frames > 0 {
-                let duration_ms = (n_frames as f64 * 1000.0 / sample_rate as f64).round() as u64;
-                if duration_ms > 0 {
-                    return Some(duration_ms);
-                }
+                duration_ms = (n_frames as f64 * 1000.0 / sample_rate as f64).round() as u64;
             }
         }
     }
 
-    lofty::read_from_path(path)
-        .ok()
-        .map(|tagged| tagged.properties().duration().as_millis() as u64)
-        .filter(|duration_ms| *duration_ms > 0)
+    if duration_ms == 0 {
+        duration_ms = lofty::read_from_path(path)
+            .ok()
+            .map(|tagged| tagged.properties().duration().as_millis() as u64)
+            .filter(|value| *value > 0)
+            .unwrap_or(0);
+    }
+
+    let bitrate_kbps = if duration_ms > 0 {
+        std::fs::metadata(path)
+            .ok()
+            .map(|meta| {
+                let bits_per_second = (meta.len() as f64 * 8.0) / (duration_ms as f64 / 1000.0);
+                (bits_per_second / 1000.0).round() as u32
+            })
+            .unwrap_or(0)
+    } else {
+        0
+    };
+
+    Some(TechnicalMetadata {
+        format: format_name,
+        bitrate_kbps,
+        sample_rate_hz,
+        channel_count,
+        duration_ms,
+        bits_per_sample,
+    })
+}
+
+fn transcode_wav_output_from_source(source: &TechnicalMetadata) -> TechnicalMetadata {
+    let bits_per_sample = 16u16;
+    let sample_rate_hz = source.sample_rate_hz.max(1);
+    let channel_count = source.channel_count.max(1);
+    let bitrate_kbps =
+        ((sample_rate_hz as u64 * channel_count as u64 * bits_per_sample as u64) / 1000) as u32;
+    TechnicalMetadata {
+        format: "WAV".to_string(),
+        bitrate_kbps,
+        sample_rate_hz,
+        channel_count,
+        duration_ms: source.duration_ms,
+        bits_per_sample,
+    }
+}
+
+fn fallback_source_technical_metadata(path: &Path, duration_ms: Option<u64>) -> TechnicalMetadata {
+    TechnicalMetadata {
+        format: path
+            .extension()
+            .and_then(|ext| ext.to_str())
+            .unwrap_or("AUDIO")
+            .to_ascii_uppercase(),
+        bitrate_kbps: 0,
+        sample_rate_hz: 44_100,
+        channel_count: 2,
+        duration_ms: duration_ms.unwrap_or(0),
+        bits_per_sample: 16,
+    }
 }
 
 fn read_cast_track_info(source_path: &Path) -> CastTrackInfo {
@@ -1163,7 +1235,11 @@ fn read_cast_track_info(source_path: &Path) -> CastTrackInfo {
         artist = common.artist;
         album = common.album;
     }
-    let duration_ms = probe_track_duration_ms(source_path);
+    let source_technical_metadata = probe_track_technical_metadata(source_path);
+    let duration_ms = source_technical_metadata
+        .as_ref()
+        .map(|meta| meta.duration_ms)
+        .filter(|value| *value > 0);
     let (album_art_path, album_art_content_type) = if let Some(path) =
         find_external_cover_art(source_path)
     {
@@ -1180,6 +1256,7 @@ fn read_cast_track_info(source_path: &Path) -> CastTrackInfo {
         artist,
         album,
         duration_ms,
+        source_technical_metadata,
         album_art_path,
         album_art_content_type,
     }
@@ -1514,6 +1591,24 @@ impl CastManager {
             .session
             .as_mut()
             .ok_or_else(|| "No cast session available".to_string())?;
+        let source_technical_metadata = track_info
+            .source_technical_metadata
+            .clone()
+            .unwrap_or_else(|| {
+                fallback_source_technical_metadata(&source_path, track_info.duration_ms)
+            });
+        let transcode_output_metadata = if mode == CastPlaybackPathKind::TranscodeWavPcm {
+            probe_track_technical_metadata(&stream_path)
+                .map(|mut meta| {
+                    if meta.format.trim().is_empty() {
+                        meta.format = "WAV".to_string();
+                    }
+                    meta
+                })
+                .or_else(|| Some(transcode_wav_output_from_source(&source_technical_metadata)))
+        } else {
+            None
+        };
         let load_start_offset_ms = 0;
         if start_offset_ms > 0 {
             info!(
@@ -1531,13 +1626,19 @@ impl CastManager {
         self.current_track_id = Some(track_id.to_string());
         self.current_path_kind = Some(mode);
         self.current_media_session_id = None;
-        self.current_track_duration_ms = track_info.duration_ms;
+        self.current_track_duration_ms = Some(source_technical_metadata.duration_ms)
+            .filter(|value| *value > 0)
+            .or(track_info.duration_ms);
         self.stop_requested = false;
+        let _ = self.bus_producer.send(Message::Playback(
+            PlaybackMessage::TechnicalMetadataChanged(source_technical_metadata),
+        ));
         let _ = self
             .bus_producer
             .send(Message::Cast(CastMessage::PlaybackPathChanged {
                 kind: mode,
                 description: path_description,
+                transcode_output_metadata,
             }));
         let _ = self
             .bus_producer

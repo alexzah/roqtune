@@ -755,6 +755,7 @@ pub enum CastMessage {
     PlaybackPathChanged {
         kind: CastPlaybackPathKind,
         description: String,
+        transcode_output_metadata: Option<TechnicalMetadata>,
     },
     PlaybackError {
         track_id: Option<String>,

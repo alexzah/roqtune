@@ -74,7 +74,8 @@ pub struct UiManager {
     cast_connected: bool,
     cast_connecting: bool,
     cast_device_name: String,
-    cast_playback_path_description: String,
+    cast_playback_path_kind: Option<protocol::CastPlaybackPathKind>,
+    cast_transcode_output_metadata: Option<protocol::TechnicalMetadata>,
     cast_device_ids: Vec<String>,
     cast_device_names: Vec<String>,
     playlist_columns: Vec<PlaylistColumnConfig>,
@@ -904,7 +905,8 @@ impl UiManager {
             cast_connected: false,
             cast_connecting: false,
             cast_device_name: String::new(),
-            cast_playback_path_description: String::new(),
+            cast_playback_path_kind: None,
+            cast_transcode_output_metadata: None,
             cast_device_ids: Vec::new(),
             cast_device_names: Vec::new(),
             playlist_columns: config::default_playlist_columns(),
@@ -1037,99 +1039,108 @@ impl UiManager {
         self.last_health_log_at = now;
     }
 
-    fn render_technical_info_text(&self) -> String {
-        let cast_route_prefix = if self.cast_connected {
-            if !self.cast_playback_path_description.is_empty() {
-                self.cast_playback_path_description.clone()
-            } else if !self.cast_device_name.is_empty() {
-                format!("Casting: Connected ({})", self.cast_device_name)
-            } else {
-                "Casting: Connected".to_string()
-            }
-        } else if self.cast_connecting {
-            "Casting: Connecting...".to_string()
-        } else {
-            String::new()
-        };
-
-        let meta = match self.current_technical_metadata.as_ref() {
-            Some(m) => m,
-            None => return cast_route_prefix,
-        };
-        let path_info = match self.current_output_path_info.as_ref() {
-            Some(p) => p,
-            None => {
-                let source_text = format!(
-                    "Source: {} ({} bit, {} kbps)",
-                    meta.format, meta.bits_per_sample, meta.bitrate_kbps
-                );
-                if cast_route_prefix.is_empty() {
-                    return source_text;
-                }
-                return format!("{} | {}", cast_route_prefix, source_text);
-            }
-        };
-
-        let source_bits = meta.bits_per_sample;
-        let source_rate = path_info.source_sample_rate_hz;
-        let source_ch = path_info.source_channel_count;
-
-        let rate_str = if source_rate >= 1000 {
-            let khz = source_rate as f32 / 1000.0;
+    fn format_rate_hz_text(rate_hz: u32) -> String {
+        if rate_hz >= 1000 {
+            let khz = rate_hz as f32 / 1000.0;
             if khz == khz.round() {
                 format!("{}kHz", khz as u32)
             } else {
                 format!("{:.1}kHz", khz)
             }
         } else {
-            format!("{}Hz", source_rate)
-        };
-
-        let source_info = format!(
-            "{} ({} bit, {}, {}ch, {} kbps)",
-            meta.format, source_bits, rate_str, source_ch, meta.bitrate_kbps
-        );
-
-        let mut transforms = Vec::new();
-
-        if path_info.resampled {
-            let out_rate = path_info.output_stream.sample_rate_hz;
-            let out_rate_str = if out_rate >= 1000 {
-                let khz = out_rate as f32 / 1000.0;
-                if khz == khz.round() {
-                    format!("{}kHz", khz as u32)
-                } else {
-                    format!("{:.1}kHz", khz)
-                }
-            } else {
-                format!("{}Hz", out_rate)
-            };
-            transforms.push(format!("Resample: {} -> {}", rate_str, out_rate_str));
+            format!("{}Hz", rate_hz)
         }
+    }
 
+    fn format_technical_metadata_text(meta: &protocol::TechnicalMetadata) -> String {
+        format!(
+            "{} ({} bit, {}, {}ch, {}kbps)",
+            meta.format,
+            meta.bits_per_sample,
+            Self::format_rate_hz_text(meta.sample_rate_hz),
+            meta.channel_count,
+            meta.bitrate_kbps
+        )
+    }
+
+    fn render_local_transform_text(&self) -> String {
+        let Some(path_info) = self.current_output_path_info.as_ref() else {
+            return "Direct play".to_string();
+        };
+        let mut transforms = Vec::new();
+        if path_info.resampled {
+            transforms.push(format!(
+                "Resample: {} -> {}",
+                Self::format_rate_hz_text(path_info.source_sample_rate_hz),
+                Self::format_rate_hz_text(path_info.output_stream.sample_rate_hz)
+            ));
+        }
         if path_info.remixed_channels {
             transforms.push(format!(
                 "Channel map: {}ch -> {}ch",
-                source_ch, path_info.output_stream.channel_count
+                path_info.source_channel_count, path_info.output_stream.channel_count
             ));
         }
-
         if path_info.dithered {
             transforms.push("Dither".to_string());
         }
-
-        let transform_str = if transforms.is_empty() {
+        if transforms.is_empty() {
             "Direct play".to_string()
         } else {
             transforms.join(" / ")
-        };
-
-        let local_text = format!("Source: {} | {}", source_info, transform_str);
-        if cast_route_prefix.is_empty() {
-            local_text
-        } else {
-            format!("{} | {}", cast_route_prefix, local_text)
         }
+    }
+
+    fn render_technical_info_text(&self) -> String {
+        if self.current_technical_metadata.is_none()
+            && !self.cast_connected
+            && !self.cast_connecting
+        {
+            return String::new();
+        }
+
+        let mut sections = Vec::new();
+        let source_section = if let Some(meta) = self.current_technical_metadata.as_ref() {
+            format!("Source: {}", Self::format_technical_metadata_text(meta))
+        } else if self.cast_connected || self.cast_connecting {
+            "Source: Unknown".to_string()
+        } else {
+            String::new()
+        };
+        if !source_section.is_empty() {
+            sections.push(source_section);
+        }
+
+        if self.cast_connected {
+            sections.push("Casting".to_string());
+            let cast_transform = match self.cast_playback_path_kind {
+                Some(protocol::CastPlaybackPathKind::Direct) => Some("Direct play".to_string()),
+                Some(protocol::CastPlaybackPathKind::TranscodeWavPcm) => {
+                    if let Some(meta) = self.cast_transcode_output_metadata.as_ref() {
+                        Some(format!(
+                            "Transcode: {}",
+                            Self::format_technical_metadata_text(meta)
+                        ))
+                    } else {
+                        Some("Transcode: WAV".to_string())
+                    }
+                }
+                None => None,
+            };
+            if let Some(cast_transform) = cast_transform {
+                sections.push(cast_transform);
+            }
+        } else if self.cast_connecting {
+            sections.push("Casting: Connecting...".to_string());
+        } else {
+            sections.push(self.render_local_transform_text());
+        }
+
+        sections
+            .into_iter()
+            .filter(|section| !section.trim().is_empty())
+            .collect::<Vec<_>>()
+            .join(" | ")
     }
 
     fn refresh_technical_info_ui(&self) {
@@ -7013,7 +7024,8 @@ impl UiManager {
                             self.cast_device_name =
                                 device.map(|device| device.name).unwrap_or_default();
                             if !self.cast_connected {
-                                self.cast_playback_path_description.clear();
+                                self.cast_playback_path_kind = None;
+                                self.cast_transcode_output_metadata = None;
                             }
                             if let Some(reason) = reason {
                                 let trimmed = reason.trim();
@@ -7027,20 +7039,11 @@ impl UiManager {
                         }
                         protocol::Message::Cast(protocol::CastMessage::PlaybackPathChanged {
                             kind,
-                            description,
+                            description: _description,
+                            transcode_output_metadata,
                         }) => {
-                            self.cast_playback_path_description = if description.trim().is_empty() {
-                                match kind {
-                                    protocol::CastPlaybackPathKind::Direct => {
-                                        "Casting: Direct (unmodified source stream)".to_string()
-                                    }
-                                    protocol::CastPlaybackPathKind::TranscodeWavPcm => {
-                                        "Casting: Transcode (WAV PCM)".to_string()
-                                    }
-                                }
-                            } else {
-                                description
-                            };
+                            self.cast_playback_path_kind = Some(kind);
+                            self.cast_transcode_output_metadata = transcode_output_metadata;
                             self.refresh_technical_info_ui();
                         }
                         protocol::Message::Cast(protocol::CastMessage::PlaybackError {
