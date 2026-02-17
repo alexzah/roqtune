@@ -9,6 +9,7 @@ pub struct OpenSubsonicTrackLocator {
     pub song_id: String,
     pub endpoint: String,
     pub username: String,
+    pub format_hint: Option<String>,
 }
 
 fn strip_trailing_slash(endpoint: &str) -> String {
@@ -21,13 +22,22 @@ pub fn encode_opensubsonic_track_uri(
     song_id: &str,
     endpoint: &str,
     username: &str,
+    format_hint: Option<&str>,
 ) -> String {
-    format!(
-        "rtq://open_subsonic/{}/{}?endpoint={}&username={}",
-        urlencoding::encode(profile_id),
-        urlencoding::encode(song_id),
+    let mut query = format!(
+        "endpoint={}&username={}",
         urlencoding::encode(&strip_trailing_slash(endpoint)),
         urlencoding::encode(username.trim())
+    );
+    if let Some(format_hint) = format_hint.map(str::trim).filter(|hint| !hint.is_empty()) {
+        query.push_str("&format=");
+        query.push_str(urlencoding::encode(format_hint).as_ref());
+    }
+    format!(
+        "rtq://open_subsonic/{}/{}?{}",
+        urlencoding::encode(profile_id),
+        urlencoding::encode(song_id),
+        query
     )
 }
 
@@ -50,12 +60,19 @@ pub fn parse_opensubsonic_track_uri(path: &Path) -> Option<OpenSubsonicTrackLoca
 
     let mut endpoint = String::new();
     let mut username = String::new();
+    let mut format_hint = None;
     for key_value in query_part.split('&') {
         let (key, value) = key_value.split_once('=')?;
         let decoded = urlencoding::decode(value).ok()?.to_string();
         match key {
             "endpoint" => endpoint = strip_trailing_slash(&decoded),
             "username" => username = decoded.trim().to_string(),
+            "format" => {
+                let normalized = decoded.trim().to_ascii_lowercase();
+                if !normalized.is_empty() {
+                    format_hint = Some(normalized);
+                }
+            }
             _ => {}
         }
     }
@@ -68,6 +85,7 @@ pub fn parse_opensubsonic_track_uri(path: &Path) -> Option<OpenSubsonicTrackLoca
         song_id,
         endpoint,
         username,
+        format_hint,
     })
 }
 
@@ -85,6 +103,7 @@ mod tests {
             "track-001",
             "https://music.example.com/",
             "alice",
+            Some("flac"),
         );
         let decoded = parse_opensubsonic_track_uri(PathBuf::from(uri).as_path())
             .expect("encoded uri should decode");
@@ -92,6 +111,7 @@ mod tests {
         assert_eq!(decoded.song_id, "track-001");
         assert_eq!(decoded.endpoint, "https://music.example.com");
         assert_eq!(decoded.username, "alice");
+        assert_eq!(decoded.format_hint.as_deref(), Some("flac"));
     }
 
     #[test]
@@ -101,6 +121,7 @@ mod tests {
             "track-001",
             "https://music.example.com",
             "alice",
+            None,
         );
         assert!(is_remote_track_path(PathBuf::from(uri).as_path()));
         assert!(!is_remote_track_path(

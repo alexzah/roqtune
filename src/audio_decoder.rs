@@ -5,9 +5,10 @@
 //! and packet emission.
 
 use crate::config::{BufferingConfig, Config, ResamplerQuality};
-use crate::integration_keyring::get_opensubsonic_password;
 use crate::integration_uri::{parse_opensubsonic_track_uri, OpenSubsonicTrackLocator};
-use crate::protocol::{self, AudioMessage, AudioPacket, ConfigMessage, Message, TrackIdentifier};
+use crate::protocol::{
+    self, AudioMessage, AudioPacket, ConfigMessage, IntegrationMessage, Message, TrackIdentifier,
+};
 use audio_mixer::{Channel as MixChannel, Mixer};
 use log::{debug, error, warn};
 use rubato::{
@@ -54,6 +55,13 @@ enum DecodeWorkItem {
     AudioDeviceOpened {
         stream_info: protocol::OutputStreamInfo,
     },
+    UpsertOpenSubsonicPassword {
+        profile_id: String,
+        password: String,
+    },
+    RemoveOpenSubsonicPassword {
+        profile_id: String,
+    },
 }
 
 /// Decoder state for the track currently being produced.
@@ -89,6 +97,7 @@ struct DecodeWorker {
     downmix_higher_channel_tracks: bool,
     decoder_request_chunk_ms: u32,
     decode_generation: u64,
+    opensubsonic_passwords: HashMap<String, String>,
 }
 
 impl DecodeWorker {
@@ -117,6 +126,7 @@ impl DecodeWorker {
             downmix_higher_channel_tracks: true,
             decoder_request_chunk_ms: BufferingConfig::default().decoder_request_chunk_ms,
             decode_generation: 0,
+            opensubsonic_passwords: HashMap::new(),
         }
     }
 
@@ -130,11 +140,11 @@ impl DecodeWorker {
         bytes.iter().map(|value| format!("{value:02x}")).collect()
     }
 
-    fn opensubsonic_stream_url(locator: &OpenSubsonicTrackLocator, password: &str) -> String {
+    fn opensubsonic_download_url(locator: &OpenSubsonicTrackLocator, password: &str) -> String {
         let salt = Self::make_opensubsonic_salt();
         let token = format!("{:x}", md5::compute(format!("{}{}", password, salt)));
         format!(
-            "{}/rest/stream.view?u={}&t={}&s={}&v={}&c={}&id={}",
+            "{}/rest/download.view?u={}&t={}&s={}&v={}&c={}&id={}",
             locator.endpoint.trim().trim_end_matches('/'),
             urlencoding::encode(locator.username.trim()),
             token,
@@ -165,18 +175,9 @@ impl DecodeWorker {
 
     fn fetch_opensubsonic_stream_bytes_with_hint(
         locator: &OpenSubsonicTrackLocator,
+        password: &str,
     ) -> Result<(Vec<u8>, Option<String>), String> {
-        let Some(password) =
-            get_opensubsonic_password(locator.profile_id.as_str()).map_err(|error| {
-                format!("Failed to read OpenSubsonic password from keyring: {error}")
-            })?
-        else {
-            return Err(format!(
-                "OpenSubsonic profile '{}' has no saved password in keyring",
-                locator.profile_id
-            ));
-        };
-        let url = Self::opensubsonic_stream_url(locator, password.as_str());
+        let url = Self::opensubsonic_download_url(locator, password);
         let client = ureq::AgentBuilder::new()
             .timeout_connect(Duration::from_secs(5))
             .timeout_read(Duration::from_secs(45))
@@ -214,7 +215,22 @@ impl DecodeWorker {
         hint: &mut Hint,
     ) -> Result<MediaSourceStream, String> {
         if let Some(locator) = parse_opensubsonic_track_uri(track.path.as_path()) {
-            let (body, hint_extension) = Self::fetch_opensubsonic_stream_bytes_with_hint(&locator)?;
+            let Some(password) = self.opensubsonic_passwords.get(&locator.profile_id) else {
+                return Err(format!(
+                    "OpenSubsonic password not cached for profile '{}'",
+                    locator.profile_id
+                ));
+            };
+            let (body, hint_extension) =
+                Self::fetch_opensubsonic_stream_bytes_with_hint(&locator, password.as_str())?;
+            if let Some(extension) = locator
+                .format_hint
+                .as_deref()
+                .map(str::trim)
+                .filter(|hint| !hint.is_empty())
+            {
+                hint.with_extension(extension);
+            }
             if let Some(extension) = hint_extension {
                 hint.with_extension(extension.as_str());
             }
@@ -336,6 +352,15 @@ impl DecodeWorker {
                 self.resampler = None;
                 self.resampler_flushed = false;
                 self.resample_buffer.clear();
+            }
+            DecodeWorkItem::UpsertOpenSubsonicPassword {
+                profile_id,
+                password,
+            } => {
+                self.opensubsonic_passwords.insert(profile_id, password);
+            }
+            DecodeWorkItem::RemoveOpenSubsonicPassword { profile_id } => {
+                self.opensubsonic_passwords.remove(profile_id.as_str());
             }
         }
     }
@@ -1136,6 +1161,30 @@ impl AudioDecoder {
                             .blocking_send(DecodeWorkItem::AudioDeviceOpened { stream_info })
                             .unwrap();
                     }
+                    Message::Integration(IntegrationMessage::UpsertBackendProfile {
+                        profile,
+                        password,
+                        ..
+                    }) => {
+                        if profile.backend_kind != protocol::BackendKind::OpenSubsonic {
+                            continue;
+                        }
+                        if let Some(password) = password {
+                            let _ = self.worker_sender.blocking_send(
+                                DecodeWorkItem::UpsertOpenSubsonicPassword {
+                                    profile_id: profile.profile_id,
+                                    password,
+                                },
+                            );
+                        }
+                    }
+                    Message::Integration(IntegrationMessage::RemoveBackendProfile {
+                        profile_id,
+                    }) => {
+                        let _ = self.worker_sender.blocking_send(
+                            DecodeWorkItem::RemoveOpenSubsonicPassword { profile_id },
+                        );
+                    }
                     _ => {}
                 },
                 Err(tokio::sync::broadcast::error::RecvError::Lagged(skipped)) => {
@@ -1428,15 +1477,16 @@ mod tests {
     }
 
     #[test]
-    fn test_opensubsonic_stream_url_contains_required_query_parts() {
+    fn test_opensubsonic_download_url_contains_required_query_parts() {
         let locator = OpenSubsonicTrackLocator {
             profile_id: "home".to_string(),
             song_id: "song-42".to_string(),
             endpoint: "https://music.example.com/".to_string(),
             username: "alice@example.com".to_string(),
+            format_hint: None,
         };
-        let url = DecodeWorker::opensubsonic_stream_url(&locator, "secret");
-        assert!(url.starts_with("https://music.example.com/rest/stream.view?"));
+        let url = DecodeWorker::opensubsonic_download_url(&locator, "secret");
+        assert!(url.starts_with("https://music.example.com/rest/download.view?"));
         assert!(url.contains("u=alice%40example.com"));
         assert!(url.contains("id=song-42"));
         assert!(url.contains("t="));

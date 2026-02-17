@@ -12,6 +12,7 @@ pub struct BackendTrack {
     pub genre: String,
     pub year: String,
     pub track_number: String,
+    pub format_hint: Option<String>,
 }
 
 /// Remote playlist payload returned by backend adapters.

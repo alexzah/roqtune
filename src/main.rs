@@ -66,7 +66,7 @@ use protocol::{
 use slint::winit_030::{winit, EventResult as WinitEventResult, WinitWindowAccessor};
 use slint::{language::ColorScheme, ComponentHandle, LogicalSize, Model, ModelRc, VecModel};
 use tokio::sync::broadcast;
-use toml_edit::{value, Array, DocumentMut, Item, Table};
+use toml_edit::{value, Array, ArrayOfTables, DocumentMut, Item, Table};
 use ui_manager::{UiManager, UiState};
 
 slint::include_modules!();
@@ -1994,6 +1994,7 @@ fn write_config_to_document(document: &mut DocumentMut, previous: &Config, confi
     ensure_section_table(document, "ui");
     ensure_section_table(document, "library");
     ensure_section_table(document, "buffering");
+    ensure_section_table(document, "integrations");
 
     {
         let output = document["output"]
@@ -2252,6 +2253,37 @@ fn write_config_to_document(document: &mut DocumentMut, previous: &Config, confi
             i64::from(config.buffering.decoder_request_chunk_ms),
             value,
         );
+    }
+
+    {
+        let integrations = document["integrations"]
+            .as_table_mut()
+            .expect("integrations should be a table");
+        if !integrations.contains_key("backends")
+            || previous.integrations.backends != config.integrations.backends
+        {
+            let mut backends = ArrayOfTables::new();
+            for backend in &config.integrations.backends {
+                let mut row = Table::new();
+                row.insert("profile_id", value(backend.profile_id.clone()));
+                row.insert(
+                    "backend_kind",
+                    value(match backend.backend_kind {
+                        IntegrationBackendKind::OpenSubsonic => "open_subsonic",
+                    }),
+                );
+                row.insert("display_name", value(backend.display_name.clone()));
+                row.insert("endpoint", value(backend.endpoint.clone()));
+                row.insert("username", value(backend.username.clone()));
+                row.insert("enabled", value(backend.enabled));
+                backends.push(row);
+            }
+            set_table_value_preserving_decor(
+                integrations,
+                "backends",
+                Item::ArrayOfTables(backends),
+            );
+        }
     }
 }
 
@@ -6083,7 +6115,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         );
         integration_manager.run();
     });
-    if let Some(backend) = find_opensubsonic_backend(&config) {
+    let startup_opensubsonic_seed = find_opensubsonic_backend(&config).map(|backend| {
         let password = get_opensubsonic_password(OPENSUBSONIC_PROFILE_ID).unwrap_or_else(|_| None);
         let status_text = if backend.enabled && password.is_none() {
             Some("Missing keyring password".to_string())
@@ -6092,6 +6124,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         };
         let snapshot = opensubsonic_profile_snapshot(backend, status_text);
         let connect_now = backend.enabled && password.is_some();
+        (snapshot, password, connect_now)
+    });
+    if let Some((snapshot, password, connect_now)) = startup_opensubsonic_seed.clone() {
         let _ = bus_sender.send(Message::Integration(
             IntegrationMessage::UpsertBackendProfile {
                 profile: snapshot,
@@ -6204,6 +6239,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let mut audio_decoder = AudioDecoder::new(decoder_bus_receiver, decoder_bus_sender);
         audio_decoder.run();
     });
+    if let Some((snapshot, password, _)) = startup_opensubsonic_seed {
+        let _ = bus_sender.send(Message::Integration(
+            IntegrationMessage::UpsertBackendProfile {
+                profile: snapshot,
+                password,
+                connect_now: false,
+            },
+        ));
+    }
 
     // Setup AudioPlayer
     let player_bus_sender = bus_sender.clone();
@@ -8055,6 +8099,69 @@ decoder_request_chunk_ms = 1500
         let serialized = serialize_config_with_preserved_comments(existing, &config)
             .expect("comment-preserving config serialization should succeed");
         assert!(serialized.contains("custom_library_key = \"keep-me\""));
+    }
+
+    #[test]
+    fn test_serialize_config_with_preserved_comments_persists_integrations_backends() {
+        let existing = r#"
+[output]
+output_device_name = ""
+output_device_auto = true
+channel_count = 2
+sample_rate_khz = 44100
+bits_per_sample = 24
+channel_count_auto = true
+sample_rate_auto = true
+bits_per_sample_auto = true
+
+[cast]
+allow_transcode_fallback = true
+
+[ui]
+show_layout_edit_intro = true
+show_tooltips = true
+auto_scroll_to_playing_track = true
+dark_mode = true
+window_width = 900
+window_height = 650
+volume = 0.8
+playback_order = "default"
+repeat_mode = "off"
+
+[library]
+folders = []
+online_metadata_enabled = false
+online_metadata_prompt_pending = true
+artist_image_cache_ttl_days = 30
+artist_image_cache_max_size_mb = 512
+
+[buffering]
+player_low_watermark_ms = 1500
+player_target_buffer_ms = 12000
+player_request_interval_ms = 120
+decoder_request_chunk_ms = 1000
+
+[integrations]
+backends = []
+"#;
+        let mut config = Config::default();
+        config.integrations.backends = vec![crate::config::BackendProfileConfig {
+            profile_id: "opensubsonic-default".to_string(),
+            backend_kind: crate::config::IntegrationBackendKind::OpenSubsonic,
+            display_name: "OpenSubsonic".to_string(),
+            endpoint: "https://music.example.com".to_string(),
+            username: "alice".to_string(),
+            enabled: true,
+        }];
+
+        let serialized = serialize_config_with_preserved_comments(existing, &config)
+            .expect("integration backend should serialize");
+        assert!(serialized.contains("[[integrations.backends]]"));
+        assert!(serialized.contains("profile_id = \"opensubsonic-default\""));
+        assert!(serialized.contains("backend_kind = \"open_subsonic\""));
+        assert!(serialized.contains("endpoint = \"https://music.example.com\""));
+        assert!(serialized.contains("username = \"alice\""));
+        assert!(serialized.contains("enabled = true"));
     }
 
     #[test]

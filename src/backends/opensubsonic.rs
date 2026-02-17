@@ -152,6 +152,12 @@ impl OpenSubsonicAdapter {
                     .unwrap_or_default()
             })
             .unwrap_or_default();
+        let format_hint = song
+            .get("suffix")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(|value| value.to_ascii_lowercase());
         Some(BackendTrack {
             item_id,
             title,
@@ -160,6 +166,7 @@ impl OpenSubsonicAdapter {
             genre,
             year,
             track_number,
+            format_hint,
         })
     }
 

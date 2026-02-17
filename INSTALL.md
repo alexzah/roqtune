@@ -6,6 +6,8 @@ This document covers local development installs and local Flatpak packaging for 
 
 - Rust + Cargo (`rustup` recommended)
 - Linux desktop environment (current supported target)
+- System keyring installed and active (for storing credentials from external integrations)
+  - For systems without an existing keyring, I highly recommend gnome keyring, as it works seamlessly by default, has minimal dependencies (doesn't require gnome or pull in gnome dependencies), and doesn't require enabling any services
 
 For Flatpak packaging:
 
@@ -21,18 +23,6 @@ For Flatpak packaging:
 - Run debug build: `cargo run`
 - Build release binary: `cargo build --release`
 - Run release build: `cargo run --release`
-
-### Chromecast Notes
-
-- Add a `Cast` button to a button cluster (default Utility preset includes it).
-- Direct cast streams original file bytes without modification.
-- Optional fallback (`Settings > Audio > Cast transcode fallback`) uses WAV PCM for receivers that reject direct streams.
-
-### Icon Assets
-
-- UI icons are vendored from **Tabler Icons** (MIT license).
-- Assets live in `src/ui/icons/tabler/`.
-- License text is included at `src/ui/icons/tabler/LICENSE`.
 
 ## Flatpak (Local Bundle + Local Install)
 

@@ -139,6 +139,7 @@ impl IntegrationManager {
                     &track.item_id,
                     &auth.endpoint,
                     &auth.username,
+                    track.format_hint.as_deref(),
                 )
                 .into(),
                 title: track.title.clone(),
@@ -173,6 +174,7 @@ impl IntegrationManager {
                             &track.item_id,
                             &auth.endpoint,
                             &auth.username,
+                            track.format_hint.as_deref(),
                         )
                         .into(),
                         summary: TrackMetadataSummary {

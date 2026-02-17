@@ -479,10 +479,16 @@ impl PlaylistManager {
             return self.current_output_rate_hz;
         }
 
-        let source_rate = self
-            .track_sample_rate_hz(track)
-            .or(self.current_output_rate_hz)
-            .or_else(|| self.verified_output_rates.last().copied())?;
+        let source_rate = match self.track_sample_rate_hz(track) {
+            Some(source_rate) => source_rate,
+            None => {
+                if is_remote_track_path(track.path.as_path()) {
+                    return self.current_output_rate_hz;
+                }
+                self.current_output_rate_hz
+                    .or_else(|| self.verified_output_rates.last().copied())?
+            }
+        };
         if self.verified_output_rates.contains(&source_rate) {
             return Some(source_rate);
         }
