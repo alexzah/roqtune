@@ -5,7 +5,7 @@ edition = "2021"
 build = "build.rs"
 
 [dependencies]
-slint = { version = "1.15.0", default-features = false, features = ["std", "unstable-winit-030", "renderer-femtovg", "renderer-software", "accessibility", "compat-1-2"] } # UI framework (Qt-free via explicit winit backend)
+slint = { version = "1.15.1", default-features = false, features = ["std", "unstable-winit-030", "renderer-femtovg", "renderer-software", "accessibility", "compat-1-2"] } # UI framework (Qt-free via explicit winit backend)
 rfd = "0.17.2"   # For file dialogs
 log = "0.4.29" # logs
 colog = "1.4.0" # logs
