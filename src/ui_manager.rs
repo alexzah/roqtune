@@ -123,6 +123,7 @@ pub struct UiManager {
     library_enrichment_last_request_at: HashMap<protocol::LibraryEnrichmentEntity, Instant>,
     library_enrichment_retry_counts: HashMap<protocol::LibraryEnrichmentEntity, u32>,
     library_enrichment_retry_not_before: HashMap<protocol::LibraryEnrichmentEntity, Instant>,
+    library_enrichment_not_found_not_before: HashMap<protocol::LibraryEnrichmentEntity, Instant>,
     library_enrichment_failed_attempt_counts: HashMap<protocol::LibraryEnrichmentEntity, u32>,
     library_last_detail_enrichment_entity: Option<protocol::LibraryEnrichmentEntity>,
     library_online_metadata_enabled: bool,
@@ -306,6 +307,7 @@ const LIBRARY_ITEM_KIND_DECADE: i32 = 4;
 const DETAIL_ENRICHMENT_RETRY_INTERVAL: Duration = Duration::from_secs(2);
 const PREFETCH_RETRY_MAX_ATTEMPTS: u32 = 4;
 const PREFETCH_RETRY_BASE_DELAY: Duration = Duration::from_millis(500);
+const NOT_FOUND_ENRICHMENT_RETRY_INTERVAL: Duration = Duration::from_secs(7 * 24 * 60 * 60);
 const ENRICHMENT_FAILED_ATTEMPT_CAP: u32 = 5;
 const LIBRARY_PREFETCH_FALLBACK_VISIBLE_ROWS: usize = 24;
 const LIBRARY_PREFETCH_TOP_OVERSCAN_ROWS: usize = 2;
@@ -1078,6 +1080,7 @@ impl UiManager {
             library_enrichment_last_request_at: HashMap::new(),
             library_enrichment_retry_counts: HashMap::new(),
             library_enrichment_retry_not_before: HashMap::new(),
+            library_enrichment_not_found_not_before: HashMap::new(),
             library_enrichment_failed_attempt_counts: HashMap::new(),
             library_last_detail_enrichment_entity: None,
             library_online_metadata_enabled: initial_online_metadata_enabled,
@@ -4483,6 +4486,30 @@ impl UiManager {
         self.library_enrichment_retry_not_before.remove(entity);
     }
 
+    fn clear_enrichment_not_found_backoff_state(
+        &mut self,
+        entity: &protocol::LibraryEnrichmentEntity,
+    ) {
+        self.library_enrichment_not_found_not_before.remove(entity);
+    }
+
+    fn schedule_enrichment_not_found_backoff(
+        &mut self,
+        entity: &protocol::LibraryEnrichmentEntity,
+    ) {
+        self.library_enrichment_not_found_not_before.insert(
+            entity.clone(),
+            Instant::now() + NOT_FOUND_ENRICHMENT_RETRY_INTERVAL,
+        );
+    }
+
+    fn enrichment_not_found_backoff_elapsed(
+        &self,
+        entity: &protocol::LibraryEnrichmentEntity,
+    ) -> bool {
+        Self::enrichment_backoff_elapsed(self.library_enrichment_not_found_not_before.get(entity))
+    }
+
     fn schedule_enrichment_retry_backoff(
         &mut self,
         entity: &protocol::LibraryEnrichmentEntity,
@@ -4507,9 +4534,11 @@ impl UiManager {
     }
 
     fn enrichment_retry_backoff_elapsed(&self, entity: &protocol::LibraryEnrichmentEntity) -> bool {
-        self.library_enrichment_retry_not_before
-            .get(entity)
-            .is_none_or(|deadline| Instant::now() >= *deadline)
+        Self::enrichment_backoff_elapsed(self.library_enrichment_retry_not_before.get(entity))
+    }
+
+    fn enrichment_backoff_elapsed(not_before: Option<&Instant>) -> bool {
+        not_before.is_none_or(|deadline| Instant::now() >= *deadline)
     }
 
     fn should_request_prefetch_for_entity(
@@ -4583,12 +4612,16 @@ impl UiManager {
             self.library_enrichment.remove(&entity);
         }
         if let Some(existing) = self.library_enrichment.get(&entity).cloned() {
-            let should_clear_cached = (Self::is_retryable_enrichment_result(&existing)
-                && self.enrichment_retry_backoff_elapsed(&entity))
-                || (priority == protocol::LibraryEnrichmentPriority::Interactive
-                    && existing.status == protocol::LibraryEnrichmentStatus::NotFound
-                    && existing.attempt_kind != protocol::LibraryEnrichmentAttemptKind::Detail);
-            if should_clear_cached {
+            if existing.status == protocol::LibraryEnrichmentStatus::NotFound {
+                if self.enrichment_not_found_backoff_elapsed(&entity) {
+                    self.library_enrichment.remove(&entity);
+                    self.clear_enrichment_not_found_backoff_state(&entity);
+                } else {
+                    return;
+                }
+            } else if Self::is_retryable_enrichment_result(&existing)
+                && self.enrichment_retry_backoff_elapsed(&entity)
+            {
                 self.library_enrichment.remove(&entity);
             }
         }
@@ -4683,10 +4716,10 @@ impl UiManager {
         let is_new_detail_entity =
             self.library_last_detail_enrichment_entity.as_ref() != Some(&entity);
         if is_new_detail_entity {
-            let should_refresh = self.library_enrichment.get(&entity).is_some_and(|payload| {
-                payload.status == protocol::LibraryEnrichmentStatus::NotFound
-                    || payload.status == protocol::LibraryEnrichmentStatus::Error
-            }) && !self.is_enrichment_attempt_capped(&entity);
+            let should_refresh =
+                self.library_enrichment.get(&entity).is_some_and(|payload| {
+                    payload.status == protocol::LibraryEnrichmentStatus::Error
+                }) && !self.is_enrichment_attempt_capped(&entity);
             if should_refresh {
                 self.library_enrichment.remove(&entity);
             }
@@ -4842,7 +4875,6 @@ impl UiManager {
                 }
                 protocol::LibraryEnrichmentEntity::Album { .. } => true,
             });
-
         self.retain_pending_detail_entity_only();
         self.replace_prefetch_queue_if_changed(prefetch_entities);
         self.replace_background_queue_if_changed(background_entities);
@@ -6013,6 +6045,7 @@ impl UiManager {
                 self.library_enrichment_last_request_at.clear();
                 self.library_enrichment_retry_counts.clear();
                 self.library_enrichment_retry_not_before.clear();
+                self.library_enrichment_not_found_not_before.clear();
                 self.library_enrichment_failed_attempt_counts.clear();
                 self.replace_prefetch_queue_if_changed(Vec::new());
                 self.replace_background_queue_if_changed(Vec::new());
@@ -6042,6 +6075,7 @@ impl UiManager {
                 self.library_enrichment_last_request_at.clear();
                 self.library_enrichment_retry_counts.clear();
                 self.library_enrichment_retry_not_before.clear();
+                self.library_enrichment_not_found_not_before.clear();
                 self.library_enrichment_failed_attempt_counts.clear();
                 self.replace_prefetch_queue_if_changed(Vec::new());
                 self.replace_background_queue_if_changed(Vec::new());
@@ -6841,6 +6875,11 @@ impl UiManager {
                                 } else {
                                     self.clear_enrichment_retry_state(&entity);
                                 }
+                                if payload.status == protocol::LibraryEnrichmentStatus::NotFound {
+                                    self.schedule_enrichment_not_found_backoff(&entity);
+                                } else {
+                                    self.clear_enrichment_not_found_backoff_state(&entity);
+                                }
                                 self.library_enrichment.insert(entity.clone(), payload);
                                 self.update_display_for_active_collection();
 
@@ -6872,6 +6911,7 @@ impl UiManager {
                                 self.library_enrichment_last_request_at.clear();
                                 self.library_enrichment_retry_counts.clear();
                                 self.library_enrichment_retry_not_before.clear();
+                                self.library_enrichment_not_found_not_before.clear();
                                 self.library_enrichment_failed_attempt_counts.clear();
                                 self.replace_prefetch_queue_if_changed(Vec::new());
                                 self.replace_background_queue_if_changed(Vec::new());
@@ -7806,6 +7846,7 @@ impl UiManager {
                                 self.library_enrichment_last_request_at.clear();
                                 self.library_enrichment_retry_counts.clear();
                                 self.library_enrichment_retry_not_before.clear();
+                                self.library_enrichment_not_found_not_before.clear();
                                 self.library_enrichment_failed_attempt_counts.clear();
                                 self.replace_prefetch_queue_if_changed(Vec::new());
                                 self.replace_background_queue_if_changed(Vec::new());
@@ -7958,6 +7999,7 @@ mod tests {
     use crate::{config::PlaylistColumnConfig, protocol};
     use std::path::PathBuf;
     use std::sync::mpsc;
+    use std::time::{Duration, Instant};
 
     fn make_meta(title: &str) -> TrackMetadata {
         TrackMetadata {
@@ -8303,6 +8345,19 @@ mod tests {
         assert!(UiManager::failed_enrichment_attempt_cap_reached(
             ENRICHMENT_FAILED_ATTEMPT_CAP,
         ));
+    }
+
+    #[test]
+    fn test_enrichment_backoff_elapsed_true_for_missing_or_past_deadline() {
+        assert!(UiManager::enrichment_backoff_elapsed(None));
+        let past = Instant::now() - Duration::from_secs(1);
+        assert!(UiManager::enrichment_backoff_elapsed(Some(&past)));
+    }
+
+    #[test]
+    fn test_enrichment_backoff_elapsed_false_for_future_deadline() {
+        let future = Instant::now() + Duration::from_secs(10);
+        assert!(!UiManager::enrichment_backoff_elapsed(Some(&future)));
     }
 
     #[test]

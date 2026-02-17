@@ -35,7 +35,7 @@ const WIKIPEDIA_SOURCE_NAME: &str = "Wikipedia";
 const THEAUDIODB_SOURCE_NAME: &str = "TheAudioDB";
 const IMAGE_CACHE_DIR_NAME: &str = "library_enrichment/images";
 const READY_METADATA_TTL_DAYS: u32 = 30;
-const CONCLUSIVE_NOT_FOUND_TTL: Duration = Duration::from_secs(24 * 60 * 60);
+const CONCLUSIVE_NOT_FOUND_TTL: Duration = Duration::from_secs(7 * 24 * 60 * 60);
 const HARD_ERROR_TTL: Duration = Duration::from_secs(30 * 60);
 const MAX_CANDIDATES: usize = 12;
 const MAX_SUMMARY_FETCHES: usize = 10;
@@ -80,6 +80,7 @@ enum TitleMatchTier {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum HttpFailureKind {
     Timeout,
+    RateLimited,
     Hard,
 }
 
@@ -296,7 +297,8 @@ impl LibraryEnrichmentManager {
     fn classify_ureq_failure(error: &ureq::Error) -> HttpFailureKind {
         match error {
             ureq::Error::Status(code, _) => match code {
-                408 | 429 | 500 | 502 | 503 | 504 => HttpFailureKind::Timeout,
+                429 => HttpFailureKind::RateLimited,
+                408 | 500 | 502 | 503 | 504 => HttpFailureKind::Timeout,
                 _ => HttpFailureKind::Hard,
             },
             ureq::Error::Transport(transport) => {
@@ -1023,6 +1025,7 @@ impl LibraryEnrichmentManager {
                 let message = format!("Request failed: {error}");
                 match classified {
                     HttpFailureKind::Timeout => Self::build_timeout_reason(message),
+                    HttpFailureKind::RateLimited => Self::build_rate_limit_reason(message),
                     HttpFailureKind::Hard => Self::build_hard_reason(message),
                 }
             })?;
@@ -1151,6 +1154,7 @@ impl LibraryEnrichmentManager {
                         let message = format!("Request failed: {error}");
                         match classified {
                             HttpFailureKind::Timeout => Self::build_timeout_reason(message),
+                            HttpFailureKind::RateLimited => Self::build_rate_limit_reason(message),
                             HttpFailureKind::Hard => Self::build_hard_reason(message),
                         }
                     })?;
@@ -2993,6 +2997,31 @@ impl LibraryEnrichmentManager {
             best_error = Some(wiki_outcome.clone());
         }
 
+        // If one source found no match but the other failed, prefer the no-match
+        // outcome to avoid repeatedly hammering the network for likely missing data.
+        if Self::should_prefer_not_found_over_error(&audiodb_outcome, &wiki_outcome) {
+            let mut outcome = audiodb_outcome;
+            outcome.payload.attempt_kind = attempt_kind;
+            if verbose_log {
+                info!(
+                    "Enrichment[{}]: final outcome {:?} (preferred NotFound over error)",
+                    entity_label, outcome.payload.status
+                );
+            }
+            return outcome;
+        }
+        if Self::should_prefer_not_found_over_error(&wiki_outcome, &audiodb_outcome) {
+            let mut outcome = wiki_outcome;
+            outcome.payload.attempt_kind = attempt_kind;
+            if verbose_log {
+                info!(
+                    "Enrichment[{}]: final outcome {:?} (preferred NotFound over error)",
+                    entity_label, outcome.payload.status
+                );
+            }
+            return outcome;
+        }
+
         if let Some(mut error_outcome) = best_error {
             error_outcome.payload.attempt_kind = attempt_kind;
             if verbose_log {
@@ -3012,6 +3041,14 @@ impl LibraryEnrichmentManager {
             );
         }
         outcome
+    }
+
+    fn should_prefer_not_found_over_error(
+        not_found_candidate: &FetchOutcome,
+        error_candidate: &FetchOutcome,
+    ) -> bool {
+        not_found_candidate.payload.status == LibraryEnrichmentStatus::NotFound
+            && error_candidate.payload.status == LibraryEnrichmentStatus::Error
     }
 
     fn image_cache_dir() -> Option<PathBuf> {
@@ -3096,6 +3133,7 @@ impl LibraryEnrichmentManager {
                         let message = format!("Image request failed: {error}");
                         match classified {
                             HttpFailureKind::Timeout => Self::build_timeout_reason(message),
+                            HttpFailureKind::RateLimited => Self::build_rate_limit_reason(message),
                             HttpFailureKind::Hard => Self::build_hard_reason(message),
                         }
                     })?;
@@ -3613,11 +3651,7 @@ impl LibraryEnrichmentManager {
             Ok(Some(mut cached)) => {
                 let bypass_cached_for_interactive = attempt_kind
                     == LibraryEnrichmentAttemptKind::Detail
-                    && (matches!(
-                        cached.status,
-                        LibraryEnrichmentStatus::Error | LibraryEnrichmentStatus::Disabled
-                    ) || (cached.status == LibraryEnrichmentStatus::NotFound
-                        && cached.attempt_kind != LibraryEnrichmentAttemptKind::Detail)
+                    && (cached.status == LibraryEnrichmentStatus::Disabled
                         || (cached.status == LibraryEnrichmentStatus::Ready
                             && cached.source_name == WIKIPEDIA_SOURCE_NAME
                             && Self::is_single_token_artist_entity(&entity)));
@@ -3746,9 +3780,10 @@ mod tests {
     use std::collections::HashSet;
 
     use super::{
-        AudioDbAlbumCandidate, AudioDbArtistCandidate, LibraryEnrichmentEntity,
-        LibraryEnrichmentManager, TitleMatchTier, WikiSummary,
+        AudioDbAlbumCandidate, AudioDbArtistCandidate, EnrichmentSource, FetchOutcome,
+        LibraryEnrichmentEntity, LibraryEnrichmentManager, TitleMatchTier, WikiSummary,
     };
+    use crate::protocol::{LibraryEnrichmentErrorKind, LibraryEnrichmentStatus};
 
     fn sample_summary(title: &str, description: &str, extract: &str) -> WikiSummary {
         WikiSummary {
@@ -4103,5 +4138,101 @@ mod tests {
         assert!(parsed["artists"]
             .as_array()
             .is_some_and(|items| items.is_empty()));
+    }
+
+    #[test]
+    fn test_should_prefer_not_found_over_error_true_for_hard_error() {
+        let entity = LibraryEnrichmentEntity::Artist {
+            artist: "Sample".to_string(),
+        };
+        let not_found = LibraryEnrichmentManager::build_outcome(
+            &entity,
+            LibraryEnrichmentStatus::NotFound,
+            String::new(),
+            None,
+            None,
+            EnrichmentSource::Wikipedia,
+            String::new(),
+            None,
+        );
+        let mut hard_error = LibraryEnrichmentManager::build_error_outcome(
+            &entity,
+            EnrichmentSource::TheAudioDB,
+            String::new(),
+            LibraryEnrichmentManager::build_hard_reason("request failed"),
+        );
+        hard_error.payload.error_kind = Some(LibraryEnrichmentErrorKind::Hard);
+
+        assert!(
+            LibraryEnrichmentManager::should_prefer_not_found_over_error(&not_found, &hard_error)
+        );
+    }
+
+    #[test]
+    fn test_should_prefer_not_found_over_error_true_for_retryable_error() {
+        let entity = LibraryEnrichmentEntity::Artist {
+            artist: "Sample".to_string(),
+        };
+        let not_found = LibraryEnrichmentManager::build_outcome(
+            &entity,
+            LibraryEnrichmentStatus::NotFound,
+            String::new(),
+            None,
+            None,
+            EnrichmentSource::Wikipedia,
+            String::new(),
+            None,
+        );
+        let retryable_error = FetchOutcome {
+            payload: crate::protocol::LibraryEnrichmentPayload {
+                entity: entity.clone(),
+                status: LibraryEnrichmentStatus::Error,
+                blurb: String::new(),
+                image_path: None,
+                source_name: "TheAudioDB".to_string(),
+                source_url: String::new(),
+                error_kind: Some(LibraryEnrichmentErrorKind::Timeout),
+                attempt_kind: crate::protocol::LibraryEnrichmentAttemptKind::VisiblePrefetch,
+            },
+            image_url: None,
+            last_error: Some(LibraryEnrichmentManager::build_timeout_reason("timed out")),
+            conclusive: false,
+        };
+
+        assert!(
+            LibraryEnrichmentManager::should_prefer_not_found_over_error(
+                &not_found,
+                &retryable_error
+            )
+        );
+    }
+
+    #[test]
+    fn test_should_prefer_not_found_over_error_false_when_other_is_not_error() {
+        let entity = LibraryEnrichmentEntity::Artist {
+            artist: "Sample".to_string(),
+        };
+        let not_found = LibraryEnrichmentManager::build_outcome(
+            &entity,
+            LibraryEnrichmentStatus::NotFound,
+            String::new(),
+            None,
+            None,
+            EnrichmentSource::Wikipedia,
+            String::new(),
+            None,
+        );
+        let ready = LibraryEnrichmentManager::build_outcome(
+            &entity,
+            LibraryEnrichmentStatus::Ready,
+            "blurb".to_string(),
+            None,
+            None,
+            EnrichmentSource::TheAudioDB,
+            String::new(),
+            None,
+        );
+
+        assert!(!LibraryEnrichmentManager::should_prefer_not_found_over_error(&not_found, &ready));
     }
 }
