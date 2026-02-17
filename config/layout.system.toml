@@ -124,7 +124,7 @@ min_second_px = 240
 
 [[button_cluster_instances]]
 leaf_id = "n10"
-actions = [7, 8]
+actions = [7, 8, 11]
 
 [root.first.first.first]
 node_type = "leaf"

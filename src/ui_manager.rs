@@ -116,6 +116,7 @@ pub struct UiManager {
     library_enrichment_last_request_at: HashMap<protocol::LibraryEnrichmentEntity, Instant>,
     library_enrichment_retry_counts: HashMap<protocol::LibraryEnrichmentEntity, u32>,
     library_enrichment_retry_not_before: HashMap<protocol::LibraryEnrichmentEntity, Instant>,
+    library_enrichment_failed_attempt_counts: HashMap<protocol::LibraryEnrichmentEntity, u32>,
     library_last_detail_enrichment_entity: Option<protocol::LibraryEnrichmentEntity>,
     library_online_metadata_enabled: bool,
     library_online_metadata_prompt_pending: bool,
@@ -297,6 +298,7 @@ const LIBRARY_ITEM_KIND_DECADE: i32 = 4;
 const DETAIL_ENRICHMENT_RETRY_INTERVAL: Duration = Duration::from_secs(2);
 const PREFETCH_RETRY_MAX_ATTEMPTS: u32 = 4;
 const PREFETCH_RETRY_BASE_DELAY: Duration = Duration::from_millis(500);
+const ENRICHMENT_FAILED_ATTEMPT_CAP: u32 = 5;
 const LIBRARY_PREFETCH_FALLBACK_VISIBLE_ROWS: usize = 24;
 const LIBRARY_PREFETCH_TOP_OVERSCAN_ROWS: usize = 2;
 const LIBRARY_PREFETCH_BOTTOM_OVERSCAN_ROWS: usize = 10;
@@ -947,6 +949,7 @@ impl UiManager {
             library_enrichment_last_request_at: HashMap::new(),
             library_enrichment_retry_counts: HashMap::new(),
             library_enrichment_retry_not_before: HashMap::new(),
+            library_enrichment_failed_attempt_counts: HashMap::new(),
             library_last_detail_enrichment_entity: None,
             library_online_metadata_enabled: initial_online_metadata_enabled,
             library_online_metadata_prompt_pending: initial_online_metadata_prompt_pending,
@@ -4236,6 +4239,56 @@ impl UiManager {
         Self::retryable_enrichment_error_kind(payload).is_some()
     }
 
+    fn is_counted_failed_enrichment_result(payload: &protocol::LibraryEnrichmentPayload) -> bool {
+        match payload.status {
+            protocol::LibraryEnrichmentStatus::NotFound => true,
+            protocol::LibraryEnrichmentStatus::Error => {
+                payload.error_kind != Some(protocol::LibraryEnrichmentErrorKind::RateLimited)
+            }
+            _ => false,
+        }
+    }
+
+    fn failed_enrichment_attempt_cap_reached(attempts: u32) -> bool {
+        attempts >= ENRICHMENT_FAILED_ATTEMPT_CAP
+    }
+
+    fn is_enrichment_attempt_capped(&self, entity: &protocol::LibraryEnrichmentEntity) -> bool {
+        let attempts = self
+            .library_enrichment_failed_attempt_counts
+            .get(entity)
+            .copied()
+            .unwrap_or(0);
+        Self::failed_enrichment_attempt_cap_reached(attempts)
+    }
+
+    fn update_failed_enrichment_attempt_state(
+        &mut self,
+        entity: &protocol::LibraryEnrichmentEntity,
+        payload: &protocol::LibraryEnrichmentPayload,
+    ) {
+        if payload.status == protocol::LibraryEnrichmentStatus::Ready
+            || payload.status == protocol::LibraryEnrichmentStatus::Disabled
+        {
+            self.library_enrichment_failed_attempt_counts.remove(entity);
+            return;
+        }
+        if !Self::is_counted_failed_enrichment_result(payload) {
+            return;
+        }
+        let attempts = self
+            .library_enrichment_failed_attempt_counts
+            .entry(entity.clone())
+            .and_modify(|value| *value = value.saturating_add(1))
+            .or_insert(1);
+        if *attempts == ENRICHMENT_FAILED_ATTEMPT_CAP {
+            debug!(
+                "Enrichment attempts capped for {:?} after {} failed attempts",
+                entity, attempts
+            );
+        }
+    }
+
     fn clear_enrichment_retry_state(&mut self, entity: &protocol::LibraryEnrichmentEntity) {
         self.library_enrichment_retry_counts.remove(entity);
         self.library_enrichment_retry_not_before.remove(entity);
@@ -4274,6 +4327,9 @@ impl UiManager {
         &mut self,
         entity: &protocol::LibraryEnrichmentEntity,
     ) -> bool {
+        if self.is_enrichment_attempt_capped(entity) {
+            return false;
+        }
         let Some(existing) = self.library_enrichment.get(entity).cloned() else {
             return true;
         };
@@ -4325,6 +4381,9 @@ impl UiManager {
         priority: protocol::LibraryEnrichmentPriority,
     ) {
         if !self.library_online_metadata_enabled {
+            return;
+        }
+        if self.is_enrichment_attempt_capped(&entity) {
             return;
         }
         if self
@@ -4438,7 +4497,7 @@ impl UiManager {
             let should_refresh = self.library_enrichment.get(&entity).is_some_and(|payload| {
                 payload.status == protocol::LibraryEnrichmentStatus::NotFound
                     || payload.status == protocol::LibraryEnrichmentStatus::Error
-            });
+            }) && !self.is_enrichment_attempt_capped(&entity);
             if should_refresh {
                 self.library_enrichment.remove(&entity);
             }
@@ -4451,6 +4510,9 @@ impl UiManager {
         &mut self,
         entity: &protocol::LibraryEnrichmentEntity,
     ) -> bool {
+        if self.is_enrichment_attempt_capped(entity) {
+            return false;
+        }
         let Some(existing) = self.library_enrichment.get(entity).cloned() else {
             return true;
         };
@@ -5739,6 +5801,7 @@ impl UiManager {
                 self.library_enrichment_last_request_at.clear();
                 self.library_enrichment_retry_counts.clear();
                 self.library_enrichment_retry_not_before.clear();
+                self.library_enrichment_failed_attempt_counts.clear();
                 self.replace_prefetch_queue_if_changed(Vec::new());
                 self.replace_background_queue_if_changed(Vec::new());
                 self.library_last_detail_enrichment_entity = None;
@@ -5767,6 +5830,7 @@ impl UiManager {
                 self.library_enrichment_last_request_at.clear();
                 self.library_enrichment_retry_counts.clear();
                 self.library_enrichment_retry_not_before.clear();
+                self.library_enrichment_failed_attempt_counts.clear();
                 self.replace_prefetch_queue_if_changed(Vec::new());
                 self.replace_background_queue_if_changed(Vec::new());
                 self.library_last_detail_enrichment_entity = None;
@@ -6537,6 +6601,7 @@ impl UiManager {
                                         &entity,
                                         protocol::LibraryEnrichmentEntity::Artist { .. }
                                     ) && self.library_last_prefetch_entities.contains(&entity);
+                                self.update_failed_enrichment_attempt_state(&entity, &payload);
                                 if Self::is_retryable_enrichment_result(&payload)
                                     && (is_current_detail_entity || is_visible_prefetch_artist)
                                 {
@@ -6575,6 +6640,7 @@ impl UiManager {
                                 self.library_enrichment_last_request_at.clear();
                                 self.library_enrichment_retry_counts.clear();
                                 self.library_enrichment_retry_not_before.clear();
+                                self.library_enrichment_failed_attempt_counts.clear();
                                 self.replace_prefetch_queue_if_changed(Vec::new());
                                 self.replace_background_queue_if_changed(Vec::new());
                                 self.library_last_detail_enrichment_entity = None;
@@ -7407,6 +7473,7 @@ impl UiManager {
                                 self.library_enrichment_last_request_at.clear();
                                 self.library_enrichment_retry_counts.clear();
                                 self.library_enrichment_retry_not_before.clear();
+                                self.library_enrichment_failed_attempt_counts.clear();
                                 self.replace_prefetch_queue_if_changed(Vec::new());
                                 self.replace_background_queue_if_changed(Vec::new());
                                 self.library_last_detail_enrichment_entity = None;
@@ -7553,6 +7620,7 @@ mod tests {
     use super::{
         fit_column_widths_to_available_space, ColumnWidthProfile, CoverArtLookupRequest,
         LibraryEntry, LibraryViewState, PlaylistSortDirection, TrackMetadata, UiManager,
+        ENRICHMENT_FAILED_ATTEMPT_CAP,
     };
     use crate::{config::PlaylistColumnConfig, protocol};
     use std::path::PathBuf;
@@ -7841,6 +7909,67 @@ mod tests {
         let selected: Vec<usize> = Vec::new();
         let anchor = UiManager::resolve_shift_anchor_source_index(&selected, Some(4));
         assert_eq!(anchor, None);
+    }
+
+    #[test]
+    fn test_is_counted_failed_enrichment_result_counts_not_found() {
+        let payload = protocol::LibraryEnrichmentPayload {
+            entity: protocol::LibraryEnrichmentEntity::Artist {
+                artist: "Example Artist".to_string(),
+            },
+            status: protocol::LibraryEnrichmentStatus::NotFound,
+            blurb: String::new(),
+            image_path: None,
+            source_name: "Wikipedia".to_string(),
+            source_url: String::new(),
+            error_kind: None,
+            attempt_kind: protocol::LibraryEnrichmentAttemptKind::Detail,
+        };
+        assert!(UiManager::is_counted_failed_enrichment_result(&payload));
+    }
+
+    #[test]
+    fn test_is_counted_failed_enrichment_result_ignores_rate_limited_error() {
+        let payload = protocol::LibraryEnrichmentPayload {
+            entity: protocol::LibraryEnrichmentEntity::Artist {
+                artist: "Example Artist".to_string(),
+            },
+            status: protocol::LibraryEnrichmentStatus::Error,
+            blurb: String::new(),
+            image_path: None,
+            source_name: "TheAudioDB".to_string(),
+            source_url: String::new(),
+            error_kind: Some(protocol::LibraryEnrichmentErrorKind::RateLimited),
+            attempt_kind: protocol::LibraryEnrichmentAttemptKind::VisiblePrefetch,
+        };
+        assert!(!UiManager::is_counted_failed_enrichment_result(&payload));
+    }
+
+    #[test]
+    fn test_is_counted_failed_enrichment_result_counts_non_rate_limited_error() {
+        let payload = protocol::LibraryEnrichmentPayload {
+            entity: protocol::LibraryEnrichmentEntity::Artist {
+                artist: "Example Artist".to_string(),
+            },
+            status: protocol::LibraryEnrichmentStatus::Error,
+            blurb: String::new(),
+            image_path: None,
+            source_name: "Wikipedia".to_string(),
+            source_url: String::new(),
+            error_kind: Some(protocol::LibraryEnrichmentErrorKind::Timeout),
+            attempt_kind: protocol::LibraryEnrichmentAttemptKind::VisiblePrefetch,
+        };
+        assert!(UiManager::is_counted_failed_enrichment_result(&payload));
+    }
+
+    #[test]
+    fn test_failed_enrichment_attempt_cap_reached_uses_threshold() {
+        assert!(!UiManager::failed_enrichment_attempt_cap_reached(
+            ENRICHMENT_FAILED_ATTEMPT_CAP.saturating_sub(1),
+        ));
+        assert!(UiManager::failed_enrichment_attempt_cap_reached(
+            ENRICHMENT_FAILED_ATTEMPT_CAP,
+        ));
     }
 
     #[test]
