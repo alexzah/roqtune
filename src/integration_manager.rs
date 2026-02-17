@@ -62,7 +62,12 @@ impl IntegrationManager {
             .passwords
             .get(profile_id)
             .cloned()
-            .ok_or_else(|| "missing keyring password".to_string())?;
+            .ok_or_else(|| {
+                format!(
+                    "missing cached OpenSubsonic credential for profile '{}'. Save credentials in Settings and reconnect.",
+                    profile_id
+                )
+            })?;
         Ok(BackendProfileAuth {
             profile_id: profile.profile_id.clone(),
             endpoint: profile.endpoint.clone(),

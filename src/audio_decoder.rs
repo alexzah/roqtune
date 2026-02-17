@@ -217,7 +217,8 @@ impl DecodeWorker {
         if let Some(locator) = parse_opensubsonic_track_uri(track.path.as_path()) {
             let Some(password) = self.opensubsonic_passwords.get(&locator.profile_id) else {
                 return Err(format!(
-                    "OpenSubsonic password not cached for profile '{}'",
+                    "OpenSubsonic credential not cached for profile '{}'. \
+Check Settings -> OpenSubsonic status and re-save credentials if needed.",
                     locator.profile_id
                 ));
             };

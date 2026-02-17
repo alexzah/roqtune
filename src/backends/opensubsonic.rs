@@ -102,7 +102,7 @@ impl OpenSubsonicAdapter {
         Ok(parsed)
     }
 
-    fn array_or_single<'a>(value: Option<&'a Value>) -> Vec<&'a Value> {
+    fn array_or_single(value: Option<&Value>) -> Vec<&Value> {
         match value {
             Some(Value::Array(items)) => items.iter().collect(),
             Some(item @ Value::Object(_)) => vec![item],

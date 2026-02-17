@@ -6,8 +6,9 @@ This document covers local development installs and local Flatpak packaging for 
 
 - Rust + Cargo (`rustup` recommended)
 - Linux desktop environment (current supported target)
-- System keyring installed and active (for storing credentials from external integrations)
-  - For systems without an existing keyring, I highly recommend gnome keyring, as it works seamlessly by default, has minimal dependencies (doesn't require gnome or pull in gnome dependencies), and doesn't require enabling any services
+- System keyring installed and active (for native runs, external integration credentials are saved there)
+  - For systems without an existing keyring, gnome-keyring is a good default and works with minimal setup
+  - Flatpak runs use the system Secret Service via `org.freedesktop.secrets` (granted in the Flatpak manifest)
 
 For Flatpak packaging:
 

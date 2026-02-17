@@ -3632,7 +3632,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             if let Err(error) =
                 set_opensubsonic_password(OPENSUBSONIC_PROFILE_ID, password_trimmed.as_str())
             {
-                status_message = format!("Failed to save password to keyring: {error}");
+                warn!(
+                    "Failed to save OpenSubsonic credential for profile '{}': {}",
+                    OPENSUBSONIC_PROFILE_ID, error
+                );
+                status_message = format!("Failed to save password to credential store: {error}");
             }
         }
 
@@ -3659,7 +3663,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             match get_opensubsonic_password(OPENSUBSONIC_PROFILE_ID) {
                 Ok(value) => value,
                 Err(error) => {
-                    status_message = format!("Failed to access keyring password: {error}");
+                    warn!(
+                        "Failed to load OpenSubsonic credential for profile '{}': {}",
+                        OPENSUBSONIC_PROFILE_ID, error
+                    );
+                    status_message = format!("Failed to access credential store password: {error}");
                     None
                 }
             }
@@ -3741,7 +3749,19 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
 
         let password_for_upsert = if password_trimmed.is_empty() {
-            get_opensubsonic_password(OPENSUBSONIC_PROFILE_ID).unwrap_or_else(|_| None)
+            match get_opensubsonic_password(OPENSUBSONIC_PROFILE_ID) {
+                Ok(value) => value,
+                Err(error) => {
+                    warn!(
+                        "Failed to load OpenSubsonic credential for profile '{}': {}",
+                        OPENSUBSONIC_PROFILE_ID, error
+                    );
+                    ui.set_settings_subsonic_status(
+                        format!("Failed to access credential store password: {error}").into(),
+                    );
+                    return;
+                }
+            }
         } else {
             Some(password_trimmed)
         };
@@ -6116,11 +6136,22 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         integration_manager.run();
     });
     let startup_opensubsonic_seed = find_opensubsonic_backend(&config).map(|backend| {
-        let password = get_opensubsonic_password(OPENSUBSONIC_PROFILE_ID).unwrap_or_else(|_| None);
-        let status_text = if backend.enabled && password.is_none() {
-            Some("Missing keyring password".to_string())
-        } else {
-            Some("Restored from config".to_string())
+        let (password, status_text) = match get_opensubsonic_password(OPENSUBSONIC_PROFILE_ID) {
+            Ok(password) => {
+                let status = if backend.enabled && password.is_none() {
+                    "Missing saved password".to_string()
+                } else {
+                    "Restored from config".to_string()
+                };
+                (password, Some(status))
+            }
+            Err(error) => {
+                warn!(
+                    "Failed to load OpenSubsonic credential from credential store: {}",
+                    error
+                );
+                (None, Some(format!("Credential store error: {error}")))
+            }
         };
         let snapshot = opensubsonic_profile_snapshot(backend, status_text);
         let connect_now = backend.enabled && password.is_some();

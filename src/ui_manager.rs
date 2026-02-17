@@ -3680,7 +3680,8 @@ impl UiManager {
             .and_then(|source_index| self.map_source_to_view_index(source_index))
             .map(|index| index as i32)
             .unwrap_or(-1);
-        let row_data: Vec<(Vec<String>, Option<PathBuf>, String, bool, String)> = rows
+        type TrackRowPayload = (Vec<String>, Option<PathBuf>, String, bool, String);
+        let row_data: Vec<TrackRowPayload> = rows
             .into_iter()
             .map(|row| {
                 let status = if Some(row.source_index) == active_playing_index {
