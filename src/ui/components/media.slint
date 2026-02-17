@@ -1,4 +1,5 @@
 import { Palette } from "std-widgets.slint";
+import { AppIcons } from "../icons.slint";
 
 export component VolumeSliderControl inherits Rectangle {
     in-out property <float> value: 1.0;
@@ -19,14 +20,14 @@ export component VolumeSliderControl inherits Rectangle {
             width: root.icon-slot-width;
             height: root.height;
             background: transparent;
-            Text {
-                width: parent.width;
-                height: parent.height;
-                text: "🔊";
-                color: root.dark ? #888 : #5f6d7c;
-                font-size: max(9px, min(12px, root.height * 0.45));
-                horizontal-alignment: center;
-                vertical-alignment: center;
+            Image {
+                source: AppIcons.volume;
+                width: max(9px, min(12px, root.height * 0.45));
+                height: self.width;
+                x: (parent.width - self.width) / 2;
+                y: (parent.height - self.height) / 2;
+                image-fit: contain;
+                colorize: root.dark ? #888 : #5f6d7c;
             }
         }
 
@@ -306,13 +307,14 @@ export component AlbumArtViewer inherits Rectangle {
             border-color: root.dark ? #454545 : #c1ccd9;
             background: root.dark ? #2f2f2f : #e2eaf4;
 
-            Text {
-                text: "♪";
-                y: parent.height / 2 - 14px;
-                color: root.dark ? #8d8d8d : #6b7786;
-                font-size: 24px;
-                horizontal-alignment: center;
-                vertical-alignment: center;
+            Image {
+                source: AppIcons.music;
+                width: 24px;
+                height: 24px;
+                x: (parent.width - self.width) / 2;
+                y: parent.height / 2 - 22px;
+                image-fit: contain;
+                colorize: root.dark ? #8d8d8d : #6b7786;
             }
 
             Text {

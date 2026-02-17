@@ -1,4 +1,5 @@
 import { Palette } from "std-widgets.slint";
+import { AppIcons } from "../icons.slint";
 
 export component TooltipHoverArea inherits TouchArea {
     in property <string> tooltip-text: "";
@@ -39,17 +40,32 @@ export component PlayerButton inherits Rectangle {
             ? (root.dark ? #666 : #e2e9f1)
             : transparent;
     animate background { duration: 150ms; }
+    private property <brush> icon-color: root.is-primary ? #2a6def : (root.dark ? #eee : #263443);
+    private property <bool> has-icon: root.icon-source.width > 0 && root.icon-source.height > 0;
     in property <string> icon-text;
+    in property <image> icon-source;
     in property <string> tooltip-text: "";
     in property <bool> enabled: true;
     in property <bool> is-primary: false;
     in property <length> font-size: 16px;
     callback clicked;
     callback tooltip_hover_changed(bool, string, int, int);
-    Text {
+
+    if root.has-icon : Image {
+        source: root.icon-source;
+        width: root.font-size;
+        height: root.font-size;
+        x: (parent.width - self.width) / 2;
+        y: (parent.height - self.height) / 2;
+        image-fit: contain;
+        colorize: root.icon-color;
+        opacity: root.enabled ? 1.0 : 0.5;
+    }
+
+    if !root.has-icon : Text {
         text: root.icon-text;
         font-size: root.font-size;
-        color: root.is-primary ? #2a6def : (root.dark ? #eee : #263443);
+        color: root.icon-color;
         horizontal-alignment: center;
         vertical-alignment: center;
         opacity: root.enabled ? 1.0 : 0.5;
@@ -96,29 +112,10 @@ export component ControlActionButton inherits Rectangle {
     callback open-add-menu(string);
     callback tooltip_hover_changed(bool, string, int, int);
 
-    pure function icon-for-action(action: int) -> string {
-        if action == 1 { return "+"; }
-        if action == 2 { return "⏮"; }
-        if action == 3 { return "▶"; }
-        if action == 4 { return "⏸"; }
-        if action == 5 { return "⏹"; }
-        if action == 6 { return "⏭"; }
-        if action == 7 { return "⇄"; }
-        if action == 8 { return "⟳"; }
-        if action == 9 { return "◫"; }
-        if action == 10 { return "⚙"; }
-        if action == 11 { return "📡"; }
-        return "•";
-    }
-
     pure function font-size-for-action(action: int) -> length {
-        if action == 1 { return 20px; }
-        if action == 3 { return 20px; }
-        if action == 10 { return 21px; }
-        if action == 11 { return 17px; }
-        if action == 7 { return 20px; }
-        if action == 8 { return 19px; }
-        return 18px;
+        if action == 1 { return 18px; }
+        if action == 10 { return 18px; }
+        return 17px;
     }
 
     pure function primary-for-action(action: int) -> bool {
@@ -174,7 +171,19 @@ export component ControlActionButton inherits Rectangle {
     height: 32px;
 
     PlayerButton {
-        icon-text: root.icon-for-action(root.action-id);
+        icon-source: root.action-id == 1 ? AppIcons.plus
+            : root.action-id == 2 ? AppIcons.player-prev
+            : root.action-id == 3 ? AppIcons.player-play
+            : root.action-id == 4 ? AppIcons.player-pause
+            : root.action-id == 5 ? AppIcons.player-stop
+            : root.action-id == 6 ? AppIcons.player-next
+            : root.action-id == 7 ? AppIcons.shuffle
+            : root.action-id == 8 ? AppIcons.repeat
+            : root.action-id == 9 ? AppIcons.layout
+            : root.action-id == 10 ? AppIcons.settings
+            : root.action-id == 11 ? AppIcons.cast
+            : AppIcons.music;
+        icon-text: "";
         tooltip-text: root.tooltip-for-action(root.action-id);
         enabled: root.enabled-for-action(root.action-id);
         font-size: root.font-size-for-action(root.action-id);
@@ -252,7 +261,7 @@ export component ButtonCluster inherits Rectangle {
             ? (root.dark ? #333 : #dde5ef)
             : (root.dark ? #2a2a2a : #eef3f9);
         Text {
-            text: "…";
+            text: "...";
             color: root.dark ? #999 : #5e6d7d;
             font-size: 16px;
             horizontal-alignment: center;

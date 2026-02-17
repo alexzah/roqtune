@@ -6437,9 +6437,9 @@ mod tests {
             "Column header menu should use compact switch controls with consistent label sizing"
         );
         assert!(
-            menu_ui.contains("text: \"X\";")
-                && menu_ui.contains("color: delete-column-ta.has-hover ? #ff5c5c : #db3f3f;"),
-            "Custom columns should render a red glyph-only delete icon"
+            menu_ui.contains("source: AppIcons.close;")
+                && menu_ui.contains("colorize: delete-column-ta.has-hover ? #ff5c5c : #db3f3f;"),
+            "Custom columns should render a red SVG delete icon"
         );
         assert!(
             slint_ui.contains("show_delete_custom_column_confirm"),
@@ -6672,9 +6672,9 @@ mod tests {
             "Library rows should activate detail/playback via native double-click handler"
         );
         assert!(
-            slint_ui.contains("icon-text: \"⌕\";")
+            slint_ui.contains("icon-source: AppIcons.search;")
                 && slint_ui.contains("root.open_global_library_search();")
-                && slint_ui.contains("icon-text: \"↻\";")
+                && slint_ui.contains("icon-source: AppIcons.refresh;")
                 && slint_ui.contains("root.library_rescan();"),
             "Library sidebar should include global search button before rescan"
         );

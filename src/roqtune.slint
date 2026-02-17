@@ -17,6 +17,7 @@ import { ModeTabs } from "ui/components/tabs.slint";
 import { LibraryRow } from "ui/components/library.slint";
 import { SettingsDropdownControl } from "ui/components/settings.slint";
 import { StatusBar } from "ui/components/status.slint";
+import { AppIcons } from "ui/icons.slint";
 
 export global AppPalette {
     in-out property <ColorScheme> color-scheme <=> Palette.color-scheme;
@@ -738,7 +739,8 @@ export component AppWindow inherits Window {
                             }
                             Rectangle { horizontal-stretch: 1; }
                             playlist-switcher-import-button := PlayerButton {
-                                icon-text: "+";
+                                icon-source: AppIcons.plus;
+                                icon-text: "";
                                 font-size: 18px;
                                 tooltip-text: "Import tracks or folders";
                                 tooltip_hover_changed(is-hovered, tooltip, anchor-x-px, anchor-y-px) => {
@@ -813,7 +815,8 @@ export component AppWindow inherits Window {
                                 horizontal-stretch: 1;
                             }
                             PlayerButton {
-                                icon-text: "⌕";
+                                icon-source: AppIcons.search;
+                                icon-text: "";
                                 font-size: 14px;
                                 tooltip-text: "Search entire library";
                                 tooltip_hover_changed(is-hovered, tooltip, anchor-x-px, anchor-y-px) => {
@@ -822,7 +825,8 @@ export component AppWindow inherits Window {
                                 clicked => { root.open_global_library_search(); }
                             }
                             library-switcher-folder-button := PlayerButton {
-                                icon-text: "+";
+                                icon-source: AppIcons.folder;
+                                icon-text: "";
                                 font-size: 18px;
                                 tooltip-text: "Library folder options";
                                 tooltip_hover_changed(is-hovered, tooltip, anchor-x-px, anchor-y-px) => {
@@ -848,7 +852,8 @@ export component AppWindow inherits Window {
                                 }
                             }
                             PlayerButton {
-                                icon-text: "↻";
+                                icon-source: AppIcons.refresh;
+                                icon-text: "";
                                 font-size: 14px;
                                 tooltip-text: "Rescan library folders";
                                 tooltip_hover_changed(is-hovered, tooltip, anchor-x-px, anchor-y-px) => {
@@ -987,12 +992,14 @@ export component AppWindow inherits Window {
                             spacing: 10px;
                             Rectangle {
                                 width: 40px;
-                                Text {
-                                    text: "▶";
-                                    color: root.theme_text_muted;
-                                    font-size: 11px;
-                                    horizontal-alignment: center;
-                                    vertical-alignment: center;
+                                Image {
+                                    source: AppIcons.player-play;
+                                    width: 11px;
+                                    height: 11px;
+                                    x: (parent.width - self.width) / 2;
+                                    y: (parent.height - self.height) / 2;
+                                    image-fit: contain;
+                                    colorize: root.theme_text_muted;
                                 }
                             }
                             for column-header[i] in root.playlist_visible_column_headers : Rectangle {
@@ -1005,8 +1012,8 @@ export component AppWindow inherits Window {
                                 border-width: (self.is-drag-source || self.is-resize-target) ? 1px : 0px;
                                 border-color: #496180;
                                 Text {
-                                    text: parent.sort-state == 1 ? column-header + " ▲"
-                                        : parent.sort-state == 2 ? column-header + " ▼"
+                                    text: parent.sort-state == 1 ? column-header + " (asc)"
+                                        : parent.sort-state == 2 ? column-header + " (desc)"
                                         : column-header;
                                     color: (parent.is-drag-source || parent.is-resize-target || parent.sort-state != 0)
                                         ? (root.ui_dark_mode ? #afc4de : #365a81)
@@ -1299,14 +1306,14 @@ export component AppWindow inherits Window {
                                 background: clear-view-ta.has-hover ? #2f4b67 : #29425b;
                                 border-width: 1px;
                                 border-color: #5d7ea0;
-                                Text {
-                                    text: "×";
-                                    color: #d9e8f8;
-                                    font-size: 12px;
-                                    width: parent.width;
-                                    height: parent.height;
-                                    horizontal-alignment: center;
-                                    vertical-alignment: center;
+                                Image {
+                                    source: AppIcons.close;
+                                    width: 10px;
+                                    height: 10px;
+                                    x: (parent.width - self.width) / 2;
+                                    y: (parent.height - self.height) / 2;
+                                    image-fit: contain;
+                                    colorize: #d9e8f8;
                                 }
                                 clear-view-ta := TouchArea {
                                     clicked => {
@@ -1353,7 +1360,8 @@ export component AppWindow inherits Window {
                                 }
 
                                 PlayerButton {
-                                    icon-text: "✕";
+                                    icon-source: AppIcons.close;
+                                    icon-text: "";
                                     font-size: 12px;
                                     tooltip-text: "Close playlist search";
                                     tooltip_hover_changed(is-hovered, tooltip, anchor-x-px, anchor-y-px) => {
@@ -1379,7 +1387,7 @@ export component AppWindow inherits Window {
                             z: 6;
 
                             playlist-scroll-toast-text := Text {
-                                text: (track-list-container.playing-above-viewport ? "↑ " : "↓ ") + "Scroll to playing";
+                                text: (track-list-container.playing-above-viewport ? "Up: " : "Down: ") + "Scroll to playing";
                                 color: #dcecff;
                                 font-size: 11px;
                                 horizontal-alignment: center;
@@ -1568,7 +1576,8 @@ export component AppWindow inherits Window {
 
                     HorizontalLayout {
                         if root.library_can_go_back : PlayerButton {
-                            icon-text: "←";
+                            icon-source: AppIcons.arrow-left;
+                            icon-text: "";
                             font-size: 14px;
                             tooltip-text: "Back";
                             tooltip_hover_changed(is-hovered, tooltip, anchor-x-px, anchor-y-px) => {
@@ -1625,12 +1634,14 @@ export component AppWindow inherits Window {
                                     source: root.library_album_header_art;
                                     image-fit: contain;
                                 }
-                                if !root.library_album_header_has_art : Text {
-                                    text: root.library_root_index == 1 ? "◎" : "▦";
-                                    color: root.ui_dark_mode ? #8fa7c6 : #466a92;
-                                    font-size: 22px;
-                                    horizontal-alignment: center;
-                                    vertical-alignment: center;
+                                if !root.library_album_header_has_art : Image {
+                                    source: root.library_root_index == 1 ? AppIcons.user : AppIcons.disc;
+                                    width: 22px;
+                                    height: 22px;
+                                    x: (parent.width - self.width) / 2;
+                                    y: (parent.height - self.height) / 2;
+                                    image-fit: contain;
+                                    colorize: root.ui_dark_mode ? #8fa7c6 : #466a92;
                                 }
                             }
                             Rectangle {
@@ -1736,7 +1747,8 @@ export component AppWindow inherits Window {
                             }
 
                             PlayerButton {
-                                icon-text: "✕";
+                                icon-source: AppIcons.close;
+                                icon-text: "";
                                 font-size: 12px;
                                 tooltip-text: "Close library search";
                                 tooltip_hover_changed(is-hovered, tooltip, anchor-x-px, anchor-y-px) => {
@@ -1942,7 +1954,7 @@ export component AppWindow inherits Window {
                             z: 6;
 
                             library-scroll-toast-text := Text {
-                                text: (library-list-container.playing-above-viewport ? "↑ " : "↓ ") + "Scroll to playing";
+                                text: (library-list-container.playing-above-viewport ? "Up: " : "Down: ") + "Scroll to playing";
                                 color: #dcecff;
                                 font-size: 11px;
                                 horizontal-alignment: center;
@@ -2030,12 +2042,14 @@ export component AppWindow inherits Window {
                             height: 22px;
                             border-radius: 3px;
                             background: prompt-accept-ta.has-hover ? #2c5c86 : #234a6c;
-                            Text {
-                                text: "✓";
-                                color: #e8f3ff;
-                                font-size: 12px;
-                                horizontal-alignment: center;
-                                vertical-alignment: center;
+                            Image {
+                                source: AppIcons.check;
+                                width: 12px;
+                                height: 12px;
+                                x: (parent.width - self.width) / 2;
+                                y: (parent.height - self.height) / 2;
+                                image-fit: contain;
+                                colorize: #e8f3ff;
                             }
                             prompt-accept-ta := TouchArea {
                                 clicked => { root.library_online_metadata_prompt_accept(); }
@@ -2047,12 +2061,14 @@ export component AppWindow inherits Window {
                             height: 22px;
                             border-radius: 3px;
                             background: prompt-deny-ta.has-hover ? #663838 : #4f2e2e;
-                            Text {
-                                text: "✕";
-                                color: #ffe8e8;
-                                font-size: 11px;
-                                horizontal-alignment: center;
-                                vertical-alignment: center;
+                            Image {
+                                source: AppIcons.close;
+                                width: 11px;
+                                height: 11px;
+                                x: (parent.width - self.width) / 2;
+                                y: (parent.height - self.height) / 2;
+                                image-fit: contain;
+                                colorize: #ffe8e8;
                             }
                             prompt-deny-ta := TouchArea {
                                 clicked => { root.library_online_metadata_prompt_deny(); }
@@ -2305,12 +2321,14 @@ export component AppWindow inherits Window {
                         border-width: 1px;
                         border-color: #5a5a5a;
                         background: layout-intro-checkbox-ta.has-hover ? #363636 : #2d2d2d;
-                        Text {
-                            text: root.layout_intro_dont_show_again ? "✓" : "";
-                            color: #8cb1ff;
-                            font-size: 12px;
-                            horizontal-alignment: center;
-                            vertical-alignment: center;
+                        if root.layout_intro_dont_show_again : Image {
+                            source: AppIcons.check;
+                            width: 10px;
+                            height: 10px;
+                            x: (parent.width - self.width) / 2;
+                            y: (parent.height - self.height) / 2;
+                            image-fit: contain;
+                            colorize: #8cb1ff;
                         }
                         layout-intro-checkbox-ta := TouchArea {
                             clicked => {
@@ -2319,7 +2337,7 @@ export component AppWindow inherits Window {
                         }
                     }
                     Text {
-                        text: "Don’t show this again";
+                        text: "Don't show this again";
                         color: #ccc;
                         font-size: 12px;
                         vertical-alignment: center;
@@ -2376,13 +2394,14 @@ export component AppWindow inherits Window {
                     x: 8px;
                     vertical-alignment: center;
                 }
-                Text {
-                    text: "▸";
-                    color: #888;
-                    font-size: 12px;
-                    width: parent.width - 8px;
-                    horizontal-alignment: right;
-                    vertical-alignment: center;
+                Image {
+                    source: AppIcons.arrow-right;
+                    width: 10px;
+                    height: 10px;
+                    x: parent.width - self.width - 8px;
+                    y: (parent.height - self.height) / 2;
+                    image-fit: contain;
+                    colorize: #888;
                 }
                 replace-action-ta := TouchArea {
                     changed has-hover => {
@@ -2581,13 +2600,14 @@ export component AppWindow inherits Window {
                         x: 8px;
                         vertical-alignment: center;
                     }
-                    Text {
-                        text: "▸";
-                        color: #888;
-                        font-size: 12px;
-                        width: parent.width - 8px;
-                        horizontal-alignment: right;
-                        vertical-alignment: center;
+                    Image {
+                        source: AppIcons.arrow-right;
+                        width: 10px;
+                        height: 10px;
+                        x: parent.width - self.width - 8px;
+                        y: (parent.height - self.height) / 2;
+                        image-fit: contain;
+                        colorize: #888;
                     }
                     panels-action-ta := TouchArea {
                         changed has-hover => {
@@ -2618,13 +2638,14 @@ export component AppWindow inherits Window {
                         x: 8px;
                         vertical-alignment: center;
                     }
-                    Text {
-                        text: "▸";
-                        color: #888;
-                        font-size: 12px;
-                        width: parent.width - 8px;
-                        horizontal-alignment: right;
-                        vertical-alignment: center;
+                    Image {
+                        source: AppIcons.arrow-right;
+                        width: 10px;
+                        height: 10px;
+                        x: parent.width - self.width - 8px;
+                        y: (parent.height - self.height) / 2;
+                        image-fit: contain;
+                        colorize: #888;
                     }
                     presets-action-ta := TouchArea {
                         changed has-hover => {
@@ -3733,12 +3754,14 @@ export component AppWindow inherits Window {
                                             height: 18px;
                                             border-radius: 2px;
                                             background: delete-action-ta.has-hover ? #4a2a2a : transparent;
-                                            Text {
-                                                text: "✕";
-                                                color: #ffb4b4;
-                                                font-size: 11px;
-                                                horizontal-alignment: center;
-                                                vertical-alignment: center;
+                                            Image {
+                                                source: AppIcons.close;
+                                                width: 10px;
+                                                height: 10px;
+                                                x: (parent.width - self.width) / 2;
+                                                y: (parent.height - self.height) / 2;
+                                                image-fit: contain;
+                                                colorize: #ffb4b4;
                                             }
                                             delete-action-ta := TouchArea {
                                                 clicked => {
@@ -4151,7 +4174,8 @@ export component AppWindow inherits Window {
                     }
                     Rectangle { horizontal-stretch: 1; }
                     PlayerButton {
-                        icon-text: "✕";
+                        icon-source: AppIcons.close;
+                        icon-text: "";
                         font-size: 14px;
                         tooltip-text: "Close settings";
                         tooltip_hover_changed(is-hovered, tooltip, anchor-x-px, anchor-y-px) => {

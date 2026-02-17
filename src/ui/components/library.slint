@@ -1,5 +1,6 @@
 import { Palette } from "std-widgets.slint";
 import { LibraryRowData } from "../types.slint";
+import { AppIcons } from "../icons.slint";
 
 export component LibraryRow inherits Rectangle {
     in property <LibraryRowData> data;
@@ -52,16 +53,19 @@ export component LibraryRow inherits Rectangle {
                 image-fit: contain;
             }
 
-            if !root.data.has_album_art : Text {
-                text: root.data.item_kind == 0 ? "♪"
-                    : root.data.item_kind == 1 ? "◎"
-                    : root.data.item_kind == 3 ? "♬"
-                    : root.data.item_kind == 4 ? "◷"
-                    : "▦";
-                color: root.dark ? #8fa7c6 : #42658d;
-                font-size: 11px;
-                horizontal-alignment: center;
-                vertical-alignment: center;
+            if !root.data.has_album_art : Image {
+                source: root.data.item_kind == 0 ? AppIcons.music
+                    : root.data.item_kind == 1 ? AppIcons.user
+                    : root.data.item_kind == 2 ? AppIcons.disc
+                    : root.data.item_kind == 3 ? AppIcons.category
+                    : root.data.item_kind == 4 ? AppIcons.calendar-time
+                    : AppIcons.folder;
+                width: 12px;
+                height: 12px;
+                x: (parent.width - self.width) / 2;
+                y: (parent.height - self.height) / 2;
+                image-fit: contain;
+                colorize: root.dark ? #8fa7c6 : #42658d;
             }
         }
 
@@ -71,11 +75,13 @@ export component LibraryRow inherits Rectangle {
             HorizontalLayout {
                 spacing: 4px;
 
-                if root.data.item_kind == 0 && root.data.is_playing : Text {
-                    text: "▶";
-                    color: root.dark ? #8fb8ff : #2d5f98;
-                    font-size: 10px;
-                    vertical-alignment: center;
+                if root.data.item_kind == 0 && root.data.is_playing : Image {
+                    source: AppIcons.player-play;
+                    width: 10px;
+                    height: 10px;
+                    y: (parent.height - self.height) / 2;
+                    image-fit: contain;
+                    colorize: root.dark ? #8fb8ff : #2d5f98;
                 }
 
                 Text {

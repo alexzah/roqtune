@@ -28,6 +28,12 @@ For Flatpak packaging:
 - Direct cast streams original file bytes without modification.
 - Optional fallback (`Settings > Audio > Cast transcode fallback`) uses WAV PCM for receivers that reject direct streams.
 
+### Icon Assets
+
+- UI icons are vendored from **Tabler Icons** (MIT license).
+- Assets live in `src/ui/icons/tabler/`.
+- License text is included at `src/ui/icons/tabler/LICENSE`.
+
 ## Flatpak (Local Bundle + Local Install)
 
 Use this command from the repo root:
