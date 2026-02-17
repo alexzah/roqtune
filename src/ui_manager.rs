@@ -73,6 +73,7 @@ pub struct UiManager {
     current_output_path_info: Option<protocol::OutputPathInfo>,
     cast_connected: bool,
     cast_connecting: bool,
+    cast_discovering: bool,
     cast_device_name: String,
     cast_playback_path_kind: Option<protocol::CastPlaybackPathKind>,
     cast_transcode_output_metadata: Option<protocol::TechnicalMetadata>,
@@ -904,6 +905,7 @@ impl UiManager {
             current_output_path_info: None,
             cast_connected: false,
             cast_connecting: false,
+            cast_discovering: false,
             cast_device_name: String::new(),
             cast_playback_path_kind: None,
             cast_transcode_output_metadata: None,
@@ -1157,6 +1159,7 @@ impl UiManager {
     fn sync_cast_state_to_ui(&self) {
         let connected = self.cast_connected;
         let connecting = self.cast_connecting;
+        let discovering = self.cast_discovering;
         let label = if connected {
             if self.cast_device_name.is_empty() {
                 "Connected".to_string()
@@ -1165,6 +1168,8 @@ impl UiManager {
             }
         } else if connecting {
             "Connecting...".to_string()
+        } else if discovering {
+            "Searching...".to_string()
         } else {
             "Not Connected".to_string()
         };
@@ -7058,9 +7063,10 @@ impl UiManager {
                             },
                         ) => {
                             self.cast_connected = state == protocol::CastConnectionState::Connected;
-                            self.cast_connecting = state
-                                == protocol::CastConnectionState::Connecting
-                                || state == protocol::CastConnectionState::Discovering;
+                            self.cast_connecting =
+                                state == protocol::CastConnectionState::Connecting;
+                            self.cast_discovering =
+                                state == protocol::CastConnectionState::Discovering;
                             self.cast_device_name =
                                 device.map(|device| device.name).unwrap_or_default();
                             if !self.cast_connected {
