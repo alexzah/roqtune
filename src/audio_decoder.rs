@@ -184,16 +184,35 @@ impl DecodeWorker {
                 self.decode_requested_samples(requested_samples);
             }
             DecodeWorkItem::ConfigChanged(config) => {
-                self.target_sample_rate = config.output.sample_rate_khz;
-                self.target_channels = config.output.channel_count;
-                self.target_bits_per_sample = config.output.bits_per_sample;
-                self.resampler_quality = config.output.resampler_quality;
-                self.dither_on_bitdepth_reduce = config.output.dither_on_bitdepth_reduce;
-                self.downmix_higher_channel_tracks = config.output.downmix_higher_channel_tracks;
-                self.decoder_request_chunk_ms = config.buffering.decoder_request_chunk_ms;
-                self.resampler = None;
-                self.resampler_flushed = false;
-                self.resample_buffer.clear();
+                let next_target_sample_rate = config.output.sample_rate_khz;
+                let next_target_channels = config.output.channel_count;
+                let next_target_bits_per_sample = config.output.bits_per_sample;
+                let next_resampler_quality = config.output.resampler_quality;
+                let next_dither_on_bitdepth_reduce = config.output.dither_on_bitdepth_reduce;
+                let next_downmix_higher_channel_tracks =
+                    config.output.downmix_higher_channel_tracks;
+                let next_decoder_request_chunk_ms = config.buffering.decoder_request_chunk_ms;
+
+                let audio_processing_changed = self.target_sample_rate != next_target_sample_rate
+                    || self.target_channels != next_target_channels
+                    || self.target_bits_per_sample != next_target_bits_per_sample
+                    || self.resampler_quality != next_resampler_quality
+                    || self.dither_on_bitdepth_reduce != next_dither_on_bitdepth_reduce
+                    || self.downmix_higher_channel_tracks != next_downmix_higher_channel_tracks;
+
+                self.target_sample_rate = next_target_sample_rate;
+                self.target_channels = next_target_channels;
+                self.target_bits_per_sample = next_target_bits_per_sample;
+                self.resampler_quality = next_resampler_quality;
+                self.dither_on_bitdepth_reduce = next_dither_on_bitdepth_reduce;
+                self.downmix_higher_channel_tracks = next_downmix_higher_channel_tracks;
+                self.decoder_request_chunk_ms = next_decoder_request_chunk_ms;
+
+                if audio_processing_changed {
+                    self.resampler = None;
+                    self.resampler_flushed = false;
+                    self.resample_buffer.clear();
+                }
             }
             DecodeWorkItem::AudioDeviceOpened { stream_info } => {
                 self.target_sample_rate = stream_info.sample_rate_hz;

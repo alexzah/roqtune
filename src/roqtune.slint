@@ -4408,6 +4408,14 @@ export component AppWindow inherits Window {
                             alignment: start;
                             spacing: 8px;
 
+                            Text {
+                                width: settings-dialog-panel.settings_row_width;
+                                text: "Audio setting changes are staged during playback and only applied after playback is stopped and started again.";
+                                color: root.ui_dark_mode ? #d6b07a : #8a4f00;
+                                font-size: 11px;
+                                wrap: word-wrap;
+                            }
+
                             SettingsDropdownControl {
                                 width: settings-dialog-panel.settings_row_width;
                                 label: "Output Device";

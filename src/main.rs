@@ -21,6 +21,7 @@ use std::{
     path::{Path, PathBuf},
     rc::Rc,
     sync::{
+        atomic::{AtomicBool, Ordering},
         mpsc::{self, RecvTimeoutError},
         Arc, Mutex,
     },
@@ -141,6 +142,18 @@ struct RuntimeOutputOverride {
     sample_rate_hz: Option<u32>,
 }
 
+#[derive(Debug, Clone)]
+struct RuntimeAudioState {
+    output: OutputConfig,
+    cast: CastConfig,
+}
+
+#[derive(Debug, Clone)]
+struct StagedAudioSettings {
+    output: OutputConfig,
+    cast: CastConfig,
+}
+
 /// Lightweight signature used to detect meaningful runtime-output changes.
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct OutputRuntimeSignature {
@@ -159,6 +172,22 @@ impl OutputRuntimeSignature {
             bits_per_sample: output.bits_per_sample,
         }
     }
+}
+
+fn resolve_effective_runtime_config(
+    persisted_config: &Config,
+    output_options: &OutputSettingsOptions,
+    runtime_output_override: Option<&RuntimeOutputOverride>,
+    runtime_audio_state: &Arc<Mutex<RuntimeAudioState>>,
+) -> Config {
+    let runtime_audio = runtime_audio_state
+        .lock()
+        .expect("runtime audio state lock poisoned")
+        .clone();
+    let mut effective_config = persisted_config.clone();
+    effective_config.output = runtime_audio.output;
+    effective_config.cast = runtime_audio.cast;
+    resolve_runtime_config(&effective_config, output_options, runtime_output_override)
 }
 
 const IMPORT_CLUSTER_PRESET: [i32; 1] = [1];
@@ -302,6 +331,7 @@ struct LibraryFolderImportContext {
     config_state: Arc<Mutex<Config>>,
     output_options: Arc<Mutex<OutputSettingsOptions>>,
     runtime_output_override: Arc<Mutex<RuntimeOutputOverride>>,
+    runtime_audio_state: Arc<Mutex<RuntimeAudioState>>,
     last_runtime_signature: Arc<Mutex<OutputRuntimeSignature>>,
     config_file: PathBuf,
     layout_workspace_size: Arc<Mutex<(u32, u32)>>,
@@ -369,8 +399,12 @@ fn add_library_folders_to_config_and_scan(
     }
 
     let runtime_override = runtime_output_override_snapshot(&context.runtime_output_override);
-    let runtime_config =
-        resolve_runtime_config(&next_config, &options_snapshot, Some(&runtime_override));
+    let runtime_config = resolve_effective_runtime_config(
+        &next_config,
+        &options_snapshot,
+        Some(&runtime_override),
+        &context.runtime_audio_state,
+    );
     {
         let mut last_runtime = context
             .last_runtime_signature
@@ -573,6 +607,12 @@ fn output_preferences_changed(previous: &OutputConfig, next: &OutputConfig) -> b
         || previous.bits_per_sample_auto != next.bits_per_sample_auto
         || previous.resampler_quality != next.resampler_quality
         || previous.dither_on_bitdepth_reduce != next.dither_on_bitdepth_reduce
+        || previous.downmix_higher_channel_tracks != next.downmix_higher_channel_tracks
+}
+
+fn audio_settings_changed(previous: &Config, next: &Config) -> bool {
+    output_preferences_changed(&previous.output, &next.output)
+        || previous.cast.allow_transcode_fallback != next.cast.allow_transcode_fallback
 }
 
 fn snapshot_output_device_names(host: &cpal::Host) -> Vec<String> {
@@ -2805,6 +2845,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         &initial_output_options,
         Some(&runtime_override_snapshot),
     );
+    let runtime_audio_state = Arc::new(Mutex::new(RuntimeAudioState {
+        output: config.output.clone(),
+        cast: config.cast.clone(),
+    }));
 
     ui.window().set_size(LogicalSize::new(
         config.ui.window_width as f32,
@@ -2839,14 +2883,49 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Bus for communication between components
     let (bus_sender, _) = broadcast::channel(8192);
+    let playback_session_active = Arc::new(AtomicBool::new(false));
+    let staged_audio_settings: Arc<Mutex<Option<StagedAudioSettings>>> = Arc::new(Mutex::new(None));
     let (playlist_bulk_import_tx, playlist_bulk_import_rx) =
         mpsc::sync_channel::<protocol::PlaylistBulkImportRequest>(64);
     let (library_scan_progress_tx, library_scan_progress_rx) =
         mpsc::sync_channel::<protocol::LibraryMessage>(512);
+    {
+        let mut playback_state_receiver = bus_sender.subscribe();
+        let playback_session_active_clone = Arc::clone(&playback_session_active);
+        thread::spawn(move || loop {
+            match playback_state_receiver.blocking_recv() {
+                Ok(Message::Playlist(PlaylistMessage::PlaylistIndicesChanged {
+                    is_playing,
+                    playing_index,
+                    ..
+                })) => {
+                    playback_session_active_clone
+                        .store(is_playing || playing_index.is_some(), Ordering::Relaxed);
+                }
+                Ok(Message::Playback(PlaybackMessage::TrackStarted(_)))
+                | Ok(Message::Playback(PlaybackMessage::Play))
+                | Ok(Message::Playback(PlaybackMessage::PlayActiveCollection)) => {
+                    playback_session_active_clone.store(true, Ordering::Relaxed);
+                }
+                Ok(Message::Playback(PlaybackMessage::Stop)) => {
+                    playback_session_active_clone.store(false, Ordering::Relaxed);
+                }
+                Ok(_) => {}
+                Err(tokio::sync::broadcast::error::RecvError::Lagged(skipped)) => {
+                    warn!(
+                        "Main playback-state listener lagged on control bus, skipped {} message(s)",
+                        skipped
+                    );
+                }
+                Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+            }
+        });
+    }
     let library_folder_import_context = LibraryFolderImportContext {
         config_state: Arc::clone(&config_state),
         output_options: Arc::clone(&output_options),
         runtime_output_override: Arc::clone(&runtime_output_override),
+        runtime_audio_state: Arc::clone(&runtime_audio_state),
         last_runtime_signature: Arc::clone(&last_runtime_signature),
         config_file: config_file.clone(),
         layout_workspace_size: Arc::clone(&layout_workspace_size),
@@ -3149,6 +3228,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let config_state_clone = Arc::clone(&config_state);
     let output_options_clone = Arc::clone(&output_options);
     let runtime_output_override_clone = Arc::clone(&runtime_output_override);
+    let runtime_audio_state_clone = Arc::clone(&runtime_audio_state);
     let last_runtime_signature_clone = Arc::clone(&last_runtime_signature);
     let config_file_clone = config_file.clone();
     let layout_workspace_size_clone = Arc::clone(&layout_workspace_size);
@@ -3191,8 +3271,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
 
         let runtime_override = runtime_output_override_snapshot(&runtime_output_override_clone);
-        let runtime_config =
-            resolve_runtime_config(&next_config, &options_snapshot, Some(&runtime_override));
+        let runtime_config = resolve_effective_runtime_config(
+            &next_config,
+            &options_snapshot,
+            Some(&runtime_override),
+            &runtime_audio_state_clone,
+        );
         {
             let mut last_runtime = last_runtime_signature_clone
                 .lock()
@@ -3221,6 +3305,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let config_state_clone = Arc::clone(&config_state);
     let output_options_clone = Arc::clone(&output_options);
     let runtime_output_override_clone = Arc::clone(&runtime_output_override);
+    let runtime_audio_state_clone = Arc::clone(&runtime_audio_state);
     let last_runtime_signature_clone = Arc::clone(&last_runtime_signature);
     let config_file_clone = config_file.clone();
     let layout_workspace_size_clone = Arc::clone(&layout_workspace_size);
@@ -3256,8 +3341,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             );
         }
         let runtime_override = runtime_output_override_snapshot(&runtime_output_override_clone);
-        let runtime_config =
-            resolve_runtime_config(&next_config, &options_snapshot, Some(&runtime_override));
+        let runtime_config = resolve_effective_runtime_config(
+            &next_config,
+            &options_snapshot,
+            Some(&runtime_override),
+            &runtime_audio_state_clone,
+        );
         {
             let mut last_runtime = last_runtime_signature_clone
                 .lock()
@@ -3273,6 +3362,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let config_state_clone = Arc::clone(&config_state);
     let output_options_clone = Arc::clone(&output_options);
     let runtime_output_override_clone = Arc::clone(&runtime_output_override);
+    let runtime_audio_state_clone = Arc::clone(&runtime_audio_state);
     let last_runtime_signature_clone = Arc::clone(&last_runtime_signature);
     let config_file_clone = config_file.clone();
     let layout_workspace_size_clone = Arc::clone(&layout_workspace_size);
@@ -3308,8 +3398,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             );
         }
         let runtime_override = runtime_output_override_snapshot(&runtime_output_override_clone);
-        let runtime_config =
-            resolve_runtime_config(&next_config, &options_snapshot, Some(&runtime_override));
+        let runtime_config = resolve_effective_runtime_config(
+            &next_config,
+            &options_snapshot,
+            Some(&runtime_override),
+            &runtime_audio_state_clone,
+        );
         {
             let mut last_runtime = last_runtime_signature_clone
                 .lock()
@@ -3325,6 +3419,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let config_state_clone = Arc::clone(&config_state);
     let output_options_clone = Arc::clone(&output_options);
     let runtime_output_override_clone = Arc::clone(&runtime_output_override);
+    let runtime_audio_state_clone = Arc::clone(&runtime_audio_state);
     let last_runtime_signature_clone = Arc::clone(&last_runtime_signature);
     let config_file_clone = config_file.clone();
     let layout_workspace_size_clone = Arc::clone(&layout_workspace_size);
@@ -3361,8 +3456,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             );
         }
         let runtime_override = runtime_output_override_snapshot(&runtime_output_override_clone);
-        let runtime_config =
-            resolve_runtime_config(&next_config, &options_snapshot, Some(&runtime_override));
+        let runtime_config = resolve_effective_runtime_config(
+            &next_config,
+            &options_snapshot,
+            Some(&runtime_override),
+            &runtime_audio_state_clone,
+        );
         {
             let mut last_runtime = last_runtime_signature_clone
                 .lock()
@@ -4120,6 +4219,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let config_state_clone = Arc::clone(&config_state);
     let output_options_clone = Arc::clone(&output_options);
     let runtime_output_override_clone = Arc::clone(&runtime_output_override);
+    let runtime_audio_state_clone = Arc::clone(&runtime_audio_state);
     let config_file_clone = config_file.clone();
     let layout_workspace_size_clone = Arc::clone(&layout_workspace_size);
     let ui_handle_clone = ui.as_weak().clone();
@@ -4153,10 +4253,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             options.clone()
         };
         let runtime_override = runtime_output_override_snapshot(&runtime_output_override_clone);
-        let runtime_config = resolve_runtime_config(
+        let runtime_config = resolve_effective_runtime_config(
             &next_config,
             &output_options_snapshot,
             Some(&runtime_override),
+            &runtime_audio_state_clone,
         );
         let _ = bus_sender_clone.send(Message::Config(ConfigMessage::ConfigChanged(
             runtime_config,
@@ -4187,6 +4288,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let config_state_clone = Arc::clone(&config_state);
     let output_options_clone = Arc::clone(&output_options);
     let runtime_output_override_clone = Arc::clone(&runtime_output_override);
+    let runtime_audio_state_clone = Arc::clone(&runtime_audio_state);
     let config_file_clone = config_file.clone();
     let layout_workspace_size_clone = Arc::clone(&layout_workspace_size);
     let ui_handle_clone = ui.as_weak().clone();
@@ -4220,10 +4322,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             options.clone()
         };
         let runtime_override = runtime_output_override_snapshot(&runtime_output_override_clone);
-        let runtime_config = resolve_runtime_config(
+        let runtime_config = resolve_effective_runtime_config(
             &next_config,
             &output_options_snapshot,
             Some(&runtime_override),
+            &runtime_audio_state_clone,
         );
         let _ = bus_sender_clone.send(Message::Config(ConfigMessage::ConfigChanged(
             runtime_config,
@@ -4254,6 +4357,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let config_state_clone = Arc::clone(&config_state);
     let output_options_clone = Arc::clone(&output_options);
     let runtime_output_override_clone = Arc::clone(&runtime_output_override);
+    let runtime_audio_state_clone = Arc::clone(&runtime_audio_state);
     let config_file_clone = config_file.clone();
     let layout_workspace_size_clone = Arc::clone(&layout_workspace_size);
     let ui_handle_clone = ui.as_weak().clone();
@@ -4287,10 +4391,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             options.clone()
         };
         let runtime_override = runtime_output_override_snapshot(&runtime_output_override_clone);
-        let runtime_config = resolve_runtime_config(
+        let runtime_config = resolve_effective_runtime_config(
             &next_config,
             &output_options_snapshot,
             Some(&runtime_override),
+            &runtime_audio_state_clone,
         );
         let _ = bus_sender_clone.send(Message::Config(ConfigMessage::ConfigChanged(
             runtime_config,
@@ -4995,6 +5100,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let config_state_clone = Arc::clone(&config_state);
     let output_options_clone = Arc::clone(&output_options);
     let runtime_output_override_clone = Arc::clone(&runtime_output_override);
+    let runtime_audio_state_clone = Arc::clone(&runtime_audio_state);
+    let staged_audio_settings_clone = Arc::clone(&staged_audio_settings);
+    let playback_session_active_clone = Arc::clone(&playback_session_active);
     let last_runtime_signature_clone = Arc::clone(&last_runtime_signature);
     let config_file_clone = config_file.clone();
     let layout_workspace_size_clone = Arc::clone(&layout_workspace_size);
@@ -5157,15 +5265,52 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
             persist_state_files_with_config_path(&next_config, &config_file_clone);
 
-            if output_preferences_changed(&previous_config.output, &next_config.output) {
+            let output_changed =
+                output_preferences_changed(&previous_config.output, &next_config.output);
+            let audio_changed = audio_settings_changed(&previous_config, &next_config);
+            let playback_session_active = playback_session_active_clone.load(Ordering::Relaxed);
+            if audio_changed && playback_session_active {
+                {
+                    let mut staged = staged_audio_settings_clone
+                        .lock()
+                        .expect("staged audio settings lock poisoned");
+                    *staged = Some(StagedAudioSettings {
+                        output: next_config.output.clone(),
+                        cast: next_config.cast.clone(),
+                    });
+                }
+                if let Some(ui) = ui_handle_clone.upgrade() {
+                    ui.set_settings_restart_notice_message(
+                        "Audio settings were saved and staged. They apply after playback is stopped and started again."
+                            .into(),
+                    );
+                    ui.set_show_settings_restart_notice(true);
+                }
+            } else if audio_changed {
+                let mut staged = staged_audio_settings_clone
+                    .lock()
+                    .expect("staged audio settings lock poisoned");
+                *staged = None;
+                let mut runtime_audio_state = runtime_audio_state_clone
+                    .lock()
+                    .expect("runtime audio state lock poisoned");
+                runtime_audio_state.output = next_config.output.clone();
+                runtime_audio_state.cast = next_config.cast.clone();
+            }
+
+            if output_changed && !(audio_changed && playback_session_active) {
                 let mut runtime_override = runtime_output_override_clone
                     .lock()
                     .expect("runtime output override lock poisoned");
                 runtime_override.sample_rate_hz = None;
             }
             let runtime_override = runtime_output_override_snapshot(&runtime_output_override_clone);
-            let runtime_config =
-                resolve_runtime_config(&next_config, &options_snapshot, Some(&runtime_override));
+            let runtime_config = resolve_effective_runtime_config(
+                &next_config,
+                &options_snapshot,
+                Some(&runtime_override),
+                &runtime_audio_state_clone,
+            );
             {
                 let mut last_runtime = last_runtime_signature_clone
                     .lock()
@@ -5182,6 +5327,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let config_state_clone = Arc::clone(&config_state);
     let output_options_clone = Arc::clone(&output_options);
     let runtime_output_override_clone = Arc::clone(&runtime_output_override);
+    let runtime_audio_state_clone = Arc::clone(&runtime_audio_state);
     let last_runtime_signature_clone = Arc::clone(&last_runtime_signature);
     let config_file_clone = config_file.clone();
     let ui_handle_clone = ui.as_weak().clone();
@@ -5253,8 +5399,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             options.clone()
         };
         let runtime_override = runtime_output_override_snapshot(&runtime_output_override_clone);
-        let runtime_config =
-            resolve_runtime_config(&next_config, &options_snapshot, Some(&runtime_override));
+        let runtime_config = resolve_effective_runtime_config(
+            &next_config,
+            &options_snapshot,
+            Some(&runtime_override),
+            &runtime_audio_state_clone,
+        );
         {
             let mut last_runtime = last_runtime_signature_clone
                 .lock()
@@ -5275,6 +5425,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let config_state_clone = Arc::clone(&config_state);
     let output_options_clone = Arc::clone(&output_options);
     let runtime_output_override_clone = Arc::clone(&runtime_output_override);
+    let runtime_audio_state_clone = Arc::clone(&runtime_audio_state);
     let last_runtime_signature_clone = Arc::clone(&last_runtime_signature);
     let config_file_clone = config_file.clone();
     let ui_handle_clone = ui.as_weak().clone();
@@ -5352,8 +5503,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             options.clone()
         };
         let runtime_override = runtime_output_override_snapshot(&runtime_output_override_clone);
-        let runtime_config =
-            resolve_runtime_config(&next_config, &options_snapshot, Some(&runtime_override));
+        let runtime_config = resolve_effective_runtime_config(
+            &next_config,
+            &options_snapshot,
+            Some(&runtime_override),
+            &runtime_audio_state_clone,
+        );
         {
             let mut last_runtime = last_runtime_signature_clone
                 .lock()
@@ -5374,6 +5529,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let config_state_clone = Arc::clone(&config_state);
     let output_options_clone = Arc::clone(&output_options);
     let runtime_output_override_clone = Arc::clone(&runtime_output_override);
+    let runtime_audio_state_clone = Arc::clone(&runtime_audio_state);
     let last_runtime_signature_clone = Arc::clone(&last_runtime_signature);
     let config_file_clone = config_file.clone();
     let ui_handle_clone = ui.as_weak().clone();
@@ -5453,8 +5609,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             options.clone()
         };
         let runtime_override = runtime_output_override_snapshot(&runtime_output_override_clone);
-        let runtime_config =
-            resolve_runtime_config(&next_config, &options_snapshot, Some(&runtime_override));
+        let runtime_config = resolve_effective_runtime_config(
+            &next_config,
+            &options_snapshot,
+            Some(&runtime_override),
+            &runtime_audio_state_clone,
+        );
         {
             let mut last_runtime = last_runtime_signature_clone
                 .lock()
@@ -5475,6 +5635,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let config_state_clone = Arc::clone(&config_state);
     let output_options_clone = Arc::clone(&output_options);
     let runtime_output_override_clone = Arc::clone(&runtime_output_override);
+    let runtime_audio_state_clone = Arc::clone(&runtime_audio_state);
     let last_runtime_signature_clone = Arc::clone(&last_runtime_signature);
     let config_file_clone = config_file.clone();
     let ui_handle_clone = ui.as_weak().clone();
@@ -5548,8 +5709,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             options.clone()
         };
         let runtime_override = runtime_output_override_snapshot(&runtime_output_override_clone);
-        let runtime_config =
-            resolve_runtime_config(&next_config, &options_snapshot, Some(&runtime_override));
+        let runtime_config = resolve_effective_runtime_config(
+            &next_config,
+            &options_snapshot,
+            Some(&runtime_override),
+            &runtime_audio_state_clone,
+        );
         {
             let mut last_runtime = last_runtime_signature_clone
                 .lock()
@@ -5725,6 +5890,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let ui_handle_clone = ui.as_weak().clone();
     let layout_workspace_size_clone = Arc::clone(&layout_workspace_size);
     let runtime_output_override_clone = Arc::clone(&runtime_output_override);
+    let runtime_audio_state_clone = Arc::clone(&runtime_audio_state);
+    let staged_audio_settings_clone = Arc::clone(&staged_audio_settings);
     let last_runtime_signature_clone = Arc::clone(&last_runtime_signature);
     thread::spawn(move || loop {
         match device_event_receiver.blocking_recv() {
@@ -5756,10 +5923,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 };
                 let runtime_override =
                     runtime_output_override_snapshot(&runtime_output_override_clone);
-                let runtime = resolve_runtime_config(
+                let runtime = resolve_effective_runtime_config(
                     &persisted_config,
                     &options_snapshot,
                     Some(&runtime_override),
+                    &runtime_audio_state_clone,
                 );
                 let runtime_signature = OutputRuntimeSignature::from_output(&runtime.output);
                 {
@@ -5779,6 +5947,20 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     runtime_override.sample_rate_hz = None;
                 }
                 debug!("Runtime output sample-rate override cleared");
+                let mut force_broadcast_runtime = false;
+                if let Some(staged) = {
+                    let mut pending = staged_audio_settings_clone
+                        .lock()
+                        .expect("staged audio settings lock poisoned");
+                    pending.take()
+                } {
+                    let mut runtime_audio_state = runtime_audio_state_clone
+                        .lock()
+                        .expect("runtime audio state lock poisoned");
+                    runtime_audio_state.output = staged.output;
+                    runtime_audio_state.cast = staged.cast;
+                    force_broadcast_runtime = true;
+                }
                 let persisted_config = {
                     let state = config_state_clone
                         .lock()
@@ -5793,10 +5975,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 };
                 let runtime_override =
                     runtime_output_override_snapshot(&runtime_output_override_clone);
-                let runtime = resolve_runtime_config(
+                let runtime = resolve_effective_runtime_config(
                     &persisted_config,
                     &options_snapshot,
                     Some(&runtime_override),
+                    &runtime_audio_state_clone,
                 );
                 let runtime_signature = OutputRuntimeSignature::from_output(&runtime.output);
                 let should_broadcast_runtime = {
@@ -5804,7 +5987,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         .lock()
                         .expect("runtime signature lock poisoned");
                     if *last_signature == runtime_signature {
-                        false
+                        force_broadcast_runtime
                     } else {
                         *last_signature = runtime_signature;
                         true
@@ -5856,10 +6039,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
                 let runtime_override =
                     runtime_output_override_snapshot(&runtime_output_override_clone);
-                let runtime = resolve_runtime_config(
+                let runtime = resolve_effective_runtime_config(
                     &persisted_config,
                     &detected_options,
                     Some(&runtime_override),
+                    &runtime_audio_state_clone,
                 );
                 let runtime_signature = OutputRuntimeSignature::from_output(&runtime.output);
                 let should_broadcast_runtime = {
@@ -5949,10 +6133,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
                 let runtime_override =
                     runtime_output_override_snapshot(&runtime_output_override_clone);
-                let runtime = resolve_runtime_config(
+                let runtime = resolve_effective_runtime_config(
                     &next_config,
                     &options_snapshot,
                     Some(&runtime_override),
+                    &runtime_audio_state_clone,
                 );
                 let runtime_signature = OutputRuntimeSignature::from_output(&runtime.output);
                 {
@@ -6050,8 +6235,8 @@ mod tests {
     use slint::{Model, ModelRc, ModelTracker, VecModel};
 
     use super::{
-        apply_column_order_keys, choose_preferred_u16, choose_preferred_u32,
-        clamp_width_for_visible_column, collect_audio_files_from_folder,
+        apply_column_order_keys, audio_settings_changed, choose_preferred_u16,
+        choose_preferred_u32, clamp_width_for_visible_column, collect_audio_files_from_folder,
         default_album_art_column_width_bounds, default_button_cluster_actions_by_index,
         is_album_art_builtin_column, is_supported_audio_file, load_layout_file,
         load_system_layout_template, output_preferences_changed,
@@ -7122,11 +7307,29 @@ mod tests {
     }
 
     #[test]
+    fn test_output_preferences_changed_detects_downmix_toggle() {
+        let previous = Config::default().output;
+        let mut next = previous.clone();
+        next.downmix_higher_channel_tracks = !next.downmix_higher_channel_tracks;
+
+        assert!(output_preferences_changed(&previous, &next));
+    }
+
+    #[test]
     fn test_output_preferences_changed_ignores_non_output_fields() {
         let previous = Config::default().output;
         let next = previous.clone();
 
         assert!(!output_preferences_changed(&previous, &next));
+    }
+
+    #[test]
+    fn test_audio_settings_changed_detects_cast_setting_change() {
+        let previous = Config::default();
+        let mut next = previous.clone();
+        next.cast.allow_transcode_fallback = !next.cast.allow_transcode_fallback;
+
+        assert!(audio_settings_changed(&previous, &next));
     }
 
     #[test]
