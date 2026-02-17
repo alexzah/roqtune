@@ -23,12 +23,16 @@ use tokio::sync::broadcast::{Receiver, Sender};
 
 use crate::{
     config::{self, PlaylistColumnConfig},
-    integration_uri::is_remote_track_path,
+    integration_keyring::get_opensubsonic_password,
+    integration_uri::{is_remote_track_path, parse_opensubsonic_track_uri},
     metadata_tags, protocol, AppWindow, LayoutAlbumArtViewerPanelModel,
     LayoutMetadataViewerPanelModel, LibraryRowData, MetadataEditorField as UiMetadataEditorField,
     TrackRowData,
 };
 use governor::{Quota, RateLimiter};
+
+const OPENSUBSONIC_API_VERSION: &str = "1.16.1";
+const OPENSUBSONIC_CLIENT_ID: &str = "roqtune";
 
 /// Shared UI models that are created in `main` and attached to the Slint window.
 pub struct UiState {
@@ -48,6 +52,8 @@ pub struct UiManager {
     active_playlist_id: String,
     playlist_ids: Vec<String>,
     playlist_names: Vec<String>,
+    opensubsonic_sync_eligible_playlist_ids: HashSet<String>,
+    unavailable_track_ids: HashSet<String>,
     track_ids: Vec<String>,
     track_paths: Vec<PathBuf>,
     track_cover_art_paths: Vec<Option<PathBuf>>,
@@ -309,6 +315,7 @@ const COVER_ART_IMAGE_CACHE_MAX_BYTES: u64 = 128 * 1024 * 1024;
 const COVER_ART_IMAGE_CACHE_MAX_ENTRIES: usize = 4096;
 const COVER_ART_FAILED_PATHS_MAX_ENTRIES: usize = 4096;
 const LIBRARY_PAGE_FETCH_LIMIT: usize = 512;
+const REMOTE_TRACK_UNAVAILABLE_TITLE: &str = "Remote track unavailable";
 
 #[derive(Default)]
 struct CoverArtImageCache {
@@ -492,6 +499,16 @@ impl UiManager {
         }
     }
 
+    fn is_pure_remote_playlist_id(playlist_id: &str) -> bool {
+        playlist_id
+            .strip_prefix("remote:opensubsonic:")
+            .and_then(|suffix| suffix.split_once(':'))
+            .map(|(profile_id, remote_playlist_id)| {
+                !profile_id.trim().is_empty() && !remote_playlist_id.trim().is_empty()
+            })
+            .unwrap_or(false)
+    }
+
     fn find_external_cover_art(track_path: &Path) -> Option<PathBuf> {
         let parent = track_path.parent()?;
         let names = ["cover", "front", "folder", "album", "art"];
@@ -608,6 +625,106 @@ impl UiManager {
             return Some(cache_path);
         }
         None
+    }
+
+    fn make_opensubsonic_salt() -> String {
+        let mut bytes = [0u8; 8];
+        let _ = getrandom::fill(&mut bytes);
+        bytes.iter().map(|value| format!("{value:02x}")).collect()
+    }
+
+    fn opensubsonic_cover_art_url(
+        locator: &crate::integration_uri::OpenSubsonicTrackLocator,
+        password: &str,
+    ) -> String {
+        let salt = Self::make_opensubsonic_salt();
+        let token = format!("{:x}", md5::compute(format!("{}{}", password, salt)));
+        format!(
+            "{}/rest/getCoverArt.view?u={}&t={}&s={}&v={}&c={}&id={}",
+            locator.endpoint.trim().trim_end_matches('/'),
+            urlencoding::encode(locator.username.trim()),
+            token,
+            salt,
+            OPENSUBSONIC_API_VERSION,
+            OPENSUBSONIC_CLIENT_ID,
+            urlencoding::encode(locator.song_id.as_str()),
+        )
+    }
+
+    fn cache_cover_art_bytes(track_path: &Path, cover_bytes: &[u8]) -> Option<PathBuf> {
+        let cache_dir = Self::covers_cache_dir()?;
+        if !cache_dir.exists() {
+            std::fs::create_dir_all(&cache_dir).ok()?;
+        }
+
+        let extension = Self::detect_image_extension(cover_bytes)?;
+        let stem = Self::embedded_art_cache_stem(track_path)?;
+        let cache_path = cache_dir.join(format!("{stem}.{extension}"));
+        let temp_path = cache_dir.join(format!("{stem}.{extension}.tmp"));
+        if Self::failed_cover_path(&cache_path) {
+            return None;
+        }
+        if std::fs::write(&temp_path, cover_bytes).is_err() {
+            return None;
+        }
+        if !Self::is_valid_image_file(&temp_path) {
+            let _ = std::fs::remove_file(&temp_path);
+            return None;
+        }
+        if std::fs::rename(&temp_path, &cache_path).is_err() {
+            let _ = std::fs::remove_file(&temp_path);
+            return None;
+        }
+        Some(cache_path)
+    }
+
+    fn fetch_remote_cover_art(
+        track_path: &Path,
+        password_cache: &mut HashMap<String, Option<String>>,
+    ) -> Option<PathBuf> {
+        if let Some(cached) = Self::embedded_art_cache_path_if_present(track_path) {
+            return Some(cached);
+        }
+        let locator = parse_opensubsonic_track_uri(track_path)?;
+        let password = if let Some(cached) = password_cache.get(&locator.profile_id) {
+            cached.clone()
+        } else {
+            match get_opensubsonic_password(&locator.profile_id) {
+                Ok(password) => {
+                    password_cache.insert(locator.profile_id.clone(), password.clone());
+                    password
+                }
+                Err(error) => {
+                    warn!(
+                        "Failed to read OpenSubsonic credential for cover art (profile '{}'): {}",
+                        locator.profile_id, error
+                    );
+                    password_cache.insert(locator.profile_id.clone(), None);
+                    None
+                }
+            }
+        }?;
+
+        let url = Self::opensubsonic_cover_art_url(&locator, password.as_str());
+        let client = ureq::AgentBuilder::new()
+            .timeout_connect(Duration::from_secs(5))
+            .timeout_read(Duration::from_secs(20))
+            .timeout_write(Duration::from_secs(20))
+            .build();
+        let response = client.get(url.as_str()).call().ok()?;
+        let mut body = Vec::new();
+        response.into_reader().read_to_end(&mut body).ok()?;
+        if body.is_empty() {
+            return None;
+        }
+        let preview = String::from_utf8_lossy(&body[..body.len().min(512)]).to_ascii_lowercase();
+        if preview.contains("subsonic-response")
+            || preview.contains("<error")
+            || preview.contains("\"error\"")
+        {
+            return None;
+        }
+        Self::cache_cover_art_bytes(track_path, &body)
     }
 
     fn find_external_cover_art_cached(&mut self, track_path: &Path) -> Option<PathBuf> {
@@ -829,13 +946,13 @@ impl UiManager {
         let (cover_art_lookup_tx, cover_art_lookup_rx) = mpsc::channel::<CoverArtLookupRequest>();
         let cover_art_bus_sender = bus_sender.clone();
         thread::spawn(move || {
+            let mut opensubsonic_password_cache: HashMap<String, Option<String>> = HashMap::new();
             while let Ok(request) = cover_art_lookup_rx.recv() {
                 let latest_request =
                     UiManager::coalesce_cover_art_requests(request, &cover_art_lookup_rx);
-                let cover_art_path = latest_request
-                    .track_path
-                    .as_ref()
-                    .and_then(|path| UiManager::find_cover_art(path.as_path()));
+                let cover_art_path = latest_request.track_path.as_ref().and_then(|path| {
+                    UiManager::find_cover_art(path.as_path(), &mut opensubsonic_password_cache)
+                });
                 let _ = cover_art_bus_sender.send(protocol::Message::Playback(
                     protocol::PlaybackMessage::CoverArtChanged(cover_art_path),
                 ));
@@ -891,6 +1008,8 @@ impl UiManager {
             active_playlist_id: String::new(),
             playlist_ids: Vec::new(),
             playlist_names: Vec::new(),
+            opensubsonic_sync_eligible_playlist_ids: HashSet::new(),
+            unavailable_track_ids: HashSet::new(),
             track_ids: Vec::new(),
             track_paths: Vec::new(),
             track_cover_art_paths: Vec::new(),
@@ -1078,6 +1197,13 @@ impl UiManager {
         )
     }
 
+    fn current_track_source_label(&self) -> Option<&'static str> {
+        self.playing_track
+            .path
+            .as_ref()
+            .and_then(|path| is_remote_track_path(path.as_path()).then_some("OpenSubsonic"))
+    }
+
     fn render_local_transform_text(&self) -> String {
         let Some(path_info) = self.current_output_path_info.as_ref() else {
             return "Direct play".to_string();
@@ -1120,7 +1246,13 @@ impl UiManager {
 
         let mut sections = Vec::new();
         let source_section = if let Some(meta) = self.current_technical_metadata.as_ref() {
-            format!("Source: {}", Self::format_technical_metadata_text(meta))
+            let source_label = self.current_track_source_label();
+            let source_format_text = Self::format_technical_metadata_text(meta);
+            if let Some(source_label) = source_label {
+                format!("Source: {} | {}", source_label, source_format_text)
+            } else {
+                format!("Source: {}", source_format_text)
+            }
         } else if self.cast_connected || self.cast_connecting {
             "Source: Unknown".to_string()
         } else {
@@ -1207,8 +1339,18 @@ impl UiManager {
         });
     }
 
-    fn find_cover_art(track_path: &Path) -> Option<PathBuf> {
+    fn find_local_cover_art(track_path: &Path) -> Option<PathBuf> {
         Self::find_external_cover_art(track_path).or_else(|| Self::extract_embedded_art(track_path))
+    }
+
+    fn find_cover_art(
+        track_path: &Path,
+        password_cache: &mut HashMap<String, Option<String>>,
+    ) -> Option<PathBuf> {
+        if is_remote_track_path(track_path) {
+            return Self::fetch_remote_cover_art(track_path, password_cache);
+        }
+        Self::find_local_cover_art(track_path)
     }
 
     fn extract_embedded_art(track_path: &Path) -> Option<PathBuf> {
@@ -1222,27 +1364,7 @@ impl UiManager {
         }
 
         let cover_bytes = metadata_tags::read_embedded_cover_art(track_path)?;
-        let extension = Self::detect_image_extension(&cover_bytes)?;
-        let stem = Self::embedded_art_cache_stem(track_path)?;
-        let cache_path = cache_dir.join(format!("{stem}.{extension}"));
-        let temp_path = cache_dir.join(format!("{stem}.{extension}.tmp"));
-
-        if Self::failed_cover_path(&cache_path) {
-            return None;
-        }
-        if std::fs::write(&temp_path, &cover_bytes).is_err() {
-            return None;
-        }
-        if !Self::is_valid_image_file(&temp_path) {
-            let _ = std::fs::remove_file(&temp_path);
-            return None;
-        }
-        if std::fs::rename(&temp_path, &cache_path).is_err() {
-            let _ = std::fs::remove_file(&temp_path);
-            return None;
-        }
-
-        Some(cache_path)
+        Self::cache_cover_art_bytes(track_path, &cover_bytes)
     }
 
     fn update_cover_art(&mut self, track_path: Option<&PathBuf>) {
@@ -1273,6 +1395,7 @@ impl UiManager {
 
     fn resolve_track_cover_art_path(&mut self, source_index: usize) -> Option<PathBuf> {
         let track_path = self.track_paths.get(source_index).cloned()?;
+        let is_remote = is_remote_track_path(track_path.as_path());
         if let Some(Some(existing_path)) = self.track_cover_art_paths.get(source_index) {
             if Self::failed_cover_path(existing_path) {
                 if let Some(cache_slot) = self.track_cover_art_paths.get_mut(source_index) {
@@ -1295,9 +1418,13 @@ impl UiManager {
             return None;
         }
 
-        let resolved_path = self
-            .find_external_cover_art_cached(&track_path)
-            .or_else(|| Self::embedded_art_cache_path_if_present(&track_path));
+        let resolved_path = if is_remote {
+            self.update_cover_art(Some(&track_path));
+            None
+        } else {
+            self.find_external_cover_art_cached(&track_path)
+                .or_else(|| Self::embedded_art_cache_path_if_present(&track_path))
+        };
         if let Some(cache_slot) = self.track_cover_art_paths.get_mut(source_index) {
             *cache_slot = resolved_path.clone();
         }
@@ -1461,6 +1588,26 @@ impl UiManager {
                 }
             })
             .collect()
+    }
+
+    fn apply_unavailable_title_override(
+        values: &mut [String],
+        playlist_columns: &[PlaylistColumnConfig],
+    ) {
+        for (visible_index, column) in playlist_columns
+            .iter()
+            .filter(|column| column.enabled)
+            .enumerate()
+        {
+            let normalized_format = Self::normalize_column_format(&column.format);
+            let normalized_name = column.name.trim().to_ascii_lowercase();
+            if normalized_format == "{title}" || normalized_name == "title" {
+                if let Some(value) = values.get_mut(visible_index) {
+                    *value = REMOTE_TRACK_UNAVAILABLE_TITLE.to_string();
+                }
+                break;
+            }
+        }
     }
 
     fn visible_playlist_columns(&self) -> Vec<&PlaylistColumnConfig> {
@@ -2526,7 +2673,7 @@ impl UiManager {
             cover_art_path = self.resolve_library_cover_art_path(track_path);
         }
         if cover_art_path.is_none() {
-            cover_art_path = Self::find_cover_art(track_path.as_path());
+            cover_art_path = Self::find_local_cover_art(track_path.as_path());
         }
         if let Some(source_index) = source_index {
             if let Some(slot) = self.track_cover_art_paths.get_mut(source_index) {
@@ -3437,6 +3584,12 @@ impl UiManager {
         self.selection_anchor_track_id = self.track_ids.get(source_index).cloned();
     }
 
+    fn prune_unavailable_track_ids(&mut self) {
+        let active_track_ids: HashSet<String> = self.track_ids.iter().cloned().collect();
+        self.unavailable_track_ids
+            .retain(|track_id| active_track_ids.contains(track_id));
+    }
+
     fn build_shift_selection_from_view_order(
         view_indices: &[usize],
         anchor_source_index: Option<usize>,
@@ -3605,6 +3758,7 @@ impl UiManager {
     }
 
     fn rebuild_track_model(&mut self) {
+        self.prune_unavailable_track_ids();
         let normalized_query = Self::normalized_search_query(&self.filter_search_query);
         let mut active_sort = self.active_sort_column_state();
 
@@ -3629,7 +3783,15 @@ impl UiManager {
 
         let mut rows: Vec<ViewRow> = Vec::with_capacity(self.track_metadata.len());
         for (source_index, metadata) in self.track_metadata.iter().enumerate() {
-            let values = Self::build_playlist_row_values(metadata, &self.playlist_columns);
+            let mut values = Self::build_playlist_row_values(metadata, &self.playlist_columns);
+            let track_unavailable = self
+                .track_ids
+                .get(source_index)
+                .map(|track_id| self.unavailable_track_ids.contains(track_id))
+                .unwrap_or(false);
+            if track_unavailable {
+                Self::apply_unavailable_title_override(&mut values, &self.playlist_columns);
+            }
             if !normalized_query.is_empty()
                 && !values
                     .iter()
@@ -3680,11 +3842,18 @@ impl UiManager {
             .and_then(|source_index| self.map_source_to_view_index(source_index))
             .map(|index| index as i32)
             .unwrap_or(-1);
-        type TrackRowPayload = (Vec<String>, Option<PathBuf>, String, bool, String);
+        type TrackRowPayload = (Vec<String>, Option<PathBuf>, String, bool, String, bool);
         let row_data: Vec<TrackRowPayload> = rows
             .into_iter()
             .map(|row| {
-                let status = if Some(row.source_index) == active_playing_index {
+                let track_unavailable = self
+                    .track_ids
+                    .get(row.source_index)
+                    .map(|track_id| self.unavailable_track_ids.contains(track_id))
+                    .unwrap_or(false);
+                let status = if track_unavailable {
+                    ""
+                } else if Some(row.source_index) == active_playing_index {
                     if playback_active {
                         "▶️"
                     } else {
@@ -3707,13 +3876,14 @@ impl UiManager {
                     source_badge,
                     selected_set.contains(&row.source_index),
                     status.to_string(),
+                    track_unavailable,
                 )
             })
             .collect();
 
         let _ = self.ui.upgrade_in_event_loop(move |ui| {
             let mut rows = Vec::with_capacity(row_data.len());
-            for (values, album_art_path, source_badge, selected, status) in row_data {
+            for (values, album_art_path, source_badge, selected, status, unavailable) in row_data {
                 let values_shared: Vec<slint::SharedString> =
                     values.into_iter().map(Into::into).collect();
                 rows.push(TrackRowData {
@@ -3722,6 +3892,7 @@ impl UiManager {
                     album_art: UiManager::load_track_row_cover_art_image(album_art_path.as_ref()),
                     source_badge: source_badge.into(),
                     selected,
+                    unavailable,
                 });
             }
             UiManager::update_or_replace_track_model(&ui, rows);
@@ -4829,9 +5000,9 @@ impl UiManager {
     }
 
     fn resolve_library_cover_art_path(&mut self, track_path: &PathBuf) -> Option<PathBuf> {
-        if let Some(cached) = self.library_cover_art_paths.get(track_path) {
-            if let Some(path) = cached {
-                if Self::failed_cover_path(path) {
+        if let Some(cached) = self.library_cover_art_paths.get(track_path).cloned() {
+            if let Some(path) = cached.clone() {
+                if Self::failed_cover_path(&path) {
                     self.library_cover_art_paths
                         .insert(track_path.clone(), None);
                     return None;
@@ -4841,15 +5012,32 @@ impl UiManager {
             {
                 self.library_cover_art_paths
                     .insert(track_path.clone(), Some(cached_embedded.clone()));
+                self.track_cover_art_missing_tracks.remove(track_path);
                 return Some(cached_embedded);
+            } else if is_remote_track_path(track_path.as_path())
+                && !self.track_cover_art_missing_tracks.contains(track_path)
+            {
+                self.update_cover_art(Some(track_path));
+                self.track_cover_art_missing_tracks
+                    .insert(track_path.clone());
             }
-            return cached.clone();
+            return cached;
         }
-        let resolved = self
-            .find_external_cover_art_cached(track_path)
-            .or_else(|| Self::embedded_art_cache_path_if_present(track_path));
+        let resolved = if is_remote_track_path(track_path.as_path()) {
+            self.update_cover_art(Some(track_path));
+            None
+        } else {
+            self.find_external_cover_art_cached(track_path)
+                .or_else(|| Self::embedded_art_cache_path_if_present(track_path))
+        };
         self.library_cover_art_paths
             .insert(track_path.clone(), resolved.clone());
+        if resolved.is_none() {
+            self.track_cover_art_missing_tracks
+                .insert(track_path.clone());
+        } else {
+            self.track_cover_art_missing_tracks.remove(track_path);
+        }
         resolved
     }
 
@@ -6098,6 +6286,18 @@ impl UiManager {
     }
 
     fn fallback_track_metadata(path: &Path) -> TrackMetadata {
+        if is_remote_track_path(path) {
+            return TrackMetadata {
+                title: "Remote track".to_string(),
+                artist: "".to_string(),
+                album: "".to_string(),
+                album_artist: "".to_string(),
+                date: "".to_string(),
+                year: "".to_string(),
+                genre: "".to_string(),
+                track_number: "".to_string(),
+            };
+        }
         let filename = path
             .file_name()
             .and_then(|name| name.to_str())
@@ -6192,6 +6392,11 @@ impl UiManager {
             let Some(index) = index_by_track_id.get(&update.track_id).copied() else {
                 continue;
             };
+            if update.summary.title == REMOTE_TRACK_UNAVAILABLE_TITLE {
+                self.unavailable_track_ids.insert(update.track_id.clone());
+            } else {
+                self.unavailable_track_ids.remove(&update.track_id);
+            }
             let next = Self::track_metadata_from_summary(&update.summary);
             if let Some(current) = self.track_metadata.get_mut(index) {
                 if current.title != next.title
@@ -6827,12 +7032,47 @@ impl UiManager {
                             | protocol::MetadataMessage::SaveTrackProperties { .. } => {}
                         },
                         protocol::Message::Playlist(
+                            protocol::PlaylistMessage::OpenSubsonicSyncEligiblePlaylists(
+                                playlist_ids,
+                            ),
+                        ) => {
+                            self.opensubsonic_sync_eligible_playlist_ids =
+                                playlist_ids.into_iter().collect();
+                            let sync_flags = self
+                                .playlist_ids
+                                .iter()
+                                .map(|playlist_id| {
+                                    self.opensubsonic_sync_eligible_playlist_ids
+                                        .contains(playlist_id)
+                                })
+                                .collect::<Vec<_>>();
+                            let _ = self.ui.upgrade_in_event_loop(move |ui| {
+                                ui.set_playlist_can_sync_opensubsonic(ModelRc::from(Rc::new(
+                                    VecModel::from(sync_flags),
+                                )));
+                            });
+                        }
+                        protocol::Message::Playlist(
                             protocol::PlaylistMessage::PlaylistsRestored(playlists),
                         ) => {
+                            let old_playlist_ids = self.playlist_ids.clone();
                             let old_len = self.playlist_ids.len();
                             self.playlist_ids = playlists.iter().map(|p| p.id.clone()).collect();
                             self.playlist_names =
                                 playlists.iter().map(|p| p.name.clone()).collect::<Vec<_>>();
+                            let remote_playlist_flags = self
+                                .playlist_ids
+                                .iter()
+                                .map(|playlist_id| Self::is_pure_remote_playlist_id(playlist_id))
+                                .collect::<Vec<_>>();
+                            let sync_flags = self
+                                .playlist_ids
+                                .iter()
+                                .map(|playlist_id| {
+                                    self.opensubsonic_sync_eligible_playlist_ids
+                                        .contains(playlist_id)
+                                })
+                                .collect::<Vec<_>>();
                             self.library_add_to_playlist_checked =
                                 vec![false; self.playlist_ids.len()];
                             self.sync_library_add_to_playlist_ui();
@@ -6841,13 +7081,34 @@ impl UiManager {
                             for p in playlists {
                                 slint_playlists.push(StandardListViewItem::from(p.name.as_str()));
                             }
+                            let new_playlist_edit_index = if new_len == old_len + 1 && old_len > 0 {
+                                self.playlist_ids
+                                    .iter()
+                                    .position(|playlist_id| !old_playlist_ids.contains(playlist_id))
+                                    .filter(|index| {
+                                        !remote_playlist_flags.get(*index).copied().unwrap_or(false)
+                                    })
+                                    .map(|index| index as i32)
+                                    .unwrap_or(-1)
+                            } else {
+                                -1
+                            };
 
                             let _ = self.ui.upgrade_in_event_loop(move |ui| {
                                 ui.set_playlists(ModelRc::from(Rc::new(VecModel::from(
                                     slint_playlists,
                                 ))));
-                                if new_len > old_len && old_len > 0 {
-                                    ui.set_editing_playlist_index((new_len - 1) as i32);
+                                ui.set_playlist_is_remote(ModelRc::from(Rc::new(VecModel::from(
+                                    remote_playlist_flags,
+                                ))));
+                                ui.set_playlist_can_sync_opensubsonic(ModelRc::from(Rc::new(
+                                    VecModel::from(sync_flags),
+                                )));
+                                if new_playlist_edit_index >= 0 {
+                                    ui.set_editing_playlist_index(new_playlist_edit_index);
+                                    ui.set_new_playlist_edit_index(new_playlist_edit_index);
+                                } else {
+                                    ui.set_new_playlist_edit_index(-1);
                                 }
                             });
                         }
@@ -6864,6 +7125,7 @@ impl UiManager {
                             {
                                 let _ = self.ui.upgrade_in_event_loop(move |ui| {
                                     ui.set_active_playlist_index(index as i32);
+                                    ui.set_new_playlist_edit_index(-1);
                                 });
                             }
                         }
@@ -7025,8 +7287,46 @@ impl UiManager {
                             }
                         }
                         protocol::Message::Playlist(
+                            protocol::PlaylistMessage::TrackUnavailable { id, reason },
+                        ) => {
+                            let newly_unavailable = self.unavailable_track_ids.insert(id.clone());
+                            if newly_unavailable {
+                                info!(
+                                    "UiManager: track marked unavailable id={} reason={}",
+                                    id, reason
+                                );
+                            }
+                            if let Some(index) =
+                                self.track_ids.iter().position(|track_id| track_id == &id)
+                            {
+                                if let Some(metadata) = self.track_metadata.get_mut(index) {
+                                    metadata.title = REMOTE_TRACK_UNAVAILABLE_TITLE.to_string();
+                                    metadata.artist.clear();
+                                    metadata.album.clear();
+                                    metadata.album_artist.clear();
+                                    metadata.date.clear();
+                                    metadata.genre.clear();
+                                    metadata.year.clear();
+                                    metadata.track_number.clear();
+                                }
+                            }
+                            self.refresh_playlist_column_content_targets();
+                            self.apply_playlist_column_layout();
+                            self.refresh_playing_track_metadata();
+                            self.update_display_for_active_collection();
+                            self.rebuild_track_model();
+                        }
+                        protocol::Message::Playlist(
                             protocol::PlaylistMessage::PlayTrackByViewIndex(view_index),
                         ) => {
+                            let unavailable = self
+                                .map_view_to_source_index(view_index)
+                                .and_then(|source_index| self.track_ids.get(source_index))
+                                .map(|track_id| self.unavailable_track_ids.contains(track_id))
+                                .unwrap_or(false);
+                            if unavailable {
+                                continue;
+                            }
                             self.start_queue_if_possible(
                                 self.build_playlist_queue_request(Some(view_index)),
                             );
@@ -7452,6 +7752,12 @@ impl UiManager {
                         protocol::Message::Playback(
                             protocol::PlaybackMessage::CoverArtChanged(path),
                         ) => {
+                            if path.is_some() {
+                                self.refresh_visible_library_cover_art_rows();
+                                if self.is_album_art_column_visible() {
+                                    self.rebuild_track_model();
+                                }
+                            }
                             let _ = self.ui.upgrade_in_event_loop(move |ui| {
                                 if let Some(path) = path {
                                     if let Some(img) = UiManager::try_load_cover_art_image(&path) {

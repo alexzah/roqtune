@@ -215,6 +215,20 @@ impl DecodeWorker {
         hint: &mut Hint,
     ) -> Result<MediaSourceStream, String> {
         if let Some(locator) = parse_opensubsonic_track_uri(track.path.as_path()) {
+            if locator.endpoint.trim().is_empty() {
+                return Err(format!(
+                    "OpenSubsonic track URI missing endpoint for profile '{}'. \
+Re-sync the track from the server and try again.",
+                    locator.profile_id
+                ));
+            }
+            if locator.username.trim().is_empty() {
+                return Err(format!(
+                    "OpenSubsonic track URI missing username for profile '{}'. \
+Re-sync the track from the server and try again.",
+                    locator.profile_id
+                ));
+            }
             let Some(password) = self.opensubsonic_passwords.get(&locator.profile_id) else {
                 return Err(format!(
                     "OpenSubsonic credential not cached for profile '{}'. \
@@ -915,12 +929,25 @@ Check Settings -> OpenSubsonic status and re-save credentials if needed.",
         false
     }
 
+    fn emit_track_unavailable_if_remote(&self, track: &TrackIdentifier, reason: &str) {
+        if parse_opensubsonic_track_uri(track.path.as_path()).is_none() {
+            return;
+        }
+        let _ = self.bus_sender.send(Message::Playlist(
+            protocol::PlaylistMessage::TrackUnavailable {
+                id: track.id.clone(),
+                reason: reason.to_string(),
+            },
+        ));
+    }
+
     fn open_track(&mut self, input_track: TrackIdentifier) -> Option<ActiveDecodeTrack> {
         let mut hint = Hint::new();
         let media_source = match self.open_media_source_stream(&input_track, &mut hint) {
             Ok(source) => source,
             Err(error_text) => {
                 error!("{error_text}");
+                self.emit_track_unavailable_if_remote(&input_track, error_text.as_str());
                 return None;
             }
         };
@@ -933,6 +960,10 @@ Check Settings -> OpenSubsonic status and re-save credentials if needed.",
             Ok(probed) => probed.format,
             Err(e) => {
                 error!("Failed to probe media source: {}", e);
+                self.emit_track_unavailable_if_remote(
+                    &input_track,
+                    format!("Failed to probe media source: {e}").as_str(),
+                );
                 return None;
             }
         };
@@ -942,6 +973,10 @@ Check Settings -> OpenSubsonic status and re-save credentials if needed.",
                 Some(track) => track,
                 None => {
                     error!("No default track found");
+                    self.emit_track_unavailable_if_remote(
+                        &input_track,
+                        "No default track found in remote stream payload",
+                    );
                     return None;
                 }
             };
@@ -952,6 +987,10 @@ Check Settings -> OpenSubsonic status and re-save credentials if needed.",
         let source_channels = codec_params.channels.map(|c| c.count() as u16).unwrap_or(2);
         if source_channels == 0 {
             error!("Unsupported channel count 0 in {:?}", input_track.path);
+            self.emit_track_unavailable_if_remote(
+                &input_track,
+                "Unsupported channel count in remote stream payload",
+            );
             return None;
         }
 
@@ -976,6 +1015,10 @@ Check Settings -> OpenSubsonic status and re-save credentials if needed.",
             Ok(decoder) => decoder,
             Err(e) => {
                 error!("Failed to create decoder: {}", e);
+                self.emit_track_unavailable_if_remote(
+                    &input_track,
+                    format!("Failed to create decoder for remote stream: {e}").as_str(),
+                );
                 return None;
             }
         };
@@ -1016,11 +1059,14 @@ Check Settings -> OpenSubsonic status and re-save credentials if needed.",
         codec_params: &CodecParameters,
     ) -> protocol::TechnicalMetadata {
         let sample_rate = codec_params.sample_rate.unwrap_or(44100);
-        let format_name = path
-            .extension()
-            .and_then(|ext| ext.to_str())
-            .unwrap_or("AUDIO")
-            .to_uppercase();
+        let format_name = parse_opensubsonic_track_uri(path.as_path())
+            .and_then(|locator| locator.format_hint.map(|hint| hint.to_ascii_uppercase()))
+            .or_else(|| {
+                path.extension()
+                    .and_then(|ext| ext.to_str())
+                    .map(|ext| ext.to_uppercase())
+            })
+            .unwrap_or_else(|| "AUDIO".to_string());
 
         let n_frames = codec_params.n_frames.unwrap_or(0);
         let duration_ms = if n_frames > 0 {

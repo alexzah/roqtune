@@ -183,6 +183,7 @@ export component AppWindow inherits Window {
             }
             if (event.text == Key.F2) {
                 root.editing_playlist_index = root.active_playlist_index;
+                root.new_playlist_edit_index = -1;
                 return accept;
             }
             reject
@@ -791,26 +792,39 @@ export component AppWindow inherits Window {
                                     name: p.text;
                                     is-active: root.active_playlist_index == i;
                                     is-editing: root.editing_playlist_index == i;
+                                    is-remote: i < root.playlist_is_remote.length && root.playlist_is_remote[i];
+                                    is-new-playlist-edit: root.new_playlist_edit_index == i;
+                                    can-sync-opensubsonic: i < root.playlist_can_sync_opensubsonic.length
+                                        && root.playlist_can_sync_opensubsonic[i];
                                     clicked => {
                                         root.switch_playlist(i);
                                         root.editing_playlist_index = -1;
+                                        root.new_playlist_edit_index = -1;
                                         root.sidebar_has_focus = true;
                                         root.refocus_main();
                                     }
                                     renamed(new-name) => {
                                         root.rename_playlist(i, new-name);
                                         root.editing_playlist_index = -1;
+                                        root.new_playlist_edit_index = -1;
                                         root.refocus_main();
                                     }
                                     cancel-edit() => {
                                         root.editing_playlist_index = -1;
+                                        root.new_playlist_edit_index = -1;
                                         root.refocus_main();
                                     }
                                     context-menu-rename() => {
                                         root.editing_playlist_index = i;
+                                        root.new_playlist_edit_index = -1;
                                     }
                                     context-menu-delete() => {
+                                        root.new_playlist_edit_index = -1;
                                         root.confirm_delete_playlist(i);
+                                    }
+                                    context-menu-sync() => {
+                                        root.new_playlist_edit_index = -1;
+                                        root.sync_playlist_to_opensubsonic(i);
                                     }
                                 }
                             }
@@ -5295,8 +5309,11 @@ export component AppWindow inherits Window {
 
     // Properties to communicate with Rust
     in-out property <[StandardListViewItem]> playlists: [];
+    in-out property <[bool]> playlist_is_remote: [];
+    in-out property <[bool]> playlist_can_sync_opensubsonic: [];
     in-out property <int> active_playlist_index: 0;
     in-out property <int> editing_playlist_index: -1;
+    in-out property <int> new_playlist_edit_index: -1;
     in-out property <[TrackRowData]> track_model: [];
     in-out property <int> playback_order_index: 0;
     in-out property <int> repeat_mode: 0; // 0: Off, 1: Playlist, 2: Track
@@ -5476,6 +5493,7 @@ export component AppWindow inherits Window {
     callback switch_playlist(int);
     callback rename_playlist(int, string);
     callback delete_playlist(int);
+    callback sync_playlist_to_opensubsonic(int);
     callback remote_detach_confirm(string);
     callback remote_detach_cancel(string);
     callback toggle_playlist_column(int);

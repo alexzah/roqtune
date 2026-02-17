@@ -73,6 +73,7 @@ pub struct PlaylistManager {
     last_remote_writeback_signature: HashMap<String, String>,
     remote_track_metadata_by_path: HashMap<PathBuf, protocol::TrackMetadataSummary>,
     backend_connection_states: HashMap<String, protocol::BackendConnectionState>,
+    unavailable_track_ids: HashSet<String>,
 }
 
 impl PlaylistManager {
@@ -120,6 +121,7 @@ impl PlaylistManager {
             last_remote_writeback_signature: HashMap::new(),
             remote_track_metadata_by_path: HashMap::new(),
             backend_connection_states: HashMap::new(),
+            unavailable_track_ids: HashSet::new(),
         }
     }
 
@@ -154,6 +156,254 @@ impl PlaylistManager {
             song_ids.push(locator.song_id);
         }
         Some(song_ids)
+    }
+
+    fn opensubsonic_sync_candidate_for_playlist(
+        &self,
+        playlist_id: &str,
+    ) -> Option<(String, Vec<String>)> {
+        if Self::remote_binding_from_playlist_id(playlist_id).is_some() {
+            return None;
+        }
+        let tracks = self.db_manager.get_tracks_for_playlist(playlist_id).ok()?;
+        if tracks.is_empty() {
+            return None;
+        }
+        let mut profile_id: Option<String> = None;
+        let mut song_ids = Vec::with_capacity(tracks.len());
+        for track in tracks {
+            let locator = parse_opensubsonic_track_uri(track.path.as_path())?;
+            if let Some(existing_profile_id) = profile_id.as_ref() {
+                if existing_profile_id != &locator.profile_id {
+                    return None;
+                }
+            } else {
+                profile_id = Some(locator.profile_id.clone());
+            }
+            song_ids.push(locator.song_id);
+        }
+        Some((profile_id?, song_ids))
+    }
+
+    fn compute_opensubsonic_sync_eligible_playlist_ids(
+        &self,
+        playlists: &[protocol::PlaylistInfo],
+    ) -> Vec<String> {
+        playlists
+            .iter()
+            .filter_map(|playlist| {
+                self.opensubsonic_sync_candidate_for_playlist(&playlist.id)
+                    .map(|_| playlist.id.clone())
+            })
+            .collect()
+    }
+
+    fn emit_opensubsonic_sync_eligible_playlists(&self, playlists: &[protocol::PlaylistInfo]) {
+        let playlist_ids = self.compute_opensubsonic_sync_eligible_playlist_ids(playlists);
+        let _ = self.bus_producer.send(protocol::Message::Playlist(
+            protocol::PlaylistMessage::OpenSubsonicSyncEligiblePlaylists(playlist_ids),
+        ));
+    }
+
+    fn playlist_name_by_id(&self, playlist_id: &str) -> Option<String> {
+        self.db_manager
+            .get_all_playlists()
+            .ok()
+            .and_then(|playlists| {
+                playlists
+                    .into_iter()
+                    .find(|playlist| playlist.id == playlist_id)
+                    .map(|playlist| playlist.name)
+            })
+    }
+
+    fn emit_remote_writeback_state(
+        &self,
+        playlist_id: String,
+        success: bool,
+        error: Option<String>,
+    ) {
+        let _ = self.bus_producer.send(protocol::Message::Playlist(
+            protocol::PlaylistMessage::RemotePlaylistWritebackState {
+                playlist_id,
+                success,
+                error,
+            },
+        ));
+    }
+
+    fn emit_track_unavailable_metadata(&self, track_id: &str) {
+        let summary = protocol::TrackMetadataSummary {
+            title: "Remote track unavailable".to_string(),
+            artist: String::new(),
+            album: String::new(),
+            album_artist: String::new(),
+            date: String::new(),
+            genre: String::new(),
+            year: String::new(),
+            track_number: String::new(),
+        };
+        let _ = self.bus_producer.send(protocol::Message::Playlist(
+            protocol::PlaylistMessage::TrackMetadataBatchUpdated {
+                updates: vec![protocol::TrackMetadataPatch {
+                    track_id: track_id.to_string(),
+                    summary,
+                }],
+            },
+        ));
+    }
+
+    fn reconcile_editing_playlist_remote_availability(&mut self) {
+        let mut remote_track_ids: HashSet<String> = HashSet::new();
+        let mut remote_unavailable_ids: HashSet<String> = HashSet::new();
+        let mut unavailable_reasons: HashMap<String, String> = HashMap::new();
+
+        for index in 0..self.editing_playlist.num_tracks() {
+            let track = self.editing_playlist.get_track(index);
+            let Some(locator) = parse_opensubsonic_track_uri(track.path.as_path()) else {
+                continue;
+            };
+            remote_track_ids.insert(track.id.clone());
+            let connected = matches!(
+                self.backend_connection_states.get(&locator.profile_id),
+                Some(protocol::BackendConnectionState::Connected)
+            );
+            if !connected {
+                remote_unavailable_ids.insert(track.id.clone());
+                unavailable_reasons.insert(
+                    track.id.clone(),
+                    format!(
+                        "OpenSubsonic profile '{}' is disabled or disconnected",
+                        locator.profile_id
+                    ),
+                );
+            }
+        }
+
+        for track_id in remote_track_ids {
+            if remote_unavailable_ids.contains(&track_id) {
+                self.unavailable_track_ids.insert(track_id.clone());
+                self.emit_track_unavailable_metadata(&track_id);
+                let reason = unavailable_reasons
+                    .get(&track_id)
+                    .cloned()
+                    .unwrap_or_else(|| "Remote track unavailable".to_string());
+                let _ = self.bus_producer.send(protocol::Message::Playlist(
+                    protocol::PlaylistMessage::TrackUnavailable {
+                        id: track_id,
+                        reason,
+                    },
+                ));
+            } else {
+                self.unavailable_track_ids.remove(&track_id);
+            }
+        }
+    }
+
+    fn find_playable_index_from(&mut self, start_index: usize, forward: bool) -> Option<usize> {
+        if self.playback_playlist.num_tracks() == 0
+            || start_index >= self.playback_playlist.num_tracks()
+        {
+            return None;
+        }
+        let mut cursor = start_index;
+        let mut visited: HashSet<usize> = HashSet::new();
+        loop {
+            if !visited.insert(cursor) {
+                return None;
+            }
+            let track_id = self.playback_playlist.get_track_id(cursor);
+            if !self.unavailable_track_ids.contains(&track_id) {
+                return Some(cursor);
+            }
+            let next = if forward {
+                self.playback_playlist.get_next_track_index(cursor)
+            } else {
+                self.playback_playlist.get_previous_track_index(cursor)
+            };
+            let next = next?;
+            if next >= self.playback_playlist.num_tracks() {
+                return None;
+            }
+            cursor = next;
+        }
+    }
+
+    fn stop_playback_after_unavailable(&mut self) {
+        self.pending_start_track_id = None;
+        self.started_track_id = None;
+        self.playback_playlist.set_playing(false);
+        self.playback_playlist.set_playing_track_index(None);
+        let _ = self
+            .bus_producer
+            .send(protocol::Message::Playback(protocol::PlaybackMessage::Stop));
+        self.broadcast_playlist_changed();
+    }
+
+    fn handle_track_unavailable(&mut self, track_id: String, reason: String) {
+        if !self.unavailable_track_ids.insert(track_id.clone()) {
+            return;
+        }
+        info!(
+            "PlaylistManager: Marking track unavailable id={} reason={}",
+            track_id, reason
+        );
+        self.emit_track_unavailable_metadata(&track_id);
+
+        let current_track_id = self
+            .playback_playlist
+            .get_playing_track_index()
+            .and_then(|index| {
+                (index < self.playback_playlist.num_tracks())
+                    .then(|| self.playback_playlist.get_track_id(index))
+            });
+        if current_track_id.as_deref() != Some(track_id.as_str()) {
+            return;
+        }
+        let Some(current_index) = self.playback_playlist.get_playing_track_index() else {
+            return;
+        };
+        let next_index = self
+            .playback_playlist
+            .get_next_track_index(current_index)
+            .and_then(|index| self.find_playable_index_from(index, true));
+        if let Some(next_index) = next_index {
+            self.play_playback_track(next_index, true);
+            return;
+        }
+        self.stop_playback_after_unavailable();
+    }
+
+    fn request_opensubsonic_sync_for_playlist(&mut self, playlist_id: &str) {
+        let Some((profile_id, song_ids)) =
+            self.opensubsonic_sync_candidate_for_playlist(playlist_id)
+        else {
+            self.emit_remote_writeback_state(
+                playlist_id.to_string(),
+                false,
+                Some(
+                    "Playlist is not eligible for OpenSubsonic sync (requires only OpenSubsonic tracks from one profile)"
+                        .to_string(),
+                ),
+            );
+            return;
+        };
+        let Some(name) = self.playlist_name_by_id(playlist_id) else {
+            self.emit_remote_writeback_state(
+                playlist_id.to_string(),
+                false,
+                Some("Playlist could not be found".to_string()),
+            );
+            return;
+        };
+        let _ = self.bus_producer.send(protocol::Message::Integration(
+            protocol::IntegrationMessage::CreateOpenSubsonicPlaylistFromLocal {
+                profile_id,
+                local_playlist_id: playlist_id.to_string(),
+                name,
+                track_song_ids: song_ids,
+            },
+        ));
     }
 
     fn should_warn_before_mixed_insert(&self, paths: &[PathBuf]) -> bool {
@@ -293,6 +543,82 @@ impl PlaylistManager {
         }
     }
 
+    fn promote_local_playlist_to_remote_binding(
+        &mut self,
+        local_playlist_id: &str,
+        profile_id: &str,
+        remote_playlist_id: &str,
+    ) -> Result<String, String> {
+        let remote_bound_playlist_id =
+            format!("remote:opensubsonic:{}:{}", profile_id, remote_playlist_id);
+        let playlist_name = self
+            .playlist_name_by_id(local_playlist_id)
+            .unwrap_or_else(|| "Remote Playlist".to_string());
+        let existing_tracks = self
+            .db_manager
+            .get_tracks_for_playlist(local_playlist_id)
+            .map_err(|error| format!("failed to read local playlist tracks: {error}"))?;
+
+        let existing_playlists = self
+            .db_manager
+            .get_all_playlists()
+            .map_err(|error| format!("failed to list playlists: {error}"))?;
+        if existing_playlists
+            .iter()
+            .any(|playlist| playlist.id == remote_bound_playlist_id)
+        {
+            let existing_remote_tracks = self
+                .db_manager
+                .get_tracks_for_playlist(&remote_bound_playlist_id)
+                .map_err(|error| format!("failed to inspect existing remote playlist: {error}"))?;
+            for track in existing_remote_tracks {
+                let _ = self.db_manager.delete_track(&track.id);
+            }
+            let _ = self
+                .db_manager
+                .rename_playlist(&remote_bound_playlist_id, &playlist_name);
+        } else {
+            self.db_manager
+                .create_playlist(&remote_bound_playlist_id, &playlist_name)
+                .map_err(|error| format!("failed to create remote-bound playlist: {error}"))?;
+        }
+
+        let pending: Vec<(String, PathBuf)> = existing_tracks
+            .into_iter()
+            .map(|track| (Uuid::new_v4().to_string(), track.path))
+            .collect();
+        if !pending.is_empty() {
+            self.db_manager
+                .save_tracks_batch(&remote_bound_playlist_id, &pending, 0)
+                .map_err(|error| {
+                    format!("failed to store remote-bound playlist tracks: {error}")
+                })?;
+        }
+
+        self.db_manager
+            .delete_playlist(local_playlist_id)
+            .map_err(|error| format!("failed to remove local playlist binding: {error}"))?;
+
+        if matches!(
+            self.playback_queue_source.as_ref(),
+            Some(protocol::PlaybackQueueSource::Playlist { playlist_id })
+                if playlist_id == local_playlist_id
+        ) {
+            self.playback_queue_source = None;
+        }
+
+        if self.active_playlist_id == local_playlist_id {
+            self.active_playlist_id = remote_bound_playlist_id.clone();
+            self.reload_editing_playlist_from_active();
+        }
+        self.last_remote_writeback_signature
+            .remove(local_playlist_id);
+        self.last_remote_writeback_signature
+            .remove(&remote_bound_playlist_id);
+
+        Ok(remote_bound_playlist_id)
+    }
+
     fn start_playback_queue(&mut self, request: protocol::PlaybackQueueRequest) {
         if request.tracks.is_empty() {
             return;
@@ -313,10 +639,14 @@ impl PlaylistManager {
         playback_playlist.force_re_randomize_shuffle();
         self.playback_playlist = playback_playlist;
         self.playback_queue_source = Some(request.source);
-        self.play_playback_track(clamped_start);
+        self.play_playback_track(clamped_start, true);
     }
 
-    fn play_playback_track(&mut self, index: usize) {
+    fn play_playback_track(&mut self, index: usize, forward: bool) {
+        let Some(index) = self.find_playable_index_from(index, forward) else {
+            self.stop_playback_after_unavailable();
+            return;
+        };
         if index >= self.playback_playlist.num_tracks() {
             debug!("play_playback_track: Index {} out of bounds", index);
             return;
@@ -560,6 +890,38 @@ impl PlaylistManager {
         self.cache_tracks(play_immediately);
     }
 
+    fn handle_technical_metadata_changed(&mut self, meta: protocol::TechnicalMetadata) {
+        debug!(
+            "PlaylistManager: Received technical metadata changed for track: {:?}",
+            meta
+        );
+        self.current_track_duration_ms = meta.duration_ms;
+        let source_rate_supported = self.verified_output_rates.contains(&meta.sample_rate_hz);
+        let should_switch = self.playback_route == protocol::PlaybackRoute::Local
+            && self.sample_rate_auto_enabled
+            && self.pending_rate_switch.is_none()
+            && self.current_output_rate_hz != Some(meta.sample_rate_hz)
+            && source_rate_supported;
+        if should_switch {
+            debug!(
+                "PlaylistManager: Source {} Hz differs from output {:?}; requesting runtime switch before continuing playback",
+                meta.sample_rate_hz, self.current_output_rate_hz
+            );
+            self.clear_cached_tracks();
+            self.request_runtime_output_rate_switch(meta.sample_rate_hz, true);
+        } else {
+            debug!(
+                "PlaylistManager: Keeping output {:?} for source {} Hz (route={:?}, auto={}, pending={:?}, source_supported={})",
+                self.current_output_rate_hz,
+                meta.sample_rate_hz,
+                self.playback_route,
+                self.sample_rate_auto_enabled,
+                self.pending_rate_switch,
+                source_rate_supported
+            );
+        }
+    }
+
     fn broadcast_active_playlist_column_order(&self) {
         match self
             .db_manager
@@ -610,12 +972,14 @@ impl PlaylistManager {
             .collect()
     }
 
-    fn broadcast_playlist_state_snapshot(&self, playlists: Vec<protocol::PlaylistInfo>) {
+    fn broadcast_playlist_state_snapshot(&mut self, playlists: Vec<protocol::PlaylistInfo>) {
         let restored_tracks = self.snapshot_editing_playlist_tracks();
         let _ = self.bus_producer.send(protocol::Message::Playlist(
             protocol::PlaylistMessage::PlaylistRestored(restored_tracks),
         ));
         self.emit_metadata_updates_for_tracks(&self.snapshot_editing_playlist_tracks());
+        self.reconcile_editing_playlist_remote_availability();
+        self.emit_opensubsonic_sync_eligible_playlists(&playlists);
         let _ = self.bus_producer.send(protocol::Message::Playlist(
             protocol::PlaylistMessage::PlaylistsRestored(playlists),
         ));
@@ -634,7 +998,6 @@ impl PlaylistManager {
         playlists: Vec<protocol::RemotePlaylistSnapshot>,
     ) {
         self.suppress_remote_writeback = true;
-        self.remove_remote_metadata_for_profile(profile_id);
         let existing_before_sync = self.db_manager.get_all_playlists().unwrap_or_default();
         let mut remote_playlist_ids = HashSet::new();
         for remote_playlist in playlists {
@@ -735,6 +1098,26 @@ impl PlaylistManager {
             self.broadcast_selection_changed();
         }
         self.suppress_remote_writeback = false;
+    }
+
+    fn normalized_playlist_name(name: &str) -> String {
+        name.trim().to_string()
+    }
+
+    fn generate_unique_playlist_name(existing_names: &[String], requested_name: &str) -> String {
+        let requested = Self::normalized_playlist_name(requested_name);
+        if !requested.is_empty() && !existing_names.iter().any(|name| name == &requested) {
+            return requested;
+        }
+
+        let mut suffix = 1usize;
+        loop {
+            let candidate = format!("Playlist {suffix}");
+            if !existing_names.iter().any(|name| name == &candidate) {
+                return candidate;
+            }
+            suffix = suffix.saturating_add(1);
+        }
     }
 
     /// Intentional paste behavior:
@@ -1360,7 +1743,7 @@ impl PlaylistManager {
                             if let Some(next_index) =
                                 self.playback_playlist.get_next_track_index(current_index)
                             {
-                                self.play_playback_track(next_index);
+                                self.play_playback_track(next_index, true);
                             }
                         }
                     }
@@ -1375,7 +1758,7 @@ impl PlaylistManager {
                                 .playback_playlist
                                 .get_previous_track_index(current_index)
                             {
-                                self.play_playback_track(prev_index);
+                                self.play_playback_track(prev_index, false);
                             }
                         }
                     }
@@ -1407,13 +1790,7 @@ impl PlaylistManager {
                             let mut advanced = false;
                             if let Some(index) = index {
                                 if index < self.playback_playlist.num_tracks() {
-                                    self.playback_playlist.set_playing_track_index(Some(index));
-                                    self.playback_playlist.set_selected_indices(vec![index]);
-                                    if self.playback_route == protocol::PlaybackRoute::Cast {
-                                        self.play_playback_track(index);
-                                    } else {
-                                        self.cache_tracks(false);
-                                    }
+                                    self.play_playback_track(index, true);
                                     advanced = true;
                                 }
                             }
@@ -1536,6 +1913,7 @@ impl PlaylistManager {
                         for index in indices {
                             if index < self.editing_playlist.num_tracks() {
                                 let id = self.editing_playlist.get_track_id(index);
+                                self.unavailable_track_ids.remove(&id);
 
                                 if let Err(e) = self.db_manager.delete_track(&id) {
                                     error!("Failed to delete track from database: {}", e);
@@ -1779,6 +2157,7 @@ impl PlaylistManager {
                             .into_iter()
                             .filter(|old_id| !new_id_set.contains(old_id))
                         {
+                            self.unavailable_track_ids.remove(&removed_id);
                             if let Err(err) = self.db_manager.delete_track(&removed_id) {
                                 error!("Failed to delete track from database: {}", err);
                             }
@@ -1800,12 +2179,25 @@ impl PlaylistManager {
                     protocol::Message::Playlist(protocol::PlaylistMessage::CreatePlaylist {
                         name,
                     }) => {
+                        let existing_playlist_names = self
+                            .db_manager
+                            .get_all_playlists()
+                            .unwrap_or_default()
+                            .into_iter()
+                            .map(|playlist| playlist.name)
+                            .collect::<Vec<_>>();
+                        let resolved_name =
+                            Self::generate_unique_playlist_name(&existing_playlist_names, &name);
                         let id = Uuid::new_v4().to_string();
-                        debug!("PlaylistManager: Creating playlist {} ({})", name, id);
-                        if let Err(e) = self.db_manager.create_playlist(&id, &name) {
+                        debug!(
+                            "PlaylistManager: Creating playlist {} ({})",
+                            resolved_name, id
+                        );
+                        if let Err(e) = self.db_manager.create_playlist(&id, &resolved_name) {
                             error!("Failed to create playlist in database: {}", e);
                         } else {
                             let playlists = self.db_manager.get_all_playlists().unwrap_or_default();
+                            self.emit_opensubsonic_sync_eligible_playlists(&playlists);
                             let _ = self.bus_producer.send(protocol::Message::Playlist(
                                 protocol::PlaylistMessage::PlaylistsRestored(playlists),
                             ));
@@ -1826,11 +2218,25 @@ impl PlaylistManager {
                         id,
                         name,
                     }) => {
-                        debug!("PlaylistManager: Renaming playlist {} to {}", id, name);
-                        if let Err(e) = self.db_manager.rename_playlist(&id, &name) {
+                        let existing_playlist_names = self
+                            .db_manager
+                            .get_all_playlists()
+                            .unwrap_or_default()
+                            .into_iter()
+                            .filter(|playlist| playlist.id != id)
+                            .map(|playlist| playlist.name)
+                            .collect::<Vec<_>>();
+                        let resolved_name =
+                            Self::generate_unique_playlist_name(&existing_playlist_names, &name);
+                        debug!(
+                            "PlaylistManager: Renaming playlist {} to {}",
+                            id, resolved_name
+                        );
+                        if let Err(e) = self.db_manager.rename_playlist(&id, &resolved_name) {
                             error!("Failed to rename playlist in database: {}", e);
                         } else {
                             let playlists = self.db_manager.get_all_playlists().unwrap_or_default();
+                            self.emit_opensubsonic_sync_eligible_playlists(&playlists);
                             let _ = self.bus_producer.send(protocol::Message::Playlist(
                                 protocol::PlaylistMessage::PlaylistsRestored(playlists),
                             ));
@@ -1846,6 +2252,23 @@ impl PlaylistManager {
                                 protocol::PlaylistMessage::DeletePlaylist { id },
                             ));
                         }
+                    }
+                    protocol::Message::Playlist(
+                        protocol::PlaylistMessage::SyncPlaylistToOpenSubsonicByIndex(index),
+                    ) => {
+                        let playlists = self.db_manager.get_all_playlists().unwrap_or_default();
+                        if let Some(playlist) = playlists.get(index) {
+                            let _ = self.bus_producer.send(protocol::Message::Playlist(
+                                protocol::PlaylistMessage::SyncPlaylistToOpenSubsonic {
+                                    id: playlist.id.clone(),
+                                },
+                            ));
+                        }
+                    }
+                    protocol::Message::Playlist(
+                        protocol::PlaylistMessage::SyncPlaylistToOpenSubsonic { id },
+                    ) => {
+                        self.request_opensubsonic_sync_for_playlist(&id);
                     }
                     protocol::Message::Playlist(protocol::PlaylistMessage::DeletePlaylist {
                         id,
@@ -1882,6 +2305,13 @@ impl PlaylistManager {
                                 }
                             }
 
+                            let _ = self.bus_producer.send(protocol::Message::Playlist(
+                                protocol::PlaylistMessage::OpenSubsonicSyncEligiblePlaylists(
+                                    self.compute_opensubsonic_sync_eligible_playlist_ids(
+                                        &playlists,
+                                    ),
+                                ),
+                            ));
                             let _ = self.bus_producer.send(protocol::Message::Playlist(
                                 protocol::PlaylistMessage::PlaylistsRestored(playlists),
                             ));
@@ -1944,6 +2374,7 @@ impl PlaylistManager {
                                 self.emit_metadata_updates_for_tracks(
                                     &self.snapshot_editing_playlist_tracks(),
                                 );
+                                self.reconcile_editing_playlist_remote_availability();
                             }
                             Err(e) => {
                                 error!("Failed to switch playlist: {}", e);
@@ -1965,6 +2396,7 @@ impl PlaylistManager {
                             self.backend_connection_states
                                 .insert(profile.profile_id, profile.connection_state);
                         }
+                        self.reconcile_editing_playlist_remote_availability();
                     }
                     protocol::Message::Playlist(
                         protocol::PlaylistMessage::RequestPlaylistState,
@@ -1974,10 +2406,13 @@ impl PlaylistManager {
                     }
                     protocol::Message::Integration(
                         protocol::IntegrationMessage::OpenSubsonicLibraryTracksUpdated {
+                            profile_id,
                             tracks,
-                            ..
                         },
                     ) => {
+                        if tracks.is_empty() {
+                            self.remove_remote_metadata_for_profile(&profile_id);
+                        }
                         for track in tracks {
                             self.remote_track_metadata_by_path.insert(
                                 track.path,
@@ -1993,6 +2428,9 @@ impl PlaylistManager {
                                 },
                             );
                         }
+                        self.emit_metadata_updates_for_tracks(
+                            &self.snapshot_editing_playlist_tracks(),
+                        );
                     }
                     protocol::Message::Integration(
                         protocol::IntegrationMessage::OpenSubsonicPlaylistsUpdated {
@@ -2016,6 +2454,62 @@ impl PlaylistManager {
                                 error,
                             },
                         ));
+                    }
+                    protocol::Message::Integration(
+                        protocol::IntegrationMessage::OpenSubsonicPlaylistCreateResult {
+                            profile_id,
+                            local_playlist_id,
+                            remote_playlist_id,
+                            success,
+                            error,
+                        },
+                    ) => {
+                        if !success {
+                            self.emit_remote_writeback_state(local_playlist_id, false, error);
+                            continue;
+                        }
+                        let Some(remote_playlist_id) = remote_playlist_id else {
+                            self.emit_remote_writeback_state(
+                                local_playlist_id,
+                                false,
+                                Some(
+                                    "OpenSubsonic did not return a playlist id for created playlist"
+                                        .to_string(),
+                                ),
+                            );
+                            continue;
+                        };
+                        match self.promote_local_playlist_to_remote_binding(
+                            &local_playlist_id,
+                            &profile_id,
+                            &remote_playlist_id,
+                        ) {
+                            Ok(remote_bound_playlist_id) => {
+                                let playlists =
+                                    self.db_manager.get_all_playlists().unwrap_or_default();
+                                self.broadcast_playlist_state_snapshot(playlists);
+                                self.broadcast_playlist_changed();
+                                self.broadcast_selection_changed();
+                                let _ = self.bus_producer.send(protocol::Message::Integration(
+                                    protocol::IntegrationMessage::SyncBackendProfile { profile_id },
+                                ));
+                                self.emit_remote_writeback_state(
+                                    remote_bound_playlist_id,
+                                    true,
+                                    None,
+                                );
+                            }
+                            Err(promotion_error) => {
+                                self.emit_remote_writeback_state(
+                                    local_playlist_id,
+                                    false,
+                                    Some(format!(
+                                        "Failed to convert playlist to remote binding: {}",
+                                        promotion_error
+                                    )),
+                                );
+                            }
+                        }
                     }
                     protocol::Message::Playlist(
                         protocol::PlaylistMessage::SetActivePlaylistColumnOrder(column_order),
@@ -2169,11 +2663,13 @@ impl PlaylistManager {
                     protocol::Message::Playback(
                         protocol::PlaybackMessage::TechnicalMetadataChanged(meta),
                     ) => {
-                        debug!(
-                            "PlaylistManager: Received technical metadata changed for track: {:?}",
-                            meta
-                        );
-                        self.current_track_duration_ms = meta.duration_ms;
+                        self.handle_technical_metadata_changed(meta);
+                    }
+                    protocol::Message::Playlist(protocol::PlaylistMessage::TrackUnavailable {
+                        id,
+                        reason,
+                    }) => {
+                        self.handle_track_unavailable(id, reason);
                     }
                     protocol::Message::Playback(protocol::PlaybackMessage::PlaybackProgress {
                         elapsed_ms,
@@ -2701,6 +3197,28 @@ mod tests {
         assert_eq!(PlaylistManager::paste_insert_gap(&[0, 2, 1], 5), 3);
         assert_eq!(PlaylistManager::paste_insert_gap(&[3], 4), 4);
         assert_eq!(PlaylistManager::paste_insert_gap(&[7, 8], 4), 4);
+    }
+
+    #[test]
+    fn test_generate_unique_playlist_name_prefers_requested_name_when_available() {
+        let existing = vec!["Default".to_string(), "Playlist 1".to_string()];
+        let resolved = PlaylistManager::generate_unique_playlist_name(&existing, "Roadtrip");
+        assert_eq!(resolved, "Roadtrip");
+    }
+
+    #[test]
+    fn test_generate_unique_playlist_name_falls_back_to_non_conflicting_default() {
+        let existing = vec![
+            "Default".to_string(),
+            "Playlist 1".to_string(),
+            "Playlist 2".to_string(),
+        ];
+        let empty_requested = PlaylistManager::generate_unique_playlist_name(&existing, "");
+        assert_eq!(empty_requested, "Playlist 3");
+
+        let duplicate_requested =
+            PlaylistManager::generate_unique_playlist_name(&existing, "Playlist 2");
+        assert_eq!(duplicate_requested, "Playlist 3");
     }
 
     #[test]
@@ -4340,5 +4858,102 @@ mod tests {
                 .unwrap_or(false),
             "DecodeTracks should not be queued before output-rate switch ack"
         );
+    }
+
+    #[test]
+    fn test_technical_metadata_switches_output_rate_even_after_track_started() {
+        let (mut manager, mut receiver) = make_direct_manager();
+        manager.sample_rate_auto_enabled = true;
+        manager.verified_output_rates = vec![44_100, 48_000, 192_000];
+        manager.current_output_rate_hz = Some(192_000);
+        manager.playback_playlist = Playlist::new();
+        manager.playback_playlist.add_track(Track {
+            id: "remote_t0".to_string(),
+            path: PathBuf::from(
+                "rtq://open_subsonic/test-profile/song-001?endpoint=https%3A%2F%2Fmusic.example.com&username=alice&format=flac",
+            ),
+        });
+        manager.playback_playlist.set_playing_track_index(Some(0));
+        manager.playback_playlist.set_playing(true);
+        manager.started_track_id = Some("remote_t0".to_string());
+
+        manager.handle_technical_metadata_changed(protocol::TechnicalMetadata {
+            format: "FLAC".to_string(),
+            bitrate_kbps: 850,
+            sample_rate_hz: 44_100,
+            channel_count: 2,
+            duration_ms: 123_000,
+            bits_per_sample: 16,
+        });
+
+        let _ = wait_for_message(&mut receiver, Duration::from_secs(1), |message| {
+            matches!(
+                message,
+                protocol::Message::Audio(protocol::AudioMessage::StopDecoding)
+            )
+        });
+        let message = wait_for_message(&mut receiver, Duration::from_secs(1), |message| {
+            matches!(
+                message,
+                protocol::Message::Config(protocol::ConfigMessage::SetRuntimeOutputRate { .. })
+            )
+        });
+        let protocol::Message::Config(protocol::ConfigMessage::SetRuntimeOutputRate {
+            sample_rate_hz,
+            ..
+        }) = message
+        else {
+            panic!("expected runtime output-rate switch request");
+        };
+        assert_eq!(sample_rate_hz, 44_100);
+        assert_eq!(manager.pending_rate_switch, Some(44_100));
+        assert!(manager.pending_rate_switch_play_immediately);
+    }
+
+    #[test]
+    fn test_reconcile_marks_legacy_remote_track_unavailable_when_disconnected() {
+        let (mut manager, mut receiver) = make_direct_manager();
+        manager.editing_playlist = Playlist::new();
+        manager.editing_playlist.add_track(Track {
+            id: "remote_legacy".to_string(),
+            path: PathBuf::from(
+                "rtq://open_subsonic/test-profile/song-001?ENDPOINT=https%3A%2F%2Fmusic.example.com&USERNAME=alice&FORMAT=flac",
+            ),
+        });
+
+        manager.reconcile_editing_playlist_remote_availability();
+
+        let metadata_message = wait_for_message(&mut receiver, Duration::from_secs(1), |message| {
+            matches!(
+                message,
+                protocol::Message::Playlist(
+                    protocol::PlaylistMessage::TrackMetadataBatchUpdated { .. }
+                )
+            )
+        });
+        let protocol::Message::Playlist(protocol::PlaylistMessage::TrackMetadataBatchUpdated {
+            updates,
+        }) = metadata_message
+        else {
+            panic!("expected TrackMetadataBatchUpdated");
+        };
+        assert_eq!(updates.len(), 1);
+        assert_eq!(updates[0].track_id, "remote_legacy");
+        assert_eq!(updates[0].summary.title, "Remote track unavailable");
+
+        let unavailable_message =
+            wait_for_message(&mut receiver, Duration::from_secs(1), |message| {
+                matches!(
+                    message,
+                    protocol::Message::Playlist(protocol::PlaylistMessage::TrackUnavailable { .. })
+                )
+            });
+        let protocol::Message::Playlist(protocol::PlaylistMessage::TrackUnavailable { id, .. }) =
+            unavailable_message
+        else {
+            panic!("expected TrackUnavailable");
+        };
+        assert_eq!(id, "remote_legacy");
+        assert!(manager.unavailable_track_ids.contains("remote_legacy"));
     }
 }

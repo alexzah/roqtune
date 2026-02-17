@@ -103,6 +103,10 @@ pub enum PlaylistMessage {
     TrackMetadataBatchUpdated {
         updates: Vec<TrackMetadataPatch>,
     },
+    TrackUnavailable {
+        id: String,
+        reason: String,
+    },
     OpenPlaylistSearch,
     ClosePlaylistSearch,
     SetPlaylistSearchQuery(String),
@@ -133,12 +137,17 @@ pub enum PlaylistMessage {
         id: String,
     },
     DeletePlaylistByIndex(usize),
+    SyncPlaylistToOpenSubsonicByIndex(usize),
+    SyncPlaylistToOpenSubsonic {
+        id: String,
+    },
     SwitchPlaylist {
         id: String,
     },
     SwitchPlaylistByIndex(usize),
     RequestPlaylistState,
     PlaylistsRestored(Vec<PlaylistInfo>),
+    OpenSubsonicSyncEligiblePlaylists(Vec<String>),
     ActivePlaylistChanged(String),
     ActivePlaylistColumnOrder(Option<Vec<String>>),
     SetActivePlaylistColumnOrder(Vec<String>),
@@ -929,8 +938,21 @@ pub enum IntegrationMessage {
         local_playlist_id: String,
         track_song_ids: Vec<String>,
     },
+    CreateOpenSubsonicPlaylistFromLocal {
+        profile_id: String,
+        local_playlist_id: String,
+        name: String,
+        track_song_ids: Vec<String>,
+    },
     OpenSubsonicPlaylistWritebackResult {
         local_playlist_id: String,
+        success: bool,
+        error: Option<String>,
+    },
+    OpenSubsonicPlaylistCreateResult {
+        profile_id: String,
+        local_playlist_id: String,
+        remote_playlist_id: Option<String>,
         success: bool,
         error: Option<String>,
     },

@@ -413,6 +413,66 @@ impl IntegrationManager {
         }
     }
 
+    fn create_playlist_from_local(
+        &mut self,
+        profile_id: &str,
+        local_playlist_id: &str,
+        name: &str,
+        track_song_ids: Vec<String>,
+    ) {
+        let auth = match self.profile_auth(profile_id) {
+            Ok(auth) => auth,
+            Err(error) => {
+                let _ = self.bus_producer.send(Message::Integration(
+                    IntegrationMessage::OpenSubsonicPlaylistCreateResult {
+                        profile_id: profile_id.to_string(),
+                        local_playlist_id: local_playlist_id.to_string(),
+                        remote_playlist_id: None,
+                        success: false,
+                        error: Some(error),
+                    },
+                ));
+                return;
+            }
+        };
+        let result = self
+            .opensubsonic_adapter
+            .create_playlist(&auth, name, &track_song_ids);
+        match result {
+            Ok(remote_playlist_id) => {
+                debug!(
+                    "IntegrationManager: OpenSubsonic playlist create succeeded for '{}'",
+                    local_playlist_id
+                );
+                let _ = self.bus_producer.send(Message::Integration(
+                    IntegrationMessage::OpenSubsonicPlaylistCreateResult {
+                        profile_id: profile_id.to_string(),
+                        local_playlist_id: local_playlist_id.to_string(),
+                        remote_playlist_id: Some(remote_playlist_id),
+                        success: true,
+                        error: None,
+                    },
+                ));
+            }
+            Err(error) => {
+                self.emit_operation_failed(
+                    Some(profile_id.to_string()),
+                    "playlist_create",
+                    error.clone(),
+                );
+                let _ = self.bus_producer.send(Message::Integration(
+                    IntegrationMessage::OpenSubsonicPlaylistCreateResult {
+                        profile_id: profile_id.to_string(),
+                        local_playlist_id: local_playlist_id.to_string(),
+                        remote_playlist_id: None,
+                        success: false,
+                        error: Some(error),
+                    },
+                ));
+            }
+        }
+    }
+
     /// Starts the blocking event loop.
     pub fn run(&mut self) {
         loop {
@@ -463,6 +523,21 @@ impl IntegrationManager {
                         track_song_ids,
                     );
                 }
+                Ok(Message::Integration(
+                    IntegrationMessage::CreateOpenSubsonicPlaylistFromLocal {
+                        profile_id,
+                        local_playlist_id,
+                        name,
+                        track_song_ids,
+                    },
+                )) => {
+                    self.create_playlist_from_local(
+                        &profile_id,
+                        &local_playlist_id,
+                        &name,
+                        track_song_ids,
+                    );
+                }
                 Ok(Message::Integration(IntegrationMessage::SetBackendConnectionState {
                     profile_id,
                     state,
@@ -480,6 +555,9 @@ impl IntegrationManager {
                 }))
                 | Ok(Message::Integration(
                     IntegrationMessage::OpenSubsonicPlaylistWritebackResult { .. },
+                ))
+                | Ok(Message::Integration(
+                    IntegrationMessage::OpenSubsonicPlaylistCreateResult { .. },
                 ))
                 | Ok(_) => {}
                 Err(tokio::sync::broadcast::error::RecvError::Lagged(skipped)) => {

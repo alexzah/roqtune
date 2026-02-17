@@ -6287,10 +6287,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let bus_sender_clone = bus_sender.clone();
     ui.on_create_playlist(move || {
         debug!("Create playlist requested");
-        // For now let's just create one with a default name.
-        // We could add a dialog later if the framework supports it easily or just prompt in CLI.
         let _ = bus_sender_clone.send(Message::Playlist(PlaylistMessage::CreatePlaylist {
-            name: "New Playlist".to_string(),
+            name: String::new(),
         }));
     });
 
@@ -6317,6 +6315,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let _ = bus_sender_clone.send(Message::Playlist(PlaylistMessage::DeletePlaylistByIndex(
             index as usize,
         )));
+    });
+
+    let bus_sender_clone = bus_sender.clone();
+    ui.on_sync_playlist_to_opensubsonic(move |index| {
+        debug!("Sync playlist to OpenSubsonic requested: index={}", index);
+        let _ = bus_sender_clone.send(Message::Playlist(
+            PlaylistMessage::SyncPlaylistToOpenSubsonicByIndex(index as usize),
+        ));
     });
 
     // Setup playlist manager

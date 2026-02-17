@@ -16,6 +16,22 @@ fn strip_trailing_slash(endpoint: &str) -> String {
     endpoint.trim().trim_end_matches('/').to_string()
 }
 
+fn strip_opensubsonic_prefix(raw: &str) -> Option<&str> {
+    const PREFIXES: [&str; 2] = ["rtq://open_subsonic/", "rtq://opensubsonic/"];
+    for prefix in PREFIXES {
+        if let Some(rest) = raw.strip_prefix(prefix) {
+            return Some(rest);
+        }
+    }
+    let lower = raw.to_ascii_lowercase();
+    for prefix in PREFIXES {
+        if lower.starts_with(prefix) {
+            return Some(&raw[prefix.len()..]);
+        }
+    }
+    None
+}
+
 /// Encodes an OpenSubsonic track locator as a synthetic path URI.
 pub fn encode_opensubsonic_track_uri(
     profile_id: &str,
@@ -43,14 +59,14 @@ pub fn encode_opensubsonic_track_uri(
 
 /// Returns true if the provided path encodes a synthetic remote track URI.
 pub fn is_remote_track_path(path: &Path) -> bool {
-    parse_opensubsonic_track_uri(path).is_some()
+    path.to_str().and_then(strip_opensubsonic_prefix).is_some()
 }
 
 /// Parses a synthetic OpenSubsonic track URI from a path.
 pub fn parse_opensubsonic_track_uri(path: &Path) -> Option<OpenSubsonicTrackLocator> {
     let raw = path.to_str()?;
-    let rest = raw.strip_prefix("rtq://open_subsonic/")?;
-    let (path_part, query_part) = rest.split_once('?')?;
+    let rest = strip_opensubsonic_prefix(raw)?;
+    let (path_part, query_part) = rest.split_once('?').unwrap_or((rest, ""));
     let mut parts = path_part.splitn(2, '/');
     let profile_id = urlencoding::decode(parts.next()?).ok()?.to_string();
     let song_id = urlencoding::decode(parts.next()?).ok()?.to_string();
@@ -62,12 +78,18 @@ pub fn parse_opensubsonic_track_uri(path: &Path) -> Option<OpenSubsonicTrackLoca
     let mut username = String::new();
     let mut format_hint = None;
     for key_value in query_part.split('&') {
-        let (key, value) = key_value.split_once('=')?;
-        let decoded = urlencoding::decode(value).ok()?.to_string();
-        match key {
-            "endpoint" => endpoint = strip_trailing_slash(&decoded),
-            "username" => username = decoded.trim().to_string(),
-            "format" => {
+        if key_value.trim().is_empty() {
+            continue;
+        }
+        let (raw_key, raw_value) = key_value.split_once('=').unwrap_or((key_value, ""));
+        let key = raw_key.trim().to_ascii_lowercase();
+        let decoded = urlencoding::decode(raw_value)
+            .map(|value| value.to_string())
+            .unwrap_or_else(|_| raw_value.to_string());
+        match key.as_str() {
+            "endpoint" | "url" | "server" => endpoint = strip_trailing_slash(&decoded),
+            "username" | "user" | "u" => username = decoded.trim().to_string(),
+            "format" | "suffix" => {
                 let normalized = decoded.trim().to_ascii_lowercase();
                 if !normalized.is_empty() {
                     format_hint = Some(normalized);
@@ -75,9 +97,6 @@ pub fn parse_opensubsonic_track_uri(path: &Path) -> Option<OpenSubsonicTrackLoca
             }
             _ => {}
         }
-    }
-    if endpoint.is_empty() || username.is_empty() {
-        return None;
     }
 
     Some(OpenSubsonicTrackLocator {
@@ -127,5 +146,28 @@ mod tests {
         assert!(!is_remote_track_path(
             PathBuf::from("/music/local.flac").as_path()
         ));
+    }
+
+    #[test]
+    fn test_decode_accepts_legacy_uppercase_query_keys() {
+        let uri = "rtq://open_subsonic/home-profile/track-001?ENDPOINT=https%3A%2F%2Fmusic.example.com&USERNAME=alice&FORMAT=FLAC";
+        let decoded = parse_opensubsonic_track_uri(PathBuf::from(uri).as_path())
+            .expect("legacy uri should decode");
+        assert_eq!(decoded.profile_id, "home-profile");
+        assert_eq!(decoded.song_id, "track-001");
+        assert_eq!(decoded.endpoint, "https://music.example.com");
+        assert_eq!(decoded.username, "alice");
+        assert_eq!(decoded.format_hint.as_deref(), Some("flac"));
+    }
+
+    #[test]
+    fn test_decode_accepts_opensubsonic_host_variant() {
+        let uri = "rtq://opensubsonic/home-profile/track-001?endpoint=https%3A%2F%2Fmusic.example.com&username=alice";
+        let decoded = parse_opensubsonic_track_uri(PathBuf::from(uri).as_path())
+            .expect("opensubsonic host variant should decode");
+        assert_eq!(decoded.profile_id, "home-profile");
+        assert_eq!(decoded.song_id, "track-001");
+        assert_eq!(decoded.endpoint, "https://music.example.com");
+        assert_eq!(decoded.username, "alice");
     }
 }

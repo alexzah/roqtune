@@ -322,6 +322,32 @@ impl MediaBackendAdapter for OpenSubsonicAdapter {
         Ok(result)
     }
 
+    fn create_playlist(
+        &self,
+        profile: &BackendProfileAuth,
+        name: &str,
+        song_ids: &[String],
+    ) -> Result<String, String> {
+        let trimmed_name = name.trim();
+        if trimmed_name.is_empty() {
+            return Err("playlist name cannot be empty".to_string());
+        }
+
+        let mut params = vec![("name".to_string(), trimmed_name.to_string())];
+        for song_id in song_ids {
+            params.push(("songId".to_string(), song_id.clone()));
+        }
+
+        let payload = self.request_json(profile, "createPlaylist", &params)?;
+        payload
+            .get("subsonic-response")
+            .and_then(|value| value.get("playlist"))
+            .and_then(|value| value.get("id"))
+            .and_then(Value::as_str)
+            .map(ToOwned::to_owned)
+            .ok_or_else(|| "OpenSubsonic createPlaylist response missing playlist id".to_string())
+    }
+
     fn replace_playlist_tracks(
         &self,
         profile: &BackendProfileAuth,

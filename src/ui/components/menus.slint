@@ -4,10 +4,12 @@ import { AppIcons } from "../icons.slint";
 export component ContextMenu inherits PopupWindow {
     callback rename();
     callback delete();
+    callback sync-opensubsonic();
     in property <bool> is-playlist: false;
+    in property <bool> show-sync-item: false;
     private property <bool> dark: Palette.color-scheme == ColorScheme.dark;
-    width: 120px;
-    height: is-playlist ? 56px : 32px;
+    width: is-playlist && show-sync-item ? 190px : 120px;
+    height: is-playlist ? (show-sync-item ? 84px : 56px) : 32px;
 
     Rectangle {
         background: root.dark ? #333 : #f0f4fa;
@@ -31,6 +33,23 @@ export component ContextMenu inherits PopupWindow {
                 item-ta-rename := TouchArea {
                     clicked => {
                         root.rename();
+                    }
+                }
+            }
+            if is-playlist && show-sync-item : Rectangle {
+                height: 24px;
+                background: item-ta-sync.has-hover ? (root.dark ? #444 : #e4ecf6) : transparent;
+                border-radius: 2px;
+                Text {
+                    x: 8px;
+                    text: "Sync with OpenSubsonic";
+                    color: root.dark ? #b9d7f7 : #2d5f98;
+                    font-size: 13px;
+                    vertical-alignment: center;
+                }
+                item-ta-sync := TouchArea {
+                    clicked => {
+                        root.sync-opensubsonic();
                     }
                 }
             }
