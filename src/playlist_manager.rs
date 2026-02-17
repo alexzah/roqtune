@@ -408,6 +408,35 @@ impl PlaylistManager {
         }
     }
 
+    fn snapshot_editing_playlist_tracks(&self) -> Vec<protocol::RestoredTrack> {
+        (0..self.editing_playlist.num_tracks())
+            .map(|index| {
+                let track = self.editing_playlist.get_track(index);
+                protocol::RestoredTrack {
+                    id: track.id.clone(),
+                    path: track.path.clone(),
+                }
+            })
+            .collect()
+    }
+
+    fn broadcast_playlist_state_snapshot(&self, playlists: Vec<protocol::PlaylistInfo>) {
+        let restored_tracks = self.snapshot_editing_playlist_tracks();
+        let _ = self.bus_producer.send(protocol::Message::Playlist(
+            protocol::PlaylistMessage::PlaylistRestored(restored_tracks),
+        ));
+        let _ = self.bus_producer.send(protocol::Message::Playlist(
+            protocol::PlaylistMessage::PlaylistsRestored(playlists),
+        ));
+        if !self.active_playlist_id.is_empty() {
+            let _ = self.bus_producer.send(protocol::Message::Playlist(
+                protocol::PlaylistMessage::ActivePlaylistChanged(self.active_playlist_id.clone()),
+            ));
+            self.broadcast_active_playlist_column_order();
+            self.broadcast_active_playlist_column_width_overrides();
+        }
+    }
+
     fn paste_insert_gap(selected_indices: &[usize], playlist_len: usize) -> usize {
         selected_indices
             .iter()
@@ -654,13 +683,21 @@ impl PlaylistManager {
     /// Starts the blocking event loop for playlist messages and playback coordination.
     pub fn run(&mut self) {
         // Restore playlists from database
-        let playlists = match self.db_manager.get_all_playlists() {
+        let mut playlists = match self.db_manager.get_all_playlists() {
             Ok(p) => p,
             Err(e) => {
                 error!("Failed to get playlists from database: {}", e);
                 Vec::new()
             }
         };
+        if playlists.is_empty() {
+            let default_id = Uuid::new_v4().to_string();
+            if let Err(err) = self.db_manager.create_playlist(&default_id, "Default") {
+                error!("Failed to create default playlist at startup: {}", err);
+            } else {
+                playlists = self.db_manager.get_all_playlists().unwrap_or_default();
+            }
+        }
 
         if !playlists.is_empty() {
             self.active_playlist_id = playlists[0].id.clone();
@@ -670,6 +707,10 @@ impl PlaylistManager {
             );
 
             // Restore tracks for active playlist
+            self.editing_playlist = Playlist::new();
+            self.editing_playlist
+                .set_playback_order(self.playback_order);
+            self.editing_playlist.set_repeat_mode(self.repeat_mode);
             match self
                 .db_manager
                 .get_tracks_for_playlist(&self.active_playlist_id)
@@ -682,23 +723,12 @@ impl PlaylistManager {
                             id: track.id.clone(),
                         });
                     }
-                    let _ = self.bus_producer.send(protocol::Message::Playlist(
-                        protocol::PlaylistMessage::PlaylistRestored(tracks),
-                    ));
                 }
                 Err(e) => {
                     error!("Failed to restore tracks from database: {}", e);
                 }
             }
-
-            let _ = self.bus_producer.send(protocol::Message::Playlist(
-                protocol::PlaylistMessage::PlaylistsRestored(playlists),
-            ));
-            let _ = self.bus_producer.send(protocol::Message::Playlist(
-                protocol::PlaylistMessage::ActivePlaylistChanged(self.active_playlist_id.clone()),
-            ));
-            self.broadcast_active_playlist_column_order();
-            self.broadcast_active_playlist_column_width_overrides();
+            self.broadcast_playlist_state_snapshot(playlists);
         }
 
         loop {
@@ -1525,6 +1555,12 @@ impl PlaylistManager {
                         self.broadcast_playlist_changed();
                     }
                     protocol::Message::Playlist(
+                        protocol::PlaylistMessage::RequestPlaylistState,
+                    ) => {
+                        let playlists = self.db_manager.get_all_playlists().unwrap_or_default();
+                        self.broadcast_playlist_state_snapshot(playlists);
+                    }
+                    protocol::Message::Playlist(
                         protocol::PlaylistMessage::SetActivePlaylistColumnOrder(column_order),
                     ) => {
                         if self.active_playlist_id.is_empty() {
@@ -2178,6 +2214,49 @@ mod tests {
         assert_eq!(PlaylistManager::paste_insert_gap(&[0, 2, 1], 5), 3);
         assert_eq!(PlaylistManager::paste_insert_gap(&[3], 4), 4);
         assert_eq!(PlaylistManager::paste_insert_gap(&[7, 8], 4), 4);
+    }
+
+    #[test]
+    fn test_request_playlist_state_replays_current_snapshot() {
+        let mut harness = PlaylistManagerHarness::new();
+        harness.drain_messages();
+
+        harness.send(protocol::Message::Playlist(
+            protocol::PlaylistMessage::RequestPlaylistState,
+        ));
+
+        let start = Instant::now();
+        let timeout = Duration::from_secs(1);
+        let mut saw_playlists = false;
+        let mut saw_active = false;
+        let mut saw_tracks = false;
+        while start.elapsed() < timeout && !(saw_playlists && saw_active && saw_tracks) {
+            match harness.receiver.try_recv() {
+                Ok(protocol::Message::Playlist(protocol::PlaylistMessage::PlaylistsRestored(
+                    playlists,
+                ))) => {
+                    saw_playlists = !playlists.is_empty();
+                }
+                Ok(protocol::Message::Playlist(
+                    protocol::PlaylistMessage::ActivePlaylistChanged(id),
+                )) => {
+                    saw_active = id == harness.active_playlist_id;
+                }
+                Ok(protocol::Message::Playlist(protocol::PlaylistMessage::PlaylistRestored(
+                    _tracks,
+                ))) => {
+                    saw_tracks = true;
+                }
+                Ok(_) => {}
+                Err(TryRecvError::Empty) => thread::sleep(Duration::from_millis(5)),
+                Err(TryRecvError::Lagged(_)) => continue,
+                Err(TryRecvError::Closed) => break,
+            }
+        }
+
+        assert!(saw_playlists, "expected PlaylistsRestored snapshot");
+        assert!(saw_active, "expected ActivePlaylistChanged snapshot");
+        assert!(saw_tracks, "expected PlaylistRestored snapshot");
     }
 
     #[test]

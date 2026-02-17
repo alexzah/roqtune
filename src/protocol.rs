@@ -136,6 +136,7 @@ pub enum PlaylistMessage {
         id: String,
     },
     SwitchPlaylistByIndex(usize),
+    RequestPlaylistState,
     PlaylistsRestored(Vec<PlaylistInfo>),
     ActivePlaylistChanged(String),
     ActivePlaylistColumnOrder(Option<Vec<String>>),

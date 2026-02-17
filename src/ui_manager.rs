@@ -6234,6 +6234,9 @@ impl UiManager {
         self.sync_library_add_to_playlist_ui();
         self.sync_library_root_counts_to_ui();
         self.request_library_root_counts();
+        let _ = self.bus_sender.send(protocol::Message::Playlist(
+            protocol::PlaylistMessage::RequestPlaylistState,
+        ));
         self.sync_properties_action_state();
         self.sync_properties_dialog_ui();
         loop {

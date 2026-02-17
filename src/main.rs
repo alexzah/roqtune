@@ -2279,16 +2279,25 @@ fn persist_state_files_with_config_path(config: &Config, config_path: &Path) {
     persist_state_files(config, config_path, &layout_path);
 }
 
+fn system_layout_template_text() -> &'static str {
+    include_str!("../config/layout.system.toml")
+}
+
+fn load_system_layout_template() -> LayoutConfig {
+    toml::from_str(system_layout_template_text())
+        .expect("layout system template should parse into LayoutConfig")
+}
+
 fn load_layout_file(path: &Path) -> LayoutConfig {
     let layout_content = match std::fs::read_to_string(path) {
         Ok(content) => content,
         Err(err) => {
             warn!(
-                "Failed to read layout file {}. Using defaults. error={}",
+                "Failed to read layout file {}. Using layout system template. error={}",
                 path.display(),
                 err
             );
-            return LayoutConfig::default();
+            return load_system_layout_template();
         }
     };
 
@@ -2296,11 +2305,11 @@ fn load_layout_file(path: &Path) -> LayoutConfig {
         Ok(layout) => layout,
         Err(err) => {
             warn!(
-                "Failed to parse layout file {}. Using defaults. error={}",
+                "Failed to parse layout file {}. Using layout system template. error={}",
                 path.display(),
                 err
             );
-            LayoutConfig::default()
+            load_system_layout_template()
         }
     }
 }
@@ -2771,16 +2780,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     if !layout_file.exists() {
-        let default_layout = LayoutConfig::default();
         info!(
             "Layout file not found. Creating default layout file. path={}",
             layout_file.display()
         );
-        std::fs::write(
-            layout_file.clone(),
-            toml::to_string(&default_layout).unwrap(),
-        )
-        .unwrap();
+        std::fs::write(layout_file.clone(), system_layout_template_text()).unwrap();
     }
 
     let config_content = std::fs::read_to_string(config_file.clone()).unwrap();
@@ -4863,7 +4867,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 .expect("config state lock poisoned");
             state.clone()
         };
-        let mut reset_layout = LayoutConfig::default();
+        let mut reset_layout = load_system_layout_template();
         reset_layout.selected_leaf_id = first_leaf_id(&reset_layout.root);
         let next = with_updated_layout(&previous, reset_layout);
         push_layout_undo_snapshot(
@@ -6049,7 +6053,8 @@ mod tests {
         apply_column_order_keys, choose_preferred_u16, choose_preferred_u32,
         clamp_width_for_visible_column, collect_audio_files_from_folder,
         default_album_art_column_width_bounds, default_button_cluster_actions_by_index,
-        is_album_art_builtin_column, is_supported_audio_file, output_preferences_changed,
+        is_album_art_builtin_column, is_supported_audio_file, load_layout_file,
+        load_system_layout_template, output_preferences_changed,
         playlist_column_key_at_visible_index, playlist_column_width_bounds,
         playlist_column_width_bounds_with_album_art, quantize_splitter_ratio_to_precision,
         reorder_visible_playlist_columns, resolve_playlist_header_column_from_x,
@@ -6057,8 +6062,9 @@ mod tests {
         resolve_runtime_config, sanitize_config, sanitize_playlist_columns,
         select_manual_output_option_index_u32, select_output_option_index_u16,
         serialize_config_with_preserved_comments, serialize_layout_with_preserved_comments,
-        should_apply_custom_column_delete, sidebar_width_from_window, update_or_replace_vec_model,
-        visible_playlist_column_kinds, OutputSettingsOptions, RuntimeOutputOverride,
+        should_apply_custom_column_delete, sidebar_width_from_window, system_layout_template_text,
+        update_or_replace_vec_model, visible_playlist_column_kinds, OutputSettingsOptions,
+        RuntimeOutputOverride,
     };
 
     fn unique_temp_directory(test_name: &str) -> PathBuf {
@@ -7355,6 +7361,36 @@ panel = "track_list"
         let serialized = serialize_layout_with_preserved_comments(existing, &layout)
             .expect("comment-preserving layout serialization should succeed");
         assert!(serialized.contains("custom_layout_flag = \"keep-me\""));
+    }
+
+    #[test]
+    fn test_load_system_layout_template_matches_checked_in_template() {
+        let parsed_from_template: LayoutConfig = toml::from_str(system_layout_template_text())
+            .expect("layout system template should parse");
+        let loaded = load_system_layout_template();
+        assert_eq!(loaded, parsed_from_template);
+    }
+
+    #[test]
+    fn test_load_layout_file_falls_back_to_system_template_when_missing() {
+        let temp_dir = unique_temp_directory("layout_missing_fallback");
+        std::fs::create_dir_all(&temp_dir).expect("temp dir should be created");
+        let missing_path = temp_dir.join("missing-layout.toml");
+        let loaded = load_layout_file(&missing_path);
+        assert_eq!(loaded, load_system_layout_template());
+        let _ = std::fs::remove_dir_all(temp_dir);
+    }
+
+    #[test]
+    fn test_load_layout_file_falls_back_to_system_template_when_invalid() {
+        let temp_dir = unique_temp_directory("layout_invalid_fallback");
+        std::fs::create_dir_all(&temp_dir).expect("temp dir should be created");
+        let invalid_path = temp_dir.join("layout.toml");
+        std::fs::write(&invalid_path, "[root\nnode_type = \"leaf\"")
+            .expect("invalid layout file should be written");
+        let loaded = load_layout_file(&invalid_path);
+        assert_eq!(loaded, load_system_layout_template());
+        let _ = std::fs::remove_dir_all(temp_dir);
     }
 
     #[test]
