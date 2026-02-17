@@ -1220,12 +1220,19 @@ export component AppWindow inherits Window {
                             1,
                             floor(track-list.height / track-list.row-height)
                         );
+                        property <bool> has-partial-bottom-row: ceil(track-list.height / track-list.row-height)
+                            > floor(track-list.height / track-list.row-height);
+                        property <bool> last-track-partially-visible-at-bottom: self.has-playing-row
+                            && self.has-partial-bottom-row
+                            && root.playing_track_index == root.track_model.length - 1
+                            && root.playing_track_index == self.first-visible-row + self.visible-row-count;
                         property <bool> has-playing-row: root.playing_track_index >= 0
                             && root.playing_track_index < root.track_model.length;
                         property <bool> playing-above-viewport: self.has-playing-row
                             && root.playing_track_index < self.first-visible-row;
                         property <bool> playing-below-viewport: self.has-playing-row
-                            && root.playing_track_index >= self.first-visible-row + self.visible-row-count;
+                            && root.playing_track_index >= self.first-visible-row + self.visible-row-count
+                            && !self.last-track-partially-visible-at-bottom;
                         property <bool> show-scroll-to-playing-toast: self.playing-above-viewport
                             || self.playing-below-viewport;
                         property <length> scroll-toast-y: self.stack-base-y
@@ -1763,13 +1770,23 @@ export component AppWindow inherits Window {
                                 library-list-view.height / (library-list-view.row-height-px * 1px)
                             )
                         );
+                        property <bool> has-partial-bottom-row: ceil(
+                            library-list-view.height / (library-list-view.row-height-px * 1px)
+                        ) > floor(
+                            library-list-view.height / (library-list-view.row-height-px * 1px)
+                        );
+                        property <bool> last-track-partially-visible-at-bottom: self.has-playing-row
+                            && self.has-partial-bottom-row
+                            && root.library_playing_track_index == root.library_model.length - 1
+                            && root.library_playing_track_index == self.first-visible-row + self.visible-row-count;
                         property <bool> has-playing-row: self.has-configured-folders
                             && root.library_playing_track_index >= 0
                             && root.library_playing_track_index < root.library_model.length;
                         property <bool> playing-above-viewport: self.has-playing-row
                             && root.library_playing_track_index < self.first-visible-row;
                         property <bool> playing-below-viewport: self.has-playing-row
-                            && root.library_playing_track_index >= self.first-visible-row + self.visible-row-count;
+                            && root.library_playing_track_index >= self.first-visible-row + self.visible-row-count
+                            && !self.last-track-partially-visible-at-bottom;
                         property <bool> show-scroll-to-playing-toast: self.playing-above-viewport
                             || self.playing-below-viewport;
                         property <length> stack-base-y: 6px;
