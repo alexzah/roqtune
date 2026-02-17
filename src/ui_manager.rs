@@ -3445,6 +3445,21 @@ impl UiManager {
         view_indices[start..=end].to_vec()
     }
 
+    fn resolve_shift_anchor_source_index(
+        selected_indices: &[usize],
+        current_anchor_source_index: Option<usize>,
+    ) -> Option<usize> {
+        if selected_indices.is_empty() {
+            return None;
+        }
+        if let Some(anchor_source_index) = current_anchor_source_index {
+            if selected_indices.contains(&anchor_source_index) {
+                return Some(anchor_source_index);
+            }
+        }
+        selected_indices.last().copied()
+    }
+
     fn active_sort_column_state(&self) -> Option<(usize, String)> {
         let sort_key = self.filter_sort_column_key.as_ref()?;
         self.visible_playlist_columns()
@@ -4921,9 +4936,10 @@ impl UiManager {
 
         self.library_selected_indices.sort_unstable();
         self.library_selected_indices.dedup();
-        if self.library_selected_indices.is_empty() {
-            self.library_selection_anchor = None;
-        }
+        self.library_selection_anchor = Self::resolve_shift_anchor_source_index(
+            &self.library_selected_indices,
+            self.library_selection_anchor,
+        );
 
         self.display_target_priority = DisplayTargetPriority::Selection;
         self.update_display_for_active_collection();
@@ -6117,6 +6133,7 @@ impl UiManager {
         if is_already_selected && !ctrl && !shift && self.selected_indices.len() > 1 {
             // Defer collapse to pointer-up so dragging still moves the full selection.
             self.pending_single_select_on_click = Some(source_index);
+            self.set_selection_anchor_from_source_index(source_index);
             return;
         }
         if !is_already_selected || ctrl || shift {
@@ -7212,7 +7229,13 @@ impl UiManager {
                             );
                             let indices_clone = indices.clone();
                             self.selected_indices = indices_clone.clone();
-                            if indices_clone.is_empty() {
+                            let next_anchor_source_index = Self::resolve_shift_anchor_source_index(
+                                &self.selected_indices,
+                                self.selection_anchor_source_index(),
+                            );
+                            if let Some(anchor_source_index) = next_anchor_source_index {
+                                self.set_selection_anchor_from_source_index(anchor_source_index);
+                            } else {
                                 self.selection_anchor_track_id = None;
                             }
                             self.display_target_priority = DisplayTargetPriority::Selection;
@@ -7791,6 +7814,27 @@ mod tests {
         let view_indices = vec![2usize, 0, 3, 1];
         let selected = UiManager::build_shift_selection_from_view_order(&view_indices, None, 3);
         assert_eq!(selected, vec![3]);
+    }
+
+    #[test]
+    fn test_resolve_shift_anchor_source_index_keeps_current_anchor_when_selected() {
+        let selected = vec![4usize, 7, 9];
+        let anchor = UiManager::resolve_shift_anchor_source_index(&selected, Some(7));
+        assert_eq!(anchor, Some(7));
+    }
+
+    #[test]
+    fn test_resolve_shift_anchor_source_index_falls_back_when_anchor_not_selected() {
+        let selected = vec![2usize, 5, 6];
+        let anchor = UiManager::resolve_shift_anchor_source_index(&selected, Some(1));
+        assert_eq!(anchor, Some(6));
+    }
+
+    #[test]
+    fn test_resolve_shift_anchor_source_index_none_when_no_selection() {
+        let selected: Vec<usize> = Vec::new();
+        let anchor = UiManager::resolve_shift_anchor_source_index(&selected, Some(4));
+        assert_eq!(anchor, None);
     }
 
     #[test]
