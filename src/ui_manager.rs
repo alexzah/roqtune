@@ -5314,7 +5314,7 @@ impl UiManager {
         } else {
             None
         };
-        if let Some(entity) = detail_entity {
+        if let Some(entity) = detail_entity.clone() {
             if let Some(payload) = self.library_enrichment.get(&entity) {
                 match payload.status {
                     protocol::LibraryEnrichmentStatus::Ready => {
@@ -5408,7 +5408,10 @@ impl UiManager {
             })
             .map(|index| index as i32)
             .unwrap_or(-1);
+        let fetch_capable_view =
+            detail_entity.is_some() || matches!(view, LibraryViewState::ArtistsRoot);
         let online_prompt_visible = self.collection_mode == COLLECTION_MODE_LIBRARY
+            && fetch_capable_view
             && self.library_online_metadata_prompt_pending;
 
         let _ = self.ui.upgrade_in_event_loop(move |ui| {
