@@ -1094,6 +1094,7 @@ impl DbManager {
     }
 
     /// Loads one tracks page and total row count.
+    #[allow(dead_code)]
     pub fn get_library_tracks_page(
         &self,
         offset: usize,

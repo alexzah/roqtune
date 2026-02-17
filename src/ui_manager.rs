@@ -23,6 +23,7 @@ use tokio::sync::broadcast::{Receiver, Sender};
 
 use crate::{
     config::{self, PlaylistColumnConfig},
+    integration_uri::is_remote_track_path,
     metadata_tags, protocol, AppWindow, LayoutAlbumArtViewerPanelModel,
     LayoutMetadataViewerPanelModel, LibraryRowData, MetadataEditorField as UiMetadataEditorField,
     TrackRowData,
@@ -249,6 +250,7 @@ struct LibraryRowPresentation {
     secondary: String,
     item_kind: i32,
     cover_art_path: Option<PathBuf>,
+    source_badge: String,
     is_playing: bool,
     selected: bool,
 }
@@ -480,6 +482,14 @@ impl UiManager {
 
     fn failed_cover_path(path: &Path) -> bool {
         TRACK_ROW_COVER_ART_FAILED_PATHS.with(|failed| failed.borrow().contains(path))
+    }
+
+    fn source_badge_for_track_path(path: &Path) -> String {
+        if is_remote_track_path(path) {
+            "SUB".to_string()
+        } else {
+            String::new()
+        }
     }
 
     fn find_external_cover_art(track_path: &Path) -> Option<PathBuf> {
@@ -3670,7 +3680,7 @@ impl UiManager {
             .and_then(|source_index| self.map_source_to_view_index(source_index))
             .map(|index| index as i32)
             .unwrap_or(-1);
-        let row_data: Vec<(Vec<String>, Option<PathBuf>, bool, String)> = rows
+        let row_data: Vec<(Vec<String>, Option<PathBuf>, String, bool, String)> = rows
             .into_iter()
             .map(|row| {
                 let status = if Some(row.source_index) == active_playing_index {
@@ -3685,9 +3695,15 @@ impl UiManager {
                 let album_art_path = album_art_column_visible
                     .then(|| self.row_cover_art_path(row.source_index))
                     .flatten();
+                let source_badge = self
+                    .track_paths
+                    .get(row.source_index)
+                    .map(|path| Self::source_badge_for_track_path(path.as_path()))
+                    .unwrap_or_default();
                 (
                     row.values,
                     album_art_path,
+                    source_badge,
                     selected_set.contains(&row.source_index),
                     status.to_string(),
                 )
@@ -3696,13 +3712,14 @@ impl UiManager {
 
         let _ = self.ui.upgrade_in_event_loop(move |ui| {
             let mut rows = Vec::with_capacity(row_data.len());
-            for (values, album_art_path, selected, status) in row_data {
+            for (values, album_art_path, source_badge, selected, status) in row_data {
                 let values_shared: Vec<slint::SharedString> =
                     values.into_iter().map(Into::into).collect();
                 rows.push(TrackRowData {
                     status: status.into(),
                     values: ModelRc::from(values_shared.as_slice()),
                     album_art: UiManager::load_track_row_cover_art_image(album_art_path.as_ref()),
+                    source_badge: source_badge.into(),
                     selected,
                 });
             }
@@ -4883,6 +4900,7 @@ impl UiManager {
             item_kind: entry.item_kind,
             album_art: album_art.unwrap_or_default(),
             has_album_art,
+            source_badge: entry.source_badge.into(),
             is_playing: entry.is_playing,
             selected: entry.selected,
         }
@@ -5212,6 +5230,7 @@ impl UiManager {
                 } else {
                     self.resolve_library_cover_art_path(&track.path)
                 },
+                source_badge: Self::source_badge_for_track_path(track.path.as_path()),
                 is_playing: self.playing_track.path.as_ref() == Some(&track.path),
                 selected,
             },
@@ -5235,6 +5254,7 @@ impl UiManager {
                 } else {
                     None
                 },
+                source_badge: String::new(),
                 is_playing: false,
                 selected,
             },
@@ -5258,6 +5278,7 @@ impl UiManager {
                 } else {
                     None
                 },
+                source_badge: String::new(),
                 is_playing: false,
                 selected,
             },
@@ -5267,6 +5288,7 @@ impl UiManager {
                 secondary: format!("{} tracks", genre.track_count),
                 item_kind: LIBRARY_ITEM_KIND_GENRE,
                 cover_art_path: None,
+                source_badge: String::new(),
                 is_playing: false,
                 selected,
             },
@@ -5276,6 +5298,7 @@ impl UiManager {
                 secondary: format!("{} tracks", decade.track_count),
                 item_kind: LIBRARY_ITEM_KIND_DECADE,
                 cover_art_path: None,
+                source_badge: String::new(),
                 is_playing: false,
                 selected,
             },
@@ -6135,6 +6158,9 @@ impl UiManager {
     }
 
     fn queue_track_metadata_lookup(&self, track_id: String, track_path: PathBuf) {
+        if is_remote_track_path(track_path.as_path()) {
+            return;
+        }
         let _ = self.metadata_lookup_tx.send(MetadataLookupRequest {
             track_id,
             track_path,

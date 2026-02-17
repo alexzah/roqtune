@@ -19,6 +19,9 @@ pub struct Config {
     #[serde(default)]
     /// Decoder/player buffering behavior.
     pub buffering: BufferingConfig,
+    #[serde(default)]
+    /// Remote integration profile configuration.
+    pub integrations: IntegrationsConfig,
 }
 
 /// Output device and format preferences.
@@ -170,6 +173,37 @@ pub struct BufferingConfig {
     pub player_request_interval_ms: u32,
     #[serde(default = "default_decoder_request_chunk_ms")]
     pub decoder_request_chunk_ms: u32,
+}
+
+/// Integration profile configuration persisted between sessions.
+#[derive(Debug, Clone, serde::Deserialize, serde::Serialize, Default)]
+pub struct IntegrationsConfig {
+    #[serde(default)]
+    pub backends: Vec<BackendProfileConfig>,
+}
+
+/// Persisted backend profile metadata (non-secret fields only).
+#[derive(Debug, Clone, serde::Deserialize, serde::Serialize, PartialEq, Eq)]
+pub struct BackendProfileConfig {
+    pub profile_id: String,
+    #[serde(default)]
+    pub backend_kind: IntegrationBackendKind,
+    #[serde(default)]
+    pub display_name: String,
+    #[serde(default)]
+    pub endpoint: String,
+    #[serde(default)]
+    pub username: String,
+    #[serde(default)]
+    pub enabled: bool,
+}
+
+/// Supported backend profile kinds persisted in config.
+#[derive(Debug, Clone, Copy, serde::Deserialize, serde::Serialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum IntegrationBackendKind {
+    #[default]
+    OpenSubsonic,
 }
 
 impl Default for OutputConfig {
@@ -340,8 +374,8 @@ pub fn default_playlist_columns() -> Vec<PlaylistColumnConfig> {
 #[cfg(test)]
 mod tests {
     use super::{
-        default_playlist_columns, BufferingConfig, Config, LayoutConfig, ResamplerQuality,
-        UiPlaybackOrder, UiRepeatMode,
+        default_playlist_columns, BufferingConfig, Config, IntegrationBackendKind, LayoutConfig,
+        ResamplerQuality, UiPlaybackOrder, UiRepeatMode,
     };
 
     #[test]
@@ -383,6 +417,7 @@ mod tests {
         assert_eq!(config.buffering.player_target_buffer_ms, 24_000);
         assert_eq!(config.buffering.player_request_interval_ms, 120);
         assert_eq!(config.buffering.decoder_request_chunk_ms, 1_500);
+        assert!(config.integrations.backends.is_empty());
     }
 
     #[test]
@@ -432,6 +467,7 @@ decoder_request_chunk_ms = 1500
             parsed.buffering.player_target_buffer_ms,
             BufferingConfig::default().player_target_buffer_ms
         );
+        assert!(parsed.integrations.backends.is_empty());
     }
 
     #[test]
@@ -569,5 +605,23 @@ decoder_request_chunk_ms = 1500
             parsed.buffering.decoder_request_chunk_ms,
             defaults.buffering.decoder_request_chunk_ms
         );
+        assert_eq!(parsed.integrations.backends, defaults.integrations.backends);
+    }
+
+    #[test]
+    fn test_backend_kind_round_trip() {
+        #[derive(Debug, Clone, serde::Deserialize, serde::Serialize, PartialEq, Eq)]
+        struct Wrapper {
+            backend_kind: IntegrationBackendKind,
+        }
+
+        let value = Wrapper {
+            backend_kind: IntegrationBackendKind::OpenSubsonic,
+        };
+        let serialized =
+            toml::to_string(&value).expect("backend kind enum should serialize to toml");
+        let parsed: Wrapper =
+            toml::from_str(&serialized).expect("backend kind enum should deserialize from toml");
+        assert_eq!(parsed, value);
     }
 }

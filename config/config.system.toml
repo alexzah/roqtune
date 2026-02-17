@@ -107,3 +107,8 @@ player_low_watermark_ms = 12000
 player_target_buffer_ms = 24000
 player_request_interval_ms = 120
 decoder_request_chunk_ms = 1500
+
+[integrations]
+# Configured remote backend profiles (non-secret fields only).
+# Passwords are stored in the system keyring keyed by profile_id.
+backends = []

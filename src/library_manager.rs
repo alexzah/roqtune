@@ -16,7 +16,7 @@ use crate::db_manager::{
     DbManager, LibraryScanState, LibraryTrackMetadataUpdate, LibraryTrackScanStub,
 };
 use crate::metadata_tags;
-use crate::protocol::{self, LibraryMessage, Message};
+use crate::protocol::{self, IntegrationMessage, LibraryMessage, Message};
 
 const SUPPORTED_AUDIO_EXTENSIONS: [&str; 7] = ["mp3", "wav", "ogg", "flac", "aac", "m4a", "mp4"];
 const LIBRARY_SCAN_UPSERT_BATCH_SIZE: usize = 256;
@@ -43,6 +43,7 @@ pub struct LibraryManager {
     library_folders: Vec<String>,
     scan_progress_tx: SyncSender<LibraryMessage>,
     playback_active: bool,
+    remote_tracks_by_profile: HashMap<String, Vec<protocol::LibraryTrack>>,
 }
 
 impl LibraryManager {
@@ -60,7 +61,40 @@ impl LibraryManager {
             library_folders: Vec::new(),
             scan_progress_tx,
             playback_active: false,
+            remote_tracks_by_profile: HashMap::new(),
         }
+    }
+
+    fn all_remote_tracks(&self) -> Vec<protocol::LibraryTrack> {
+        let mut merged = Vec::new();
+        for tracks in self.remote_tracks_by_profile.values() {
+            merged.extend(tracks.iter().cloned());
+        }
+        merged
+    }
+
+    fn merged_local_and_remote_tracks(&self) -> Result<Vec<protocol::LibraryTrack>, String> {
+        let mut tracks = self
+            .db_manager
+            .get_library_tracks()
+            .map_err(|err| format!("Failed to load tracks: {}", err))?;
+        tracks.extend(self.all_remote_tracks());
+        tracks.sort_by(|left, right| {
+            left.title
+                .to_ascii_lowercase()
+                .cmp(&right.title.to_ascii_lowercase())
+                .then_with(|| {
+                    left.artist
+                        .to_ascii_lowercase()
+                        .cmp(&right.artist.to_ascii_lowercase())
+                })
+                .then_with(|| {
+                    left.album
+                        .to_ascii_lowercase()
+                        .cmp(&right.album.to_ascii_lowercase())
+                })
+        });
+        Ok(tracks)
     }
 
     fn is_supported_audio_file(path: &Path) -> bool {
@@ -545,13 +579,13 @@ impl LibraryManager {
     }
 
     fn publish_tracks(&self) {
-        match self.db_manager.get_library_tracks() {
+        match self.merged_local_and_remote_tracks() {
             Ok(tracks) => {
                 let _ = self
                     .bus_producer
                     .send(Message::Library(LibraryMessage::TracksResult(tracks)));
             }
-            Err(err) => self.send_scan_failed(format!("Failed to load tracks: {}", err)),
+            Err(err) => self.send_scan_failed(err),
         }
     }
 
@@ -600,10 +634,10 @@ impl LibraryManager {
     }
 
     fn publish_global_search_data(&self) {
-        let tracks = match self.db_manager.get_library_tracks() {
+        let tracks = match self.merged_local_and_remote_tracks() {
             Ok(tracks) => tracks,
-            Err(err) => {
-                self.send_scan_failed(format!("Failed to load tracks: {}", err));
+            Err(error_text) => {
+                self.send_scan_failed(error_text);
                 return;
             }
         };
@@ -633,7 +667,7 @@ impl LibraryManager {
 
     fn publish_root_counts(&self) {
         let tracks = match self.db_manager.get_library_tracks_count() {
-            Ok(count) => count,
+            Ok(count) => count.saturating_add(self.all_remote_tracks().len()),
             Err(err) => {
                 warn!("Failed to load tracks count: {}", err);
                 return;
@@ -750,18 +784,18 @@ impl LibraryManager {
     ) {
         let limit = limit.max(1);
         let result: Result<(usize, Vec<protocol::LibraryEntryPayload>), String> = match view {
-            protocol::LibraryViewQuery::Tracks => self
-                .db_manager
-                .get_library_tracks_page(offset, limit)
-                .map(|(rows, total)| {
-                    (
-                        total,
-                        rows.into_iter()
-                            .map(protocol::LibraryEntryPayload::Track)
-                            .collect(),
-                    )
+            protocol::LibraryViewQuery::Tracks => {
+                self.merged_local_and_remote_tracks().map(|rows| {
+                    let total = rows.len();
+                    let entries = rows
+                        .into_iter()
+                        .skip(offset)
+                        .take(limit)
+                        .map(protocol::LibraryEntryPayload::Track)
+                        .collect();
+                    (total, entries)
                 })
-                .map_err(|err| format!("Failed to load tracks page: {}", err)),
+            }
             protocol::LibraryViewQuery::Artists => self
                 .db_manager
                 .get_library_artists_page(offset, limit)
@@ -813,7 +847,8 @@ impl LibraryManager {
             protocol::LibraryViewQuery::GlobalSearch => self
                 .db_manager
                 .get_library_tracks()
-                .and_then(|tracks| {
+                .map(|mut tracks| {
+                    tracks.extend(self.all_remote_tracks());
                     let artists = self.db_manager.get_library_artists()?;
                     let albums = self.db_manager.get_library_albums()?;
                     let mut entries: Vec<protocol::LibraryEntryPayload> =
@@ -882,6 +917,7 @@ impl LibraryManager {
                     let rows = entries.into_iter().skip(offset).take(limit).collect();
                     Ok((rows, total))
                 })
+                .and_then(|result| result)
                 .map(|(rows, total)| (total, rows))
                 .map_err(|err| format!("Failed to load global search page: {}", err)),
             protocol::LibraryViewQuery::ArtistDetail { artist } => self
@@ -1233,6 +1269,11 @@ impl LibraryManager {
                     }
                     Message::Library(LibraryMessage::RequestDecadeTracks { decade }) => {
                         self.publish_decade_tracks(decade);
+                    }
+                    Message::Integration(
+                        IntegrationMessage::OpenSubsonicLibraryTracksUpdated { profile_id, tracks },
+                    ) => {
+                        self.remote_tracks_by_profile.insert(profile_id, tracks);
                     }
                     Message::Library(LibraryMessage::DrainScanProgressQueue) => {}
                     Message::Library(LibraryMessage::RequestLibraryPage {

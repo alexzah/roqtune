@@ -32,6 +32,8 @@ webbrowser = "1.0.6"
 native-tls = "0.2.14"
 mdns-sd = "0.17.0"
 audio-mixer = "0.2.0"
+keyring = "2.3.3"
+md5 = "0.8.0"
 
 [build-dependencies]
 slint-build = "1.15.0"

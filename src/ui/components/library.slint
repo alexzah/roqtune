@@ -111,5 +111,24 @@ export component LibraryRow inherits Rectangle {
                 vertical-alignment: center;
             }
         }
+
+        if root.data.source_badge != "" : Rectangle {
+            width: 42px;
+            height: 18px;
+            border-radius: 9px;
+            border-width: 1px;
+            border-color: root.dark ? #3f5470 : #b4cde8;
+            background: root.dark ? #1f3248 : #e2eefb;
+            y: (parent.height - self.height) / 2;
+
+            Text {
+                text: root.data.source_badge;
+                color: root.dark ? #9fc3eb : #2d5f98;
+                font-size: 10px;
+                font-weight: 600;
+                horizontal-alignment: center;
+                vertical-alignment: center;
+            }
+        }
     }
 }

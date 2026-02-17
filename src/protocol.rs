@@ -25,6 +25,7 @@ pub enum Message {
     Metadata(MetadataMessage),
     Config(ConfigMessage),
     Cast(CastMessage),
+    Integration(IntegrationMessage),
 }
 
 /// Track traversal strategy for next/previous operations.
@@ -171,6 +172,21 @@ pub enum PlaylistMessage {
     ChangePlaybackOrder(PlaybackOrder),
     ToggleRepeat,
     RepeatModeChanged(RepeatMode),
+    RemoteDetachConfirmationRequested {
+        playlist_id: String,
+        playlist_name: String,
+    },
+    ConfirmDetachRemotePlaylist {
+        playlist_id: String,
+    },
+    CancelDetachRemotePlaylist {
+        playlist_id: String,
+    },
+    RemotePlaylistWritebackState {
+        playlist_id: String,
+        success: bool,
+        error: Option<String>,
+    },
 }
 
 /// Library-domain commands and notifications.
@@ -828,4 +844,115 @@ pub enum ConfigMessage {
     SetRuntimeOutputRate { sample_rate_hz: u32, reason: String },
     ClearRuntimeOutputRateOverride,
     OutputDeviceCapabilitiesChanged { verified_sample_rates: Vec<u32> },
+}
+
+/// Registered backend kind used by integration profiles and track sources.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum BackendKind {
+    LocalFs,
+    OpenSubsonic,
+}
+
+/// High-level runtime connectivity state for one backend profile.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum BackendConnectionState {
+    Disconnected,
+    Connecting,
+    Connected,
+    Error,
+}
+
+/// Immutable snapshot for one configured backend profile.
+#[derive(Debug, Clone, serde::Deserialize, serde::Serialize)]
+pub struct BackendProfileSnapshot {
+    pub profile_id: String,
+    pub backend_kind: BackendKind,
+    pub display_name: String,
+    pub endpoint: String,
+    pub username: String,
+    pub configured: bool,
+    pub connection_state: BackendConnectionState,
+    pub status_text: Option<String>,
+}
+
+/// Immutable integration snapshot distributed on the event bus.
+#[derive(Debug, Clone, serde::Deserialize, serde::Serialize)]
+pub struct BackendSnapshot {
+    pub version: u64,
+    pub profiles: Vec<BackendProfileSnapshot>,
+}
+
+/// Integration-domain commands and notifications.
+#[derive(Debug, Clone)]
+#[allow(dead_code)]
+pub enum IntegrationMessage {
+    RequestSnapshot,
+    UpsertBackendProfile {
+        profile: BackendProfileSnapshot,
+        password: Option<String>,
+        connect_now: bool,
+    },
+    RemoveBackendProfile {
+        profile_id: String,
+    },
+    ConnectBackendProfile {
+        profile_id: String,
+    },
+    TestBackendConnection {
+        profile_id: String,
+    },
+    DisconnectBackendProfile {
+        profile_id: String,
+    },
+    SyncBackendProfile {
+        profile_id: String,
+    },
+    SetBackendConnectionState {
+        profile_id: String,
+        state: BackendConnectionState,
+        status_text: Option<String>,
+    },
+    BackendSnapshotUpdated(BackendSnapshot),
+    OpenSubsonicLibraryTracksUpdated {
+        profile_id: String,
+        tracks: Vec<LibraryTrack>,
+    },
+    OpenSubsonicPlaylistsUpdated {
+        profile_id: String,
+        playlists: Vec<RemotePlaylistSnapshot>,
+    },
+    PushOpenSubsonicPlaylistUpdate {
+        profile_id: String,
+        remote_playlist_id: String,
+        local_playlist_id: String,
+        track_song_ids: Vec<String>,
+    },
+    OpenSubsonicPlaylistWritebackResult {
+        local_playlist_id: String,
+        success: bool,
+        error: Option<String>,
+    },
+    BackendOperationFailed {
+        profile_id: Option<String>,
+        action: String,
+        error: String,
+    },
+}
+
+/// Remote playlist snapshot emitted by integration sync events.
+#[derive(Debug, Clone)]
+pub struct RemotePlaylistSnapshot {
+    pub remote_playlist_id: String,
+    pub name: String,
+    pub tracks: Vec<RemotePlaylistTrackSnapshot>,
+}
+
+/// One remote playlist track snapshot with display metadata.
+#[derive(Debug, Clone)]
+pub struct RemotePlaylistTrackSnapshot {
+    pub item_id: String,
+    pub path: PathBuf,
+    pub summary: TrackMetadataSummary,
 }

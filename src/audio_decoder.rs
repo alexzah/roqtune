@@ -5,6 +5,8 @@
 //! and packet emission.
 
 use crate::config::{BufferingConfig, Config, ResamplerQuality};
+use crate::integration_keyring::get_opensubsonic_password;
+use crate::integration_uri::{parse_opensubsonic_track_uri, OpenSubsonicTrackLocator};
 use crate::protocol::{self, AudioMessage, AudioPacket, ConfigMessage, Message, TrackIdentifier};
 use audio_mixer::{Channel as MixChannel, Mixer};
 use log::{debug, error, warn};
@@ -13,10 +15,12 @@ use rubato::{
 };
 use std::cmp::min;
 use std::collections::{HashMap, VecDeque};
+use std::io::{Cursor, Read};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::thread;
+use std::time::Duration;
 use symphonia::core::audio::SampleBuffer;
 use symphonia::core::codecs::{CodecParameters, Decoder, DecoderOptions};
 use symphonia::core::errors::Error;
@@ -27,6 +31,9 @@ use symphonia::core::probe::Hint;
 use tokio::sync::broadcast::{Receiver, Sender};
 use tokio::sync::mpsc::error::TrySendError;
 use tokio::sync::mpsc::{self, Receiver as MpscReceiver, Sender as MpscSender};
+
+const OPENSUBSONIC_API_VERSION: &str = "1.16.1";
+const OPENSUBSONIC_CLIENT_ID: &str = "roqtune";
 
 /// Work items consumed by the decode worker thread.
 #[derive(Debug, Clone)]
@@ -115,6 +122,114 @@ impl DecodeWorker {
 
     fn should_bootstrap_decode(tracks: &[TrackIdentifier]) -> bool {
         tracks.iter().any(|track| track.play_immediately)
+    }
+
+    fn make_opensubsonic_salt() -> String {
+        let mut bytes = [0u8; 8];
+        let _ = getrandom::fill(&mut bytes);
+        bytes.iter().map(|value| format!("{value:02x}")).collect()
+    }
+
+    fn opensubsonic_stream_url(locator: &OpenSubsonicTrackLocator, password: &str) -> String {
+        let salt = Self::make_opensubsonic_salt();
+        let token = format!("{:x}", md5::compute(format!("{}{}", password, salt)));
+        format!(
+            "{}/rest/stream.view?u={}&t={}&s={}&v={}&c={}&id={}",
+            locator.endpoint.trim().trim_end_matches('/'),
+            urlencoding::encode(locator.username.trim()),
+            token,
+            salt,
+            OPENSUBSONIC_API_VERSION,
+            OPENSUBSONIC_CLIENT_ID,
+            urlencoding::encode(locator.song_id.as_str()),
+        )
+    }
+
+    fn extension_from_content_type(content_type: &str) -> Option<&'static str> {
+        let mime = content_type
+            .split(';')
+            .next()
+            .map(str::trim)
+            .unwrap_or_default()
+            .to_ascii_lowercase();
+        match mime.as_str() {
+            "audio/mpeg" | "audio/mp3" => Some("mp3"),
+            "audio/flac" | "audio/x-flac" => Some("flac"),
+            "audio/ogg" | "audio/vorbis" | "audio/opus" => Some("ogg"),
+            "audio/aac" | "audio/x-aac" => Some("aac"),
+            "audio/mp4" | "audio/x-m4a" => Some("m4a"),
+            "audio/wav" | "audio/x-wav" => Some("wav"),
+            _ => None,
+        }
+    }
+
+    fn fetch_opensubsonic_stream_bytes_with_hint(
+        locator: &OpenSubsonicTrackLocator,
+    ) -> Result<(Vec<u8>, Option<String>), String> {
+        let Some(password) =
+            get_opensubsonic_password(locator.profile_id.as_str()).map_err(|error| {
+                format!("Failed to read OpenSubsonic password from keyring: {error}")
+            })?
+        else {
+            return Err(format!(
+                "OpenSubsonic profile '{}' has no saved password in keyring",
+                locator.profile_id
+            ));
+        };
+        let url = Self::opensubsonic_stream_url(locator, password.as_str());
+        let client = ureq::AgentBuilder::new()
+            .timeout_connect(Duration::from_secs(5))
+            .timeout_read(Duration::from_secs(45))
+            .timeout_write(Duration::from_secs(45))
+            .build();
+        let response = client
+            .get(url.as_str())
+            .call()
+            .map_err(|error| format!("OpenSubsonic stream request failed: {error}"))?;
+        let hint_extension = response
+            .header("Content-Type")
+            .and_then(Self::extension_from_content_type)
+            .map(ToOwned::to_owned);
+        let mut body = Vec::new();
+        response
+            .into_reader()
+            .read_to_end(&mut body)
+            .map_err(|error| format!("OpenSubsonic stream body read failed: {error}"))?;
+        if body.is_empty() {
+            return Err("OpenSubsonic stream response was empty".to_string());
+        }
+        let preview = String::from_utf8_lossy(&body[..body.len().min(512)]).to_ascii_lowercase();
+        if preview.contains("subsonic-response")
+            || preview.contains("<error")
+            || preview.contains("\"error\"")
+        {
+            return Err("OpenSubsonic stream request returned an error payload".to_string());
+        }
+        Ok((body, hint_extension))
+    }
+
+    fn open_media_source_stream(
+        &self,
+        track: &TrackIdentifier,
+        hint: &mut Hint,
+    ) -> Result<MediaSourceStream, String> {
+        if let Some(locator) = parse_opensubsonic_track_uri(track.path.as_path()) {
+            let (body, hint_extension) = Self::fetch_opensubsonic_stream_bytes_with_hint(&locator)?;
+            if let Some(extension) = hint_extension {
+                hint.with_extension(extension.as_str());
+            }
+            return Ok(MediaSourceStream::new(
+                Box::new(Cursor::new(body)),
+                Default::default(),
+            ));
+        }
+
+        if let Some(extension) = track.path.extension().and_then(|ext| ext.to_str()) {
+            hint.with_extension(extension);
+        }
+        let file = std::fs::File::open(track.path.clone())
+            .map_err(|error| format!("Failed to open file: {error}"))?;
+        Ok(MediaSourceStream::new(Box::new(file), Default::default()))
     }
 
     /// Runs the decode worker loop, draining queued work items forever.
@@ -775,16 +890,14 @@ impl DecodeWorker {
     }
 
     fn open_track(&mut self, input_track: TrackIdentifier) -> Option<ActiveDecodeTrack> {
-        let file = match std::fs::File::open(input_track.path.clone()) {
-            Ok(file) => file,
-            Err(e) => {
-                error!("Failed to open file: {}", e);
+        let mut hint = Hint::new();
+        let media_source = match self.open_media_source_stream(&input_track, &mut hint) {
+            Ok(source) => source,
+            Err(error_text) => {
+                error!("{error_text}");
                 return None;
             }
         };
-
-        let media_source = MediaSourceStream::new(Box::new(file), Default::default());
-        let hint = Hint::new();
         let mut format_reader = match symphonia::default::get_probe().format(
             &hint,
             media_source,
@@ -1083,6 +1196,7 @@ impl AudioDecoder {
 #[cfg(test)]
 mod tests {
     use super::{AudioDecoder, DecodeWorkItem, DecodeWorker};
+    use crate::integration_uri::OpenSubsonicTrackLocator;
     use crate::protocol::TrackIdentifier;
     use std::path::PathBuf;
     use std::sync::atomic::{AtomicBool, Ordering};
@@ -1311,5 +1425,23 @@ mod tests {
         let transformed = worker.transform_channels(&samples, 6, 2);
 
         assert_eq!(transformed, vec![0.3, 0.2]);
+    }
+
+    #[test]
+    fn test_opensubsonic_stream_url_contains_required_query_parts() {
+        let locator = OpenSubsonicTrackLocator {
+            profile_id: "home".to_string(),
+            song_id: "song-42".to_string(),
+            endpoint: "https://music.example.com/".to_string(),
+            username: "alice@example.com".to_string(),
+        };
+        let url = DecodeWorker::opensubsonic_stream_url(&locator, "secret");
+        assert!(url.starts_with("https://music.example.com/rest/stream.view?"));
+        assert!(url.contains("u=alice%40example.com"));
+        assert!(url.contains("id=song-42"));
+        assert!(url.contains("t="));
+        assert!(url.contains("s="));
+        assert!(url.contains("v=1.16.1"));
+        assert!(url.contains("c=roqtune"));
     }
 }

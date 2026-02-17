@@ -1,9 +1,13 @@
 mod audio_decoder;
 mod audio_player;
 mod audio_probe;
+mod backends;
 mod cast_manager;
 mod config;
 mod db_manager;
+mod integration_keyring;
+mod integration_manager;
+mod integration_uri;
 mod layout;
 mod library_enrichment_manager;
 mod library_manager;
@@ -34,11 +38,14 @@ use audio_player::AudioPlayer;
 use audio_probe::get_or_probe_output_device;
 use cast_manager::CastManager;
 use config::{
-    BufferingConfig, ButtonClusterInstanceConfig, CastConfig, Config, LibraryConfig, OutputConfig,
-    PlaylistColumnConfig, ResamplerQuality, UiConfig, UiPlaybackOrder, UiRepeatMode,
+    BackendProfileConfig, BufferingConfig, ButtonClusterInstanceConfig, CastConfig, Config,
+    IntegrationBackendKind, IntegrationsConfig, LibraryConfig, OutputConfig, PlaylistColumnConfig,
+    ResamplerQuality, UiConfig, UiPlaybackOrder, UiRepeatMode,
 };
 use cpal::traits::{DeviceTrait, HostTrait};
 use db_manager::DbManager;
+use integration_keyring::{get_opensubsonic_password, set_opensubsonic_password};
+use integration_manager::IntegrationManager;
 use layout::{
     add_root_leaf_if_empty, compute_tree_layout_metrics, delete_leaf, first_leaf_id,
     replace_leaf_panel, sanitize_layout_config, set_split_ratio, split_leaf, LayoutConfig,
@@ -53,7 +60,8 @@ use metadata_manager::MetadataManager;
 use playlist::Playlist;
 use playlist_manager::PlaylistManager;
 use protocol::{
-    CastMessage, ConfigMessage, Message, MetadataMessage, PlaybackMessage, PlaylistMessage,
+    CastMessage, ConfigMessage, IntegrationMessage, Message, MetadataMessage, PlaybackMessage,
+    PlaylistMessage,
 };
 use slint::winit_030::{winit, EventResult as WinitEventResult, WinitWindowAccessor};
 use slint::{language::ColorScheme, ComponentHandle, LogicalSize, Model, ModelRc, VecModel};
@@ -201,6 +209,7 @@ const PLAYLIST_IMPORT_CHUNK_SIZE: usize = 512;
 const DROP_IMPORT_BATCH_DELAY_MS: u64 = 80;
 const COLLECTION_MODE_PLAYLIST: i32 = 0;
 const COLLECTION_MODE_LIBRARY: i32 = 1;
+const OPENSUBSONIC_PROFILE_ID: &str = "opensubsonic-default";
 
 fn is_supported_audio_file(path: &Path) -> bool {
     path.extension()
@@ -211,6 +220,62 @@ fn is_supported_audio_file(path: &Path) -> bool {
                 .any(|supported| ext.eq_ignore_ascii_case(supported))
         })
         .unwrap_or(false)
+}
+
+fn find_opensubsonic_backend(config: &Config) -> Option<&BackendProfileConfig> {
+    config
+        .integrations
+        .backends
+        .iter()
+        .find(|backend| backend.profile_id == OPENSUBSONIC_PROFILE_ID)
+}
+
+fn upsert_opensubsonic_backend_config(
+    config: &mut Config,
+    endpoint: &str,
+    username: &str,
+    enabled: bool,
+) {
+    let endpoint = endpoint.trim().trim_end_matches('/').to_string();
+    let username = username.trim().to_string();
+    if let Some(existing) = config
+        .integrations
+        .backends
+        .iter_mut()
+        .find(|backend| backend.profile_id == OPENSUBSONIC_PROFILE_ID)
+    {
+        existing.backend_kind = IntegrationBackendKind::OpenSubsonic;
+        existing.display_name = "OpenSubsonic".to_string();
+        existing.endpoint = endpoint;
+        existing.username = username;
+        existing.enabled = enabled;
+        return;
+    }
+    config.integrations.backends.push(BackendProfileConfig {
+        profile_id: OPENSUBSONIC_PROFILE_ID.to_string(),
+        backend_kind: IntegrationBackendKind::OpenSubsonic,
+        display_name: "OpenSubsonic".to_string(),
+        endpoint,
+        username,
+        enabled,
+    });
+}
+
+fn opensubsonic_profile_snapshot(
+    config_backend: &BackendProfileConfig,
+    status_text: Option<String>,
+) -> protocol::BackendProfileSnapshot {
+    protocol::BackendProfileSnapshot {
+        profile_id: config_backend.profile_id.clone(),
+        backend_kind: protocol::BackendKind::OpenSubsonic,
+        display_name: config_backend.display_name.clone(),
+        endpoint: config_backend.endpoint.clone(),
+        username: config_backend.username.clone(),
+        configured: !config_backend.endpoint.trim().is_empty()
+            && !config_backend.username.trim().is_empty(),
+        connection_state: protocol::BackendConnectionState::Disconnected,
+        status_text,
+    }
 }
 
 fn collect_audio_files_from_folder(folder_path: &Path) -> Vec<PathBuf> {
@@ -861,6 +926,25 @@ fn sanitize_config(config: Config) -> Config {
         .library
         .artist_image_cache_max_size_mb
         .clamp(16, 16_384);
+    let mut sanitized_backends = Vec::new();
+    let mut seen_backend_ids = HashSet::new();
+    for backend in config.integrations.backends {
+        let trimmed_profile_id = backend.profile_id.trim();
+        if trimmed_profile_id.is_empty() {
+            continue;
+        }
+        if !seen_backend_ids.insert(trimmed_profile_id.to_ascii_lowercase()) {
+            continue;
+        }
+        sanitized_backends.push(BackendProfileConfig {
+            profile_id: trimmed_profile_id.to_string(),
+            backend_kind: backend.backend_kind,
+            display_name: backend.display_name.trim().to_string(),
+            endpoint: backend.endpoint.trim().trim_end_matches('/').to_string(),
+            username: backend.username.trim().to_string(),
+            enabled: backend.enabled,
+        });
+    }
 
     Config {
         output: OutputConfig {
@@ -904,6 +988,9 @@ fn sanitize_config(config: Config) -> Config {
             player_target_buffer_ms: clamped_target,
             player_request_interval_ms: clamped_interval,
             decoder_request_chunk_ms: clamped_decoder_chunk,
+        },
+        integrations: IntegrationsConfig {
+            backends: sanitized_backends,
         },
     }
 }
@@ -2387,6 +2474,7 @@ fn with_updated_layout(previous: &Config, layout: LayoutConfig) -> Config {
         },
         library: previous.library.clone(),
         buffering: previous.buffering.clone(),
+        integrations: previous.integrations.clone(),
     })
 }
 
@@ -2761,6 +2849,26 @@ fn apply_config_to_ui(
         }
     }
     ui.set_settings_library_online_metadata_enabled(config.library.online_metadata_enabled);
+    if let Some(backend) = find_opensubsonic_backend(config) {
+        ui.set_settings_subsonic_enabled(backend.enabled);
+        ui.set_settings_subsonic_endpoint(backend.endpoint.clone().into());
+        ui.set_settings_subsonic_username(backend.username.clone().into());
+        ui.set_settings_subsonic_password("".into());
+        let status = if backend.endpoint.trim().is_empty() || backend.username.trim().is_empty() {
+            "Not configured".to_string()
+        } else if backend.enabled {
+            "Configured (ready to connect)".to_string()
+        } else {
+            "Configured (disabled)".to_string()
+        };
+        ui.set_settings_subsonic_status(status.into());
+    } else {
+        ui.set_settings_subsonic_enabled(false);
+        ui.set_settings_subsonic_endpoint("".into());
+        ui.set_settings_subsonic_username("".into());
+        ui.set_settings_subsonic_password("".into());
+        ui.set_settings_subsonic_status("Not configured".into());
+    }
     apply_playlist_columns_to_ui(ui, config);
     apply_layout_to_ui(ui, config, workspace_width_px, workspace_height_px);
 }
@@ -3471,6 +3579,199 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let _ = bus_sender_clone.send(Message::Config(ConfigMessage::ConfigChanged(
             runtime_config,
         )));
+    });
+
+    let bus_sender_clone = bus_sender.clone();
+    let config_state_clone = Arc::clone(&config_state);
+    let output_options_clone = Arc::clone(&output_options);
+    let runtime_output_override_clone = Arc::clone(&runtime_output_override);
+    let runtime_audio_state_clone = Arc::clone(&runtime_audio_state);
+    let last_runtime_signature_clone = Arc::clone(&last_runtime_signature);
+    let config_file_clone = config_file.clone();
+    let layout_workspace_size_clone = Arc::clone(&layout_workspace_size);
+    let ui_handle_clone = ui.as_weak().clone();
+    ui.on_settings_save_subsonic_profile(move |enabled, endpoint, username, password| {
+        let endpoint_trimmed = endpoint.trim().trim_end_matches('/').to_string();
+        let username_trimmed = username.trim().to_string();
+        let password_trimmed = password.trim().to_string();
+
+        let mut status_message = "OpenSubsonic profile saved".to_string();
+        if !password_trimmed.is_empty() {
+            if let Err(error) =
+                set_opensubsonic_password(OPENSUBSONIC_PROFILE_ID, password_trimmed.as_str())
+            {
+                status_message = format!("Failed to save password to keyring: {error}");
+            }
+        }
+
+        let next_config = {
+            let mut state = config_state_clone
+                .lock()
+                .expect("config state lock poisoned");
+            let mut next = state.clone();
+            upsert_opensubsonic_backend_config(
+                &mut next,
+                endpoint_trimmed.as_str(),
+                username_trimmed.as_str(),
+                enabled,
+            );
+            next = sanitize_config(next);
+            *state = next.clone();
+            next
+        };
+        persist_state_files_with_config_path(&next_config, &config_file_clone);
+
+        let password_for_upsert = if !password_trimmed.is_empty() {
+            Some(password_trimmed)
+        } else {
+            match get_opensubsonic_password(OPENSUBSONIC_PROFILE_ID) {
+                Ok(value) => value,
+                Err(error) => {
+                    status_message = format!("Failed to access keyring password: {error}");
+                    None
+                }
+            }
+        };
+
+        if let Some(backend) = find_opensubsonic_backend(&next_config) {
+            let snapshot = opensubsonic_profile_snapshot(backend, Some(status_message.clone()));
+            let connect_now = enabled && password_for_upsert.is_some();
+            let _ = bus_sender_clone.send(Message::Integration(
+                IntegrationMessage::UpsertBackendProfile {
+                    profile: snapshot,
+                    password: password_for_upsert,
+                    connect_now,
+                },
+            ));
+            if !enabled {
+                let _ = bus_sender_clone.send(Message::Integration(
+                    IntegrationMessage::DisconnectBackendProfile {
+                        profile_id: OPENSUBSONIC_PROFILE_ID.to_string(),
+                    },
+                ));
+            }
+        }
+
+        let options_snapshot = {
+            let options = output_options_clone
+                .lock()
+                .expect("output options lock poisoned");
+            options.clone()
+        };
+        let (workspace_width_px, workspace_height_px) =
+            workspace_size_snapshot(&layout_workspace_size_clone);
+        if let Some(ui) = ui_handle_clone.upgrade() {
+            apply_config_to_ui(
+                &ui,
+                &next_config,
+                &options_snapshot,
+                workspace_width_px,
+                workspace_height_px,
+            );
+            ui.set_settings_subsonic_status(status_message.into());
+            ui.set_settings_subsonic_password("".into());
+        }
+        let runtime_override = runtime_output_override_snapshot(&runtime_output_override_clone);
+        let runtime_config = resolve_effective_runtime_config(
+            &next_config,
+            &options_snapshot,
+            Some(&runtime_override),
+            &runtime_audio_state_clone,
+        );
+        {
+            let mut last_runtime = last_runtime_signature_clone
+                .lock()
+                .expect("runtime signature lock poisoned");
+            *last_runtime = OutputRuntimeSignature::from_output(&runtime_config.output);
+        }
+        let _ = bus_sender_clone.send(Message::Config(ConfigMessage::ConfigChanged(
+            runtime_config,
+        )));
+    });
+
+    let bus_sender_clone = bus_sender.clone();
+    let ui_handle_clone = ui.as_weak().clone();
+    ui.on_settings_test_subsonic_connection(move || {
+        let Some(ui) = ui_handle_clone.upgrade() else {
+            return;
+        };
+
+        let endpoint_trimmed = ui
+            .get_settings_subsonic_endpoint()
+            .trim()
+            .trim_end_matches('/')
+            .to_string();
+        let username_trimmed = ui.get_settings_subsonic_username().trim().to_string();
+        let password_trimmed = ui.get_settings_subsonic_password().trim().to_string();
+        if endpoint_trimmed.is_empty() || username_trimmed.is_empty() {
+            ui.set_settings_subsonic_status("Enter server URL and username first".into());
+            return;
+        }
+
+        let password_for_upsert = if password_trimmed.is_empty() {
+            get_opensubsonic_password(OPENSUBSONIC_PROFILE_ID).unwrap_or_else(|_| None)
+        } else {
+            Some(password_trimmed)
+        };
+        let profile = protocol::BackendProfileSnapshot {
+            profile_id: OPENSUBSONIC_PROFILE_ID.to_string(),
+            backend_kind: protocol::BackendKind::OpenSubsonic,
+            display_name: "OpenSubsonic".to_string(),
+            endpoint: endpoint_trimmed,
+            username: username_trimmed,
+            configured: true,
+            connection_state: protocol::BackendConnectionState::Disconnected,
+            status_text: Some("Testing connection...".to_string()),
+        };
+        let _ = bus_sender_clone.send(Message::Integration(
+            IntegrationMessage::UpsertBackendProfile {
+                profile,
+                password: password_for_upsert,
+                connect_now: false,
+            },
+        ));
+        let _ = bus_sender_clone.send(Message::Integration(
+            IntegrationMessage::TestBackendConnection {
+                profile_id: OPENSUBSONIC_PROFILE_ID.to_string(),
+            },
+        ));
+        ui.set_settings_subsonic_status("Testing connection...".into());
+    });
+
+    let bus_sender_clone = bus_sender.clone();
+    ui.on_settings_sync_subsonic_now(move || {
+        let _ = bus_sender_clone.send(Message::Integration(
+            IntegrationMessage::SyncBackendProfile {
+                profile_id: OPENSUBSONIC_PROFILE_ID.to_string(),
+            },
+        ));
+    });
+
+    let bus_sender_clone = bus_sender.clone();
+    ui.on_settings_disconnect_subsonic(move || {
+        let _ = bus_sender_clone.send(Message::Integration(
+            IntegrationMessage::DisconnectBackendProfile {
+                profile_id: OPENSUBSONIC_PROFILE_ID.to_string(),
+            },
+        ));
+    });
+
+    let bus_sender_clone = bus_sender.clone();
+    ui.on_remote_detach_confirm(move |playlist_id| {
+        let _ = bus_sender_clone.send(Message::Playlist(
+            PlaylistMessage::ConfirmDetachRemotePlaylist {
+                playlist_id: playlist_id.to_string(),
+            },
+        ));
+    });
+
+    let bus_sender_clone = bus_sender.clone();
+    ui.on_remote_detach_cancel(move |playlist_id| {
+        let _ = bus_sender_clone.send(Message::Playlist(
+            PlaylistMessage::CancelDetachRemotePlaylist {
+                playlist_id: playlist_id.to_string(),
+            },
+        ));
     });
 
     // Wire up play button
@@ -5242,6 +5543,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 },
                 library: previous_config.library.clone(),
                 buffering: previous_config.buffering.clone(),
+                integrations: previous_config.integrations.clone(),
             });
 
             let (workspace_width_px, workspace_height_px) =
@@ -5377,6 +5679,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             },
             library: previous_config.library.clone(),
             buffering: previous_config.buffering.clone(),
+            integrations: previous_config.integrations.clone(),
         });
 
         if let Some(ui) = ui_handle_clone.upgrade() {
@@ -5481,6 +5784,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             },
             library: previous_config.library.clone(),
             buffering: previous_config.buffering.clone(),
+            integrations: previous_config.integrations.clone(),
         });
 
         if let Some(ui) = ui_handle_clone.upgrade() {
@@ -5587,6 +5891,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             },
             library: previous_config.library.clone(),
             buffering: previous_config.buffering.clone(),
+            integrations: previous_config.integrations.clone(),
         });
 
         if let Some(ui) = ui_handle_clone.upgrade() {
@@ -5687,6 +5992,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             },
             library: previous_config.library.clone(),
             buffering: previous_config.buffering.clone(),
+            integrations: previous_config.integrations.clone(),
         });
 
         if let Some(ui) = ui_handle_clone.upgrade() {
@@ -5768,6 +6074,33 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     });
 
     // Setup playlist manager
+    let integration_manager_bus_receiver = bus_sender.subscribe();
+    let integration_manager_bus_sender = bus_sender.clone();
+    thread::spawn(move || {
+        let mut integration_manager = IntegrationManager::new(
+            integration_manager_bus_receiver,
+            integration_manager_bus_sender,
+        );
+        integration_manager.run();
+    });
+    if let Some(backend) = find_opensubsonic_backend(&config) {
+        let password = get_opensubsonic_password(OPENSUBSONIC_PROFILE_ID).unwrap_or_else(|_| None);
+        let status_text = if backend.enabled && password.is_none() {
+            Some("Missing keyring password".to_string())
+        } else {
+            Some("Restored from config".to_string())
+        };
+        let snapshot = opensubsonic_profile_snapshot(backend, status_text);
+        let connect_now = backend.enabled && password.is_some();
+        let _ = bus_sender.send(Message::Integration(
+            IntegrationMessage::UpsertBackendProfile {
+                profile: snapshot,
+                password,
+                connect_now,
+            },
+        ));
+    }
+
     let playlist_manager_bus_receiver = bus_sender.subscribe();
     let playlist_manager_bus_sender = bus_sender.clone();
     let db_manager = DbManager::new().expect("Failed to initialize database");
@@ -5879,6 +6212,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let mut audio_player = AudioPlayer::new(player_bus_receiver, player_bus_sender);
         audio_player.run();
     });
+
+    let _ = bus_sender.send(Message::Integration(IntegrationMessage::RequestSnapshot));
 
     // Re-detect output options only when an audio-device open coincides with
     // an output-device inventory change (startup has already done initial detection).
@@ -6119,6 +6454,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         },
                         library: state.library.clone(),
                         buffering: state.buffering.clone(),
+                        integrations: state.integrations.clone(),
                     });
                     *state = updated.clone();
                     updated
@@ -6163,6 +6499,88 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             workspace_width_px,
                             workspace_height_px,
                         );
+                    }
+                });
+            }
+            Ok(Message::Playlist(PlaylistMessage::RemoteDetachConfirmationRequested {
+                playlist_id,
+                playlist_name,
+            })) => {
+                let ui_weak = ui_handle_clone.clone();
+                let message = format!(
+                    "This edit will detach '{}' from OpenSubsonic sync and keep it local-only. Continue?",
+                    playlist_name
+                );
+                let _ = slint::invoke_from_event_loop(move || {
+                    if let Some(ui) = ui_weak.upgrade() {
+                        ui.set_remote_detach_target_playlist_id(playlist_id.into());
+                        ui.set_remote_detach_confirm_message(message.into());
+                        ui.set_show_remote_detach_confirm(true);
+                    }
+                });
+            }
+            Ok(Message::Playlist(PlaylistMessage::RemotePlaylistWritebackState {
+                playlist_id,
+                success,
+                error,
+            })) => {
+                let ui_weak = ui_handle_clone.clone();
+                let status = if success {
+                    format!("OpenSubsonic playlist sync complete ({playlist_id})")
+                } else {
+                    format!(
+                        "OpenSubsonic playlist sync failed ({playlist_id}): {}",
+                        error.unwrap_or_else(|| "unknown error".to_string())
+                    )
+                };
+                let _ = slint::invoke_from_event_loop(move || {
+                    if let Some(ui) = ui_weak.upgrade() {
+                        ui.set_settings_subsonic_status(status.into());
+                    }
+                });
+            }
+            Ok(Message::Integration(IntegrationMessage::BackendSnapshotUpdated(snapshot))) => {
+                let ui_weak = ui_handle_clone.clone();
+                let status = snapshot
+                    .profiles
+                    .iter()
+                    .find(|profile| profile.profile_id == OPENSUBSONIC_PROFILE_ID)
+                    .map(|profile| {
+                        profile.status_text.clone().unwrap_or_else(|| {
+                            match profile.connection_state {
+                                protocol::BackendConnectionState::Connected => {
+                                    "Connected".to_string()
+                                }
+                                protocol::BackendConnectionState::Connecting => {
+                                    "Connecting...".to_string()
+                                }
+                                protocol::BackendConnectionState::Disconnected => {
+                                    "Disconnected".to_string()
+                                }
+                                protocol::BackendConnectionState::Error => "Error".to_string(),
+                            }
+                        })
+                    })
+                    .unwrap_or_else(|| "Not configured".to_string());
+                let _ = slint::invoke_from_event_loop(move || {
+                    if let Some(ui) = ui_weak.upgrade() {
+                        ui.set_settings_subsonic_status(status.into());
+                    }
+                });
+            }
+            Ok(Message::Integration(IntegrationMessage::BackendOperationFailed {
+                profile_id,
+                action,
+                error,
+            })) => {
+                if profile_id.as_deref() != Some(OPENSUBSONIC_PROFILE_ID) {
+                    continue;
+                }
+                let ui_weak = ui_handle_clone.clone();
+                let status = format!("OpenSubsonic {action} failed: {error}");
+                let _ = slint::invoke_from_event_loop(move || {
+                    if let Some(ui) = ui_weak.upgrade() {
+                        ui.set_settings_subsonic_status(status.into());
                     }
                 });
             }
@@ -6468,8 +6886,9 @@ mod tests {
         );
         assert!(
             slint_ui.contains("in-out property <int> settings_dialog_tab_index: 0;")
-                && slint_ui.contains("labels: [\"General\", \"Audio\", \"Library\"];"),
-            "Settings dialog should expose and render General/Audio/Library tabs"
+                && slint_ui
+                    .contains("labels: [\"General\", \"Audio\", \"Library\", \"Integrations\"];"),
+            "Settings dialog should expose and render General/Audio/Library/Integrations tabs"
         );
         assert!(
             slint_ui.contains("text: \"Show layout editing mode tutorial\""),
@@ -7252,6 +7671,7 @@ mod tests {
             },
             library: LibraryConfig::default(),
             buffering: BufferingConfig::default(),
+            integrations: crate::config::IntegrationsConfig::default(),
         };
         let options = OutputSettingsOptions {
             device_names: vec!["Device A".to_string(), "Device B".to_string()],
