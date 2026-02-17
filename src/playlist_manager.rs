@@ -72,6 +72,7 @@ pub struct PlaylistManager {
     suppress_remote_writeback: bool,
     last_remote_writeback_signature: HashMap<String, String>,
     remote_track_metadata_by_path: HashMap<PathBuf, protocol::TrackMetadataSummary>,
+    backend_connection_states: HashMap<String, protocol::BackendConnectionState>,
 }
 
 impl PlaylistManager {
@@ -118,6 +119,7 @@ impl PlaylistManager {
             suppress_remote_writeback: false,
             last_remote_writeback_signature: HashMap::new(),
             remote_track_metadata_by_path: HashMap::new(),
+            backend_connection_states: HashMap::new(),
         }
     }
 
@@ -196,6 +198,42 @@ impl PlaylistManager {
                 playlist_name,
             },
         ));
+    }
+
+    fn reload_editing_playlist_from_active(&mut self) {
+        self.editing_playlist = Playlist::new();
+        self.editing_playlist
+            .set_playback_order(self.playback_order);
+        self.editing_playlist.set_repeat_mode(self.repeat_mode);
+        if let Ok(tracks) = self
+            .db_manager
+            .get_tracks_for_playlist(&self.active_playlist_id)
+        {
+            for track in tracks {
+                self.editing_playlist.add_track(Track {
+                    path: track.path,
+                    id: track.id,
+                });
+            }
+        }
+    }
+
+    fn remove_remote_metadata_for_profile(&mut self, profile_id: &str) {
+        self.remote_track_metadata_by_path.retain(|path, _| {
+            parse_opensubsonic_track_uri(path.as_path())
+                .map(|locator| locator.profile_id != profile_id)
+                .unwrap_or(true)
+        });
+    }
+
+    fn is_remote_playlist_blocked(&self, playlist_id: &str) -> bool {
+        let Some((profile_id, _)) = Self::remote_binding_from_playlist_id(playlist_id) else {
+            return false;
+        };
+        matches!(
+            self.backend_connection_states.get(&profile_id),
+            Some(protocol::BackendConnectionState::Error)
+        )
     }
 
     fn detach_active_playlist_binding(&mut self) {
@@ -596,12 +634,15 @@ impl PlaylistManager {
         playlists: Vec<protocol::RemotePlaylistSnapshot>,
     ) {
         self.suppress_remote_writeback = true;
+        self.remove_remote_metadata_for_profile(profile_id);
+        let existing_before_sync = self.db_manager.get_all_playlists().unwrap_or_default();
+        let mut remote_playlist_ids = HashSet::new();
         for remote_playlist in playlists {
             let remote_playlist_id = remote_playlist.remote_playlist_id.clone();
             let local_playlist_id =
                 format!("remote:opensubsonic:{}:{}", profile_id, remote_playlist_id);
-            let existing = self.db_manager.get_all_playlists().unwrap_or_default();
-            if !existing
+            remote_playlist_ids.insert(local_playlist_id.clone());
+            if !existing_before_sync
                 .iter()
                 .any(|playlist| playlist.id == local_playlist_id)
             {
@@ -648,26 +689,46 @@ impl PlaylistManager {
                 ));
             }
         }
-        if let Ok(playlists) = self.db_manager.get_all_playlists() {
+        for stale_playlist in existing_before_sync.iter().filter(|playlist| {
+            playlist
+                .id
+                .strip_prefix("remote:opensubsonic:")
+                .and_then(|suffix| suffix.split_once(':'))
+                .map(|(existing_profile_id, _)| existing_profile_id == profile_id)
+                .unwrap_or(false)
+                && !remote_playlist_ids.contains(&playlist.id)
+        }) {
+            let _ = self.db_manager.delete_playlist(&stale_playlist.id);
+            if matches!(
+                self.playback_queue_source.as_ref(),
+                Some(protocol::PlaybackQueueSource::Playlist { playlist_id })
+                    if playlist_id == &stale_playlist.id
+            ) {
+                self.playback_queue_source = None;
+            }
+        }
+        if let Ok(mut playlists) = self.db_manager.get_all_playlists() {
+            if playlists.is_empty() {
+                let default_id = Uuid::new_v4().to_string();
+                if self
+                    .db_manager
+                    .create_playlist(&default_id, "Default")
+                    .is_ok()
+                {
+                    playlists = self.db_manager.get_all_playlists().unwrap_or_default();
+                }
+            }
             if playlists
                 .iter()
-                .any(|playlist| playlist.id == self.active_playlist_id)
+                .all(|playlist| playlist.id != self.active_playlist_id)
             {
-                self.editing_playlist = Playlist::new();
-                self.editing_playlist
-                    .set_playback_order(self.playback_order);
-                self.editing_playlist.set_repeat_mode(self.repeat_mode);
-                if let Ok(tracks) = self
-                    .db_manager
-                    .get_tracks_for_playlist(&self.active_playlist_id)
-                {
-                    for track in tracks {
-                        self.editing_playlist.add_track(Track {
-                            path: track.path,
-                            id: track.id,
-                        });
-                    }
-                }
+                self.active_playlist_id = playlists
+                    .first()
+                    .map(|playlist| playlist.id.clone())
+                    .unwrap_or_default();
+            }
+            if !self.active_playlist_id.is_empty() {
+                self.reload_editing_playlist_from_active();
             }
             self.broadcast_playlist_state_snapshot(playlists);
             self.broadcast_playlist_changed();
@@ -1832,6 +1893,13 @@ impl PlaylistManager {
                     ) => {
                         let playlists = self.db_manager.get_all_playlists().unwrap_or_default();
                         if let Some(p) = playlists.get(index) {
+                            if self.is_remote_playlist_blocked(&p.id) {
+                                debug!(
+                                    "PlaylistManager: blocked switch to unavailable remote playlist {}",
+                                    p.id
+                                );
+                                continue;
+                            }
                             let id = p.id.clone();
                             let _ = self.bus_producer.send(protocol::Message::Playlist(
                                 protocol::PlaylistMessage::SwitchPlaylist { id },
@@ -1841,6 +1909,13 @@ impl PlaylistManager {
                     protocol::Message::Playlist(protocol::PlaylistMessage::SwitchPlaylist {
                         id,
                     }) => {
+                        if self.is_remote_playlist_blocked(&id) {
+                            debug!(
+                                "PlaylistManager: blocked switch to unavailable remote playlist {}",
+                                id
+                            );
+                            continue;
+                        }
                         debug!("PlaylistManager: Switching to playlist {}", id);
                         if id == self.active_playlist_id {
                             continue;
@@ -1848,14 +1923,15 @@ impl PlaylistManager {
 
                         self.clear_track_list_history();
                         self.active_playlist_id = id.clone();
-                        self.editing_playlist = Playlist::new(); // Clear in-memory editing playlist
-                                                                 // Ensure settings are applied to new editing playlist
-                        self.editing_playlist
-                            .set_playback_order(self.playback_order);
-                        self.editing_playlist.set_repeat_mode(self.repeat_mode);
-
-                        match self.db_manager.get_tracks_for_playlist(&id) {
+                        match self
+                            .db_manager
+                            .get_tracks_for_playlist(&self.active_playlist_id)
+                        {
                             Ok(tracks) => {
+                                self.editing_playlist = Playlist::new();
+                                self.editing_playlist
+                                    .set_playback_order(self.playback_order);
+                                self.editing_playlist.set_repeat_mode(self.repeat_mode);
                                 for track in tracks.iter() {
                                     self.editing_playlist.add_track(Track {
                                         path: track.path.clone(),
@@ -1880,6 +1956,15 @@ impl PlaylistManager {
                         self.broadcast_active_playlist_column_order();
                         self.broadcast_active_playlist_column_width_overrides();
                         self.broadcast_playlist_changed();
+                    }
+                    protocol::Message::Integration(
+                        protocol::IntegrationMessage::BackendSnapshotUpdated(snapshot),
+                    ) => {
+                        self.backend_connection_states.clear();
+                        for profile in snapshot.profiles {
+                            self.backend_connection_states
+                                .insert(profile.profile_id, profile.connection_state);
+                        }
                     }
                     protocol::Message::Playlist(
                         protocol::PlaylistMessage::RequestPlaylistState,

@@ -486,7 +486,7 @@ impl UiManager {
 
     fn source_badge_for_track_path(path: &Path) -> String {
         if is_remote_track_path(path) {
-            "SUB".to_string()
+            "opensubsonic".to_string()
         } else {
             String::new()
         }

@@ -94,9 +94,23 @@ impl IntegrationManager {
     }
 
     fn remove_profile(&mut self, profile_id: &str) {
-        let removed = self.profiles.remove(profile_id).is_some();
+        let removed_profile = self.profiles.remove(profile_id);
         self.passwords.remove(profile_id);
-        if removed {
+        if let Some(profile) = removed_profile {
+            if profile.backend_kind == BackendKind::OpenSubsonic {
+                let _ = self.bus_producer.send(Message::Integration(
+                    IntegrationMessage::OpenSubsonicLibraryTracksUpdated {
+                        profile_id: profile_id.to_string(),
+                        tracks: Vec::new(),
+                    },
+                ));
+                let _ = self.bus_producer.send(Message::Integration(
+                    IntegrationMessage::OpenSubsonicPlaylistsUpdated {
+                        profile_id: profile_id.to_string(),
+                        playlists: Vec::new(),
+                    },
+                ));
+            }
             self.emit_snapshot();
         }
     }
@@ -289,11 +303,29 @@ impl IntegrationManager {
     }
 
     fn disconnect_profile(&mut self, profile_id: &str) {
+        let backend_kind = self
+            .profiles
+            .get(profile_id)
+            .map(|profile| profile.backend_kind);
         self.set_profile_connection_state(
             profile_id,
             BackendConnectionState::Disconnected,
             Some("Disconnected".to_string()),
         );
+        if backend_kind == Some(BackendKind::OpenSubsonic) {
+            let _ = self.bus_producer.send(Message::Integration(
+                IntegrationMessage::OpenSubsonicLibraryTracksUpdated {
+                    profile_id: profile_id.to_string(),
+                    tracks: Vec::new(),
+                },
+            ));
+            let _ = self.bus_producer.send(Message::Integration(
+                IntegrationMessage::OpenSubsonicPlaylistsUpdated {
+                    profile_id: profile_id.to_string(),
+                    playlists: Vec::new(),
+                },
+            ));
+        }
     }
 
     fn sync_profile(&mut self, profile_id: &str) {
@@ -545,13 +577,18 @@ mod tests {
         let _ = observer.try_recv();
 
         manager.remove_profile("subsonic-home");
-        let message = observer
-            .try_recv()
-            .expect("removing existing profile should emit snapshot");
-        let Message::Integration(IntegrationMessage::BackendSnapshotUpdated(snapshot)) = message
-        else {
-            panic!("unexpected message emitted by integration manager");
-        };
+        let mut snapshot = None;
+        for _ in 0..4 {
+            let Ok(message) = observer.try_recv() else {
+                break;
+            };
+            if let Message::Integration(IntegrationMessage::BackendSnapshotUpdated(next)) = message
+            {
+                snapshot = Some(next);
+                break;
+            }
+        }
+        let snapshot = snapshot.expect("removing existing profile should emit snapshot");
         assert_eq!(snapshot.version, 2);
         assert!(snapshot.profiles.is_empty());
 

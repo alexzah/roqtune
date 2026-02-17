@@ -1273,7 +1273,14 @@ impl LibraryManager {
                     Message::Integration(
                         IntegrationMessage::OpenSubsonicLibraryTracksUpdated { profile_id, tracks },
                     ) => {
-                        self.remote_tracks_by_profile.insert(profile_id, tracks);
+                        if tracks.is_empty() {
+                            self.remote_tracks_by_profile.remove(&profile_id);
+                        } else {
+                            self.remote_tracks_by_profile.insert(profile_id, tracks);
+                        }
+                        self.publish_root_counts();
+                        self.publish_tracks();
+                        self.publish_global_search_data();
                     }
                     Message::Library(LibraryMessage::DrainScanProgressQueue) => {}
                     Message::Library(LibraryMessage::RequestLibraryPage {

@@ -3705,9 +3705,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     "Failed to save OpenSubsonic credential for profile '{}': {}",
                     OPENSUBSONIC_PROFILE_ID, error
                 );
-                status_message = format!(
-                    "System keyring unavailable; password cached for this session only: {error}"
-                );
+                status_message =
+                    "System keyring unavailable; password cached for this session only".to_string();
                 if keyring_unavailable_error(error.as_str()) {
                     show_keyring_notice = true;
                     keyring_notice_message = OPENSUBSONIC_SESSION_KEYRING_NOTICE.to_string();
@@ -3751,7 +3750,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         "Failed to load OpenSubsonic credential for profile '{}': {}",
                         OPENSUBSONIC_PROFILE_ID, error
                     );
-                    status_message = format!("Failed to access credential store password: {error}");
+                    status_message =
+                        "Could not read saved OpenSubsonic credential from the system keyring"
+                            .to_string();
                     if keyring_unavailable_error(error.as_str()) {
                         show_keyring_notice = true;
                         keyring_notice_message = OPENSUBSONIC_SESSION_KEYRING_NOTICE.to_string();
@@ -3860,10 +3861,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         OPENSUBSONIC_PROFILE_ID, error
                     );
                     ui.set_settings_subsonic_status(
-                        format!(
-                            "Keyring unavailable. Enter password to test (session-only): {error}"
-                        )
-                        .into(),
+                        "System keyring unavailable. Enter password to test for this session only."
+                            .into(),
                     );
                     return;
                 }
@@ -6365,14 +6364,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     startup_subsonic_session_prompt = Some((
                         backend.username.clone(),
                         backend.endpoint.clone(),
-                        format!("Credential store unavailable: {error}"),
+                        "System keyring is unavailable. Enter your password for this session."
+                            .to_string(),
                     ));
                 }
                 (
                     None,
-                    Some(format!(
-                        "Credential store unavailable; session password required: {error}"
-                    )),
+                    Some("System keyring unavailable; session password required".to_string()),
                 )
             }
         };
@@ -6380,15 +6378,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let connect_now = backend.enabled && password.is_some();
         (snapshot, password, connect_now)
     });
-    if let Some((snapshot, password, connect_now)) = startup_opensubsonic_seed.clone() {
-        let _ = bus_sender.send(Message::Integration(
-            IntegrationMessage::UpsertBackendProfile {
-                profile: snapshot,
-                password,
-                connect_now,
-            },
-        ));
-    }
 
     let playlist_manager_bus_receiver = bus_sender.subscribe();
     let playlist_manager_bus_sender = bus_sender.clone();
@@ -6493,12 +6482,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let mut audio_decoder = AudioDecoder::new(decoder_bus_receiver, decoder_bus_sender);
         audio_decoder.run();
     });
-    if let Some((snapshot, password, _)) = startup_opensubsonic_seed {
+    if let Some((snapshot, password, connect_now)) = startup_opensubsonic_seed {
         let _ = bus_sender.send(Message::Integration(
             IntegrationMessage::UpsertBackendProfile {
                 profile: snapshot,
                 password,
-                connect_now: false,
+                connect_now,
             },
         ));
     }

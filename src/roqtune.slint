@@ -3972,14 +3972,17 @@ export component AppWindow inherits Window {
                         width: 36px;
                         height: 36px;
                         border-radius: 18px;
-                        background: #f08c00;
-                        Text {
-                            text: "SUB";
-                            color: #ffffff;
-                            font-size: 10px;
-                            font-weight: 700;
-                            horizontal-alignment: center;
-                            vertical-alignment: center;
+                        background: root.ui_dark_mode ? #1f3248 : #e2eefb;
+                        border-width: 1px;
+                        border-color: root.ui_dark_mode ? #3f5470 : #b4cde8;
+                        Image {
+                            source: AppIcons.opensubsonic;
+                            width: 18px;
+                            height: 18px;
+                            x: (parent.width - self.width) / 2;
+                            y: (parent.height - self.height) / 2;
+                            image-fit: contain;
+                            colorize: root.ui_dark_mode ? #9fc3eb : #2d5f98;
                         }
                     }
 
@@ -5047,11 +5050,32 @@ export component AppWindow inherits Window {
                         height: parent.height;
                         spacing: 10px;
 
-                        Text {
-                            text: "OpenSubsonic";
-                            color: root.theme_text_primary;
-                            font-size: 12px;
-                            font-weight: 700;
+                        HorizontalLayout {
+                            spacing: 6px;
+                            Rectangle {
+                                width: 18px;
+                                height: 18px;
+                                border-radius: 9px;
+                                border-width: 1px;
+                                border-color: root.ui_dark_mode ? #3f5470 : #b4cde8;
+                                background: root.ui_dark_mode ? #1f3248 : #e2eefb;
+                                Image {
+                                    source: AppIcons.opensubsonic;
+                                    width: 10px;
+                                    height: 10px;
+                                    x: (parent.width - self.width) / 2;
+                                    y: (parent.height - self.height) / 2;
+                                    image-fit: contain;
+                                    colorize: root.ui_dark_mode ? #9fc3eb : #2d5f98;
+                                }
+                            }
+                            Text {
+                                text: "OpenSubsonic";
+                                color: root.theme_text_primary;
+                                font-size: 12px;
+                                font-weight: 700;
+                                vertical-alignment: center;
+                            }
                         }
 
                         Rectangle {
