@@ -52,20 +52,3 @@ pub fn get_opensubsonic_password(profile_id: &str) -> Result<Option<String>, Str
         }
     }
 }
-
-/// Deletes the OpenSubsonic password for a profile from the OS keyring.
-#[allow(dead_code)]
-pub fn delete_opensubsonic_password(profile_id: &str) -> Result<(), String> {
-    let entry = opensubsonic_entry(profile_id)?;
-    match entry.delete_password() {
-        Ok(()) | Err(keyring::Error::NoEntry) => Ok(()),
-        Err(err) => {
-            let detail = format!("failed to delete keyring password: {err}");
-            Err(format_keyring_error(
-                "delete OpenSubsonic credential",
-                profile_id,
-                detail.as_str(),
-            ))
-        }
-    }
-}

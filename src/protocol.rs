@@ -895,7 +895,6 @@ pub struct BackendSnapshot {
 
 /// Integration-domain commands and notifications.
 #[derive(Debug, Clone)]
-#[allow(dead_code)]
 pub enum IntegrationMessage {
     RequestSnapshot,
     UpsertBackendProfile {
@@ -903,9 +902,11 @@ pub enum IntegrationMessage {
         password: Option<String>,
         connect_now: bool,
     },
+    #[allow(dead_code)]
     RemoveBackendProfile {
         profile_id: String,
     },
+    #[allow(dead_code)]
     ConnectBackendProfile {
         profile_id: String,
     },
@@ -918,6 +919,7 @@ pub enum IntegrationMessage {
     SyncBackendProfile {
         profile_id: String,
     },
+    #[allow(dead_code)]
     SetBackendConnectionState {
         profile_id: String,
         state: BackendConnectionState,

@@ -17,7 +17,7 @@ use std::{
 };
 
 use governor::state::NotKeyed;
-use log::{debug, info, warn};
+use log::{debug, info, trace, warn};
 use slint::{Image, Model, ModelRc, StandardListViewItem, VecModel};
 use tokio::sync::broadcast::{Receiver, Sender};
 
@@ -6452,9 +6452,11 @@ impl UiManager {
 
     /// Handles selection gesture start from the UI overlay.
     pub fn on_pointer_down(&mut self, pressed_index: usize, ctrl: bool, shift: bool) {
-        debug!(
+        trace!(
             "on_pointer_down: index={}, ctrl={}, shift={}",
-            pressed_index, ctrl, shift
+            pressed_index,
+            ctrl,
+            shift
         );
         let Some(source_index) = self.map_view_to_source_index(pressed_index) else {
             self.pressed_index = None;
@@ -6509,22 +6511,23 @@ impl UiManager {
         let Some(source_index) = self.map_view_to_source_index(pressed_index) else {
             return;
         };
-        debug!(
+        trace!(
             ">>> on_drag_start START: pressed_index={}, self.selected_indices={:?}",
-            source_index, self.selected_indices
+            source_index,
+            self.selected_indices
         );
         if self.selected_indices.contains(&source_index) {
             self.drag_indices = self.selected_indices.clone();
-            debug!(
+            trace!(
                 ">>> MULTI-SELECT DRAG: using drag_indices {:?}",
                 self.drag_indices
             );
         } else {
             self.drag_indices = vec![source_index];
-            debug!(">>> SINGLE DRAG: using index {:?}", self.drag_indices);
+            trace!(">>> SINGLE DRAG: using index {:?}", self.drag_indices);
         }
         self.drag_indices.sort();
-        debug!(
+        trace!(
             ">>> on_drag_start END: drag_indices={:?}",
             self.drag_indices
         );
@@ -6558,16 +6561,19 @@ impl UiManager {
             return;
         }
 
-        debug!(
+        trace!(
             ">>> on_drag_end START: is_dragging={}, drop_gap={}, drag_indices={:?}",
-            self.is_dragging, drop_gap, self.drag_indices
+            self.is_dragging,
+            drop_gap,
+            self.drag_indices
         );
         if self.is_dragging && !self.drag_indices.is_empty() {
             let indices = self.drag_indices.clone();
             let to = drop_gap;
-            debug!(
+            trace!(
                 ">>> on_drag_end SENDING ReorderTracks: indices={:?}, to={}",
-                indices, to
+                indices,
+                to
             );
 
             let _ = self.bus_sender.send(protocol::Message::Playlist(
@@ -6678,9 +6684,10 @@ impl UiManager {
                                 first_row,
                                 row_count,
                             } => {
-                                debug!(
+                                trace!(
                                     "Library viewport changed: first_row={}, row_count={}",
-                                    first_row, row_count
+                                    first_row,
+                                    row_count
                                 );
                                 self.library_artist_prefetch_first_row = first_row;
                                 let current_view = self.current_library_view();

@@ -1093,40 +1093,6 @@ impl DbManager {
         Ok(tracks)
     }
 
-    /// Loads one tracks page and total row count.
-    #[allow(dead_code)]
-    pub fn get_library_tracks_page(
-        &self,
-        offset: usize,
-        limit: usize,
-    ) -> Result<(Vec<LibraryTrack>, usize), rusqlite::Error> {
-        let total = self.get_library_tracks_count()?;
-        let mut stmt = self.conn.prepare(
-            "SELECT track_id, path, title, artist, album, album_artist, genre, year, track_number
-             FROM library_tracks
-             ORDER BY sort_title ASC, path ASC
-             LIMIT ?1 OFFSET ?2",
-        )?;
-        let iter = stmt.query_map(params![limit as i64, offset as i64], |row| {
-            Ok(LibraryTrack {
-                id: row.get(0)?,
-                path: PathBuf::from(row.get::<_, String>(1)?),
-                title: row.get(2)?,
-                artist: row.get(3)?,
-                album: row.get(4)?,
-                album_artist: row.get(5)?,
-                genre: row.get(6)?,
-                year: row.get(7)?,
-                track_number: row.get(8)?,
-            })
-        })?;
-        let mut rows = Vec::new();
-        for item in iter {
-            rows.push(item?);
-        }
-        Ok((rows, total))
-    }
-
     /// Returns total indexed track count.
     pub fn get_library_tracks_count(&self) -> Result<usize, rusqlite::Error> {
         let count: i64 = self

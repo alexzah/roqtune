@@ -1,20 +1,34 @@
+#[path = "audio/audio_decoder.rs"]
 mod audio_decoder;
+#[path = "audio/audio_player.rs"]
 mod audio_player;
+#[path = "audio/audio_probe.rs"]
 mod audio_probe;
 mod backends;
+#[path = "cast/cast_manager.rs"]
 mod cast_manager;
 mod config;
 mod db_manager;
+#[path = "integration/integration_keyring.rs"]
 mod integration_keyring;
+#[path = "integration/integration_manager.rs"]
 mod integration_manager;
+#[path = "integration/integration_uri.rs"]
 mod integration_uri;
 mod layout;
+#[path = "library/library_enrichment_manager.rs"]
 mod library_enrichment_manager;
+#[path = "library/library_manager.rs"]
 mod library_manager;
+#[path = "cast/media_controls_manager.rs"]
 mod media_controls_manager;
+#[path = "metadata/metadata_manager.rs"]
 mod metadata_manager;
+#[path = "metadata/metadata_tags.rs"]
 mod metadata_tags;
+#[path = "playlist/playlist.rs"]
 mod playlist;
+#[path = "playlist/playlist_manager.rs"]
 mod playlist_manager;
 mod protocol;
 mod ui_manager;
@@ -54,7 +68,7 @@ use layout::{
 };
 use library_enrichment_manager::LibraryEnrichmentManager;
 use library_manager::LibraryManager;
-use log::{debug, info, warn};
+use log::{debug, info, trace, warn};
 use media_controls_manager::MediaControlsManager;
 use metadata_manager::MetadataManager;
 use playlist::Playlist;
@@ -4192,9 +4206,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Wire up pointer down handler
     let bus_sender_clone = bus_sender.clone();
     ui.on_on_pointer_down(move |index, ctrl, shift| {
-        debug!(
+        trace!(
             "Pointer down at index {:?} (ctrl={}, shift={})",
-            index, ctrl, shift
+            index,
+            ctrl,
+            shift
         );
         let _ = bus_sender_clone.send(Message::Playlist(PlaylistMessage::OnPointerDown {
             index: index as usize,
@@ -4213,7 +4229,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 return;
             }
         }
-        debug!("Drag start at index {:?}", pressed_index);
+        trace!("Drag start at index {:?}", pressed_index);
         let _ = bus_sender_clone.send(Message::Playlist(PlaylistMessage::OnDragStart {
             pressed_index: pressed_index as usize,
         }));
@@ -4228,7 +4244,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 return;
             }
         }
-        debug!("Drag move to gap {:?}", drop_gap);
+        trace!("Drag move to gap {:?}", drop_gap);
         let _ = bus_sender_clone.send(Message::Playlist(PlaylistMessage::OnDragMove {
             drop_gap: drop_gap as usize,
         }));
@@ -4243,7 +4259,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 return;
             }
         }
-        debug!("Drag end at gap {:?}", drop_gap);
+        trace!("Drag end at gap {:?}", drop_gap);
         let _ = bus_sender_clone.send(Message::Playlist(PlaylistMessage::OnDragEnd {
             drop_gap: drop_gap as usize,
         }));
