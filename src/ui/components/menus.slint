@@ -217,6 +217,7 @@ export component ConfirmationDialog inherits Rectangle {
 
 export component InfoDialog inherits Rectangle {
     callback dismissed();
+    in property <string> title: "Restart Required";
     in property <string> message: "";
     in property <bool> is-visible: false;
     private property <bool> dark: Palette.color-scheme == ColorScheme.dark;
@@ -239,7 +240,7 @@ export component InfoDialog inherits Rectangle {
             spacing: 14px;
 
             Text {
-                text: "Restart Required";
+                text: root.title;
                 color: root.dark ? #eee : #253444;
                 font-size: 16px;
                 font-weight: 700;

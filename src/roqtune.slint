@@ -125,6 +125,15 @@ export component AppWindow inherits Window {
                 root.properties_cancel();
                 return accept;
             }
+            if (event.text == Key.Escape && root.show_subsonic_session_password_prompt) {
+                root.subsonic_session_password_cancel();
+                return accept;
+            }
+            if (event.text == Key.Escape && root.show_subsonic_keyring_notice) {
+                root.show_subsonic_keyring_notice = false;
+                root.refocus_main();
+                return accept;
+            }
             if (event.text == Key.Escape && root.layout_edit_mode) {
                 root.show_layout_editor_dialog = false;
                 root.show_layout_leaf_context_menu = false;
@@ -3918,10 +3927,149 @@ export component AppWindow inherits Window {
 
     restart_notice_overlay := InfoDialog {
         is-visible: root.show_settings_restart_notice;
+        title: "Restart Required";
         message: root.settings_restart_notice_message;
         dismissed => {
             root.show_settings_restart_notice = false;
             root.refocus_main();
+        }
+    }
+
+    subsonic_keyring_notice_overlay := InfoDialog {
+        is-visible: root.show_subsonic_keyring_notice;
+        title: "OpenSubsonic Credential Store Unavailable";
+        message: root.subsonic_keyring_notice_message;
+        dismissed => {
+            root.show_subsonic_keyring_notice = false;
+            root.refocus_main();
+        }
+    }
+
+    if root.show_subsonic_session_password_prompt : Rectangle {
+        background: #00000088;
+        z: 112;
+
+        TouchArea {}
+
+        Rectangle {
+            width: min(root.width - 40px, 520px);
+            height: 300px;
+            x: (parent.width - self.width) / 2;
+            y: (parent.height - self.height) / 2;
+            border-radius: 6px;
+            background: root.ui_dark_mode ? #242424 : #f6f8fc;
+            border-width: 1px;
+            border-color: root.ui_dark_mode ? #3b3b3b : #c7d1dd;
+
+            VerticalLayout {
+                padding: 16px;
+                spacing: 10px;
+
+                HorizontalLayout {
+                    spacing: 10px;
+
+                    Rectangle {
+                        width: 36px;
+                        height: 36px;
+                        border-radius: 18px;
+                        background: #f08c00;
+                        Text {
+                            text: "SUB";
+                            color: #ffffff;
+                            font-size: 10px;
+                            font-weight: 700;
+                            horizontal-alignment: center;
+                            vertical-alignment: center;
+                        }
+                    }
+
+                    VerticalLayout {
+                        spacing: 2px;
+                        Text {
+                            text: "OpenSubsonic Session Sign-In";
+                            color: root.theme_text_primary;
+                            font-size: 16px;
+                            font-weight: 700;
+                        }
+                        Text {
+                            text: root.subsonic_session_prompt_endpoint;
+                            color: root.theme_text_secondary;
+                            font-size: 11px;
+                            wrap: word-wrap;
+                        }
+                    }
+                }
+
+                Text {
+                    text: "System keyring is unavailable. Enter your password to use OpenSubsonic for this session only.";
+                    color: root.theme_text_secondary;
+                    font-size: 12px;
+                    wrap: word-wrap;
+                }
+
+                HorizontalLayout {
+                    spacing: 10px;
+                    Text {
+                        text: "Username";
+                        width: 110px;
+                        color: root.theme_text_primary;
+                        font-size: 12px;
+                        vertical-alignment: center;
+                    }
+                    Text {
+                        text: root.subsonic_session_prompt_username;
+                        color: root.theme_text_primary;
+                        font-size: 12px;
+                        vertical-alignment: center;
+                        wrap: word-wrap;
+                    }
+                }
+
+                HorizontalLayout {
+                    spacing: 10px;
+                    Text {
+                        text: "Password";
+                        width: 110px;
+                        color: root.theme_text_primary;
+                        font-size: 12px;
+                        vertical-alignment: center;
+                    }
+                    subsonic-session-password-input := LineEdit {
+                        text <=> root.subsonic_session_prompt_password;
+                        input-type: password;
+                        placeholder-text: "session only";
+                        accepted => {
+                            root.subsonic_session_password_submit(root.subsonic_session_prompt_password);
+                        }
+                    }
+                }
+
+                Text {
+                    text: root.subsonic_session_prompt_status;
+                    color: root.ui_dark_mode ? #f0b27a : #9a4a00;
+                    font-size: 11px;
+                    wrap: word-wrap;
+                    vertical-stretch: 1;
+                }
+
+                HorizontalLayout {
+                    spacing: 10px;
+                    Rectangle { horizontal-stretch: 1; }
+                    Button {
+                        text: "Not Now";
+                        clicked => {
+                            root.subsonic_session_password_cancel();
+                        }
+                    }
+                    Button {
+                        text: "Continue";
+                        primary: true;
+                        clicked => {
+                            root.subsonic_session_password_submit(root.subsonic_session_prompt_password);
+                        }
+                    }
+                }
+            }
         }
     }
 
@@ -5169,6 +5317,13 @@ export component AppWindow inherits Window {
     in-out property <bool> show_settings_dialog: false;
     in-out property <bool> show_settings_restart_notice: false;
     in-out property <string> settings_restart_notice_message: "";
+    in-out property <bool> show_subsonic_keyring_notice: false;
+    in-out property <string> subsonic_keyring_notice_message: "";
+    in-out property <bool> show_subsonic_session_password_prompt: false;
+    in-out property <string> subsonic_session_prompt_username: "";
+    in-out property <string> subsonic_session_prompt_endpoint: "";
+    in-out property <string> subsonic_session_prompt_password: "";
+    in-out property <string> subsonic_session_prompt_status: "";
     in-out property <bool> cast_connected: false;
     in-out property <bool> cast_connecting: false;
     in-out property <string> cast_connection_label: "Not Connected";
@@ -5271,6 +5426,8 @@ export component AppWindow inherits Window {
     callback settings_test_subsonic_connection();
     callback settings_sync_subsonic_now();
     callback settings_disconnect_subsonic();
+    callback subsonic_session_password_submit(string);
+    callback subsonic_session_password_cancel();
     callback clear_library_enrichment_cache();
     callback library_viewport_changed(int, int);
     callback handle_track_click(int, bool, bool);

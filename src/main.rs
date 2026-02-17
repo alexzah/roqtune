@@ -210,6 +210,61 @@ const DROP_IMPORT_BATCH_DELAY_MS: u64 = 80;
 const COLLECTION_MODE_PLAYLIST: i32 = 0;
 const COLLECTION_MODE_LIBRARY: i32 = 1;
 const OPENSUBSONIC_PROFILE_ID: &str = "opensubsonic-default";
+const OPENSUBSONIC_SESSION_KEYRING_NOTICE: &str = "System keyring is not available. roqtune will keep your OpenSubsonic password only for this session and ask again after restart.";
+
+enum OpenSubsonicPasswordResolution {
+    Saved(String),
+    SessionOnly(String),
+    Missing,
+    KeyringError(String),
+}
+
+fn keyring_unavailable_error(error: &str) -> bool {
+    error.contains("Platform secure storage failure")
+        || error.contains("org.freedesktop.DBus.Error.ServiceUnknown")
+        || error.contains("failed to create keyring entry")
+}
+
+fn session_cached_opensubsonic_password(
+    session_passwords: &Arc<Mutex<HashMap<String, String>>>,
+    profile_id: &str,
+) -> Option<String> {
+    let cache = session_passwords
+        .lock()
+        .expect("session password cache lock poisoned");
+    cache.get(profile_id).cloned()
+}
+
+fn resolve_opensubsonic_password(
+    profile_id: &str,
+    session_passwords: &Arc<Mutex<HashMap<String, String>>>,
+) -> OpenSubsonicPasswordResolution {
+    match get_opensubsonic_password(profile_id) {
+        Ok(Some(password)) => OpenSubsonicPasswordResolution::Saved(password),
+        Ok(None) => {
+            if let Some(password) =
+                session_cached_opensubsonic_password(session_passwords, profile_id)
+            {
+                OpenSubsonicPasswordResolution::SessionOnly(password)
+            } else {
+                OpenSubsonicPasswordResolution::Missing
+            }
+        }
+        Err(error) => {
+            if let Some(password) =
+                session_cached_opensubsonic_password(session_passwords, profile_id)
+            {
+                warn!(
+                    "Falling back to session-only OpenSubsonic credential for profile '{}': {}",
+                    profile_id, error
+                );
+                OpenSubsonicPasswordResolution::SessionOnly(password)
+            } else {
+                OpenSubsonicPasswordResolution::KeyringError(error)
+            }
+        }
+    }
+}
 
 fn is_supported_audio_file(path: &Path) -> bool {
     path.extension()
@@ -3025,6 +3080,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let (bus_sender, _) = broadcast::channel(8192);
     let playback_session_active = Arc::new(AtomicBool::new(false));
     let staged_audio_settings: Arc<Mutex<Option<StagedAudioSettings>>> = Arc::new(Mutex::new(None));
+    let opensubsonic_session_passwords: Arc<Mutex<HashMap<String, String>>> =
+        Arc::new(Mutex::new(HashMap::new()));
     let (playlist_bulk_import_tx, playlist_bulk_import_rx) =
         mpsc::sync_channel::<protocol::PlaylistBulkImportRequest>(64);
     let (library_scan_progress_tx, library_scan_progress_rx) =
@@ -3622,13 +3679,25 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let config_file_clone = config_file.clone();
     let layout_workspace_size_clone = Arc::clone(&layout_workspace_size);
     let ui_handle_clone = ui.as_weak().clone();
+    let opensubsonic_session_passwords_clone = Arc::clone(&opensubsonic_session_passwords);
     ui.on_settings_save_subsonic_profile(move |enabled, endpoint, username, password| {
         let endpoint_trimmed = endpoint.trim().trim_end_matches('/').to_string();
         let username_trimmed = username.trim().to_string();
         let password_trimmed = password.trim().to_string();
 
         let mut status_message = "OpenSubsonic profile saved".to_string();
+        let mut show_keyring_notice = false;
+        let mut keyring_notice_message = String::new();
         if !password_trimmed.is_empty() {
+            {
+                let mut session_passwords = opensubsonic_session_passwords_clone
+                    .lock()
+                    .expect("session password cache lock poisoned");
+                session_passwords.insert(
+                    OPENSUBSONIC_PROFILE_ID.to_string(),
+                    password_trimmed.clone(),
+                );
+            }
             if let Err(error) =
                 set_opensubsonic_password(OPENSUBSONIC_PROFILE_ID, password_trimmed.as_str())
             {
@@ -3636,7 +3705,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     "Failed to save OpenSubsonic credential for profile '{}': {}",
                     OPENSUBSONIC_PROFILE_ID, error
                 );
-                status_message = format!("Failed to save password to credential store: {error}");
+                status_message = format!(
+                    "System keyring unavailable; password cached for this session only: {error}"
+                );
+                if keyring_unavailable_error(error.as_str()) {
+                    show_keyring_notice = true;
+                    keyring_notice_message = OPENSUBSONIC_SESSION_KEYRING_NOTICE.to_string();
+                }
             }
         }
 
@@ -3660,14 +3735,27 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let password_for_upsert = if !password_trimmed.is_empty() {
             Some(password_trimmed)
         } else {
-            match get_opensubsonic_password(OPENSUBSONIC_PROFILE_ID) {
-                Ok(value) => value,
-                Err(error) => {
+            match resolve_opensubsonic_password(
+                OPENSUBSONIC_PROFILE_ID,
+                &opensubsonic_session_passwords_clone,
+            ) {
+                OpenSubsonicPasswordResolution::Saved(password) => Some(password),
+                OpenSubsonicPasswordResolution::SessionOnly(password) => {
+                    status_message =
+                        "Using session-only OpenSubsonic credential (not saved)".to_string();
+                    Some(password)
+                }
+                OpenSubsonicPasswordResolution::Missing => None,
+                OpenSubsonicPasswordResolution::KeyringError(error) => {
                     warn!(
                         "Failed to load OpenSubsonic credential for profile '{}': {}",
                         OPENSUBSONIC_PROFILE_ID, error
                     );
                     status_message = format!("Failed to access credential store password: {error}");
+                    if keyring_unavailable_error(error.as_str()) {
+                        show_keyring_notice = true;
+                        keyring_notice_message = OPENSUBSONIC_SESSION_KEYRING_NOTICE.to_string();
+                    }
                     None
                 }
             }
@@ -3710,6 +3798,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             );
             ui.set_settings_subsonic_status(status_message.into());
             ui.set_settings_subsonic_password("".into());
+            if show_keyring_notice {
+                ui.set_subsonic_keyring_notice_message(keyring_notice_message.into());
+                ui.set_show_subsonic_keyring_notice(true);
+            }
         }
         let runtime_override = runtime_output_override_snapshot(&runtime_output_override_clone);
         let runtime_config = resolve_effective_runtime_config(
@@ -3731,6 +3823,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let bus_sender_clone = bus_sender.clone();
     let ui_handle_clone = ui.as_weak().clone();
+    let opensubsonic_session_passwords_clone = Arc::clone(&opensubsonic_session_passwords);
     ui.on_settings_test_subsonic_connection(move || {
         let Some(ui) = ui_handle_clone.upgrade() else {
             return;
@@ -3749,20 +3842,42 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
 
         let password_for_upsert = if password_trimmed.is_empty() {
-            match get_opensubsonic_password(OPENSUBSONIC_PROFILE_ID) {
-                Ok(value) => value,
-                Err(error) => {
+            match resolve_opensubsonic_password(
+                OPENSUBSONIC_PROFILE_ID,
+                &opensubsonic_session_passwords_clone,
+            ) {
+                OpenSubsonicPasswordResolution::Saved(password) => Some(password),
+                OpenSubsonicPasswordResolution::SessionOnly(password) => {
+                    ui.set_settings_subsonic_status(
+                        "Testing connection with session-only credential".into(),
+                    );
+                    Some(password)
+                }
+                OpenSubsonicPasswordResolution::Missing => None,
+                OpenSubsonicPasswordResolution::KeyringError(error) => {
                     warn!(
                         "Failed to load OpenSubsonic credential for profile '{}': {}",
                         OPENSUBSONIC_PROFILE_ID, error
                     );
                     ui.set_settings_subsonic_status(
-                        format!("Failed to access credential store password: {error}").into(),
+                        format!(
+                            "Keyring unavailable. Enter password to test (session-only): {error}"
+                        )
+                        .into(),
                     );
                     return;
                 }
             }
         } else {
+            {
+                let mut session_passwords = opensubsonic_session_passwords_clone
+                    .lock()
+                    .expect("session password cache lock poisoned");
+                session_passwords.insert(
+                    OPENSUBSONIC_PROFILE_ID.to_string(),
+                    password_trimmed.clone(),
+                );
+            }
             Some(password_trimmed)
         };
         let profile = protocol::BackendProfileSnapshot {
@@ -3800,12 +3915,92 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     });
 
     let bus_sender_clone = bus_sender.clone();
+    let opensubsonic_session_passwords_clone = Arc::clone(&opensubsonic_session_passwords);
     ui.on_settings_disconnect_subsonic(move || {
+        let mut session_passwords = opensubsonic_session_passwords_clone
+            .lock()
+            .expect("session password cache lock poisoned");
+        session_passwords.remove(OPENSUBSONIC_PROFILE_ID);
         let _ = bus_sender_clone.send(Message::Integration(
             IntegrationMessage::DisconnectBackendProfile {
                 profile_id: OPENSUBSONIC_PROFILE_ID.to_string(),
             },
         ));
+    });
+
+    let bus_sender_clone = bus_sender.clone();
+    let config_state_clone = Arc::clone(&config_state);
+    let ui_handle_clone = ui.as_weak().clone();
+    let opensubsonic_session_passwords_clone = Arc::clone(&opensubsonic_session_passwords);
+    ui.on_subsonic_session_password_submit(move |password| {
+        let Some(ui) = ui_handle_clone.upgrade() else {
+            return;
+        };
+        let password_trimmed = password.trim().to_string();
+        if password_trimmed.is_empty() {
+            ui.set_subsonic_session_prompt_status("Enter password to continue".into());
+            return;
+        }
+
+        let backend = {
+            let state = config_state_clone
+                .lock()
+                .expect("config state lock poisoned");
+            find_opensubsonic_backend(&state).cloned()
+        };
+        let Some(backend) = backend else {
+            ui.set_subsonic_session_prompt_status(
+                "OpenSubsonic profile is not configured in settings".into(),
+            );
+            return;
+        };
+
+        {
+            let mut session_passwords = opensubsonic_session_passwords_clone
+                .lock()
+                .expect("session password cache lock poisoned");
+            session_passwords.insert(
+                OPENSUBSONIC_PROFILE_ID.to_string(),
+                password_trimmed.clone(),
+            );
+        }
+
+        let status_message = "Using session-only OpenSubsonic credential (not saved)";
+        let snapshot = opensubsonic_profile_snapshot(&backend, Some(status_message.to_string()));
+        let _ = bus_sender_clone.send(Message::Integration(
+            IntegrationMessage::UpsertBackendProfile {
+                profile: snapshot,
+                password: Some(password_trimmed),
+                connect_now: backend.enabled,
+            },
+        ));
+
+        ui.set_settings_subsonic_status(status_message.into());
+        ui.set_settings_subsonic_password("".into());
+        ui.set_subsonic_session_prompt_password("".into());
+        ui.set_subsonic_session_prompt_status("".into());
+        ui.set_show_subsonic_session_password_prompt(false);
+        ui.invoke_refocus_main();
+    });
+
+    let bus_sender_clone = bus_sender.clone();
+    let ui_handle_clone = ui.as_weak().clone();
+    ui.on_subsonic_session_password_cancel(move || {
+        let _ = bus_sender_clone.send(Message::Integration(
+            IntegrationMessage::DisconnectBackendProfile {
+                profile_id: OPENSUBSONIC_PROFILE_ID.to_string(),
+            },
+        ));
+        let Some(ui) = ui_handle_clone.upgrade() else {
+            return;
+        };
+        ui.set_subsonic_session_prompt_password("".into());
+        ui.set_subsonic_session_prompt_status("Session credential prompt dismissed".into());
+        ui.set_show_subsonic_session_password_prompt(false);
+        ui.set_settings_subsonic_status(
+            "OpenSubsonic disconnected (session password not provided)".into(),
+        );
+        ui.invoke_refocus_main();
     });
 
     let bus_sender_clone = bus_sender.clone();
@@ -6135,22 +6330,50 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         );
         integration_manager.run();
     });
+    let mut startup_subsonic_session_prompt: Option<(String, String, String)> = None;
     let startup_opensubsonic_seed = find_opensubsonic_backend(&config).map(|backend| {
-        let (password, status_text) = match get_opensubsonic_password(OPENSUBSONIC_PROFILE_ID) {
-            Ok(password) => {
-                let status = if backend.enabled && password.is_none() {
+        let (password, status_text) = match resolve_opensubsonic_password(
+            OPENSUBSONIC_PROFILE_ID,
+            &opensubsonic_session_passwords,
+        ) {
+            OpenSubsonicPasswordResolution::Saved(password) => (
+                Some(password),
+                Some("Restored from credential store".to_string()),
+            ),
+            OpenSubsonicPasswordResolution::SessionOnly(password) => (
+                Some(password),
+                Some("Using session-only credential".to_string()),
+            ),
+            OpenSubsonicPasswordResolution::Missing => {
+                let status = if backend.enabled {
                     "Missing saved password".to_string()
                 } else {
                     "Restored from config".to_string()
                 };
-                (password, Some(status))
+                (None, Some(status))
             }
-            Err(error) => {
+            OpenSubsonicPasswordResolution::KeyringError(error) => {
                 warn!(
                     "Failed to load OpenSubsonic credential from credential store: {}",
                     error
                 );
-                (None, Some(format!("Credential store error: {error}")))
+                if backend.enabled
+                    && !backend.username.trim().is_empty()
+                    && !backend.endpoint.trim().is_empty()
+                    && keyring_unavailable_error(error.as_str())
+                {
+                    startup_subsonic_session_prompt = Some((
+                        backend.username.clone(),
+                        backend.endpoint.clone(),
+                        format!("Credential store unavailable: {error}"),
+                    ));
+                }
+                (
+                    None,
+                    Some(format!(
+                        "Credential store unavailable; session password required: {error}"
+                    )),
+                )
             }
         };
         let snapshot = opensubsonic_profile_snapshot(backend, status_text);
@@ -6697,6 +6920,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let bus_sender_clone = bus_sender.clone();
     let _ = bus_sender_clone.send(Message::Cast(CastMessage::DiscoverDevices));
+
+    if let Some((username, endpoint, status)) = startup_subsonic_session_prompt {
+        ui.set_subsonic_session_prompt_username(username.into());
+        ui.set_subsonic_session_prompt_endpoint(endpoint.into());
+        ui.set_subsonic_session_prompt_password("".into());
+        ui.set_subsonic_session_prompt_status(status.into());
+        ui.set_show_subsonic_session_password_prompt(true);
+    }
 
     ui.run()?;
 
