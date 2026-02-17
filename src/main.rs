@@ -20,7 +20,6 @@ mod layout;
 mod library_enrichment_manager;
 #[path = "library/library_manager.rs"]
 mod library_manager;
-#[path = "cast/media_controls_manager.rs"]
 mod media_controls_manager;
 #[path = "metadata/metadata_manager.rs"]
 mod metadata_manager;
