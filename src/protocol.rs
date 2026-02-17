@@ -198,6 +198,12 @@ pub enum LibraryMessage {
         selections: Vec<LibrarySelectionSpec>,
         playlist_ids: Vec<String>,
     },
+    /// Paste copied library selections into the current active playlist.
+    /// This follows playlist paste insertion semantics (after the current
+    /// selection anchor, or append to end when no selection exists).
+    PasteSelectionToActivePlaylist {
+        selections: Vec<LibrarySelectionSpec>,
+    },
     CopySelected,
     CutSelected,
     DeleteSelected,

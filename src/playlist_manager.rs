@@ -437,6 +437,9 @@ impl PlaylistManager {
         }
     }
 
+    /// Intentional paste behavior:
+    /// insert after the last selected item; if nothing is selected, append.
+    /// Keep this stable so paste is predictable across playlist workflows.
     fn paste_insert_gap(selected_indices: &[usize], playlist_len: usize) -> usize {
         selected_indices
             .iter()
@@ -1318,12 +1321,8 @@ impl PlaylistManager {
                         self.editing_playlist
                             .move_tracks(appended_indices.clone(), insert_gap);
 
-                        let insert_at = self
-                            .editing_playlist
-                            .get_selected_indices()
-                            .first()
-                            .copied()
-                            .unwrap_or_else(|| insert_gap.min(self.editing_playlist.num_tracks()));
+                        // Publish the anchored insertion point used for paste.
+                        let insert_at = insert_gap.min(playlist_len);
 
                         let _ = self.bus_producer.send(protocol::Message::Playlist(
                             protocol::PlaylistMessage::TracksInserted {
@@ -2214,6 +2213,97 @@ mod tests {
         assert_eq!(PlaylistManager::paste_insert_gap(&[0, 2, 1], 5), 3);
         assert_eq!(PlaylistManager::paste_insert_gap(&[3], 4), 4);
         assert_eq!(PlaylistManager::paste_insert_gap(&[7, 8], 4), 4);
+    }
+
+    #[test]
+    fn test_paste_tracks_inserts_after_last_selected_track() {
+        let mut harness = PlaylistManagerHarness::new();
+        harness.drain_messages();
+
+        let _ = harness.add_track("pm_paste_anchor_0");
+        let _ = harness.add_track("pm_paste_anchor_1");
+        let _ = harness.add_track("pm_paste_anchor_2");
+        let _ = harness.add_track("pm_paste_anchor_3");
+        harness.drain_messages();
+
+        harness.send(protocol::Message::Playlist(
+            protocol::PlaylistMessage::SelectionChanged(vec![1, 2]),
+        ));
+        let _ = wait_for_message(&mut harness.receiver, Duration::from_secs(1), |message| {
+            matches!(
+                message,
+                protocol::Message::Playlist(protocol::PlaylistMessage::SelectionChanged(indices))
+                    if indices == &vec![1, 2]
+            )
+        });
+        thread::sleep(Duration::from_millis(20));
+        harness.drain_messages();
+
+        let pasted_paths = vec![
+            PathBuf::from("/tmp/pm_paste_anchor_new_0.mp3"),
+            PathBuf::from("/tmp/pm_paste_anchor_new_1.mp3"),
+        ];
+        harness.send(protocol::Message::Playlist(
+            protocol::PlaylistMessage::PasteTracks(pasted_paths.clone()),
+        ));
+
+        let inserted_message =
+            wait_for_message(&mut harness.receiver, Duration::from_secs(1), |message| {
+                matches!(
+                    message,
+                    protocol::Message::Playlist(protocol::PlaylistMessage::TracksInserted {
+                        tracks, ..
+                    }) if tracks.len() == 2
+                )
+            });
+        if let protocol::Message::Playlist(protocol::PlaylistMessage::TracksInserted {
+            tracks,
+            insert_at,
+        }) = inserted_message
+        {
+            assert_eq!(insert_at, 3);
+            let actual_paths: Vec<PathBuf> = tracks.into_iter().map(|track| track.path).collect();
+            assert_eq!(actual_paths, pasted_paths);
+        } else {
+            panic!("expected TracksInserted message");
+        }
+    }
+
+    #[test]
+    fn test_paste_tracks_without_selection_appends_to_playlist_end() {
+        let mut harness = PlaylistManagerHarness::new();
+        harness.drain_messages();
+
+        let _ = harness.add_track("pm_paste_end_0");
+        let _ = harness.add_track("pm_paste_end_1");
+        let _ = harness.add_track("pm_paste_end_2");
+        harness.drain_messages();
+
+        let pasted_paths = vec![PathBuf::from("/tmp/pm_paste_end_new_0.mp3")];
+        harness.send(protocol::Message::Playlist(
+            protocol::PlaylistMessage::PasteTracks(pasted_paths.clone()),
+        ));
+
+        let inserted_message =
+            wait_for_message(&mut harness.receiver, Duration::from_secs(1), |message| {
+                matches!(
+                    message,
+                    protocol::Message::Playlist(protocol::PlaylistMessage::TracksInserted {
+                        tracks, ..
+                    }) if tracks.len() == 1
+                )
+            });
+        if let protocol::Message::Playlist(protocol::PlaylistMessage::TracksInserted {
+            tracks,
+            insert_at,
+        }) = inserted_message
+        {
+            assert_eq!(insert_at, 3);
+            let actual_paths: Vec<PathBuf> = tracks.into_iter().map(|track| track.path).collect();
+            assert_eq!(actual_paths, pasted_paths);
+        } else {
+            panic!("expected TracksInserted message");
+        }
     }
 
     #[test]

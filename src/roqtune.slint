@@ -555,6 +555,7 @@ export component AppWindow inherits Window {
 
     // Status display at the bottom showing the currently playing track
     in-out property <string> status-text: "";
+    in-out property <string> status-selection-summary: "";
 
     VerticalLayout {
         layout-workspace := Rectangle {
@@ -2095,7 +2096,7 @@ export component AppWindow inherits Window {
                     && root.layout-region-panel-kind(i) == root.panel_kind_status_bar;
                 status-text: root.status-text;
                 technical-info: root.technical-info;
-                time-range: root.format-time-range(root.elapsed-ms, root.total-ms);
+                selection-summary: root.status-selection-summary;
             }
 
             for leaf-id[i] in root.layout_leaf_ids : Rectangle {

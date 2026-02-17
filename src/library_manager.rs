@@ -1091,6 +1091,42 @@ impl LibraryManager {
             }));
     }
 
+    fn paste_selection_to_active_playlist(&self, selections: Vec<protocol::LibrarySelectionSpec>) {
+        if selections.is_empty() {
+            let _ = self
+                .bus_producer
+                .send(Message::Library(LibraryMessage::AddToPlaylistsFailed(
+                    "No library items selected".to_string(),
+                )));
+            return;
+        }
+
+        let paths = match self.resolve_selection_paths(selections) {
+            Ok(paths) => paths,
+            Err(err) => {
+                let _ = self
+                    .bus_producer
+                    .send(Message::Library(LibraryMessage::AddToPlaylistsFailed(err)));
+                return;
+            }
+        };
+
+        if paths.is_empty() {
+            let _ = self
+                .bus_producer
+                .send(Message::Library(LibraryMessage::AddToPlaylistsFailed(
+                    "No tracks matched the selected library items".to_string(),
+                )));
+            return;
+        }
+
+        let _ = self
+            .bus_producer
+            .send(Message::Playlist(protocol::PlaylistMessage::PasteTracks(
+                paths,
+            )));
+    }
+
     fn remove_selection_from_library(&self, selections: Vec<protocol::LibrarySelectionSpec>) {
         if selections.is_empty() {
             let _ =
@@ -1219,6 +1255,11 @@ impl LibraryManager {
                         playlist_ids,
                     }) => {
                         self.add_selection_to_playlists(selections, playlist_ids);
+                    }
+                    Message::Library(LibraryMessage::PasteSelectionToActivePlaylist {
+                        selections,
+                    }) => {
+                        self.paste_selection_to_active_playlist(selections);
                     }
                     Message::Library(LibraryMessage::RemoveSelectionFromLibrary { selections }) => {
                         self.remove_selection_from_library(selections);

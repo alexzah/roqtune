@@ -1887,6 +1887,14 @@ impl UiManager {
         }
     }
 
+    fn status_selection_summary_text(selected_track_count: usize) -> String {
+        match selected_track_count {
+            0 => String::new(),
+            1 => "1 track selected".to_string(),
+            count => format!("{} tracks selected", count),
+        }
+    }
+
     fn resolve_metadata_for_track_path_from_sources(
         path: &Path,
         track_paths: &[PathBuf],
@@ -3625,6 +3633,8 @@ impl UiManager {
 
         self.view_indices = rows.iter().map(|row| row.source_index).collect();
         let selected_set: HashSet<usize> = self.selected_indices.iter().copied().collect();
+        let selected_track_count = selected_set.len();
+        let selection_summary_text = Self::status_selection_summary_text(selected_track_count);
         let active_playing_index = self.active_playing_index;
         let playback_active = self.playback_active;
         let selected_view_index = self
@@ -3677,6 +3687,7 @@ impl UiManager {
 
             ui.set_selected_track_index(selected_view_index);
             ui.set_playing_track_index(playing_view_index);
+            ui.set_status_selection_summary(selection_summary_text.into());
         });
 
         self.sync_filter_state_to_ui();
@@ -4040,10 +4051,11 @@ impl UiManager {
         }
 
         self.pending_paste_feedback = true;
+        // Route library-copy paste through playlist paste handling so insertion
+        // stays anchored after current selection (or appends when no selection).
         let _ = self.bus_sender.send(protocol::Message::Library(
-            protocol::LibraryMessage::AddSelectionToPlaylists {
+            protocol::LibraryMessage::PasteSelectionToActivePlaylist {
                 selections: self.copied_library_selections.clone(),
-                playlist_ids: vec![self.active_playlist_id.clone()],
             },
         ));
     }
@@ -6640,6 +6652,7 @@ impl UiManager {
                             }
                             | protocol::LibraryMessage::ClearEnrichmentCache
                             | protocol::LibraryMessage::AddSelectionToPlaylists { .. }
+                            | protocol::LibraryMessage::PasteSelectionToActivePlaylist { .. }
                             | protocol::LibraryMessage::RemoveSelectionFromLibrary { .. } => {}
                         },
                         protocol::Message::Metadata(metadata_message) => match metadata_message {
