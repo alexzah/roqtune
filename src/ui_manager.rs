@@ -96,6 +96,10 @@ pub struct UiManager {
     /// `playing_index` in `PlaylistIndicesChanged`, which is a playback-queue
     /// index and does not correspond to source order when a filter/sort is active).
     active_playing_index: Option<usize>,
+    /// Source index of the currently playing track in `library_entries`.
+    /// Resolved via the stable track id stored in `playing_track.id`
+    /// (with path-based fallback), consistent with how playlist mode resolves
+    /// `active_playing_index`.  See `update_library_playing_index`.
     library_playing_index: Option<usize>,
     drag_indices: Vec<usize>,
     is_dragging: bool,
@@ -143,6 +147,11 @@ pub struct UiManager {
     collection_mode: i32,
     library_view_stack: Vec<LibraryViewState>,
     library_entries: Vec<LibraryEntry>,
+    /// Mapping from library view row to source index in `library_entries`.
+    /// Semantics mirror `view_indices` for playlists: when a search filter is
+    /// active the vector contains the filtered permutation; when empty, view
+    /// index == source index (identity).  Library queues are built in view
+    /// order so next/prev follows the visible row sequence.
     library_view_indices: Vec<usize>,
     library_selected_indices: Vec<usize>,
     library_selection_anchor: Option<usize>,
@@ -212,6 +221,10 @@ struct TrackMetadata {
 
 #[derive(Clone, Default)]
 struct PlayingTrackState {
+    /// Stable track id of the currently playing track.  Used to resolve the
+    /// playing source index in both playlist and library views, since it
+    /// uniquely identifies an entry even when duplicate file paths exist.
+    id: Option<String>,
     path: Option<PathBuf>,
     metadata: Option<protocol::DetailedMetadata>,
 }
@@ -2529,11 +2542,13 @@ impl UiManager {
 
     fn set_playing_track(
         &mut self,
+        id: Option<String>,
         path: Option<PathBuf>,
         metadata_hint: Option<protocol::DetailedMetadata>,
     ) -> bool {
         let previous_path = self.playing_track.path.clone();
         let path_changed = previous_path != path;
+        self.playing_track.id = id;
         self.playing_track.path = path.clone();
         self.playing_track.metadata = match (path.as_ref(), metadata_hint) {
             (None, _) => None,
@@ -3327,7 +3342,29 @@ impl UiManager {
         );
     }
 
+    /// Resolve `library_playing_index` to the source index in `library_entries`
+    /// for the currently playing track.
+    ///
+    /// Uses the stable track **id** as the primary lookup key (consistent with
+    /// the playlist-side `resolve_active_playing_source_index`), falling back
+    /// to a path-based match when the id is unavailable.  This ensures the
+    /// correct library row is highlighted even when a search filter reorders
+    /// the view or when duplicate paths exist across local/remote sources.
     fn update_library_playing_index(&mut self) {
+        // Primary: match by stable track id.
+        if let Some(playing_id) = &self.playing_track.id {
+            if let Some(index) = self.library_entries.iter().position(|entry| {
+                if let LibraryEntry::Track(track) = entry {
+                    &track.id == playing_id
+                } else {
+                    false
+                }
+            }) {
+                self.library_playing_index = Some(index);
+                return;
+            }
+        }
+        // Fallback: match by file path when id is unavailable.
         if let Some(playing_path) = &self.playing_track.path {
             self.library_playing_index = self.library_entries.iter().position(|entry| {
                 if let LibraryEntry::Track(track) = entry {
@@ -6672,6 +6709,12 @@ impl UiManager {
         })
     }
 
+    /// Build a library playback queue in **view order** (filtered/searched).
+    ///
+    /// Analogous to `build_playlist_queue_snapshot` — the returned queue
+    /// preserves the on-screen row order so that next/previous navigation
+    /// matches what the user sees.  The `start_index` is an offset within this
+    /// queue, not a source index into `library_entries`.
     fn build_library_queue_request(
         &self,
         preferred_source_index: Option<usize>,
@@ -8097,6 +8140,7 @@ impl UiManager {
                             );
 
                             let playing_track_changed = self.set_playing_track(
+                                playing_track_id.clone(),
                                 playing_track_path.clone(),
                                 playing_track_metadata.clone(),
                             );
