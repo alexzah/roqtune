@@ -1,4 +1,4 @@
-<img src="images/logo.png" width="50%">
+<img src="images/logo.png" width="20%">
 
 # roqtune
 
