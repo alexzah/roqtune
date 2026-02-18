@@ -1,4 +1,26 @@
+# Build artifacts
 /target
+**/target
 /flatpak/.build
 /flatpak/.repo
 /flatpak/dist
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+.DS_Store
+
+# Rust
+*.rs.bk
+Cargo.toml.bak
+
+# Backup files
+*.bak
+*.orig
+
+# Environment
+.env
+.env.local
