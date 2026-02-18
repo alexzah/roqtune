@@ -21,10 +21,13 @@ use mdns_sd::{ServiceDaemon, ServiceEvent};
 use serde_json::Value;
 use tokio::sync::broadcast::{Receiver, Sender};
 
+use crate::integration_keyring::get_opensubsonic_password;
+use crate::integration_uri::{parse_opensubsonic_track_uri, OpenSubsonicTrackLocator};
 use crate::metadata_tags;
 use crate::protocol::{
-    CastConnectionState, CastDeviceInfo, CastMessage, CastPlaybackPathKind, Message,
-    PlaybackMessage, TechnicalMetadata, TrackStarted,
+    BackendKind, CastConnectionState, CastDeviceInfo, CastMessage, CastPlaybackPathKind,
+    IntegrationMessage, Message, PlaybackMessage, TechnicalMetadata, TrackMetadataSummary,
+    TrackStarted,
 };
 
 const CAST_DEFAULT_MEDIA_RECEIVER_APP_ID: &str = "CC1AD845";
@@ -39,6 +42,8 @@ const CAST_CONNECT_TIMEOUT: Duration = Duration::from_secs(6);
 const CAST_READ_TIMEOUT: Duration = Duration::from_millis(180);
 const CAST_WRITE_TIMEOUT: Duration = Duration::from_millis(1500);
 const STREAM_TOKEN_TTL: Duration = Duration::from_secs(60 * 30);
+const OPENSUBSONIC_API_VERSION: &str = "1.16.1";
+const OPENSUBSONIC_CLIENT_ID: &str = "roqtune";
 
 #[derive(Clone)]
 struct StreamResource {
@@ -350,6 +355,59 @@ fn extension_to_content_type(path: &Path) -> String {
         _ => "application/octet-stream",
     }
     .to_string()
+}
+
+fn make_opensubsonic_salt() -> String {
+    let mut bytes = [0u8; 8];
+    let _ = getrandom::fill(&mut bytes);
+    bytes.iter().map(|value| format!("{value:02x}")).collect()
+}
+
+fn opensubsonic_download_url(locator: &OpenSubsonicTrackLocator, password: &str) -> String {
+    let salt = make_opensubsonic_salt();
+    let token = format!("{:x}", md5::compute(format!("{}{}", password, salt)));
+    format!(
+        "{}/rest/download.view?u={}&t={}&s={}&v={}&c={}&id={}",
+        locator.endpoint.trim().trim_end_matches('/'),
+        urlencoding::encode(locator.username.trim()),
+        token,
+        salt,
+        OPENSUBSONIC_API_VERSION,
+        OPENSUBSONIC_CLIENT_ID,
+        urlencoding::encode(locator.song_id.as_str()),
+    )
+}
+
+fn opensubsonic_cover_art_url(locator: &OpenSubsonicTrackLocator, password: &str) -> String {
+    let salt = make_opensubsonic_salt();
+    let token = format!("{:x}", md5::compute(format!("{}{}", password, salt)));
+    format!(
+        "{}/rest/getCoverArt.view?u={}&t={}&s={}&v={}&c={}&id={}",
+        locator.endpoint.trim().trim_end_matches('/'),
+        urlencoding::encode(locator.username.trim()),
+        token,
+        salt,
+        OPENSUBSONIC_API_VERSION,
+        OPENSUBSONIC_CLIENT_ID,
+        urlencoding::encode(locator.song_id.as_str()),
+    )
+}
+
+fn content_type_from_format_hint(format_hint: Option<&str>) -> Option<String> {
+    let normalized = format_hint
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(|value| value.to_ascii_lowercase())?;
+    let content_type = match normalized.as_str() {
+        "flac" => "audio/flac",
+        "mp3" => "audio/mpeg",
+        "wav" => "audio/wav",
+        "ogg" | "opus" | "vorbis" => "audio/ogg",
+        "m4a" | "mp4" => "audio/mp4",
+        "aac" => "audio/aac",
+        _ => return None,
+    };
+    Some(content_type.to_string())
 }
 
 fn local_ip_for_remote(remote_ip: IpAddr) -> Option<IpAddr> {
@@ -995,6 +1053,9 @@ fn parse_media_status(payload: &str) -> Option<MediaStatus> {
 }
 
 fn default_track_title_from_path(path: &Path) -> String {
+    if let Some(locator) = parse_opensubsonic_track_uri(path) {
+        return locator.song_id;
+    }
     path.file_stem()
         .and_then(|stem| stem.to_str())
         .or_else(|| path.file_name().and_then(|name| name.to_str()))
@@ -1208,13 +1269,22 @@ fn transcode_wav_output_from_source(source: &TechnicalMetadata) -> TechnicalMeta
     }
 }
 
-fn fallback_source_technical_metadata(path: &Path, duration_ms: Option<u64>) -> TechnicalMetadata {
+fn fallback_source_technical_metadata(
+    path: &Path,
+    duration_ms: Option<u64>,
+    format_hint: Option<&str>,
+) -> TechnicalMetadata {
     TechnicalMetadata {
-        format: path
-            .extension()
-            .and_then(|ext| ext.to_str())
-            .unwrap_or("AUDIO")
-            .to_ascii_uppercase(),
+        format: format_hint
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(|value| value.to_ascii_uppercase())
+            .or_else(|| {
+                path.extension()
+                    .and_then(|ext| ext.to_str())
+                    .map(|value| value.to_ascii_uppercase())
+            })
+            .unwrap_or_else(|| "AUDIO".to_string()),
         bitrate_kbps: 0,
         sample_rate_hz: 44_100,
         channel_count: 2,
@@ -1223,26 +1293,50 @@ fn fallback_source_technical_metadata(path: &Path, duration_ms: Option<u64>) -> 
     }
 }
 
-fn read_cast_track_info(source_path: &Path) -> CastTrackInfo {
+fn read_cast_track_info(
+    source_path: &Path,
+    metadata_summary: Option<&TrackMetadataSummary>,
+) -> CastTrackInfo {
     let fallback_title = default_track_title_from_path(source_path);
-    let mut title = fallback_title.clone();
-    let mut artist = String::new();
-    let mut album = String::new();
-    if let Some(common) = metadata_tags::read_common_track_metadata(source_path) {
-        if !common.title.trim().is_empty() {
-            title = common.title;
+    let mut title = metadata_summary
+        .map(|summary| summary.title.trim().to_string())
+        .filter(|value| !value.is_empty())
+        .unwrap_or(fallback_title.clone());
+    let mut artist = metadata_summary
+        .map(|summary| summary.artist.trim().to_string())
+        .unwrap_or_default();
+    let mut album = metadata_summary
+        .map(|summary| summary.album.trim().to_string())
+        .unwrap_or_default();
+    let is_remote_uri = parse_opensubsonic_track_uri(source_path).is_some();
+    if !is_remote_uri {
+        if let Some(common) = metadata_tags::read_common_track_metadata(source_path) {
+            if title.trim().is_empty() && !common.title.trim().is_empty() {
+                title = common.title;
+            }
+            if artist.trim().is_empty() {
+                artist = common.artist;
+            }
+            if album.trim().is_empty() {
+                album = common.album;
+            }
         }
-        artist = common.artist;
-        album = common.album;
     }
-    let source_technical_metadata = probe_track_technical_metadata(source_path);
+    if title.trim().is_empty() {
+        title = fallback_title;
+    }
+    let source_technical_metadata = if is_remote_uri {
+        None
+    } else {
+        probe_track_technical_metadata(source_path)
+    };
     let duration_ms = source_technical_metadata
         .as_ref()
         .map(|meta| meta.duration_ms)
         .filter(|value| *value > 0);
-    let (album_art_path, album_art_content_type) = if let Some(path) =
-        find_external_cover_art(source_path)
-    {
+    let (album_art_path, album_art_content_type) = if is_remote_uri {
+        (None, None)
+    } else if let Some(path) = find_external_cover_art(source_path) {
         let content_type = image_content_type_from_path(&path);
         (Some(path), content_type)
     } else if let Some((path, content_type)) = extract_embedded_cover_art_to_cache(source_path) {
@@ -1404,11 +1498,13 @@ pub struct CastManager {
     transcode_cache_dir: PathBuf,
     current_track_id: Option<String>,
     current_track_source_path: Option<PathBuf>,
+    current_track_metadata_summary: Option<TrackMetadataSummary>,
     current_path_kind: Option<CastPlaybackPathKind>,
     current_media_session_id: Option<i64>,
     current_track_duration_ms: Option<u64>,
     stop_requested: bool,
     last_status_poll_at: Instant,
+    opensubsonic_passwords: HashMap<String, String>,
 }
 
 impl CastManager {
@@ -1430,11 +1526,13 @@ impl CastManager {
             transcode_cache_dir,
             current_track_id: None,
             current_track_source_path: None,
+            current_track_metadata_summary: None,
             current_path_kind: None,
             current_media_session_id: None,
             current_track_duration_ms: None,
             stop_requested: false,
             last_status_poll_at: Instant::now(),
+            opensubsonic_passwords: HashMap::new(),
         }
     }
 
@@ -1471,6 +1569,27 @@ impl CastManager {
             CastConnectionState::Disconnected
         };
         self.emit_connection_state(state, None, self.connected_device.clone());
+    }
+
+    fn opensubsonic_password_for_profile(&mut self, profile_id: &str) -> Result<String, String> {
+        if let Some(password) = self.opensubsonic_passwords.get(profile_id) {
+            return Ok(password.clone());
+        }
+        match get_opensubsonic_password(profile_id) {
+            Ok(Some(password)) => {
+                self.opensubsonic_passwords
+                    .insert(profile_id.to_string(), password.clone());
+                Ok(password)
+            }
+            Ok(None) => Err(format!(
+                "OpenSubsonic credential not cached for profile '{}'. Re-save credentials in Settings and reconnect.",
+                profile_id
+            )),
+            Err(error) => Err(format!(
+                "OpenSubsonic credential lookup failed for profile '{}': {}",
+                profile_id, error
+            )),
+        }
     }
 
     fn connect_device(&mut self, device_id: &str) {
@@ -1518,6 +1637,7 @@ impl CastManager {
         self.session = None;
         self.current_track_id = None;
         self.current_track_source_path = None;
+        self.current_track_metadata_summary = None;
         self.current_path_kind = None;
         self.current_media_session_id = None;
         self.current_track_duration_ms = None;
@@ -1536,6 +1656,7 @@ impl CastManager {
         source_path: PathBuf,
         start_offset_ms: u64,
         mode: CastPlaybackPathKind,
+        metadata_summary: Option<TrackMetadataSummary>,
     ) -> Result<(), String> {
         let Some(device) = self.connected_device.clone() else {
             return Err("No cast device connected".to_string());
@@ -1544,49 +1665,89 @@ impl CastManager {
             .address
             .parse::<IpAddr>()
             .map_err(|err| format!("invalid cast receiver IP '{}': {err}", device.address))?;
-        let local_ip = local_ip_for_remote(receiver_ip)
-            .ok_or_else(|| "Unable to determine local sender IP for cast receiver".to_string())?;
+        let local_ip = local_ip_for_remote(receiver_ip);
+        let remote_locator = parse_opensubsonic_track_uri(source_path.as_path());
+        let remote_format_hint = remote_locator
+            .as_ref()
+            .and_then(|locator| locator.format_hint.as_deref());
+        let track_info = read_cast_track_info(&source_path, metadata_summary.as_ref());
 
-        let (stream_path, content_type, path_description) = match mode {
-            CastPlaybackPathKind::Direct => (
-                source_path.clone(),
-                extension_to_content_type(&source_path),
-                "Casting: Direct (unmodified source stream)".to_string(),
-            ),
-            CastPlaybackPathKind::TranscodeWavPcm => {
-                let wav_path = transcode_to_wav_pcm(&source_path, &self.transcode_cache_dir)?;
+        let (url, stream_path, content_type, path_description, mut album_art_url) =
+            if let Some(locator) = remote_locator.as_ref() {
+                if mode != CastPlaybackPathKind::Direct {
+                    return Err(
+                        "WAV transcode fallback is not supported for OpenSubsonic cast tracks."
+                            .to_string(),
+                    );
+                }
+                let password = self.opensubsonic_password_for_profile(&locator.profile_id)?;
+                let stream_url = opensubsonic_download_url(locator, password.as_str());
+                let art_url = Some(opensubsonic_cover_art_url(locator, password.as_str()));
+                let stream_content_type =
+                    content_type_from_format_hint(locator.format_hint.as_deref())
+                        .unwrap_or_else(|| "audio/mpeg".to_string());
                 (
-                    wav_path,
-                    "audio/wav".to_string(),
-                    "Casting: Transcode (WAV PCM)".to_string(),
+                    stream_url,
+                    None,
+                    stream_content_type,
+                    "Casting: Direct (OpenSubsonic stream)".to_string(),
+                    art_url,
                 )
-            }
-        };
+            } else {
+                let (stream_path, content_type, path_description) = match mode {
+                    CastPlaybackPathKind::Direct => (
+                        source_path.clone(),
+                        extension_to_content_type(&source_path),
+                        "Casting: Direct (unmodified source stream)".to_string(),
+                    ),
+                    CastPlaybackPathKind::TranscodeWavPcm => {
+                        let wav_path =
+                            transcode_to_wav_pcm(&source_path, &self.transcode_cache_dir)?;
+                        (
+                            wav_path,
+                            "audio/wav".to_string(),
+                            "Casting: Transcode (WAV PCM)".to_string(),
+                        )
+                    }
+                };
 
-        let token = self.stream_server.register_file(
-            stream_path.clone(),
-            content_type.clone(),
-            receiver_ip,
-        )?;
-        let url = self.stream_server.media_url(&token, local_ip);
-        let track_info = read_cast_track_info(&source_path);
-        let album_art_url = if let (Some(art_path), Some(art_content_type)) = (
-            track_info.album_art_path.clone(),
-            track_info.album_art_content_type.clone(),
-        ) {
-            match self
-                .stream_server
-                .register_file(art_path, art_content_type, receiver_ip)
-            {
-                Ok(art_token) => Some(self.stream_server.media_url(&art_token, local_ip)),
-                Err(err) => {
-                    debug!("CastManager: failed to register album art stream: {}", err);
-                    None
+                let token = self.stream_server.register_file(
+                    stream_path.clone(),
+                    content_type.clone(),
+                    receiver_ip,
+                )?;
+                let local_ip = local_ip.ok_or_else(|| {
+                    "Unable to determine local sender IP for cast receiver".to_string()
+                })?;
+                (
+                    self.stream_server.media_url(&token, local_ip),
+                    Some(stream_path),
+                    content_type,
+                    path_description,
+                    None,
+                )
+            };
+
+        if album_art_url.is_none() {
+            if let (Some(art_path), Some(art_content_type)) = (
+                track_info.album_art_path.clone(),
+                track_info.album_art_content_type.clone(),
+            ) {
+                match self
+                    .stream_server
+                    .register_file(art_path, art_content_type, receiver_ip)
+                {
+                    Ok(art_token) => {
+                        if let Some(local_ip) = local_ip {
+                            album_art_url = Some(self.stream_server.media_url(&art_token, local_ip))
+                        }
+                    }
+                    Err(err) => {
+                        debug!("CastManager: failed to register album art stream: {}", err);
+                    }
                 }
             }
-        } else {
-            None
-        };
+        }
         let session = self
             .session
             .as_mut()
@@ -1595,10 +1756,16 @@ impl CastManager {
             .source_technical_metadata
             .clone()
             .unwrap_or_else(|| {
-                fallback_source_technical_metadata(&source_path, track_info.duration_ms)
+                fallback_source_technical_metadata(
+                    &source_path,
+                    track_info.duration_ms,
+                    remote_format_hint,
+                )
             });
         let transcode_output_metadata = if mode == CastPlaybackPathKind::TranscodeWavPcm {
-            probe_track_technical_metadata(&stream_path)
+            stream_path
+                .as_ref()
+                .and_then(|path| probe_track_technical_metadata(path.as_path()))
                 .map(|mut meta| {
                     if meta.format.trim().is_empty() {
                         meta.format = "WAV".to_string();
@@ -1651,13 +1818,21 @@ impl CastManager {
         Ok(())
     }
 
-    fn load_track(&mut self, track_id: &str, path: PathBuf, start_offset_ms: u64) {
+    fn load_track(
+        &mut self,
+        track_id: &str,
+        path: PathBuf,
+        start_offset_ms: u64,
+        metadata_summary: Option<TrackMetadataSummary>,
+    ) {
         self.current_track_source_path = Some(path.clone());
+        self.current_track_metadata_summary = metadata_summary.clone();
         let direct_result = self.load_track_with_mode(
             track_id,
             path.clone(),
             start_offset_ms,
             CastPlaybackPathKind::Direct,
+            metadata_summary.clone(),
         );
         if direct_result.is_ok() {
             return;
@@ -1682,6 +1857,7 @@ impl CastManager {
                     track_id.to_string(),
                 )));
             self.current_track_source_path = None;
+            self.current_track_metadata_summary = None;
             self.current_media_session_id = None;
             self.current_track_duration_ms = None;
             return;
@@ -1692,6 +1868,7 @@ impl CastManager {
             path,
             start_offset_ms,
             CastPlaybackPathKind::TranscodeWavPcm,
+            metadata_summary,
         ) {
             Ok(()) => {}
             Err(err) => {
@@ -1711,6 +1888,7 @@ impl CastManager {
                         track_id.to_string(),
                     )));
                 self.current_track_source_path = None;
+                self.current_track_metadata_summary = None;
                 self.current_media_session_id = None;
                 self.current_track_duration_ms = None;
             }
@@ -1745,6 +1923,7 @@ impl CastManager {
                 {
                     self.current_track_id = None;
                     self.current_track_source_path = None;
+                    self.current_track_metadata_summary = None;
                     self.current_media_session_id = None;
                     self.current_track_duration_ms = None;
                     self.stop_requested = false;
@@ -1754,6 +1933,7 @@ impl CastManager {
                     Some("FINISHED") => {
                         self.current_track_id = None;
                         self.current_track_source_path = None;
+                        self.current_track_metadata_summary = None;
                         self.current_media_session_id = None;
                         self.current_track_duration_ms = None;
                         let _ = self
@@ -1774,6 +1954,7 @@ impl CastManager {
                                     source_path,
                                     retry_offset_ms,
                                     CastPlaybackPathKind::TranscodeWavPcm,
+                                    self.current_track_metadata_summary.clone(),
                                 ) {
                                     Ok(()) => {
                                         let _ = self.bus_producer.send(Message::Cast(
@@ -1797,6 +1978,7 @@ impl CastManager {
                         }
                         self.current_track_id = None;
                         self.current_track_source_path = None;
+                        self.current_track_metadata_summary = None;
                         self.current_media_session_id = None;
                         self.current_track_duration_ms = None;
                         let _ = self
@@ -1867,7 +2049,23 @@ impl CastManager {
                 track_id,
                 path,
                 start_offset_ms,
-            }) => self.load_track(&track_id, path, start_offset_ms),
+                metadata_summary,
+            }) => self.load_track(&track_id, path, start_offset_ms, metadata_summary),
+            Message::Integration(IntegrationMessage::UpsertBackendProfile {
+                profile,
+                password,
+                ..
+            }) => {
+                if profile.backend_kind == BackendKind::OpenSubsonic {
+                    if let Some(password) = password {
+                        self.opensubsonic_passwords
+                            .insert(profile.profile_id, password);
+                    }
+                }
+            }
+            Message::Integration(IntegrationMessage::RemoveBackendProfile { profile_id }) => {
+                self.opensubsonic_passwords.remove(profile_id.as_str());
+            }
             Message::Cast(CastMessage::Play) => {
                 if let Some(session) = self.session.as_mut() {
                     if let Err(err) = session.play(self.current_media_session_id) {

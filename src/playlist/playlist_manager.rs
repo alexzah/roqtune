@@ -664,12 +664,14 @@ impl PlaylistManager {
 
         if self.playback_route == protocol::PlaybackRoute::Cast {
             let track = self.playback_playlist.get_track(index).clone();
+            let metadata_summary = self.remote_track_metadata_by_path.get(&track.path).cloned();
             let _ =
                 self.bus_producer
                     .send(protocol::Message::Cast(protocol::CastMessage::LoadTrack {
                         track_id: track_id.clone(),
                         path: track.path,
                         start_offset_ms: 0,
+                        metadata_summary,
                     }));
             self.pending_start_track_id = Some(track_id);
             self.broadcast_playlist_changed();
@@ -710,6 +712,7 @@ impl PlaylistManager {
             return;
         }
         let track = self.playback_playlist.get_track(index).clone();
+        let metadata_summary = self.remote_track_metadata_by_path.get(&track.path).cloned();
         self.stop_decoding();
         let _ = self.bus_producer.send(protocol::Message::Playback(
             protocol::PlaybackMessage::ClearPlayerCache,
@@ -720,6 +723,7 @@ impl PlaylistManager {
                 track_id: track.id.clone(),
                 path: track.path,
                 start_offset_ms: self.current_elapsed_ms,
+                metadata_summary,
             }));
         self.pending_start_track_id = Some(track.id);
         self.broadcast_playlist_changed();

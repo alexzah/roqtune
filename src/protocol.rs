@@ -769,6 +769,7 @@ pub enum CastMessage {
         track_id: String,
         path: PathBuf,
         start_offset_ms: u64,
+        metadata_summary: Option<TrackMetadataSummary>,
     },
     Play,
     Pause,
