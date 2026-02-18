@@ -43,7 +43,7 @@ use std::{
         Arc, Mutex,
     },
     thread,
-    time::Duration,
+    time::{Duration, Instant},
 };
 
 use audio_decoder::AudioDecoder;
@@ -84,6 +84,15 @@ use toml_edit::{value, Array, ArrayOfTables, DocumentMut, Item, Table};
 use ui_manager::{UiManager, UiState};
 
 slint::include_modules!();
+
+const PLAYLIST_COLUMN_SPACING_PX: i32 = 10;
+const PLAYLIST_COLUMN_PREVIEW_THROTTLE_INTERVAL: Duration = Duration::from_millis(16);
+
+#[derive(Default)]
+struct PlaylistColumnPreviewThrottleState {
+    last_sent_at: Option<Instant>,
+    last_column_key: Option<String>,
+}
 
 fn setup_app_state_associations(ui: &AppWindow, ui_state: &UiState) {
     ui.set_track_model(ModelRc::from(ui_state.track_model.clone()));
@@ -1621,7 +1630,7 @@ fn resolve_playlist_header_column_from_x(mouse_x_px: i32, widths_px: &[i32]) -> 
         if mouse_x_px >= start_px && mouse_x_px < end_px {
             return index as i32;
         }
-        let next_start = end_px.saturating_add(10);
+        let next_start = end_px.saturating_add(PLAYLIST_COLUMN_SPACING_PX);
         if mouse_x_px < next_start {
             return -1;
         }
@@ -1655,7 +1664,7 @@ fn resolve_playlist_header_gap_from_x(mouse_x_px: i32, widths_px: &[i32]) -> i32
             };
         }
 
-        let next_start = end_px.saturating_add(10);
+        let next_start = end_px.saturating_add(PLAYLIST_COLUMN_SPACING_PX);
         if mouse_x_px < next_start {
             return index as i32 + 1;
         }
@@ -1680,7 +1689,7 @@ fn resolve_playlist_header_divider_from_x(
         if (mouse_x_px - end_px).abs() <= tolerance {
             return index as i32;
         }
-        start_px = end_px.saturating_add(10);
+        start_px = end_px.saturating_add(PLAYLIST_COLUMN_SPACING_PX);
     }
     -1
 }
@@ -4434,6 +4443,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let bus_sender_clone = bus_sender.clone();
     ui.on_playlist_columns_viewport_resized(move |width_px| {
         let clamped_width = width_px.max(0) as u32;
+        debug!("COLLAYOUT ui-visible-band width={}px", clamped_width);
         let _ = bus_sender_clone.send(Message::Playlist(
             PlaylistMessage::PlaylistViewportWidthChanged(clamped_width),
         ));
@@ -4511,6 +4521,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let bus_sender_clone = bus_sender.clone();
     let config_state_clone = Arc::clone(&config_state);
+    let preview_throttle_state =
+        Arc::new(Mutex::new(PlaylistColumnPreviewThrottleState::default()));
     ui.on_preview_playlist_column_width(move |visible_index, width_px| {
         let (column_key, clamped_width_px) = {
             let state = config_state_clone
@@ -4529,6 +4541,41 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             (column_key, clamped)
         };
         if let (Some(column_key), Some(clamped_width_px)) = (column_key, clamped_width_px) {
+            let should_send = {
+                let mut throttle = preview_throttle_state
+                    .lock()
+                    .expect("playlist column preview throttle lock poisoned");
+                if throttle.last_column_key.as_deref() != Some(column_key.as_str()) {
+                    throttle.last_column_key = Some(column_key.clone());
+                    throttle.last_sent_at = None;
+                }
+                let now = Instant::now();
+                match throttle.last_sent_at {
+                    Some(last_sent_at)
+                        if now.duration_since(last_sent_at)
+                            < PLAYLIST_COLUMN_PREVIEW_THROTTLE_INTERVAL =>
+                    {
+                        false
+                    }
+                    _ => {
+                        throttle.last_sent_at = Some(now);
+                        true
+                    }
+                }
+            };
+            if !should_send {
+                trace!(
+                    "COLLAYOUT preview-throttled key={} requested={} clamped={}",
+                    column_key,
+                    width_px,
+                    clamped_width_px
+                );
+                return;
+            }
+            debug!(
+                "COLLAYOUT preview-send key={} requested={} clamped={}",
+                column_key, width_px, clamped_width_px
+            );
             let _ = bus_sender_clone.send(Message::Playlist(
                 PlaylistMessage::SetActivePlaylistColumnWidthOverride {
                     column_key,
@@ -4563,6 +4610,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             (column_key, clamped)
         };
         if let (Some(column_key), Some(clamped_width_px)) = (column_key, clamped_width_px) {
+            debug!(
+                "COLLAYOUT commit key={} requested={} clamped={}",
+                column_key, width_px, clamped_width_px
+            );
             let next_config = {
                 let mut state = config_state_clone
                     .lock()
@@ -7466,7 +7517,7 @@ mod tests {
         );
         assert!(
             slint_ui.contains("property <bool> in-null-column: self.in-viewport")
-                && slint_ui.contains("track-list.viewport-width - root.null-column-width"),
+                && slint_ui.contains("track-list.visible-width - root.null-column-width"),
             "Track overlay should detect clicks in null column"
         );
         assert!(
@@ -7590,6 +7641,33 @@ mod tests {
                     "root.layout-region-panel-kind(i) == root.panel_kind_track_list"
                 ),
             "Track list should be rendered as a movable docking panel that supports duplicate instances"
+        );
+    }
+
+    #[test]
+    fn test_playlist_header_uses_measured_visible_columns_band_contract() {
+        let slint_ui = include_str!("roqtune.slint");
+        assert!(
+            slint_ui.contains("property <length> columns-band-width:"),
+            "Header should define an explicit measured columns-band width"
+        );
+        assert!(
+            slint_ui.contains("track-list.visible-width - root.playlist-fixed-chrome-width"),
+            "Measured columns band should derive from visible list width"
+        );
+        assert!(
+            slint_ui.contains("property <int> columns-band-width-px"),
+            "Header should expose measured columns-band width in pixels"
+        );
+        assert!(
+            slint_ui.contains("if !(root.layout-region-is-visible(i)")
+                && slint_ui
+                    .contains("root.layout-region-panel-kind(i) == root.panel_kind_track_list"),
+            "Viewport-width emission must be gated to visible track-list panels only"
+        );
+        assert!(
+            !slint_ui.contains("self.width - 16px - 40px - root.null-column-width"),
+            "Legacy formula-based header width subtraction should be removed"
         );
     }
 

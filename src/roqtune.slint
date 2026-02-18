@@ -231,6 +231,16 @@ export component AppWindow inherits Window {
     in-out property <bool> show_delete_custom_column_confirm: false;
     in-out property <bool> sidebar_has_focus: false;
     property <length> null-column-width: 120px;
+    property <length> playlist-row-padding-x: 8px;
+    property <length> playlist-column-spacing: 10px;
+    property <length> playlist-status-lane-width: 40px;
+    property <length> playlist-columns-band-offset-x: root.playlist-row-padding-x
+        + root.playlist-status-lane-width
+        + root.playlist-column-spacing;
+    property <length> playlist-fixed-chrome-width: root.playlist-row-padding-x * 2
+        + root.playlist-status-lane-width
+        + root.null-column-width
+        + root.playlist-column-spacing * 3;
     property <length> column-menu-x: 0px;
     property <length> column-menu-y: 0px;
     in-out property <int> column_drag_from: -1;
@@ -253,6 +263,8 @@ export component AppWindow inherits Window {
     in-out property <[int]> playlist_column_gap_positions_px: [];
     in-out property <int> playlist_columns_content_width_px: 0;
     in-out property <int> playlist_columns_available_width_px: 0;
+    property <length> playlist-content-width: root.playlist-fixed-chrome-width
+        + max(0px, root.playlist_columns_content_width_px * 1px);
     in-out property <[LayoutButtonClusterPanelModel]> layout_button_cluster_panels: [];
     in-out property <[LayoutMetadataViewerPanelModel]> layout_metadata_viewer_panels: [];
     in-out property <[LayoutAlbumArtViewerPanelModel]> layout_album_art_viewer_panels: [];
@@ -1005,22 +1017,27 @@ export component AppWindow inherits Window {
                         height: 28px;
                         clip: true;
                         background: root.theme_surface_bg;
-                        property <int> viewport-width-px: max(0, floor((self.width - 16px - 40px - root.null-column-width - 20px) / 1px));
-                        changed viewport-width-px => {
-                            if self.viewport-width-px != root.playlist_columns_available_width_px {
-                                root.playlist_columns_available_width_px = self.viewport-width-px;
-                                root.playlist_columns_viewport_resized(self.viewport-width-px);
+                        property <length> columns-band-width: max(0px, track-list.visible-width - root.playlist-fixed-chrome-width);
+                        property <int> columns-band-width-px: max(0, floor(self.columns-band-width / 1px));
+                        changed columns-band-width-px => {
+                            if !(root.layout-region-is-visible(i)
+                                    && root.layout-region-panel-kind(i) == root.panel_kind_track_list) {
+                                return;
+                            }
+                            if self.columns-band-width-px != root.playlist_columns_available_width_px {
+                                root.playlist_columns_available_width_px = self.columns-band-width-px;
+                                root.playlist_columns_viewport_resized(self.columns-band-width-px);
                             }
                         }
                         HorizontalLayout {
                             x: track-list.viewport-x;
-                            width: max(parent.width, track-list.viewport-width);
+                            width: max(track-list.visible-width, root.playlist-content-width);
                             height: parent.height;
-                            padding-left: 8px;
-                            padding-right: 8px;
-                            spacing: 10px;
+                            padding-left: root.playlist-row-padding-x;
+                            padding-right: root.playlist-row-padding-x;
+                            spacing: root.playlist-column-spacing;
                             Rectangle {
-                                width: 40px;
+                                width: root.playlist-status-lane-width;
                                 Image {
                                     source: AppIcons.player-play;
                                     width: 11px;
@@ -1073,15 +1090,15 @@ export component AppWindow inherits Window {
                         }
 
                         column-header-drag-ta := TouchArea {
-                            x: 8px + 40px + 10px;
+                            x: root.playlist-columns-band-offset-x + track-list.viewport-x;
                             y: 0px;
-                            property <length> max-drag-width: max(0px, parent.width - 16px - 40px - root.null-column-width - 20px);
                             width: root.playlist_columns_content_width_px > 0
                                 ? min(self.max-drag-width, root.playlist_columns_content_width_px * 1px)
                                 : self.max-drag-width;
                             height: parent.height;
+                            property <length> max-drag-width: max(0px, track-list.visible-width - root.playlist-fixed-chrome-width);
                             property <int> visible_column_count: root.playlist_visible_column_headers.length;
-                            property <int> content-mouse-x-px: floor((self.mouse-x - track-list.viewport-x) / 1px);
+                            property <int> content-mouse-x-px: floor(self.mouse-x / 1px);
                             mouse-cursor: (root.column_resize_active || root.column_hover_divider != -1) ? col-resize : default;
                             pointer-event(event) => {
                                 if (event.button == PointerEventButton.right && event.kind == PointerEventKind.down) {
@@ -1214,7 +1231,7 @@ export component AppWindow inherits Window {
                                 && root.column_drop_gap != -1
                                 && column-header-drag-ta.visible_column_count > 0
                                 && root.column_drop_gap < root.playlist_column_gap_positions_px.length : Rectangle {
-                            x: column-header-drag-ta.x + track-list.viewport-x
+                            x: column-header-drag-ta.x
                                 + root.playlist_column_gap_positions_px[root.column_drop_gap] * 1px - 1px;
                             y: 3px;
                             width: 2px;
@@ -1226,7 +1243,7 @@ export component AppWindow inherits Window {
                         if root.column_resize_active
                                 && root.column_resize_index >= 0
                                 && root.column_resize_index < root.playlist_column_widths_px.length : Rectangle {
-                            x: column-header-drag-ta.x + track-list.viewport-x
+                            x: column-header-drag-ta.x
                                 + root.playlist-column-divider-x(root.column_resize_index) * 1px - 1px;
                             y: 3px;
                             width: 2px;
@@ -1463,6 +1480,7 @@ export component AppWindow inherits Window {
                                 self.viewport-y = 0px - centered-first-row * row-height;
                             }
                             for track[i] in root.track_model : TrackRow {
+                                width: max(track-list.visible-width, root.playlist-content-width);
                                 data: track;
                                 is-playing: root.playing_track_index == i;
                                 is-hover: root.hover-index == i && !root.is-dragging;
@@ -1471,6 +1489,9 @@ export component AppWindow inherits Window {
                                 column-widths-px: root.playlist_column_widths_px;
                                 row-height: track-list.row-height;
                                 null-column-width: root.null-column-width;
+                                horizontal-padding: root.playlist-row-padding-x;
+                                column-spacing: root.playlist-column-spacing;
+                                status-lane-width: root.playlist-status-lane-width;
                             }
                         }
 
@@ -1491,7 +1512,7 @@ export component AppWindow inherits Window {
                             property <int> raw-row: floor(content-y / row-height);
                             property <bool> is-in-rows: self.in-viewport && raw-row >= 0 && raw-row < root.track_model.length;
                             property <bool> in-null-column: self.in-viewport
-                                && self.mouse-x >= (track-list.viewport-width - root.null-column-width);
+                                && self.mouse-x >= (track-list.visible-width - root.null-column-width);
                             property <int> hovered-row: is-in-rows ? raw-row : -1;
                             property <int> drop-gap: max(0, min(root.track_model.length, floor((content-y + row-height / 2) / row-height)));
 

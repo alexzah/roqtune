@@ -125,6 +125,9 @@ export component TrackRow inherits Rectangle {
     in property <[int]> column-widths-px: [];
     in property <length> row-height: 30px;
     in property <length> null-column-width: 120px;
+    in property <length> horizontal-padding: 8px;
+    in property <length> column-spacing: 10px;
+    in property <length> status-lane-width: 40px;
     private property <bool> dark: Palette.color-scheme == ColorScheme.dark;
 
     pure function column-width-for-index(index: int) -> length {
@@ -155,12 +158,12 @@ export component TrackRow inherits Rectangle {
     opacity: root.data.unavailable ? 0.68 : 1.0;
 
     HorizontalLayout {
-        padding-left: 8px;
-        padding-right: 8px;
-        spacing: 10px;
+        padding-left: root.horizontal-padding;
+        padding-right: root.horizontal-padding;
+        spacing: root.column-spacing;
 
         Rectangle {
-            width: 40px;
+            width: root.status-lane-width;
             Text {
                 text: root.data.status;
                 color: root.data.unavailable ? (root.dark ? #7a7a7a : #7c8895) : #2a6def;
@@ -214,28 +217,29 @@ export component TrackRow inherits Rectangle {
 
         Rectangle { horizontal-stretch: 1; }
 
-        if root.data.source_badge != "" : Rectangle {
-            width: 26px;
-            height: 18px;
-            border-radius: 9px;
-            border-width: 1px;
-            border-color: root.dark ? #3f5470 : #b4cde8;
-            background: root.dark ? #1f3248 : #e2eefb;
-            y: (parent.height - self.height) / 2;
-
-            Image {
-                source: AppIcons.opensubsonic;
-                width: 12px;
-                height: 12px;
-                x: (parent.width - self.width) / 2;
-                y: (parent.height - self.height) / 2;
-                image-fit: contain;
-                colorize: root.dark ? #9fc3eb : #2d5f98;
-            }
-        }
-
         Rectangle {
             width: root.null-column-width;
+
+            if root.data.source_badge != "" : Rectangle {
+                x: parent.width - self.width - 8px;
+                y: (parent.height - self.height) / 2;
+                width: 26px;
+                height: 18px;
+                border-radius: 9px;
+                border-width: 1px;
+                border-color: root.dark ? #3f5470 : #b4cde8;
+                background: root.dark ? #1f3248 : #e2eefb;
+
+                Image {
+                    source: AppIcons.opensubsonic;
+                    width: 12px;
+                    height: 12px;
+                    x: (parent.width - self.width) / 2;
+                    y: (parent.height - self.height) / 2;
+                    image-fit: contain;
+                    colorize: root.dark ? #9fc3eb : #2d5f98;
+                }
+            }
         }
     }
 }

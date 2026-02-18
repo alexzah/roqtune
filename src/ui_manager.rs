@@ -5,6 +5,7 @@
 
 use std::hash::{Hash, Hasher};
 use std::io::Read;
+use std::panic::Location;
 use std::time::{Duration, Instant};
 use std::{
     cell::RefCell,
@@ -95,6 +96,7 @@ pub struct UiManager {
     playlist_columns_available_width_px: u32,
     playlist_columns_content_width_px: u32,
     playlist_row_height_px: u32,
+    playlist_layout_pass_seq: u64,
     album_art_column_min_width_px: u32,
     album_art_column_max_width_px: u32,
     filter_sort_column_key: Option<String>,
@@ -191,6 +193,32 @@ struct ColumnWidthProfile {
     min_px: u32,
     preferred_px: u32,
     max_px: u32,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum PlaylistColumnClass {
+    AlbumArt,
+    TrackNumber,
+    DiscNumber,
+    YearDate,
+    Title,
+    ArtistFamily,
+    Album,
+    Genre,
+    Duration,
+    Custom,
+    Generic,
+}
+
+#[derive(Clone, Copy, Debug)]
+struct DeterministicColumnLayoutSpec {
+    min_px: u32,
+    max_px: u32,
+    target_px: u32,
+    semantic_floor_px: u32,
+    emergency_floor_px: u32,
+    shrink_priority: u8,
+    fixed_width: bool,
 }
 
 /// Cover-art lookup request payload used by the internal worker thread.
@@ -319,6 +347,7 @@ const COVER_ART_IMAGE_CACHE_MAX_ENTRIES: usize = 4096;
 const COVER_ART_FAILED_PATHS_MAX_ENTRIES: usize = 4096;
 const LIBRARY_PAGE_FETCH_LIMIT: usize = 512;
 const REMOTE_TRACK_UNAVAILABLE_TITLE: &str = "Remote track unavailable";
+const PLAYLIST_COLUMN_SPACING_PX: u32 = 10;
 
 #[derive(Default)]
 struct CoverArtImageCache {
@@ -404,51 +433,284 @@ thread_local! {
         RefCell::new(FailedCoverPathCache::default());
 }
 
-fn fit_column_widths_to_available_space(
+fn apply_shrink_to_group(
     widths: &mut [u32],
-    min_widths: &[u32],
-    _max_widths: &[u32],
-    available_width_px: u32,
-) {
-    let mut used_width: u32 = widths.iter().copied().sum();
-    if used_width > available_width_px {
-        let mut deficit = used_width - available_width_px;
-        while deficit > 0 {
-            let adjustable_indices: Vec<usize> = widths
-                .iter()
-                .enumerate()
-                .filter_map(|(index, width)| (*width > min_widths[index]).then_some(index))
-                .collect();
-            if adjustable_indices.is_empty() {
-                break;
-            }
-            let step = (deficit / adjustable_indices.len() as u32).max(1);
-            let mut reduced_this_round = 0u32;
-            for index in adjustable_indices {
-                let shrink_capacity = widths[index] - min_widths[index];
-                if shrink_capacity == 0 {
-                    continue;
-                }
-                let shrink_by = shrink_capacity.min(step).min(deficit);
-                widths[index] -= shrink_by;
-                deficit -= shrink_by;
-                reduced_this_round += shrink_by;
-                if deficit == 0 {
-                    break;
-                }
-            }
-            if reduced_this_round == 0 {
-                break;
+    floors: &[u32],
+    indices: &[usize],
+    deficit_px: u32,
+) -> u32 {
+    if deficit_px == 0 || indices.is_empty() {
+        return deficit_px;
+    }
+
+    let mut total_capacity = 0u32;
+    for index in indices {
+        total_capacity =
+            total_capacity.saturating_add(widths[*index].saturating_sub(floors[*index]));
+    }
+    if total_capacity == 0 {
+        return deficit_px;
+    }
+
+    let shrink_budget = deficit_px.min(total_capacity);
+    if shrink_budget == total_capacity {
+        for index in indices {
+            widths[*index] = floors[*index];
+        }
+        return deficit_px - total_capacity;
+    }
+
+    let mut remaining_caps: Vec<u32> = indices
+        .iter()
+        .map(|index| widths[*index].saturating_sub(floors[*index]))
+        .collect();
+    let mut active_count = remaining_caps
+        .iter()
+        .copied()
+        .filter(|capacity| *capacity > 0)
+        .count();
+    if active_count == 0 {
+        return deficit_px;
+    }
+    let mut remaining_budget = shrink_budget;
+    let mut cursor = 0usize;
+    while remaining_budget > 0 && active_count > 0 {
+        if remaining_caps[cursor] > 0 {
+            let width_index = indices[cursor];
+            widths[width_index] = widths[width_index].saturating_sub(1);
+            remaining_caps[cursor] -= 1;
+            remaining_budget -= 1;
+            if remaining_caps[cursor] == 0 {
+                active_count -= 1;
             }
         }
+        cursor += 1;
+        if cursor >= indices.len() {
+            cursor = 0;
+        }
     }
-    used_width = widths.iter().copied().sum();
-    debug!(
-        "Playlist column sizing fitted: available={} used={} columns={} (shrink-only)",
-        available_width_px,
-        used_width,
-        widths.len()
+
+    deficit_px.saturating_sub(shrink_budget.saturating_sub(remaining_budget))
+}
+
+fn apply_grow_to_group(
+    widths: &mut [u32],
+    ceilings: &[u32],
+    indices: &[usize],
+    surplus_px: u32,
+) -> u32 {
+    if surplus_px == 0 || indices.is_empty() {
+        return surplus_px;
+    }
+
+    let mut total_capacity = 0u32;
+    for index in indices {
+        total_capacity =
+            total_capacity.saturating_add(ceilings[*index].saturating_sub(widths[*index]));
+    }
+    if total_capacity == 0 {
+        return surplus_px;
+    }
+
+    let grow_budget = surplus_px.min(total_capacity);
+    if grow_budget == total_capacity {
+        for index in indices {
+            widths[*index] = ceilings[*index];
+        }
+        return surplus_px - total_capacity;
+    }
+
+    let mut remaining_caps: Vec<u32> = indices
+        .iter()
+        .map(|index| ceilings[*index].saturating_sub(widths[*index]))
+        .collect();
+    let mut active_count = remaining_caps
+        .iter()
+        .copied()
+        .filter(|capacity| *capacity > 0)
+        .count();
+    if active_count == 0 {
+        return surplus_px;
+    }
+
+    let mut remaining_budget = grow_budget;
+    let mut cursor = 0usize;
+    while remaining_budget > 0 && active_count > 0 {
+        if remaining_caps[cursor] > 0 {
+            let width_index = indices[cursor];
+            widths[width_index] = widths[width_index].saturating_add(1);
+            remaining_caps[cursor] -= 1;
+            remaining_budget -= 1;
+            if remaining_caps[cursor] == 0 {
+                active_count -= 1;
+            }
+        }
+        cursor += 1;
+        if cursor >= indices.len() {
+            cursor = 0;
+        }
+    }
+
+    surplus_px.saturating_sub(grow_budget.saturating_sub(remaining_budget))
+}
+
+fn shrink_widths_to_floors_by_priority(
+    widths: &mut [u32],
+    floors: &[u32],
+    priorities: &[u8],
+    fixed_width_flags: &[bool],
+    mut deficit_px: u32,
+) -> u32 {
+    if deficit_px == 0 {
+        return 0;
+    }
+
+    let mut priority_levels: Vec<u8> = priorities
+        .iter()
+        .enumerate()
+        .filter_map(|(index, priority)| (!fixed_width_flags[index]).then_some(*priority))
+        .collect();
+    priority_levels.sort_unstable();
+    priority_levels.dedup();
+
+    for priority in priority_levels {
+        if deficit_px == 0 {
+            break;
+        }
+        let indices: Vec<usize> = priorities
+            .iter()
+            .enumerate()
+            .filter_map(|(index, level)| {
+                (!fixed_width_flags[index] && *level == priority).then_some(index)
+            })
+            .collect();
+        deficit_px = apply_shrink_to_group(widths, floors, &indices, deficit_px);
+    }
+
+    deficit_px
+}
+
+fn grow_widths_to_ceilings_by_priority(
+    widths: &mut [u32],
+    ceilings: &[u32],
+    priorities: &[u8],
+    fixed_width_flags: &[bool],
+    mut surplus_px: u32,
+) -> u32 {
+    if surplus_px == 0 {
+        return 0;
+    }
+
+    let mut priority_levels: Vec<u8> = priorities
+        .iter()
+        .enumerate()
+        .filter_map(|(index, priority)| (!fixed_width_flags[index]).then_some(*priority))
+        .collect();
+    priority_levels.sort_unstable();
+    priority_levels.dedup();
+    priority_levels.reverse();
+
+    for priority in priority_levels {
+        if surplus_px == 0 {
+            break;
+        }
+        let indices: Vec<usize> = priorities
+            .iter()
+            .enumerate()
+            .filter_map(|(index, level)| {
+                (!fixed_width_flags[index] && *level == priority).then_some(index)
+            })
+            .collect();
+        surplus_px = apply_grow_to_group(widths, ceilings, &indices, surplus_px);
+    }
+
+    surplus_px
+}
+
+fn fit_column_widths_deterministic(
+    specs: &[DeterministicColumnLayoutSpec],
+    available_width_px: u32,
+) -> Vec<u32> {
+    if specs.is_empty() {
+        return Vec::new();
+    }
+
+    let mut widths: Vec<u32> = specs
+        .iter()
+        .map(|spec| spec.target_px.clamp(spec.min_px, spec.max_px))
+        .collect();
+    let total_width: u32 = widths.iter().copied().sum();
+    if total_width < available_width_px {
+        let ceilings: Vec<u32> = specs
+            .iter()
+            .map(|spec| {
+                if spec.fixed_width {
+                    spec.target_px
+                } else {
+                    spec.max_px.max(spec.target_px)
+                }
+            })
+            .collect();
+        let priorities: Vec<u8> = specs.iter().map(|spec| spec.shrink_priority).collect();
+        let fixed_width_flags: Vec<bool> = specs.iter().map(|spec| spec.fixed_width).collect();
+        let _ = grow_widths_to_ceilings_by_priority(
+            &mut widths,
+            &ceilings,
+            &priorities,
+            &fixed_width_flags,
+            available_width_px - total_width,
+        );
+        return widths;
+    }
+    if total_width == available_width_px {
+        return widths;
+    }
+
+    let mut deficit_px = total_width - available_width_px;
+    let semantic_floors: Vec<u32> = specs
+        .iter()
+        .map(|spec| {
+            if spec.fixed_width {
+                spec.target_px
+            } else {
+                spec.semantic_floor_px
+                    .clamp(spec.emergency_floor_px, spec.target_px)
+            }
+        })
+        .collect();
+    let priorities: Vec<u8> = specs.iter().map(|spec| spec.shrink_priority).collect();
+    let fixed_width_flags: Vec<bool> = specs.iter().map(|spec| spec.fixed_width).collect();
+    deficit_px = shrink_widths_to_floors_by_priority(
+        &mut widths,
+        &semantic_floors,
+        &priorities,
+        &fixed_width_flags,
+        deficit_px,
     );
+
+    if deficit_px == 0 {
+        return widths;
+    }
+
+    let emergency_floors: Vec<u32> = specs
+        .iter()
+        .map(|spec| {
+            if spec.fixed_width {
+                spec.target_px
+            } else {
+                spec.emergency_floor_px.min(spec.target_px)
+            }
+        })
+        .collect();
+    let _ = shrink_widths_to_floors_by_priority(
+        &mut widths,
+        &emergency_floors,
+        &priorities,
+        &fixed_width_flags,
+        deficit_px,
+    );
+
+    widths
 }
 
 impl UiManager {
@@ -1053,6 +1315,7 @@ impl UiManager {
             playlist_columns_available_width_px: 0,
             playlist_columns_content_width_px: 0,
             playlist_row_height_px: BASE_ROW_HEIGHT_PX,
+            playlist_layout_pass_seq: 0,
             album_art_column_min_width_px: config::default_playlist_album_art_column_min_width_px(),
             album_art_column_max_width_px: config::default_playlist_album_art_column_max_width_px(),
             filter_sort_column_key: None,
@@ -1693,6 +1956,69 @@ impl UiManager {
         !Self::is_album_art_builtin_column(column)
     }
 
+    fn playlist_column_class(column: &PlaylistColumnConfig) -> PlaylistColumnClass {
+        if Self::is_album_art_builtin_column(column) {
+            return PlaylistColumnClass::AlbumArt;
+        }
+
+        let normalized_format = column.format.trim().to_ascii_lowercase();
+        let normalized_name = column.name.trim().to_ascii_lowercase();
+
+        if normalized_format == "{track}"
+            || normalized_format == "{track_number}"
+            || normalized_format == "{tracknumber}"
+            || normalized_name == "track #"
+            || normalized_name == "track"
+        {
+            return PlaylistColumnClass::TrackNumber;
+        }
+
+        if normalized_format == "{disc}" || normalized_format == "{disc_number}" {
+            return PlaylistColumnClass::DiscNumber;
+        }
+
+        if normalized_format == "{year}"
+            || normalized_format == "{date}"
+            || normalized_name == "year"
+        {
+            return PlaylistColumnClass::YearDate;
+        }
+
+        if normalized_format == "{title}" || normalized_name == "title" {
+            return PlaylistColumnClass::Title;
+        }
+
+        if normalized_format == "{artist}"
+            || normalized_format == "{album_artist}"
+            || normalized_format == "{albumartist}"
+            || normalized_name == "artist"
+            || normalized_name == "album artist"
+        {
+            return PlaylistColumnClass::ArtistFamily;
+        }
+
+        if normalized_format == "{album}" || normalized_name == "album" {
+            return PlaylistColumnClass::Album;
+        }
+
+        if normalized_format == "{genre}" || normalized_name == "genre" {
+            return PlaylistColumnClass::Genre;
+        }
+
+        if normalized_name == "duration"
+            || normalized_name == "time"
+            || normalized_format == "{duration}"
+        {
+            return PlaylistColumnClass::Duration;
+        }
+
+        if column.custom {
+            return PlaylistColumnClass::Custom;
+        }
+
+        PlaylistColumnClass::Generic
+    }
+
     fn album_art_column_width_profile(&self) -> ColumnWidthProfile {
         let min_px = self.album_art_column_min_width_px.clamp(12, 512);
         let max_px = self
@@ -1707,108 +2033,112 @@ impl UiManager {
     }
 
     fn column_width_profile_for_column(&self, column: &PlaylistColumnConfig) -> ColumnWidthProfile {
-        if Self::is_album_art_builtin_column(column) {
-            return self.album_art_column_width_profile();
-        }
-
-        let normalized_format = column.format.trim().to_ascii_lowercase();
-        let normalized_name = column.name.trim().to_ascii_lowercase();
-
-        if normalized_format == "{track}"
-            || normalized_format == "{track_number}"
-            || normalized_format == "{tracknumber}"
-            || normalized_name == "track #"
-            || normalized_name == "track"
-        {
-            return ColumnWidthProfile {
+        match Self::playlist_column_class(column) {
+            PlaylistColumnClass::AlbumArt => self.album_art_column_width_profile(),
+            PlaylistColumnClass::TrackNumber => ColumnWidthProfile {
                 min_px: 52,
                 preferred_px: 68,
                 max_px: 90,
-            };
-        }
-
-        if normalized_format == "{disc}" || normalized_format == "{disc_number}" {
-            return ColumnWidthProfile {
+            },
+            PlaylistColumnClass::DiscNumber => ColumnWidthProfile {
                 min_px: 50,
                 preferred_px: 64,
                 max_px: 84,
-            };
-        }
-
-        if normalized_format == "{year}"
-            || normalized_format == "{date}"
-            || normalized_name == "year"
-        {
-            return ColumnWidthProfile {
+            },
+            PlaylistColumnClass::YearDate => ColumnWidthProfile {
                 min_px: 64,
                 preferred_px: 78,
                 max_px: 104,
-            };
-        }
-
-        if normalized_format == "{title}" || normalized_name == "title" {
-            return ColumnWidthProfile {
+            },
+            PlaylistColumnClass::Title => ColumnWidthProfile {
                 min_px: 140,
                 preferred_px: 230,
                 max_px: 440,
-            };
-        }
-
-        if normalized_format == "{artist}"
-            || normalized_format == "{album_artist}"
-            || normalized_format == "{albumartist}"
-            || normalized_name == "artist"
-            || normalized_name == "album artist"
-        {
-            return ColumnWidthProfile {
+            },
+            PlaylistColumnClass::ArtistFamily => ColumnWidthProfile {
                 min_px: 120,
                 preferred_px: 190,
                 max_px: 320,
-            };
-        }
-
-        if normalized_format == "{album}" || normalized_name == "album" {
-            return ColumnWidthProfile {
+            },
+            PlaylistColumnClass::Album => ColumnWidthProfile {
                 min_px: 140,
                 preferred_px: 220,
                 max_px: 360,
-            };
-        }
-
-        if normalized_format == "{genre}" || normalized_name == "genre" {
-            return ColumnWidthProfile {
+            },
+            PlaylistColumnClass::Genre => ColumnWidthProfile {
                 min_px: 100,
                 preferred_px: 140,
                 max_px: 210,
-            };
-        }
-
-        if normalized_name == "duration"
-            || normalized_name == "time"
-            || normalized_format == "{duration}"
-        {
-            return ColumnWidthProfile {
+            },
+            PlaylistColumnClass::Duration => ColumnWidthProfile {
                 min_px: 78,
                 preferred_px: 92,
                 max_px: 120,
-            };
-        }
-
-        if column.custom {
-            return ColumnWidthProfile {
+            },
+            PlaylistColumnClass::Custom => ColumnWidthProfile {
                 min_px: 110,
                 preferred_px: 180,
                 max_px: 340,
-            };
-        }
-
-        ColumnWidthProfile {
-            min_px: 100,
-            preferred_px: 170,
-            max_px: 300,
+            },
+            PlaylistColumnClass::Generic => ColumnWidthProfile {
+                min_px: 100,
+                preferred_px: 170,
+                max_px: 300,
+            },
         }
     }
 
+    fn column_shrink_priority(class: PlaylistColumnClass) -> u8 {
+        match class {
+            PlaylistColumnClass::AlbumArt => 255,
+            PlaylistColumnClass::TrackNumber
+            | PlaylistColumnClass::DiscNumber
+            | PlaylistColumnClass::YearDate
+            | PlaylistColumnClass::Duration => 0,
+            PlaylistColumnClass::Genre
+            | PlaylistColumnClass::Custom
+            | PlaylistColumnClass::Generic => 1,
+            PlaylistColumnClass::ArtistFamily | PlaylistColumnClass::Album => 2,
+            PlaylistColumnClass::Title => 3,
+        }
+    }
+
+    fn semantic_floor_for_column(class: PlaylistColumnClass, profile: ColumnWidthProfile) -> u32 {
+        match class {
+            PlaylistColumnClass::AlbumArt => profile.preferred_px,
+            PlaylistColumnClass::TrackNumber => profile.min_px.max(52),
+            PlaylistColumnClass::DiscNumber => profile.min_px.max(50),
+            PlaylistColumnClass::YearDate => profile.min_px.max(64),
+            PlaylistColumnClass::Title => profile.min_px.max(140),
+            PlaylistColumnClass::ArtistFamily => profile.min_px.max(120),
+            PlaylistColumnClass::Album => profile.min_px.max(140),
+            PlaylistColumnClass::Genre => profile.min_px.max(100),
+            PlaylistColumnClass::Duration => profile.min_px.max(78),
+            PlaylistColumnClass::Custom => profile.min_px.max(110),
+            PlaylistColumnClass::Generic => profile.min_px.max(100),
+        }
+        .min(profile.max_px)
+    }
+
+    fn emergency_floor_for_column(class: PlaylistColumnClass, profile: ColumnWidthProfile) -> u32 {
+        let fallback = profile.min_px.min(64);
+        match class {
+            PlaylistColumnClass::AlbumArt => profile.preferred_px,
+            PlaylistColumnClass::TrackNumber => 24,
+            PlaylistColumnClass::DiscNumber => 24,
+            PlaylistColumnClass::YearDate => 36,
+            PlaylistColumnClass::Title => 72,
+            PlaylistColumnClass::ArtistFamily => 64,
+            PlaylistColumnClass::Album => 64,
+            PlaylistColumnClass::Genre => 52,
+            PlaylistColumnClass::Duration => 36,
+            PlaylistColumnClass::Custom => 52,
+            PlaylistColumnClass::Generic => fallback,
+        }
+        .min(profile.max_px)
+    }
+
+    #[track_caller]
     fn refresh_playlist_column_content_targets(&mut self) {
         const SAMPLE_LIMIT: usize = 256;
         const MAX_MEASURED_CHARS: usize = 80;
@@ -1867,11 +2197,20 @@ impl UiManager {
         }
 
         self.playlist_column_content_targets_px = targets;
+        let caller = Location::caller();
+        debug!(
+            "COLLAYOUT refresh-targets at {}:{}:{} rows={} visible_cols={} targets={:?}",
+            caller.file(),
+            caller.line(),
+            caller.column(),
+            total_rows,
+            self.playlist_column_content_targets_px.len(),
+            self.playlist_column_content_targets_px
+        );
     }
 
     fn resolve_playlist_column_target_width_px(
         override_width_px: Option<u32>,
-        current_width_px: Option<u32>,
         stored_target_width_px: Option<u32>,
         content_target_width_px: u32,
         profile: ColumnWidthProfile,
@@ -1880,9 +2219,7 @@ impl UiManager {
         let base_width_px = if let Some(override_width_px) = override_width_px {
             override_width_px
         } else if preserve_current_widths {
-            stored_target_width_px
-                .or(current_width_px)
-                .unwrap_or(content_target_width_px)
+            stored_target_width_px.unwrap_or(content_target_width_px)
         } else {
             content_target_width_px
         };
@@ -1905,19 +2242,17 @@ impl UiManager {
         available_width_px: u32,
         preserve_current_widths: bool,
     ) -> (Vec<u32>, HashMap<String, u32>) {
-        const COLUMN_SPACING_PX: u32 = 10;
         let visible_columns = self.visible_playlist_columns();
         if visible_columns.is_empty() {
             return (Vec::new(), HashMap::new());
         }
 
-        let mut min_widths = Vec::with_capacity(visible_columns.len());
-        let mut max_widths = Vec::with_capacity(visible_columns.len());
-        let mut widths = Vec::with_capacity(visible_columns.len());
+        let mut layout_specs = Vec::with_capacity(visible_columns.len());
         let mut target_widths_by_key = HashMap::with_capacity(visible_columns.len());
 
         for (index, column) in visible_columns.iter().enumerate() {
             let profile = self.column_width_profile_for_column(column);
+            let class = Self::playlist_column_class(column);
             let column_key = Self::playlist_column_key(column);
             let override_width = self
                 .playlist_column_width_overrides_px
@@ -1932,38 +2267,39 @@ impl UiManager {
                 .playlist_column_target_widths_px
                 .get(&column_key)
                 .copied();
-            let current_width = self.playlist_column_widths_px.get(index).copied();
             let target = Self::resolve_playlist_column_target_width_px(
                 override_width,
-                current_width,
                 stored_target,
                 content_target,
                 profile,
                 preserve_current_widths,
             );
             target_widths_by_key.insert(column_key, target);
-            min_widths.push(Self::layout_min_width_px_for_column(
-                column, profile, target,
-            ));
-            max_widths.push(profile.max_px);
-            widths.push(target);
+            let min_width_px = Self::layout_min_width_px_for_column(column, profile, target);
+            let emergency_floor_px =
+                Self::emergency_floor_for_column(class, profile).min(min_width_px);
+            layout_specs.push(DeterministicColumnLayoutSpec {
+                min_px: min_width_px,
+                max_px: profile.max_px.max(min_width_px),
+                target_px: target,
+                semantic_floor_px: Self::semantic_floor_for_column(class, profile)
+                    .max(min_width_px),
+                emergency_floor_px,
+                shrink_priority: Self::column_shrink_priority(class),
+                fixed_width: Self::is_album_art_builtin_column(column),
+            });
         }
 
-        let spacing_total =
-            COLUMN_SPACING_PX.saturating_mul((widths.len().saturating_sub(1)) as u32);
-        let preferred_total: u32 = widths.iter().copied().sum();
+        let spacing_total = PLAYLIST_COLUMN_SPACING_PX
+            .saturating_mul((layout_specs.len().saturating_sub(1)) as u32);
+        let preferred_total: u32 = layout_specs.iter().map(|spec| spec.target_px).sum();
         let available_for_columns = if available_width_px == 0 {
             preferred_total
         } else {
             available_width_px.saturating_sub(spacing_total)
         };
 
-        fit_column_widths_to_available_space(
-            &mut widths,
-            &min_widths,
-            &max_widths,
-            available_for_columns,
-        );
+        let widths = fit_column_widths_deterministic(&layout_specs, available_for_columns);
 
         (widths, target_widths_by_key)
     }
@@ -2005,7 +2341,40 @@ impl UiManager {
         )
     }
 
-    fn apply_playlist_column_layout_internal(&mut self, preserve_current_widths: bool) {
+    fn apply_playlist_column_layout_internal(
+        &mut self,
+        preserve_current_widths: bool,
+        trigger: &'static Location<'static>,
+    ) {
+        self.playlist_layout_pass_seq = self.playlist_layout_pass_seq.saturating_add(1);
+        let pass_seq = self.playlist_layout_pass_seq;
+        let visible_column_keys: Vec<String> = self
+            .visible_playlist_columns()
+            .iter()
+            .map(|column| Self::playlist_column_key(column))
+            .collect();
+        let stored_targets_for_visible: Vec<Option<u32>> = visible_column_keys
+            .iter()
+            .map(|key| self.playlist_column_target_widths_px.get(key).copied())
+            .collect();
+        let overrides_for_visible: Vec<Option<u32>> = visible_column_keys
+            .iter()
+            .map(|key| self.playlist_column_width_overrides_px.get(key).copied())
+            .collect();
+        debug!(
+            "COLLAYOUT pass={} start preserve={} trigger={}:{}:{} band={} visible_keys={:?} content_targets={:?} stored_targets={:?} current_widths={:?} overrides={:?}",
+            pass_seq,
+            preserve_current_widths,
+            trigger.file(),
+            trigger.line(),
+            trigger.column(),
+            self.playlist_columns_available_width_px,
+            visible_column_keys,
+            self.playlist_column_content_targets_px,
+            stored_targets_for_visible,
+            self.playlist_column_widths_px,
+            overrides_for_visible
+        );
         if self.playlist_column_content_targets_px.len() != self.visible_playlist_columns().len() {
             self.refresh_playlist_column_content_targets();
         }
@@ -2015,17 +2384,43 @@ impl UiManager {
             preserve_current_widths,
         );
         let row_height_px = self.compute_playlist_row_height_px(&widths);
-        let content_width = widths
-            .iter()
-            .copied()
-            .sum::<u32>()
-            .saturating_add(10u32.saturating_mul((widths.len().saturating_sub(1)) as u32));
-        self.playlist_column_target_widths_px = target_widths_by_key;
+        let content_width = widths.iter().copied().sum::<u32>().saturating_add(
+            PLAYLIST_COLUMN_SPACING_PX.saturating_mul((widths.len().saturating_sub(1)) as u32),
+        );
+        if preserve_current_widths {
+            for (key, value) in target_widths_by_key {
+                self.playlist_column_target_widths_px
+                    .entry(key)
+                    .or_insert(value);
+            }
+        } else {
+            self.playlist_column_target_widths_px = target_widths_by_key;
+        }
+
+        debug!(
+            "COLLAYOUT pass={} result widths={:?} columns_content={} row_height={} targets_after_compute={:?}",
+            pass_seq,
+            widths,
+            content_width,
+            row_height_px,
+            self.playlist_column_target_widths_px
+        );
+        trace!(
+            "Playlist geometry: visible_band={} widths={:?} columns_content={} row_height={}",
+            self.playlist_columns_available_width_px,
+            widths,
+            content_width,
+            row_height_px
+        );
 
         if widths == self.playlist_column_widths_px
             && content_width == self.playlist_columns_content_width_px
             && row_height_px == self.playlist_row_height_px
         {
+            debug!(
+                "COLLAYOUT pass={} skipped-no-change widths/content/row-height unchanged",
+                pass_seq
+            );
             return;
         }
 
@@ -2043,7 +2438,7 @@ impl UiManager {
         for (index, width_px) in widths_i32.iter().enumerate() {
             cursor_px = cursor_px.saturating_add((*width_px).max(0));
             if index + 1 < widths_i32.len() {
-                cursor_px = cursor_px.saturating_add(10);
+                cursor_px = cursor_px.saturating_add(PLAYLIST_COLUMN_SPACING_PX as i32);
             }
             gap_positions.push(cursor_px);
         }
@@ -2057,14 +2452,23 @@ impl UiManager {
             ui.set_playlist_columns_content_width_px(content_width_i32);
             ui.set_playlist_row_height_px(row_height_i32);
         });
+        debug!(
+            "COLLAYOUT pass={} applied widths={:?} content={} row_height={}",
+            pass_seq,
+            self.playlist_column_widths_px,
+            self.playlist_columns_content_width_px,
+            self.playlist_row_height_px
+        );
     }
 
+    #[track_caller]
     fn apply_playlist_column_layout(&mut self) {
-        self.apply_playlist_column_layout_internal(false);
+        self.apply_playlist_column_layout_internal(false, Location::caller());
     }
 
+    #[track_caller]
     fn apply_playlist_column_layout_preserving_current_widths(&mut self) {
-        self.apply_playlist_column_layout_internal(true);
+        self.apply_playlist_column_layout_internal(true, Location::caller());
     }
 
     fn status_text_from_detailed_metadata(meta: &protocol::DetailedMetadata) -> String {
@@ -7945,6 +8349,12 @@ impl UiManager {
                         protocol::Message::Playlist(
                             protocol::PlaylistMessage::PlaylistViewportWidthChanged(width_px),
                         ) => {
+                            debug!(
+                                "COLLAYOUT viewport-message width={} previous={} changed={}",
+                                width_px,
+                                self.playlist_columns_available_width_px,
+                                self.playlist_columns_available_width_px != width_px
+                            );
                             if self.playlist_columns_available_width_px != width_px {
                                 self.playlist_columns_available_width_px = width_px;
                                 self.apply_playlist_column_layout_preserving_current_widths();
@@ -7968,6 +8378,24 @@ impl UiManager {
                             }
                             let clamped_width_px =
                                 self.clamp_column_override_width_px(&column_key, width_px);
+                            if self
+                                .playlist_column_width_overrides_px
+                                .get(&column_key)
+                                .copied()
+                                == Some(clamped_width_px)
+                            {
+                                debug!(
+                                    "COLLAYOUT override-noop key={} requested={} clamped={} (unchanged)",
+                                    column_key,
+                                    width_px,
+                                    clamped_width_px
+                                );
+                                continue;
+                            }
+                            debug!(
+                                "COLLAYOUT override-apply key={} requested={} clamped={}",
+                                column_key, width_px, clamped_width_px
+                            );
                             self.playlist_column_width_overrides_px
                                 .insert(column_key, clamped_width_px);
                             self.apply_playlist_column_layout();
@@ -8000,9 +8428,9 @@ impl UiManager {
 #[cfg(test)]
 mod tests {
     use super::{
-        fit_column_widths_to_available_space, ColumnWidthProfile, CoverArtLookupRequest,
-        LibraryEntry, LibraryViewState, PlaylistSortDirection, TrackMetadata, UiManager,
-        ENRICHMENT_FAILED_ATTEMPT_CAP,
+        fit_column_widths_deterministic, ColumnWidthProfile, CoverArtLookupRequest,
+        DeterministicColumnLayoutSpec, LibraryEntry, LibraryViewState, PlaylistSortDirection,
+        TrackMetadata, UiManager, ENRICHMENT_FAILED_ATTEMPT_CAP,
     };
     use crate::{config::PlaylistColumnConfig, protocol};
     use std::path::PathBuf;
@@ -9138,59 +9566,256 @@ mod tests {
     }
 
     #[test]
-    fn test_fit_column_widths_shrinks_to_available_width() {
-        let mut widths = vec![220u32, 180u32, 200u32];
-        let mins = vec![100u32, 120u32, 130u32];
-        let maxs = vec![400u32, 360u32, 380u32];
+    fn test_fit_column_widths_deterministic_respects_available_space() {
+        let specs = vec![
+            DeterministicColumnLayoutSpec {
+                min_px: 100,
+                max_px: 400,
+                target_px: 220,
+                semantic_floor_px: 100,
+                emergency_floor_px: 64,
+                shrink_priority: 1,
+                fixed_width: false,
+            },
+            DeterministicColumnLayoutSpec {
+                min_px: 120,
+                max_px: 360,
+                target_px: 180,
+                semantic_floor_px: 120,
+                emergency_floor_px: 64,
+                shrink_priority: 2,
+                fixed_width: false,
+            },
+            DeterministicColumnLayoutSpec {
+                min_px: 130,
+                max_px: 380,
+                target_px: 200,
+                semantic_floor_px: 130,
+                emergency_floor_px: 72,
+                shrink_priority: 3,
+                fixed_width: false,
+            },
+        ];
 
-        fit_column_widths_to_available_space(&mut widths, &mins, &maxs, 420);
-
+        let widths = fit_column_widths_deterministic(&specs, 420);
         assert_eq!(widths.iter().copied().sum::<u32>(), 420);
-        assert!(widths[0] >= mins[0] && widths[0] <= maxs[0]);
-        assert!(widths[1] >= mins[1] && widths[1] <= maxs[1]);
-        assert!(widths[2] >= mins[2] && widths[2] <= maxs[2]);
+        assert_eq!(widths, vec![100, 120, 200]);
     }
 
     #[test]
-    fn test_fit_column_widths_keeps_targets_when_space_is_available() {
-        let mut widths = vec![120u32, 140u32, 160u32];
-        let mins = vec![90u32, 100u32, 120u32];
-        let maxs = vec![260u32, 280u32, 300u32];
+    fn test_fit_column_widths_deterministic_grows_to_use_available_space() {
+        let specs = vec![
+            DeterministicColumnLayoutSpec {
+                min_px: 100,
+                max_px: 400,
+                target_px: 220,
+                semantic_floor_px: 100,
+                emergency_floor_px: 64,
+                shrink_priority: 1,
+                fixed_width: false,
+            },
+            DeterministicColumnLayoutSpec {
+                min_px: 120,
+                max_px: 360,
+                target_px: 180,
+                semantic_floor_px: 120,
+                emergency_floor_px: 64,
+                shrink_priority: 2,
+                fixed_width: false,
+            },
+            DeterministicColumnLayoutSpec {
+                min_px: 130,
+                max_px: 380,
+                target_px: 200,
+                semantic_floor_px: 130,
+                emergency_floor_px: 72,
+                shrink_priority: 3,
+                fixed_width: false,
+            },
+        ];
 
-        fit_column_widths_to_available_space(&mut widths, &mins, &maxs, 640);
-
-        assert_eq!(widths, vec![120u32, 140u32, 160u32]);
+        let widths = fit_column_widths_deterministic(&specs, 760);
+        assert_eq!(widths.iter().copied().sum::<u32>(), 760);
+        assert!(widths[0] >= 220);
+        assert!(widths[1] >= 180);
+        assert!(widths[2] >= 200);
     }
 
     #[test]
-    fn test_fit_column_widths_stops_at_minimums_when_viewport_too_small() {
-        let mut widths = vec![150u32, 170u32, 190u32];
-        let mins = vec![100u32, 120u32, 140u32];
-        let maxs = vec![260u32, 280u32, 300u32];
+    fn test_fit_column_widths_deterministic_monotonic_for_adjacent_widths() {
+        let specs = vec![
+            DeterministicColumnLayoutSpec {
+                min_px: 140,
+                max_px: 440,
+                target_px: 230,
+                semantic_floor_px: 140,
+                emergency_floor_px: 72,
+                shrink_priority: 3,
+                fixed_width: false,
+            },
+            DeterministicColumnLayoutSpec {
+                min_px: 120,
+                max_px: 320,
+                target_px: 190,
+                semantic_floor_px: 120,
+                emergency_floor_px: 64,
+                shrink_priority: 2,
+                fixed_width: false,
+            },
+            DeterministicColumnLayoutSpec {
+                min_px: 140,
+                max_px: 360,
+                target_px: 220,
+                semantic_floor_px: 140,
+                emergency_floor_px: 64,
+                shrink_priority: 2,
+                fixed_width: false,
+            },
+        ];
 
-        fit_column_widths_to_available_space(&mut widths, &mins, &maxs, 120);
-
-        assert_eq!(widths, mins);
+        let widths_narrow = fit_column_widths_deterministic(&specs, 449);
+        let widths_wide = fit_column_widths_deterministic(&specs, 450);
+        for (narrow, wide) in widths_narrow.iter().zip(widths_wide.iter()) {
+            assert!(
+                *wide >= *narrow,
+                "column width decreased for wider viewport: {} -> {}",
+                narrow,
+                wide
+            );
+        }
+        assert!(widths_wide
+            .iter()
+            .zip(widths_narrow.iter())
+            .all(|(wide, narrow)| (*wide as i32 - *narrow as i32).abs() <= 1));
     }
 
     #[test]
-    fn test_resolve_playlist_column_target_width_preserves_current_width_on_viewport_resize() {
+    fn test_fit_column_widths_deterministic_keeps_fixed_album_art_width() {
+        let specs = vec![
+            DeterministicColumnLayoutSpec {
+                min_px: 96,
+                max_px: 96,
+                target_px: 96,
+                semantic_floor_px: 96,
+                emergency_floor_px: 96,
+                shrink_priority: 255,
+                fixed_width: true,
+            },
+            DeterministicColumnLayoutSpec {
+                min_px: 140,
+                max_px: 440,
+                target_px: 230,
+                semantic_floor_px: 140,
+                emergency_floor_px: 72,
+                shrink_priority: 3,
+                fixed_width: false,
+            },
+            DeterministicColumnLayoutSpec {
+                min_px: 120,
+                max_px: 320,
+                target_px: 190,
+                semantic_floor_px: 120,
+                emergency_floor_px: 64,
+                shrink_priority: 2,
+                fixed_width: false,
+            },
+        ];
+
+        let widths = fit_column_widths_deterministic(&specs, 260);
+        assert_eq!(widths[0], 96);
+        assert!(widths[1] >= 72);
+        assert!(widths[2] >= 64);
+    }
+
+    #[test]
+    fn test_fit_column_widths_deterministic_monotonic_across_full_resize_range() {
+        let specs = vec![
+            DeterministicColumnLayoutSpec {
+                min_px: 16,
+                max_px: 220,
+                target_px: 72,
+                semantic_floor_px: 72,
+                emergency_floor_px: 72,
+                shrink_priority: 255,
+                fixed_width: true,
+            },
+            DeterministicColumnLayoutSpec {
+                min_px: 140,
+                max_px: 440,
+                target_px: 230,
+                semantic_floor_px: 140,
+                emergency_floor_px: 72,
+                shrink_priority: 3,
+                fixed_width: false,
+            },
+            DeterministicColumnLayoutSpec {
+                min_px: 120,
+                max_px: 320,
+                target_px: 190,
+                semantic_floor_px: 120,
+                emergency_floor_px: 64,
+                shrink_priority: 2,
+                fixed_width: false,
+            },
+            DeterministicColumnLayoutSpec {
+                min_px: 140,
+                max_px: 360,
+                target_px: 220,
+                semantic_floor_px: 140,
+                emergency_floor_px: 64,
+                shrink_priority: 2,
+                fixed_width: false,
+            },
+        ];
+
+        let mut previous = fit_column_widths_deterministic(&specs, 320);
+        for available in 321..760 {
+            let current = fit_column_widths_deterministic(&specs, available);
+            for (index, (prev_width, current_width)) in
+                previous.iter().zip(current.iter()).enumerate()
+            {
+                assert!(
+                    *current_width >= *prev_width,
+                    "column {index} decreased while growing width: {} -> {} (available={})",
+                    prev_width,
+                    current_width,
+                    available
+                );
+            }
+            previous = current;
+        }
+
+        let mut previous = fit_column_widths_deterministic(&specs, 760);
+        for available in (320..760).rev() {
+            let current = fit_column_widths_deterministic(&specs, available);
+            for (index, (prev_width, current_width)) in
+                previous.iter().zip(current.iter()).enumerate()
+            {
+                assert!(
+                    *current_width <= *prev_width,
+                    "column {index} increased while shrinking width: {} -> {} (available={})",
+                    prev_width,
+                    current_width,
+                    available
+                );
+            }
+            previous = current;
+        }
+    }
+
+    #[test]
+    fn test_resolve_playlist_column_target_width_falls_back_to_content_when_preserving_without_stored_target(
+    ) {
         let profile = ColumnWidthProfile {
             min_px: 60,
             preferred_px: 160,
             max_px: 320,
         };
 
-        let target = UiManager::resolve_playlist_column_target_width_px(
-            None,
-            Some(140),
-            None,
-            220,
-            profile,
-            true,
-        );
+        let target =
+            UiManager::resolve_playlist_column_target_width_px(None, None, 220, profile, true);
 
-        assert_eq!(target, 140);
+        assert_eq!(target, 220);
     }
 
     #[test]
@@ -9203,20 +9828,13 @@ mod tests {
 
         let from_override = UiManager::resolve_playlist_column_target_width_px(
             Some(12),
-            Some(200),
             Some(240),
             72,
             profile,
             true,
         );
-        let from_content = UiManager::resolve_playlist_column_target_width_px(
-            None,
-            Some(200),
-            Some(240),
-            72,
-            profile,
-            false,
-        );
+        let from_content =
+            UiManager::resolve_playlist_column_target_width_px(None, Some(240), 72, profile, false);
 
         assert_eq!(from_override, 16);
         assert_eq!(from_content, 72);
@@ -9230,14 +9848,8 @@ mod tests {
             max_px: 480,
         };
 
-        let target = UiManager::resolve_playlist_column_target_width_px(
-            None,
-            Some(24),
-            Some(96),
-            72,
-            profile,
-            true,
-        );
+        let target =
+            UiManager::resolve_playlist_column_target_width_px(None, Some(96), 72, profile, true);
 
         assert_eq!(target, 96);
     }
