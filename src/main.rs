@@ -4443,7 +4443,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let bus_sender_clone = bus_sender.clone();
     ui.on_playlist_columns_viewport_resized(move |width_px| {
         let clamped_width = width_px.max(0) as u32;
-        debug!("COLLAYOUT ui-visible-band width={}px", clamped_width);
         let _ = bus_sender_clone.send(Message::Playlist(
             PlaylistMessage::PlaylistViewportWidthChanged(clamped_width),
         ));
@@ -4564,18 +4563,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 }
             };
             if !should_send {
-                trace!(
-                    "COLLAYOUT preview-throttled key={} requested={} clamped={}",
-                    column_key,
-                    width_px,
-                    clamped_width_px
-                );
                 return;
             }
-            debug!(
-                "COLLAYOUT preview-send key={} requested={} clamped={}",
-                column_key, width_px, clamped_width_px
-            );
             let _ = bus_sender_clone.send(Message::Playlist(
                 PlaylistMessage::SetActivePlaylistColumnWidthOverride {
                     column_key,
@@ -4610,10 +4599,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             (column_key, clamped)
         };
         if let (Some(column_key), Some(clamped_width_px)) = (column_key, clamped_width_px) {
-            debug!(
-                "COLLAYOUT commit key={} requested={} clamped={}",
-                column_key, width_px, clamped_width_px
-            );
             let next_config = {
                 let mut state = config_state_clone
                     .lock()
