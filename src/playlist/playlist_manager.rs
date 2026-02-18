@@ -941,25 +941,6 @@ impl PlaylistManager {
         }
     }
 
-    fn broadcast_active_playlist_column_width_overrides(&self) {
-        match self
-            .db_manager
-            .get_playlist_column_width_overrides(&self.active_playlist_id)
-        {
-            Ok(overrides) => {
-                let _ = self.bus_producer.send(protocol::Message::Playlist(
-                    protocol::PlaylistMessage::ActivePlaylistColumnWidthOverrides(overrides),
-                ));
-            }
-            Err(err) => {
-                error!(
-                    "Failed to load playlist column width overrides for {}: {}",
-                    self.active_playlist_id, err
-                );
-            }
-        }
-    }
-
     fn snapshot_editing_playlist_tracks(&self) -> Vec<protocol::RestoredTrack> {
         (0..self.editing_playlist.num_tracks())
             .map(|index| {
@@ -988,7 +969,6 @@ impl PlaylistManager {
                 protocol::PlaylistMessage::ActivePlaylistChanged(self.active_playlist_id.clone()),
             ));
             self.broadcast_active_playlist_column_order();
-            self.broadcast_active_playlist_column_width_overrides();
         }
     }
 
@@ -2385,7 +2365,6 @@ impl PlaylistManager {
                             protocol::PlaylistMessage::ActivePlaylistChanged(id),
                         ));
                         self.broadcast_active_playlist_column_order();
-                        self.broadcast_active_playlist_column_width_overrides();
                         self.broadcast_playlist_changed();
                     }
                     protocol::Message::Integration(
@@ -2534,54 +2513,6 @@ impl PlaylistManager {
                             continue;
                         }
                         self.broadcast_active_playlist_column_order();
-                    }
-                    protocol::Message::Playlist(
-                        protocol::PlaylistMessage::SetActivePlaylistColumnWidthOverride {
-                            column_key,
-                            width_px,
-                            persist,
-                        },
-                    ) => {
-                        if !persist || self.active_playlist_id.is_empty() {
-                            continue;
-                        }
-                        if let Err(err) = self.db_manager.set_playlist_column_width_override(
-                            &self.active_playlist_id,
-                            &column_key,
-                            width_px,
-                        ) {
-                            error!(
-                                "Failed to persist playlist column width override for {} key {}: {}",
-                                self.active_playlist_id, column_key, err
-                            );
-                        }
-                    }
-                    protocol::Message::Playlist(
-                        protocol::PlaylistMessage::ClearActivePlaylistColumnWidthOverride {
-                            column_key,
-                            persist,
-                        },
-                    ) => {
-                        if !persist || self.active_playlist_id.is_empty() {
-                            continue;
-                        }
-                        if let Err(err) = self.db_manager.clear_playlist_column_width_override(
-                            &self.active_playlist_id,
-                            &column_key,
-                        ) {
-                            error!(
-                                "Failed to clear playlist column width override for {} key {}: {}",
-                                self.active_playlist_id, column_key, err
-                            );
-                        }
-                    }
-                    protocol::Message::Playlist(
-                        protocol::PlaylistMessage::RequestActivePlaylistColumnWidthOverrides,
-                    ) => {
-                        if self.active_playlist_id.is_empty() {
-                            continue;
-                        }
-                        self.broadcast_active_playlist_column_width_overrides();
                     }
                     protocol::Message::Audio(protocol::AudioMessage::TrackCached(id, offset)) => {
                         if self.playback_route == protocol::PlaybackRoute::Cast {
@@ -3353,47 +3284,6 @@ mod tests {
         assert!(saw_playlists, "expected PlaylistsRestored snapshot");
         assert!(saw_active, "expected ActivePlaylistChanged snapshot");
         assert!(saw_tracks, "expected PlaylistRestored snapshot");
-    }
-
-    #[test]
-    fn test_set_active_playlist_column_width_override_persists_small_values() {
-        let mut harness = PlaylistManagerHarness::new();
-        harness.drain_messages();
-
-        harness.send(protocol::Message::Playlist(
-            protocol::PlaylistMessage::SetActivePlaylistColumnWidthOverride {
-                column_key: "{album_art}".to_string(),
-                width_px: 16,
-                persist: true,
-            },
-        ));
-        harness.send(protocol::Message::Playlist(
-            protocol::PlaylistMessage::RequestActivePlaylistColumnWidthOverrides,
-        ));
-
-        let message = wait_for_message(&mut harness.receiver, Duration::from_secs(1), |message| {
-            matches!(
-                message,
-                protocol::Message::Playlist(
-                    protocol::PlaylistMessage::ActivePlaylistColumnWidthOverrides(_)
-                )
-            )
-        });
-
-        let overrides = if let protocol::Message::Playlist(
-            protocol::PlaylistMessage::ActivePlaylistColumnWidthOverrides(Some(overrides)),
-        ) = message
-        {
-            overrides
-        } else {
-            panic!("expected persisted width overrides for active playlist");
-        };
-
-        let album_art_width = overrides
-            .iter()
-            .find(|entry| entry.column_key == "{album_art}")
-            .map(|entry| entry.width_px);
-        assert_eq!(album_art_width, Some(16));
     }
 
     #[test]

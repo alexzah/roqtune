@@ -25,6 +25,7 @@ use crate::{
     config::{self, PlaylistColumnConfig},
     integration_keyring::get_opensubsonic_password,
     integration_uri::{is_remote_track_path, parse_opensubsonic_track_uri},
+    layout::PlaylistColumnWidthOverrideConfig,
     metadata_tags, protocol, AppWindow, LayoutAlbumArtViewerPanelModel,
     LayoutMetadataViewerPanelModel, LibraryRowData, MetadataEditorField as UiMetadataEditorField,
     TrackRowData,
@@ -1662,6 +1663,30 @@ impl UiManager {
             return width_px.clamp(profile.min_px, profile.max_px);
         }
         width_px.max(1)
+    }
+
+    fn apply_layout_column_width_overrides(
+        &mut self,
+        overrides: &[PlaylistColumnWidthOverrideConfig],
+    ) {
+        self.playlist_column_width_overrides_px.clear();
+        for override_item in overrides {
+            let key = override_item.column_key.trim();
+            if key.is_empty() {
+                continue;
+            }
+            let key_owned = key.to_string();
+            if !self
+                .playlist_columns
+                .iter()
+                .any(|column| Self::playlist_column_key(column) == key_owned)
+            {
+                continue;
+            }
+            let clamped_width_px = self.clamp_column_override_width_px(key, override_item.width_px);
+            self.playlist_column_width_overrides_px
+                .insert(key_owned, clamped_width_px);
+        }
     }
 
     fn is_sortable_playlist_column(column: &PlaylistColumnConfig) -> bool {
@@ -7164,7 +7189,6 @@ impl UiManager {
                         ) => {
                             self.active_playlist_id = id.clone();
                             self.selection_anchor_track_id = None;
-                            self.playlist_column_width_overrides_px.clear();
                             self.playlist_column_target_widths_px.clear();
                             self.apply_playlist_column_layout();
                             if let Some(index) =
@@ -7869,8 +7893,9 @@ impl UiManager {
                                 .iter()
                                 .map(Self::playlist_column_key)
                                 .collect();
-                            self.playlist_column_width_overrides_px
-                                .retain(|key, _| valid_column_keys.contains(key));
+                            self.apply_layout_column_width_overrides(
+                                &config.ui.layout.playlist_column_width_overrides,
+                            );
                             self.playlist_column_target_widths_px
                                 .retain(|key, _| valid_column_keys.contains(key));
                             self.refresh_playlist_column_content_targets();
@@ -7926,49 +7951,25 @@ impl UiManager {
                             }
                         }
                         protocol::Message::Playlist(
-                            protocol::PlaylistMessage::ActivePlaylistColumnWidthOverrides(
-                                overrides,
-                            ),
-                        ) => {
-                            self.playlist_column_width_overrides_px.clear();
-                            if let Some(overrides) = overrides {
-                                for override_item in overrides {
-                                    if override_item.column_key.trim().is_empty() {
-                                        continue;
-                                    }
-                                    let clamped_width_px = self.clamp_column_override_width_px(
-                                        &override_item.column_key,
-                                        override_item.width_px,
-                                    );
-                                    self.playlist_column_width_overrides_px
-                                        .insert(override_item.column_key, clamped_width_px);
-                                }
-                            }
-                            self.apply_playlist_column_layout();
-                        }
-                        protocol::Message::Playlist(
                             protocol::PlaylistMessage::SetActivePlaylistColumnWidthOverride {
                                 column_key,
                                 width_px,
-                                ..
                             },
                         ) => {
                             if column_key.trim().is_empty() {
+                                continue;
+                            }
+                            if !self
+                                .playlist_columns
+                                .iter()
+                                .any(|column| Self::playlist_column_key(column) == column_key)
+                            {
                                 continue;
                             }
                             let clamped_width_px =
                                 self.clamp_column_override_width_px(&column_key, width_px);
                             self.playlist_column_width_overrides_px
                                 .insert(column_key, clamped_width_px);
-                            self.apply_playlist_column_layout();
-                        }
-                        protocol::Message::Playlist(
-                            protocol::PlaylistMessage::ClearActivePlaylistColumnWidthOverride {
-                                column_key,
-                                ..
-                            },
-                        ) => {
-                            self.playlist_column_width_overrides_px.remove(&column_key);
                             self.apply_playlist_column_layout();
                         }
                         protocol::Message::Playlist(

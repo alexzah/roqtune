@@ -3,8 +3,8 @@
 use crate::protocol::{
     LibraryAlbum, LibraryArtist, LibraryDecade, LibraryEnrichmentAttemptKind,
     LibraryEnrichmentEntity, LibraryEnrichmentErrorKind, LibraryEnrichmentPayload,
-    LibraryEnrichmentStatus, LibraryGenre, LibraryTrack, PlaylistColumnWidthOverride, PlaylistInfo,
-    RestoredTrack, TrackMetadataSummary,
+    LibraryEnrichmentStatus, LibraryGenre, LibraryTrack, PlaylistInfo, RestoredTrack,
+    TrackMetadataSummary,
 };
 use rusqlite::{params, Connection, OptionalExtension};
 use std::{
@@ -685,90 +685,6 @@ impl DbManager {
             }
         }
         Ok(None)
-    }
-
-    /// Persists the full set of width overrides for a playlist.
-    pub fn set_playlist_column_width_overrides(
-        &self,
-        playlist_id: &str,
-        overrides: &[PlaylistColumnWidthOverride],
-    ) -> Result<(), rusqlite::Error> {
-        let serialized_overrides = if overrides.is_empty() {
-            None
-        } else {
-            Some(
-                serde_json::to_string(overrides)
-                    .map_err(|err| rusqlite::Error::ToSqlConversionFailure(Box::new(err)))?,
-            )
-        };
-        self.conn.execute(
-            "UPDATE playlists SET column_width_overrides = ?1 WHERE id = ?2",
-            params![serialized_overrides, playlist_id],
-        )?;
-        Ok(())
-    }
-
-    /// Loads all persisted width overrides for a playlist, if present.
-    pub fn get_playlist_column_width_overrides(
-        &self,
-        playlist_id: &str,
-    ) -> Result<Option<Vec<PlaylistColumnWidthOverride>>, rusqlite::Error> {
-        let raw: Option<String> = self
-            .conn
-            .query_row(
-                "SELECT column_width_overrides FROM playlists WHERE id = ?1",
-                params![playlist_id],
-                |row| row.get(0),
-            )
-            .optional()?
-            .flatten();
-
-        if let Some(raw) = raw {
-            if raw.trim().is_empty() {
-                return Ok(None);
-            }
-            if let Ok(parsed) = serde_json::from_str::<Vec<PlaylistColumnWidthOverride>>(&raw) {
-                return Ok(Some(parsed));
-            }
-        }
-        Ok(None)
-    }
-
-    /// Upserts one width override entry by column key.
-    pub fn set_playlist_column_width_override(
-        &self,
-        playlist_id: &str,
-        column_key: &str,
-        width_px: u32,
-    ) -> Result<(), rusqlite::Error> {
-        let mut overrides = self
-            .get_playlist_column_width_overrides(playlist_id)?
-            .unwrap_or_default();
-        if let Some(existing) = overrides
-            .iter_mut()
-            .find(|item| item.column_key == column_key)
-        {
-            existing.width_px = width_px;
-        } else {
-            overrides.push(PlaylistColumnWidthOverride {
-                column_key: column_key.to_string(),
-                width_px,
-            });
-        }
-        self.set_playlist_column_width_overrides(playlist_id, &overrides)
-    }
-
-    /// Deletes one width override entry by column key.
-    pub fn clear_playlist_column_width_override(
-        &self,
-        playlist_id: &str,
-        column_key: &str,
-    ) -> Result<(), rusqlite::Error> {
-        let mut overrides = self
-            .get_playlist_column_width_overrides(playlist_id)?
-            .unwrap_or_default();
-        overrides.retain(|item| item.column_key != column_key);
-        self.set_playlist_column_width_overrides(playlist_id, &overrides)
     }
 
     /// Batch upserts many scan stubs in one transaction.
@@ -1686,7 +1602,6 @@ impl DbManager {
 #[cfg(test)]
 mod tests {
     use super::DbManager;
-    use crate::protocol::PlaylistColumnWidthOverride;
     use rusqlite::Connection;
     use std::{fs, path::PathBuf};
     use uuid::Uuid;
@@ -1719,71 +1634,6 @@ mod tests {
             .get_playlist_column_order(&playlist.id)
             .expect("column order query should succeed");
         assert_eq!(loaded_order, Some(saved_order));
-    }
-
-    #[test]
-    fn test_set_and_get_playlist_column_width_overrides_round_trip() {
-        let db = DbManager::new_in_memory().expect("in-memory db should initialize");
-        let playlists = db
-            .get_all_playlists()
-            .expect("playlists should be queryable after init");
-        let playlist = playlists
-            .first()
-            .expect("default playlist should exist after init");
-
-        let saved = vec![
-            PlaylistColumnWidthOverride {
-                column_key: "{title}".to_string(),
-                width_px: 210,
-            },
-            PlaylistColumnWidthOverride {
-                column_key: "{artist}".to_string(),
-                width_px: 180,
-            },
-        ];
-        db.set_playlist_column_width_overrides(&playlist.id, &saved)
-            .expect("column width overrides should persist");
-
-        let loaded = db
-            .get_playlist_column_width_overrides(&playlist.id)
-            .expect("column width overrides query should succeed");
-        assert_eq!(loaded, Some(saved));
-    }
-
-    #[test]
-    fn test_upsert_and_clear_playlist_column_width_override() {
-        let db = DbManager::new_in_memory().expect("in-memory db should initialize");
-        let playlists = db
-            .get_all_playlists()
-            .expect("playlists should be queryable after init");
-        let playlist = playlists
-            .first()
-            .expect("default playlist should exist after init");
-
-        db.set_playlist_column_width_override(&playlist.id, "{title}", 190)
-            .expect("title width override should be saved");
-        db.set_playlist_column_width_override(&playlist.id, "{artist}", 170)
-            .expect("artist width override should be saved");
-        db.set_playlist_column_width_override(&playlist.id, "{title}", 200)
-            .expect("title width override should update");
-
-        let loaded = db
-            .get_playlist_column_width_overrides(&playlist.id)
-            .expect("column width overrides query should succeed")
-            .expect("overrides should exist");
-        assert_eq!(loaded.len(), 2);
-        assert!(loaded
-            .iter()
-            .any(|item| item.column_key == "{title}" && item.width_px == 200));
-
-        db.clear_playlist_column_width_override(&playlist.id, "{artist}")
-            .expect("artist override should be removed");
-        let loaded_after_clear = db
-            .get_playlist_column_width_overrides(&playlist.id)
-            .expect("column width overrides query should succeed")
-            .expect("title override should remain");
-        assert_eq!(loaded_after_clear.len(), 1);
-        assert_eq!(loaded_after_clear[0].column_key, "{title}");
     }
 
     #[test]

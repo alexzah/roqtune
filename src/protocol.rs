@@ -152,17 +152,10 @@ pub enum PlaylistMessage {
     ActivePlaylistColumnOrder(Option<Vec<String>>),
     SetActivePlaylistColumnOrder(Vec<String>),
     RequestActivePlaylistColumnOrder,
-    ActivePlaylistColumnWidthOverrides(Option<Vec<PlaylistColumnWidthOverride>>),
     SetActivePlaylistColumnWidthOverride {
         column_key: String,
         width_px: u32,
-        persist: bool,
     },
-    ClearActivePlaylistColumnWidthOverride {
-        column_key: String,
-        persist: bool,
-    },
-    RequestActivePlaylistColumnWidthOverrides,
     TrackFinished,
     TrackStarted {
         index: usize,
@@ -486,15 +479,6 @@ pub enum ImportSource {
 pub struct TrackMetadataPatch {
     pub track_id: String,
     pub summary: TrackMetadataSummary,
-}
-
-/// Persisted per-column width override for one playlist.
-#[derive(Debug, Clone, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
-pub struct PlaylistColumnWidthOverride {
-    /// Stable column key (`{title}` or `custom:Name|Format`).
-    pub column_key: String,
-    /// Width override in logical pixels.
-    pub width_px: u32,
 }
 
 /// Minimal track row restored from storage.

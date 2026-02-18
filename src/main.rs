@@ -62,8 +62,9 @@ use integration_manager::IntegrationManager;
 use layout::{
     add_root_leaf_if_empty, compute_tree_layout_metrics, delete_leaf, first_leaf_id,
     replace_leaf_panel, sanitize_layout_config, set_split_ratio, split_leaf, LayoutConfig,
-    LayoutNode, LayoutPanelKind, SplitAxis, ViewerPanelDisplayPriority, ViewerPanelImageSource,
-    ViewerPanelInstanceConfig, ViewerPanelMetadataSource, SPLITTER_THICKNESS_PX,
+    LayoutNode, LayoutPanelKind, PlaylistColumnWidthOverrideConfig, SplitAxis,
+    ViewerPanelDisplayPriority, ViewerPanelImageSource, ViewerPanelInstanceConfig,
+    ViewerPanelMetadataSource, SPLITTER_THICKNESS_PX,
 };
 use library_enrichment_manager::LibraryEnrichmentManager;
 use library_manager::LibraryManager;
@@ -963,9 +964,18 @@ fn sanitize_config(config: Config) -> Config {
             &mut clamped_album_art_column_max_width_px,
         );
     }
+    let sanitized_column_width_overrides = sanitize_layout_column_width_overrides(
+        &sanitized_layout.playlist_column_width_overrides,
+        &sanitized_playlist_columns,
+        ColumnWidthBounds {
+            min_px: clamped_album_art_column_min_width_px as i32,
+            max_px: clamped_album_art_column_max_width_px as i32,
+        },
+    );
     sanitized_layout.playlist_album_art_column_min_width_px = clamped_album_art_column_min_width_px;
     sanitized_layout.playlist_album_art_column_max_width_px = clamped_album_art_column_max_width_px;
     sanitized_layout.playlist_columns = sanitized_playlist_columns.clone();
+    sanitized_layout.playlist_column_width_overrides = sanitized_column_width_overrides;
     sanitized_layout.button_cluster_instances = sanitized_button_cluster_instances;
     sanitized_layout.viewer_panel_instances = sanitized_viewer_panel_instances;
     let clamped_low_watermark = config.buffering.player_low_watermark_ms.max(500);
@@ -1474,6 +1484,64 @@ fn clamp_width_for_visible_column(
 ) -> Option<i32> {
     let bounds = playlist_column_bounds_at_visible_index(columns, visible_index, album_art_bounds)?;
     Some(width_px.clamp(bounds.min_px, bounds.max_px.max(bounds.min_px)))
+}
+
+fn sanitize_layout_column_width_overrides(
+    overrides: &[PlaylistColumnWidthOverrideConfig],
+    columns: &[PlaylistColumnConfig],
+    album_art_bounds: ColumnWidthBounds,
+) -> Vec<PlaylistColumnWidthOverrideConfig> {
+    let mut bounds_by_key: HashMap<String, ColumnWidthBounds> =
+        HashMap::with_capacity(columns.len());
+    for column in columns {
+        bounds_by_key.insert(
+            playlist_column_key(column),
+            playlist_column_width_bounds_with_album_art(column, album_art_bounds),
+        );
+    }
+
+    let mut seen_keys = HashSet::new();
+    let mut sanitized = Vec::new();
+    for override_item in overrides {
+        let key = override_item.column_key.trim();
+        if key.is_empty() || !seen_keys.insert(key.to_string()) {
+            continue;
+        }
+        let Some(bounds) = bounds_by_key.get(key) else {
+            continue;
+        };
+        let clamped_width_px = (override_item.width_px as i32)
+            .clamp(bounds.min_px, bounds.max_px.max(bounds.min_px))
+            as u32;
+        sanitized.push(PlaylistColumnWidthOverrideConfig {
+            column_key: key.to_string(),
+            width_px: clamped_width_px,
+        });
+    }
+    sanitized
+}
+
+fn upsert_layout_column_width_override(layout: &mut LayoutConfig, column_key: &str, width_px: u32) {
+    if let Some(existing) = layout
+        .playlist_column_width_overrides
+        .iter_mut()
+        .find(|entry| entry.column_key == column_key)
+    {
+        existing.width_px = width_px;
+        return;
+    }
+    layout
+        .playlist_column_width_overrides
+        .push(PlaylistColumnWidthOverrideConfig {
+            column_key: column_key.to_string(),
+            width_px,
+        });
+}
+
+fn clear_layout_column_width_override(layout: &mut LayoutConfig, column_key: &str) {
+    layout
+        .playlist_column_width_overrides
+        .retain(|entry| entry.column_key != column_key);
 }
 
 fn reorder_visible_playlist_columns(
@@ -4465,7 +4533,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 PlaylistMessage::SetActivePlaylistColumnWidthOverride {
                     column_key,
                     width_px: clamped_width_px as u32,
-                    persist: false,
                 },
             ));
         }
@@ -4473,6 +4540,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let bus_sender_clone = bus_sender.clone();
     let config_state_clone = Arc::clone(&config_state);
+    let output_options_clone = Arc::clone(&output_options);
+    let runtime_output_override_clone = Arc::clone(&runtime_output_override);
+    let runtime_audio_state_clone = Arc::clone(&runtime_audio_state);
+    let last_runtime_signature_clone = Arc::clone(&last_runtime_signature);
+    let config_file_clone = config_file.clone();
     ui.on_commit_playlist_column_width(move |visible_index, width_px| {
         let (column_key, clamped_width_px) = {
             let state = config_state_clone
@@ -4491,18 +4563,53 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             (column_key, clamped)
         };
         if let (Some(column_key), Some(clamped_width_px)) = (column_key, clamped_width_px) {
-            let _ = bus_sender_clone.send(Message::Playlist(
-                PlaylistMessage::SetActivePlaylistColumnWidthOverride {
-                    column_key,
-                    width_px: clamped_width_px as u32,
-                    persist: true,
-                },
-            ));
+            let next_config = {
+                let mut state = config_state_clone
+                    .lock()
+                    .expect("config state lock poisoned");
+                let mut next = state.clone();
+                upsert_layout_column_width_override(
+                    &mut next.ui.layout,
+                    &column_key,
+                    clamped_width_px as u32,
+                );
+                next = sanitize_config(next);
+                *state = next.clone();
+                next
+            };
+            persist_state_files_with_config_path(&next_config, &config_file_clone);
+            let options_snapshot = {
+                let options = output_options_clone
+                    .lock()
+                    .expect("output options lock poisoned");
+                options.clone()
+            };
+            let runtime_override = runtime_output_override_snapshot(&runtime_output_override_clone);
+            let runtime_config = resolve_effective_runtime_config(
+                &next_config,
+                &options_snapshot,
+                Some(&runtime_override),
+                &runtime_audio_state_clone,
+            );
+            {
+                let mut last_runtime = last_runtime_signature_clone
+                    .lock()
+                    .expect("runtime signature lock poisoned");
+                *last_runtime = OutputRuntimeSignature::from_output(&runtime_config.output);
+            }
+            let _ = bus_sender_clone.send(Message::Config(ConfigMessage::ConfigChanged(
+                runtime_config,
+            )));
         }
     });
 
     let bus_sender_clone = bus_sender.clone();
     let config_state_clone = Arc::clone(&config_state);
+    let output_options_clone = Arc::clone(&output_options);
+    let runtime_output_override_clone = Arc::clone(&runtime_output_override);
+    let runtime_audio_state_clone = Arc::clone(&runtime_audio_state);
+    let last_runtime_signature_clone = Arc::clone(&last_runtime_signature);
+    let config_file_clone = config_file.clone();
     ui.on_reset_playlist_column_width(move |visible_index| {
         let column_key = {
             let state = config_state_clone
@@ -4514,12 +4621,39 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             )
         };
         if let Some(column_key) = column_key {
-            let _ = bus_sender_clone.send(Message::Playlist(
-                PlaylistMessage::ClearActivePlaylistColumnWidthOverride {
-                    column_key,
-                    persist: true,
-                },
-            ));
+            let next_config = {
+                let mut state = config_state_clone
+                    .lock()
+                    .expect("config state lock poisoned");
+                let mut next = state.clone();
+                clear_layout_column_width_override(&mut next.ui.layout, &column_key);
+                next = sanitize_config(next);
+                *state = next.clone();
+                next
+            };
+            persist_state_files_with_config_path(&next_config, &config_file_clone);
+            let options_snapshot = {
+                let options = output_options_clone
+                    .lock()
+                    .expect("output options lock poisoned");
+                options.clone()
+            };
+            let runtime_override = runtime_output_override_snapshot(&runtime_output_override_clone);
+            let runtime_config = resolve_effective_runtime_config(
+                &next_config,
+                &options_snapshot,
+                Some(&runtime_override),
+                &runtime_audio_state_clone,
+            );
+            {
+                let mut last_runtime = last_runtime_signature_clone
+                    .lock()
+                    .expect("runtime signature lock poisoned");
+                *last_runtime = OutputRuntimeSignature::from_output(&runtime_config.output);
+            }
+            let _ = bus_sender_clone.send(Message::Config(ConfigMessage::ConfigChanged(
+                runtime_config,
+            )));
         }
     });
 
@@ -6915,11 +7049,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let bus_sender_clone = bus_sender.clone();
     let _ = bus_sender_clone.send(Message::Playlist(
         PlaylistMessage::RequestActivePlaylistColumnOrder,
-    ));
-
-    let bus_sender_clone = bus_sender.clone();
-    let _ = bus_sender_clone.send(Message::Playlist(
-        PlaylistMessage::RequestActivePlaylistColumnWidthOverrides,
     ));
 
     let bus_sender_clone = bus_sender.clone();
