@@ -163,7 +163,17 @@ pub enum PlaylistMessage {
     },
     PlaylistIndicesChanged {
         playing_playlist_id: Option<String>,
+        /// Index within the *playback queue* — **not** a source index into the
+        /// editing playlist.  The playback queue is built in view order
+        /// (filtered/sorted), so this value only coincides with the source
+        /// index when no filter or sort is active.  Consumers must resolve
+        /// the actual source position via `playing_track_id`.
         playing_index: Option<usize>,
+        /// Stable unique track id of the currently playing track.  This is the
+        /// authoritative key for mapping back to the editing playlist's source
+        /// arrays, since it correctly identifies the entry even when duplicate
+        /// file paths exist or a filter/sort view reorders the queue.
+        playing_track_id: Option<String>,
         playing_track_path: Option<PathBuf>,
         playing_track_metadata: Option<DetailedMetadata>,
         selected_indices: Vec<usize>,

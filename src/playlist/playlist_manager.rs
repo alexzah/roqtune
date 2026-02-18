@@ -2840,20 +2840,31 @@ impl PlaylistManager {
         ));
     }
 
+    /// Broadcast the current playlist/playback state to all listeners.
+    ///
+    /// **Important**: `playing_index` is the position inside `playback_playlist`,
+    /// which is a queue snapshot built in **view order** (filtered/sorted).
+    /// It is NOT a source index into the editing playlist.  Consumers must use
+    /// `playing_track_id` to resolve the actual source position.
     fn broadcast_playlist_changed(&mut self) {
         let mut playing_track_path = None;
+        let mut playing_track_id = None;
 
         if let Some(playing_idx) = self.playback_playlist.get_playing_track_index() {
             if playing_idx < self.playback_playlist.num_tracks() {
                 let track = self.playback_playlist.get_track(playing_idx);
                 playing_track_path = Some(track.path.clone());
+                playing_track_id = Some(track.id.clone());
             }
         }
 
         let _ = self.bus_producer.send(protocol::Message::Playlist(
             protocol::PlaylistMessage::PlaylistIndicesChanged {
                 playing_playlist_id: self.playback_playlist_id(),
+                // NOTE: This index is in playback-queue space, not editing-playlist
+                // source space.  The UI must resolve via `playing_track_id`.
                 playing_index: self.playback_playlist.get_playing_track_index(),
+                playing_track_id,
                 playing_track_path,
                 playing_track_metadata: None,
                 selected_indices: self.editing_playlist.get_selected_indices(),

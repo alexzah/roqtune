@@ -60,10 +60,41 @@ pub struct UiManager {
     track_cover_art_paths: Vec<Option<PathBuf>>,
     track_cover_art_missing_tracks: HashSet<PathBuf>,
     track_metadata: Vec<TrackMetadata>,
+    /// Mapping from **view row position** to **source index** in the parallel
+    /// arrays (`track_ids`, `track_paths`, `track_metadata`).
+    ///
+    /// When a sort or search filter is active, `view_indices` contains the
+    /// filtered/sorted permutation of source indices — `view_indices[view_row]`
+    /// gives the source index for that visible row.  When no filter is active
+    /// the vector is **empty**, which means view index == source index (identity).
+    ///
+    /// # Coordinate spaces
+    ///
+    /// *Source index*: position in the editing playlist's underlying arrays.
+    /// *View index*: position in the rendered (possibly filtered/sorted) list.
+    ///
+    /// All messages sent to `PlaylistManager` that reference track positions
+    /// (e.g. `SelectTrackMulti`, `DeleteTracks`, `ReorderTracks`) use **source
+    /// indices**.  The UI emits **view indices** which `UiManager` translates
+    /// via `map_view_to_source_index` before forwarding.
+    ///
+    /// # Playback queue relationship
+    ///
+    /// `build_playlist_queue_snapshot` iterates `view_indices` to emit the
+    /// playback queue in **view order**.  The `PlaylistManager` then operates
+    /// on that queue using its own internal indices.  The `playing_index`
+    /// returned in `PlaylistIndicesChanged` is therefore a *playback-queue*
+    /// index, **not** a source index.  `resolve_active_playing_source_index`
+    /// must resolve back to a source index via the track path, not by using
+    /// the raw `playing_index`.
     view_indices: Vec<usize>,
     selected_indices: Vec<usize>,
     selection_anchor_track_id: Option<String>,
     copied_track_paths: Vec<PathBuf>,
+    /// Source index of the currently playing track in the editing playlist's
+    /// parallel arrays.  Resolved via `playing_track_path` (NOT from the raw
+    /// `playing_index` in `PlaylistIndicesChanged`, which is a playback-queue
+    /// index and does not correspond to source order when a filter/sort is active).
     active_playing_index: Option<usize>,
     library_playing_index: Option<usize>,
     drag_indices: Vec<usize>,
@@ -6541,6 +6572,18 @@ impl UiManager {
         })
     }
 
+    /// Build the playback queue snapshot in **view order** (filtered/sorted).
+    ///
+    /// The returned `tracks` vector preserves the order the user sees on screen,
+    /// so next/previous navigation in the `playback_playlist` matches the
+    /// visual ordering.  The `start_index` is an offset *within this queue*,
+    /// not a source index.
+    ///
+    /// Because the queue is emitted in view order, the `playing_index` that
+    /// `PlaylistManager` later broadcasts in `PlaylistIndicesChanged` is a
+    /// queue-relative index and must **not** be treated as a source index by
+    /// the UI.  See `resolve_active_playing_source_index` for the correct
+    /// back-mapping strategy.
     fn build_playlist_queue_snapshot(
         track_ids: &[String],
         track_paths: &[PathBuf],
@@ -6581,18 +6624,47 @@ impl UiManager {
         Some((tracks, start_index))
     }
 
+    /// Resolve the currently-playing track to a **source index** in the
+    /// editing playlist's parallel arrays (`track_ids`, `track_paths`, etc.).
+    ///
+    /// # Why track-ID lookup is required (not `playing_index`)
+    ///
+    /// `playing_index` in `PlaylistIndicesChanged` originates from the
+    /// *playback playlist*, which is a queue snapshot built by
+    /// `build_playlist_queue_snapshot` in **view order** (filtered/sorted).
+    /// It is NOT a source index into the editing playlist.  Using it directly
+    /// would highlight the wrong track whenever a sort or search filter is
+    /// active, and would break next/prev visual consistency.
+    ///
+    /// The stable track **id** is the only reliable key that uniquely
+    /// identifies the exact playlist entry, even when:
+    /// - A filter or sort view reorders the playback queue relative to the
+    ///   editing playlist's source order.
+    /// - The same file path appears more than once in the playlist (duplicates).
+    /// - The playlist contains a mix of local and remote tracks.
+    ///
+    /// `playing_track_path` is kept as a fallback for robustness in the rare
+    /// case that `playing_track_id` is `None` (e.g. stale messages from older
+    /// protocol versions).
     fn resolve_active_playing_source_index(
+        track_ids: &[String],
         track_paths: &[PathBuf],
         is_playing_active_playlist: bool,
-        playing_index: Option<usize>,
+        playing_track_id: Option<&str>,
         playing_track_path: Option<&PathBuf>,
     ) -> Option<usize> {
         if !is_playing_active_playlist {
             return None;
         }
-        if let Some(index) = playing_index.filter(|index| *index < track_paths.len()) {
-            return Some(index);
+        // Primary: resolve via the stable track id (unique per playlist entry).
+        if let Some(id) = playing_track_id {
+            if let Some(index) = track_ids.iter().position(|candidate| candidate == id) {
+                return Some(index);
+            }
         }
+        // Fallback: resolve via file path when track id is unavailable.
+        // This finds the first match, which is acceptable as a best-effort
+        // fallback but may be ambiguous for duplicate-path entries.
         playing_track_path.and_then(|playing_path| {
             track_paths
                 .iter()
@@ -7997,13 +8069,14 @@ impl UiManager {
                         protocol::Message::Playlist(
                             protocol::PlaylistMessage::PlaylistIndicesChanged {
                                 playing_playlist_id,
-                                playing_index,
+                                playing_track_id,
                                 playing_track_path,
                                 playing_track_metadata,
                                 selected_indices,
                                 is_playing,
                                 playback_order,
                                 repeat_mode,
+                                ..
                             },
                         ) => {
                             self.playback_active = is_playing;
@@ -8016,9 +8089,10 @@ impl UiManager {
                             let is_playing_active_playlist =
                                 playing_playlist_id.as_ref() == Some(&self.active_playlist_id);
                             self.active_playing_index = Self::resolve_active_playing_source_index(
+                                &self.track_ids,
                                 &self.track_paths,
                                 is_playing_active_playlist,
-                                playing_index,
+                                playing_track_id.as_deref(),
                                 playing_track_path.as_ref(),
                             );
 
@@ -8612,35 +8686,67 @@ mod tests {
         assert_eq!(start_index, 0);
     }
 
+    /// `playing_index` is a playback-playlist index (view-ordered queue), NOT a
+    /// source index into the editing playlist.  The resolver must always use
+    /// The resolver uses the stable track id to find the correct source index,
+    /// even when a sorted/filtered view has reordered the playback queue.
     #[test]
-    fn test_resolve_active_playing_source_index_prefers_playing_index_over_path_match() {
+    fn test_resolve_active_playing_source_index_uses_track_id() {
+        let track_ids = vec![
+            "id-a1".to_string(),
+            "id-b".to_string(),
+            "id-a2".to_string(),
+            "id-c".to_string(),
+        ];
         let track_paths = vec![
             PathBuf::from("a.mp3"),
             PathBuf::from("b.mp3"),
             PathBuf::from("a.mp3"),
             PathBuf::from("c.mp3"),
         ];
+        // Two entries share the path "a.mp3" but have distinct track ids.
+        // The resolver must find source index 2 (id-a2), not 0 (id-a1).
         let playing_path = PathBuf::from("a.mp3");
         let resolved = UiManager::resolve_active_playing_source_index(
+            &track_ids,
             &track_paths,
             true,
-            Some(2),
+            Some("id-a2"),
             Some(&playing_path),
         );
         assert_eq!(resolved, Some(2));
     }
 
+    /// When track id is unavailable (None), the resolver falls back to the
+    /// first path match.  This is a best-effort fallback for robustness.
     #[test]
-    fn test_resolve_active_playing_source_index_falls_back_to_path_when_index_missing() {
+    fn test_resolve_active_playing_source_index_falls_back_to_path_when_id_missing() {
+        let track_ids = vec!["id-a".to_string(), "id-b".to_string()];
         let track_paths = vec![PathBuf::from("a.mp3"), PathBuf::from("b.mp3")];
         let playing_path = PathBuf::from("b.mp3");
         let resolved = UiManager::resolve_active_playing_source_index(
+            &track_ids,
             &track_paths,
             true,
             None,
             Some(&playing_path),
         );
         assert_eq!(resolved, Some(1));
+    }
+
+    /// When not playing the active playlist, the resolver returns None.
+    #[test]
+    fn test_resolve_active_playing_source_index_returns_none_for_different_playlist() {
+        let track_ids = vec!["id-a".to_string()];
+        let track_paths = vec![PathBuf::from("a.mp3")];
+        let resolved = UiManager::resolve_active_playing_source_index(
+            &track_ids,
+            &track_paths,
+            false,
+            Some("id-a"),
+            Some(&PathBuf::from("a.mp3")),
+        );
+        assert_eq!(resolved, None);
     }
 
     #[test]
