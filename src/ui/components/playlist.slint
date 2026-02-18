@@ -1,39 +1,73 @@
-import { LineEdit } from "std-widgets.slint";
+import { LineEdit, Palette } from "std-widgets.slint";
 
 import { TrackRowData } from "../types.slint";
+import { AppIcons } from "../icons.slint";
 import { ContextMenu } from "menus.slint";
 
 export component PlaylistRow inherits Rectangle {
     in property <string> name;
     in property <bool> is-active;
     in property <bool> is-editing;
+    in property <bool> is-remote;
+    in property <bool> is-new-playlist-edit;
+    in property <bool> can-sync-opensubsonic;
     callback clicked();
     callback renamed(string);
     callback context-menu-rename();
     callback context-menu-delete();
+    callback context-menu-sync();
     callback cancel-edit();
 
     property <length> menu-x;
     property <length> menu-y;
+    private property <bool> dark: Palette.color-scheme == ColorScheme.dark;
 
     height: 24px;
-    background: is-active ? #3d3d3d : ta.has-hover ? #333 : transparent;
+    background: is-active
+        ? (root.dark ? #3d3d3d : #d9e5f5)
+        : ta.has-hover
+            ? (root.dark ? #333 : #e5ecf5)
+            : transparent;
     border-radius: 2px;
 
     if !is-editing : Text {
         x: 8px;
+        width: max(0px, parent.width - (root.is-remote ? 32px : 12px));
         text: root.name;
-        color: is-active ? #eee : #aaa;
+        color: is-active ? (root.dark ? #eee : #223445) : (root.dark ? #aaa : #5a6877);
         font-size: 13px;
         vertical-alignment: center;
         horizontal-alignment: left;
+        overflow: elide;
+    }
+
+    if !is-editing && root.is-remote : Rectangle {
+        x: parent.width - self.width - 8px;
+        y: (parent.height - self.height) / 2;
+        width: 14px;
+        height: 14px;
+        border-radius: 7px;
+        border-width: 1px;
+        border-color: root.dark ? #3f5470 : #b4cde8;
+        background: root.dark ? #1f3248 : #e2eefb;
+
+        Image {
+            source: AppIcons.opensubsonic;
+            width: 8px;
+            height: 8px;
+            x: (parent.width - self.width) / 2;
+            y: (parent.height - self.height) / 2;
+            image-fit: contain;
+            colorize: root.dark ? #9fc3eb : #2d5f98;
+        }
     }
 
     if is-editing : LineEdit {
         x: 4px;
         width: parent.width - 8px;
         height: parent.height - 4px;
-        text: root.name;
+        text: root.is-new-playlist-edit ? "" : root.name;
+        placeholder-text: root.is-new-playlist-edit ? root.name : "";
         accepted => {
             root.renamed(self.text);
         }
@@ -56,10 +90,14 @@ export component PlaylistRow inherits Rectangle {
 
     menu := ContextMenu {
         is-playlist: true;
+        show-sync-item: root.can-sync-opensubsonic;
         x: root.menu-x;
         y: root.menu-y;
         rename => {
             root.context-menu-rename();
+        }
+        sync-opensubsonic => {
+            root.context-menu-sync();
         }
         delete => {
             root.context-menu-delete();
@@ -87,6 +125,10 @@ export component TrackRow inherits Rectangle {
     in property <[int]> column-widths-px: [];
     in property <length> row-height: 30px;
     in property <length> null-column-width: 120px;
+    in property <length> horizontal-padding: 8px;
+    in property <length> column-spacing: 10px;
+    in property <length> status-lane-width: 40px;
+    private property <bool> dark: Palette.color-scheme == ColorScheme.dark;
 
     pure function column-width-for-index(index: int) -> length {
         if index >= 0 && index < root.column-widths-px.length {
@@ -96,19 +138,35 @@ export component TrackRow inherits Rectangle {
     }
 
     height: root.row-height;
-    background: data.selected ? #3d3d3d : is-hover ? #333 : transparent;
+    property <brush> idle-background: data.selected
+        ? (root.dark ? #3d3d3d : #dce8f7)
+        : root.is-playing
+            ? (root.dark ? #24384f : #d4e6fb)
+            : transparent;
+    background: root.data.unavailable
+        ? (data.selected
+            ? (root.dark ? #373737 : #dde2e9)
+            : (root.dark ? #2d2d2d : #edf1f5))
+        : is-hover
+            ? data.selected
+                ? (root.dark ? #474747 : #d2deed)
+                : root.is-playing
+                    ? (root.dark ? #2f4965 : #c8ddf5)
+                    : (root.dark ? #333 : #e5ecf5)
+            : root.idle-background;
     animate background { duration: 100ms; }
+    opacity: root.data.unavailable ? 0.68 : 1.0;
 
     HorizontalLayout {
-        padding-left: 8px;
-        padding-right: 8px;
-        spacing: 10px;
+        padding-left: root.horizontal-padding;
+        padding-right: root.horizontal-padding;
+        spacing: root.column-spacing;
 
         Rectangle {
-            width: 40px;
+            width: root.status-lane-width;
             Text {
                 text: root.data.status;
-                color: #2a6def;
+                color: root.data.unavailable ? (root.dark ? #7a7a7a : #7c8895) : #2a6def;
                 font-size: 14px;
                 horizontal-alignment: center;
                 vertical-alignment: center;
@@ -126,7 +184,7 @@ export component TrackRow inherits Rectangle {
                 width: max(16px, min(parent.width, root.height - 8px));
                 height: self.width;
                 border-radius: 2px;
-                background: #2a2a2a;
+                background: root.dark ? #2a2a2a : #e3ebf5;
                 Image {
                     source: root.data.album_art;
                     width: parent.width;
@@ -139,7 +197,17 @@ export component TrackRow inherits Rectangle {
                 x: 0px;
                 width: parent.width;
                 text: column-value;
-                color: (index < root.headers.length && root.headers[index] == "Title") ? #eee : #aaa;
+                color: root.data.unavailable
+                    ? (root.dark ? #8a8a8a : #73808c)
+                    : data.selected
+                        ? (root.dark ? #ececec : #1f2f3f)
+                        : root.is-playing
+                            ? (index < root.headers.length && root.headers[index] == "Title")
+                                ? (root.dark ? #d7e9ff : #21496f)
+                                : (root.dark ? #b5c9e3 : #406487)
+                            : (index < root.headers.length && root.headers[index] == "Title")
+                                ? (root.dark ? #eee : #243444)
+                                : (root.dark ? #aaa : #5a6877);
                 font-size: 13px;
                 vertical-alignment: center;
                 overflow: elide;
@@ -151,6 +219,27 @@ export component TrackRow inherits Rectangle {
 
         Rectangle {
             width: root.null-column-width;
+
+            if root.data.source_badge != "" : Rectangle {
+                x: parent.width - self.width - 8px;
+                y: (parent.height - self.height) / 2;
+                width: 26px;
+                height: 18px;
+                border-radius: 9px;
+                border-width: 1px;
+                border-color: root.dark ? #3f5470 : #b4cde8;
+                background: root.dark ? #1f3248 : #e2eefb;
+
+                Image {
+                    source: AppIcons.opensubsonic;
+                    width: 12px;
+                    height: 12px;
+                    x: (parent.width - self.width) / 2;
+                    y: (parent.height - self.height) / 2;
+                    image-fit: contain;
+                    colorize: root.dark ? #9fc3eb : #2d5f98;
+                }
+            }
         }
     }
 }

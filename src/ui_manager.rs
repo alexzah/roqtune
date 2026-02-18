@@ -4,12 +4,12 @@
 //! metadata/cover-art lookup, and owns playlist table presentation behavior.
 
 use std::hash::{Hash, Hasher};
-use std::io::Write;
+use std::io::Read;
 use std::time::{Duration, Instant};
 use std::{
     cell::RefCell,
     collections::hash_map::DefaultHasher,
-    collections::{HashMap, HashSet},
+    collections::{HashMap, HashSet, VecDeque},
     path::{Path, PathBuf},
     rc::Rc,
     sync::mpsc::{self, Receiver as StdReceiver, Sender as StdSender},
@@ -17,16 +17,23 @@ use std::{
 };
 
 use governor::state::NotKeyed;
-use log::{debug, info, warn};
+use log::{debug, info, trace, warn};
 use slint::{Image, Model, ModelRc, StandardListViewItem, VecModel};
 use tokio::sync::broadcast::{Receiver, Sender};
 
 use crate::{
     config::{self, PlaylistColumnConfig},
-    metadata_tags, protocol, AppWindow, LibraryRowData,
-    MetadataEditorField as UiMetadataEditorField, TrackRowData,
+    integration_keyring::get_opensubsonic_password,
+    integration_uri::{is_remote_track_path, parse_opensubsonic_track_uri},
+    layout::PlaylistColumnWidthOverrideConfig,
+    metadata_tags, protocol, AppWindow, LayoutAlbumArtViewerPanelModel,
+    LayoutMetadataViewerPanelModel, LibraryRowData, MetadataEditorField as UiMetadataEditorField,
+    TrackRowData,
 };
 use governor::{Quota, RateLimiter};
+
+const OPENSUBSONIC_API_VERSION: &str = "1.16.1";
+const OPENSUBSONIC_CLIENT_ID: &str = "roqtune";
 
 /// Shared UI models that are created in `main` and attached to the Slint window.
 pub struct UiState {
@@ -39,11 +46,15 @@ pub struct UiManager {
     ui: slint::Weak<AppWindow>,
     bus_receiver: Receiver<protocol::Message>,
     bus_sender: Sender<protocol::Message>,
+    library_scan_progress_rx: StdReceiver<protocol::LibraryMessage>,
     cover_art_lookup_tx: StdSender<CoverArtLookupRequest>,
+    metadata_lookup_tx: StdSender<MetadataLookupRequest>,
     last_cover_art_lookup_path: Option<PathBuf>,
     active_playlist_id: String,
     playlist_ids: Vec<String>,
     playlist_names: Vec<String>,
+    opensubsonic_sync_eligible_playlist_ids: HashSet<String>,
+    unavailable_track_ids: HashSet<String>,
     track_ids: Vec<String>,
     track_paths: Vec<PathBuf>,
     track_cover_art_paths: Vec<Option<PathBuf>>,
@@ -54,18 +65,28 @@ pub struct UiManager {
     selection_anchor_track_id: Option<String>,
     copied_track_paths: Vec<PathBuf>,
     active_playing_index: Option<usize>,
+    library_playing_index: Option<usize>,
     drag_indices: Vec<usize>,
     is_dragging: bool,
     pressed_index: Option<usize>,
+    pending_single_select_on_click: Option<usize>,
     progress_rl:
         RateLimiter<NotKeyed, governor::state::InMemoryState, governor::clock::DefaultClock>,
     // Cached progress values to avoid unnecessary UI updates
     last_elapsed_ms: u64,
     last_total_ms: u64,
-    current_playing_track_path: Option<PathBuf>,
-    current_playing_track_metadata: Option<protocol::DetailedMetadata>,
+    playing_track: PlayingTrackState,
+    display_target_priority: DisplayTargetPriority,
     current_technical_metadata: Option<protocol::TechnicalMetadata>,
     current_output_path_info: Option<protocol::OutputPathInfo>,
+    cast_connected: bool,
+    cast_connecting: bool,
+    cast_discovering: bool,
+    cast_device_name: String,
+    cast_playback_path_kind: Option<protocol::CastPlaybackPathKind>,
+    cast_transcode_output_metadata: Option<protocol::TechnicalMetadata>,
+    cast_device_ids: Vec<String>,
+    cast_device_names: Vec<String>,
     playlist_columns: Vec<PlaylistColumnConfig>,
     playlist_column_content_targets_px: Vec<u32>,
     playlist_column_target_widths_px: HashMap<String, u32>,
@@ -80,6 +101,8 @@ pub struct UiManager {
     filter_sort_direction: Option<PlaylistSortDirection>,
     filter_search_query: String,
     filter_search_visible: bool,
+    auto_scroll_to_playing_track: bool,
+    playlist_scroll_center_token: i32,
     playback_active: bool,
     processed_message_count: u64,
     lagged_message_count: u64,
@@ -92,8 +115,36 @@ pub struct UiManager {
     library_view_indices: Vec<usize>,
     library_selected_indices: Vec<usize>,
     library_selection_anchor: Option<usize>,
+    library_root_counts: [usize; 5],
     library_cover_art_paths: HashMap<PathBuf, Option<PathBuf>>,
+    folder_cover_art_paths: HashMap<PathBuf, Option<PathBuf>>,
+    library_enrichment:
+        HashMap<protocol::LibraryEnrichmentEntity, protocol::LibraryEnrichmentPayload>,
+    library_enrichment_pending: HashSet<protocol::LibraryEnrichmentEntity>,
+    library_enrichment_last_request_at: HashMap<protocol::LibraryEnrichmentEntity, Instant>,
+    library_enrichment_retry_counts: HashMap<protocol::LibraryEnrichmentEntity, u32>,
+    library_enrichment_retry_not_before: HashMap<protocol::LibraryEnrichmentEntity, Instant>,
+    library_enrichment_not_found_not_before: HashMap<protocol::LibraryEnrichmentEntity, Instant>,
+    library_enrichment_failed_attempt_counts: HashMap<protocol::LibraryEnrichmentEntity, u32>,
+    library_last_detail_enrichment_entity: Option<protocol::LibraryEnrichmentEntity>,
+    library_online_metadata_enabled: bool,
+    library_online_metadata_prompt_pending: bool,
+    library_artist_prefetch_first_row: usize,
+    library_artist_prefetch_row_count: usize,
+    library_scroll_positions: HashMap<LibraryScrollViewKey, usize>,
+    pending_library_scroll_restore_row: Option<usize>,
+    library_scroll_restore_token: i32,
+    library_scroll_center_token: i32,
+    library_artist_row_indices: HashMap<String, Vec<usize>>,
+    library_last_prefetch_entities: Vec<protocol::LibraryEnrichmentEntity>,
+    library_last_background_entities: Vec<protocol::LibraryEnrichmentEntity>,
     library_search_query: String,
+    library_page_request_id: u64,
+    library_page_view: Option<protocol::LibraryViewQuery>,
+    library_page_next_offset: usize,
+    library_page_total: usize,
+    library_page_entries: Vec<protocol::LibraryEntryPayload>,
+    library_page_query: String,
     library_search_visible: bool,
     library_scan_in_progress: bool,
     library_status_text: String,
@@ -102,6 +153,7 @@ pub struct UiManager {
     library_toast_generation: u64,
     pending_paste_feedback: bool,
     copied_library_selections: Vec<protocol::LibrarySelectionSpec>,
+    pending_library_remove_selections: Vec<protocol::LibrarySelectionSpec>,
     properties_request_nonce: u64,
     properties_pending_request_id: Option<u64>,
     properties_pending_request_kind: Option<PropertiesRequestKind>,
@@ -127,6 +179,12 @@ struct TrackMetadata {
     track_number: String,
 }
 
+#[derive(Clone, Default)]
+struct PlayingTrackState {
+    path: Option<PathBuf>,
+    metadata: Option<protocol::DetailedMetadata>,
+}
+
 /// Width policy used by adaptive playlist column sizing.
 #[derive(Clone, Copy, Debug)]
 struct ColumnWidthProfile {
@@ -135,10 +193,43 @@ struct ColumnWidthProfile {
     max_px: u32,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum PlaylistColumnClass {
+    AlbumArt,
+    TrackNumber,
+    DiscNumber,
+    YearDate,
+    Title,
+    ArtistFamily,
+    Album,
+    Genre,
+    Duration,
+    Custom,
+    Generic,
+}
+
+#[derive(Clone, Copy, Debug)]
+struct DeterministicColumnLayoutSpec {
+    min_px: u32,
+    max_px: u32,
+    target_px: u32,
+    semantic_floor_px: u32,
+    emergency_floor_px: u32,
+    shrink_priority: u8,
+    fixed_width: bool,
+}
+
 /// Cover-art lookup request payload used by the internal worker thread.
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct CoverArtLookupRequest {
     track_path: Option<PathBuf>,
+}
+
+/// Deferred metadata-lookup request payload used by the internal worker thread.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct MetadataLookupRequest {
+    track_id: String,
+    track_path: PathBuf,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -155,7 +246,7 @@ enum PropertiesRequestKind {
 
 #[derive(Clone, Debug)]
 enum LibraryViewState {
-    SongsRoot,
+    TracksRoot,
     ArtistsRoot,
     AlbumsRoot,
     GenresRoot,
@@ -167,9 +258,19 @@ enum LibraryViewState {
     DecadeDetail { decade: String },
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+enum LibraryScrollViewKey {
+    TracksRoot,
+    ArtistsRoot,
+    AlbumsRoot,
+    GenresRoot,
+    DecadesRoot,
+    GlobalSearch,
+}
+
 #[derive(Clone, Debug)]
 enum LibraryEntry {
-    Song(protocol::LibrarySong),
+    Track(protocol::LibraryTrack),
     Artist(protocol::LibraryArtist),
     Album(protocol::LibraryAlbum),
     Genre(protocol::LibraryGenre),
@@ -183,8 +284,30 @@ struct LibraryRowPresentation {
     secondary: String,
     item_kind: i32,
     cover_art_path: Option<PathBuf>,
+    source_badge: String,
     is_playing: bool,
     selected: bool,
+}
+
+#[derive(Clone, Debug, Default)]
+struct ViewerTrackContext {
+    artist: String,
+    album: String,
+    album_artist: String,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum DisplayTargetPriority {
+    Selection,
+    Playing,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum DisplayTargetResolutionMode {
+    PreferSelection,
+    PreferPlaying,
+    SelectionOnly,
+    PlayingOnly,
 }
 
 const PLAYLIST_COLUMN_KIND_TEXT: i32 = 0;
@@ -193,67 +316,691 @@ const BASE_ROW_HEIGHT_PX: u32 = 30;
 const ALBUM_ART_ROW_PADDING_PX: u32 = 8;
 const COLLECTION_MODE_PLAYLIST: i32 = 0;
 const COLLECTION_MODE_LIBRARY: i32 = 1;
+const VIEWER_DISPLAY_PRIORITY_DEFAULT: i32 = 0;
+const VIEWER_DISPLAY_PRIORITY_PREFER_SELECTION: i32 = 1;
+const VIEWER_DISPLAY_PRIORITY_PREFER_NOW_PLAYING: i32 = 2;
+const VIEWER_DISPLAY_PRIORITY_SELECTION_ONLY: i32 = 3;
+const VIEWER_DISPLAY_PRIORITY_NOW_PLAYING_ONLY: i32 = 4;
+const VIEWER_METADATA_SOURCE_TRACK: i32 = 0;
+const VIEWER_METADATA_SOURCE_ALBUM_DESCRIPTION: i32 = 1;
+const VIEWER_METADATA_SOURCE_ARTIST_BIO: i32 = 2;
+const VIEWER_IMAGE_SOURCE_ALBUM_ART: i32 = 0;
+const VIEWER_IMAGE_SOURCE_ARTIST_IMAGE: i32 = 1;
 const LIBRARY_ITEM_KIND_SONG: i32 = 0;
 const LIBRARY_ITEM_KIND_ARTIST: i32 = 1;
 const LIBRARY_ITEM_KIND_ALBUM: i32 = 2;
 const LIBRARY_ITEM_KIND_GENRE: i32 = 3;
 const LIBRARY_ITEM_KIND_DECADE: i32 = 4;
+const DETAIL_ENRICHMENT_RETRY_INTERVAL: Duration = Duration::from_secs(2);
+const PREFETCH_RETRY_MAX_ATTEMPTS: u32 = 4;
+const PREFETCH_RETRY_BASE_DELAY: Duration = Duration::from_millis(500);
+const NOT_FOUND_ENRICHMENT_RETRY_INTERVAL: Duration = Duration::from_secs(7 * 24 * 60 * 60);
+const ENRICHMENT_FAILED_ATTEMPT_CAP: u32 = 5;
+const LIBRARY_PREFETCH_FALLBACK_VISIBLE_ROWS: usize = 24;
+const LIBRARY_PREFETCH_TOP_OVERSCAN_ROWS: usize = 2;
+const LIBRARY_PREFETCH_BOTTOM_OVERSCAN_ROWS: usize = 10;
+const LIBRARY_BACKGROUND_WARM_QUEUE_SIZE: usize = 6;
+const COVER_ART_IMAGE_CACHE_MAX_BYTES: u64 = 128 * 1024 * 1024;
+const COVER_ART_IMAGE_CACHE_MAX_ENTRIES: usize = 4096;
+const COVER_ART_FAILED_PATHS_MAX_ENTRIES: usize = 4096;
+const LIBRARY_PAGE_FETCH_LIMIT: usize = 512;
+const REMOTE_TRACK_UNAVAILABLE_TITLE: &str = "Remote track unavailable";
+const PLAYLIST_COLUMN_SPACING_PX: u32 = 10;
 
-thread_local! {
-    static TRACK_ROW_COVER_ART_IMAGE_CACHE: RefCell<HashMap<PathBuf, Image>> =
-        RefCell::new(HashMap::new());
-    static TRACK_ROW_COVER_ART_FAILED_PATHS: RefCell<HashSet<PathBuf>> =
-        RefCell::new(HashSet::new());
+#[derive(Default)]
+struct CoverArtImageCache {
+    entries: HashMap<PathBuf, (Image, u64)>,
+    lru: VecDeque<PathBuf>,
+    total_bytes: u64,
 }
 
-fn fit_column_widths_to_available_space(
-    widths: &mut [u32],
-    min_widths: &[u32],
-    _max_widths: &[u32],
-    available_width_px: u32,
-) {
-    let mut used_width: u32 = widths.iter().copied().sum();
-    if used_width > available_width_px {
-        let mut deficit = used_width - available_width_px;
-        while deficit > 0 {
-            let adjustable_indices: Vec<usize> = widths
-                .iter()
-                .enumerate()
-                .filter_map(|(index, width)| (*width > min_widths[index]).then_some(index))
-                .collect();
-            if adjustable_indices.is_empty() {
+impl CoverArtImageCache {
+    fn touch_lru(&mut self, path: &PathBuf) {
+        if let Some(position) = self.lru.iter().position(|candidate| candidate == path) {
+            let _ = self.lru.remove(position);
+        }
+        self.lru.push_back(path.clone());
+    }
+
+    fn get(&mut self, path: &PathBuf) -> Option<Image> {
+        let cached = self.entries.get(path).map(|(image, _)| image.clone())?;
+        self.touch_lru(path);
+        Some(cached)
+    }
+
+    fn insert(&mut self, path: PathBuf, image: Image, approx_bytes: u64) {
+        if let Some((_, existing_bytes)) = self.entries.remove(&path) {
+            self.total_bytes = self.total_bytes.saturating_sub(existing_bytes);
+        }
+        self.touch_lru(&path);
+        self.total_bytes = self.total_bytes.saturating_add(approx_bytes);
+        self.entries.insert(path, (image, approx_bytes));
+
+        while self.total_bytes > COVER_ART_IMAGE_CACHE_MAX_BYTES
+            || self.entries.len() > COVER_ART_IMAGE_CACHE_MAX_ENTRIES
+        {
+            let Some(evicted_path) = self.lru.pop_front() else {
                 break;
-            }
-            let step = (deficit / adjustable_indices.len() as u32).max(1);
-            let mut reduced_this_round = 0u32;
-            for index in adjustable_indices {
-                let shrink_capacity = widths[index] - min_widths[index];
-                if shrink_capacity == 0 {
-                    continue;
-                }
-                let shrink_by = shrink_capacity.min(step).min(deficit);
-                widths[index] -= shrink_by;
-                deficit -= shrink_by;
-                reduced_this_round += shrink_by;
-                if deficit == 0 {
-                    break;
-                }
-            }
-            if reduced_this_round == 0 {
-                break;
+            };
+            if let Some((_, bytes)) = self.entries.remove(&evicted_path) {
+                self.total_bytes = self.total_bytes.saturating_sub(bytes);
             }
         }
     }
-    used_width = widths.iter().copied().sum();
-    debug!(
-        "Playlist column sizing fitted: available={} used={} columns={} (shrink-only)",
-        available_width_px,
-        used_width,
-        widths.len()
+
+    fn clear(&mut self) {
+        self.entries.clear();
+        self.lru.clear();
+        self.total_bytes = 0;
+    }
+}
+
+#[derive(Default)]
+struct FailedCoverPathCache {
+    paths: HashSet<PathBuf>,
+    order: VecDeque<PathBuf>,
+}
+
+impl FailedCoverPathCache {
+    fn contains(&self, path: &Path) -> bool {
+        self.paths.contains(path)
+    }
+
+    fn insert(&mut self, path: PathBuf) {
+        if self.paths.insert(path.clone()) {
+            self.order.push_back(path);
+            while self.paths.len() > COVER_ART_FAILED_PATHS_MAX_ENTRIES {
+                let Some(evicted) = self.order.pop_front() else {
+                    break;
+                };
+                self.paths.remove(&evicted);
+            }
+        }
+    }
+
+    fn clear(&mut self) {
+        self.paths.clear();
+        self.order.clear();
+    }
+}
+
+thread_local! {
+    static TRACK_ROW_COVER_ART_IMAGE_CACHE: RefCell<CoverArtImageCache> =
+        RefCell::new(CoverArtImageCache::default());
+    static TRACK_ROW_COVER_ART_FAILED_PATHS: RefCell<FailedCoverPathCache> =
+        RefCell::new(FailedCoverPathCache::default());
+}
+
+fn apply_shrink_to_group(
+    widths: &mut [u32],
+    floors: &[u32],
+    indices: &[usize],
+    deficit_px: u32,
+) -> u32 {
+    if deficit_px == 0 || indices.is_empty() {
+        return deficit_px;
+    }
+
+    let mut total_capacity = 0u32;
+    for index in indices {
+        total_capacity =
+            total_capacity.saturating_add(widths[*index].saturating_sub(floors[*index]));
+    }
+    if total_capacity == 0 {
+        return deficit_px;
+    }
+
+    let shrink_budget = deficit_px.min(total_capacity);
+    if shrink_budget == total_capacity {
+        for index in indices {
+            widths[*index] = floors[*index];
+        }
+        return deficit_px - total_capacity;
+    }
+
+    let mut remaining_caps: Vec<u32> = indices
+        .iter()
+        .map(|index| widths[*index].saturating_sub(floors[*index]))
+        .collect();
+    let mut active_count = remaining_caps
+        .iter()
+        .copied()
+        .filter(|capacity| *capacity > 0)
+        .count();
+    if active_count == 0 {
+        return deficit_px;
+    }
+    let mut remaining_budget = shrink_budget;
+    let mut cursor = 0usize;
+    while remaining_budget > 0 && active_count > 0 {
+        if remaining_caps[cursor] > 0 {
+            let width_index = indices[cursor];
+            widths[width_index] = widths[width_index].saturating_sub(1);
+            remaining_caps[cursor] -= 1;
+            remaining_budget -= 1;
+            if remaining_caps[cursor] == 0 {
+                active_count -= 1;
+            }
+        }
+        cursor += 1;
+        if cursor >= indices.len() {
+            cursor = 0;
+        }
+    }
+
+    deficit_px.saturating_sub(shrink_budget.saturating_sub(remaining_budget))
+}
+
+fn apply_grow_to_group(
+    widths: &mut [u32],
+    ceilings: &[u32],
+    indices: &[usize],
+    surplus_px: u32,
+) -> u32 {
+    if surplus_px == 0 || indices.is_empty() {
+        return surplus_px;
+    }
+
+    let mut total_capacity = 0u32;
+    for index in indices {
+        total_capacity =
+            total_capacity.saturating_add(ceilings[*index].saturating_sub(widths[*index]));
+    }
+    if total_capacity == 0 {
+        return surplus_px;
+    }
+
+    let grow_budget = surplus_px.min(total_capacity);
+    if grow_budget == total_capacity {
+        for index in indices {
+            widths[*index] = ceilings[*index];
+        }
+        return surplus_px - total_capacity;
+    }
+
+    let mut remaining_caps: Vec<u32> = indices
+        .iter()
+        .map(|index| ceilings[*index].saturating_sub(widths[*index]))
+        .collect();
+    let mut active_count = remaining_caps
+        .iter()
+        .copied()
+        .filter(|capacity| *capacity > 0)
+        .count();
+    if active_count == 0 {
+        return surplus_px;
+    }
+
+    let mut remaining_budget = grow_budget;
+    let mut cursor = 0usize;
+    while remaining_budget > 0 && active_count > 0 {
+        if remaining_caps[cursor] > 0 {
+            let width_index = indices[cursor];
+            widths[width_index] = widths[width_index].saturating_add(1);
+            remaining_caps[cursor] -= 1;
+            remaining_budget -= 1;
+            if remaining_caps[cursor] == 0 {
+                active_count -= 1;
+            }
+        }
+        cursor += 1;
+        if cursor >= indices.len() {
+            cursor = 0;
+        }
+    }
+
+    surplus_px.saturating_sub(grow_budget.saturating_sub(remaining_budget))
+}
+
+fn shrink_widths_to_floors_by_priority(
+    widths: &mut [u32],
+    floors: &[u32],
+    priorities: &[u8],
+    fixed_width_flags: &[bool],
+    mut deficit_px: u32,
+) -> u32 {
+    if deficit_px == 0 {
+        return 0;
+    }
+
+    let mut priority_levels: Vec<u8> = priorities
+        .iter()
+        .enumerate()
+        .filter_map(|(index, priority)| (!fixed_width_flags[index]).then_some(*priority))
+        .collect();
+    priority_levels.sort_unstable();
+    priority_levels.dedup();
+
+    for priority in priority_levels {
+        if deficit_px == 0 {
+            break;
+        }
+        let indices: Vec<usize> = priorities
+            .iter()
+            .enumerate()
+            .filter_map(|(index, level)| {
+                (!fixed_width_flags[index] && *level == priority).then_some(index)
+            })
+            .collect();
+        deficit_px = apply_shrink_to_group(widths, floors, &indices, deficit_px);
+    }
+
+    deficit_px
+}
+
+fn grow_widths_to_ceilings_by_priority(
+    widths: &mut [u32],
+    ceilings: &[u32],
+    priorities: &[u8],
+    fixed_width_flags: &[bool],
+    mut surplus_px: u32,
+) -> u32 {
+    if surplus_px == 0 {
+        return 0;
+    }
+
+    let mut priority_levels: Vec<u8> = priorities
+        .iter()
+        .enumerate()
+        .filter_map(|(index, priority)| (!fixed_width_flags[index]).then_some(*priority))
+        .collect();
+    priority_levels.sort_unstable();
+    priority_levels.dedup();
+    priority_levels.reverse();
+
+    for priority in priority_levels {
+        if surplus_px == 0 {
+            break;
+        }
+        let indices: Vec<usize> = priorities
+            .iter()
+            .enumerate()
+            .filter_map(|(index, level)| {
+                (!fixed_width_flags[index] && *level == priority).then_some(index)
+            })
+            .collect();
+        surplus_px = apply_grow_to_group(widths, ceilings, &indices, surplus_px);
+    }
+
+    surplus_px
+}
+
+fn fit_column_widths_deterministic(
+    specs: &[DeterministicColumnLayoutSpec],
+    available_width_px: u32,
+) -> Vec<u32> {
+    if specs.is_empty() {
+        return Vec::new();
+    }
+
+    let mut widths: Vec<u32> = specs
+        .iter()
+        .map(|spec| spec.target_px.clamp(spec.min_px, spec.max_px))
+        .collect();
+    let total_width: u32 = widths.iter().copied().sum();
+    if total_width < available_width_px {
+        let ceilings: Vec<u32> = specs
+            .iter()
+            .map(|spec| {
+                if spec.fixed_width {
+                    spec.target_px
+                } else {
+                    spec.max_px.max(spec.target_px)
+                }
+            })
+            .collect();
+        let priorities: Vec<u8> = specs.iter().map(|spec| spec.shrink_priority).collect();
+        let fixed_width_flags: Vec<bool> = specs.iter().map(|spec| spec.fixed_width).collect();
+        let _ = grow_widths_to_ceilings_by_priority(
+            &mut widths,
+            &ceilings,
+            &priorities,
+            &fixed_width_flags,
+            available_width_px - total_width,
+        );
+        return widths;
+    }
+    if total_width == available_width_px {
+        return widths;
+    }
+
+    let mut deficit_px = total_width - available_width_px;
+    let semantic_floors: Vec<u32> = specs
+        .iter()
+        .map(|spec| {
+            if spec.fixed_width {
+                spec.target_px
+            } else {
+                spec.semantic_floor_px
+                    .clamp(spec.emergency_floor_px, spec.target_px)
+            }
+        })
+        .collect();
+    let priorities: Vec<u8> = specs.iter().map(|spec| spec.shrink_priority).collect();
+    let fixed_width_flags: Vec<bool> = specs.iter().map(|spec| spec.fixed_width).collect();
+    deficit_px = shrink_widths_to_floors_by_priority(
+        &mut widths,
+        &semantic_floors,
+        &priorities,
+        &fixed_width_flags,
+        deficit_px,
     );
+
+    if deficit_px == 0 {
+        return widths;
+    }
+
+    let emergency_floors: Vec<u32> = specs
+        .iter()
+        .map(|spec| {
+            if spec.fixed_width {
+                spec.target_px
+            } else {
+                spec.emergency_floor_px.min(spec.target_px)
+            }
+        })
+        .collect();
+    let _ = shrink_widths_to_floors_by_priority(
+        &mut widths,
+        &emergency_floors,
+        &priorities,
+        &fixed_width_flags,
+        deficit_px,
+    );
+
+    widths
 }
 
 impl UiManager {
+    fn roqtune_cache_root() -> Option<PathBuf> {
+        dirs::cache_dir().map(|path| path.join("roqtune"))
+    }
+
+    fn covers_cache_dir() -> Option<PathBuf> {
+        Self::roqtune_cache_root().map(|path| path.join("covers"))
+    }
+
+    fn enrichment_images_cache_dir() -> Option<PathBuf> {
+        Self::roqtune_cache_root().map(|path| path.join("library_enrichment").join("images"))
+    }
+
+    fn is_managed_cached_image_path(path: &Path) -> bool {
+        let in_cover_cache = Self::covers_cache_dir()
+            .map(|cache_dir| path.starts_with(cache_dir))
+            .unwrap_or(false);
+        let in_enrichment_cache = Self::enrichment_images_cache_dir()
+            .map(|cache_dir| path.starts_with(cache_dir))
+            .unwrap_or(false);
+        in_cover_cache || in_enrichment_cache
+    }
+
+    fn delete_cached_image_file_if_managed(path: &Path) {
+        if !Self::is_managed_cached_image_path(path) {
+            return;
+        }
+        if !path.exists() {
+            return;
+        }
+        if let Err(error) = std::fs::remove_file(path) {
+            debug!(
+                "Failed removing invalid managed cache image {}: {}",
+                path.display(),
+                error
+            );
+        }
+    }
+
+    fn failed_cover_path(path: &Path) -> bool {
+        TRACK_ROW_COVER_ART_FAILED_PATHS.with(|failed| failed.borrow().contains(path))
+    }
+
+    fn source_badge_for_track_path(path: &Path) -> String {
+        if is_remote_track_path(path) {
+            "opensubsonic".to_string()
+        } else {
+            String::new()
+        }
+    }
+
+    fn is_pure_remote_playlist_id(playlist_id: &str) -> bool {
+        playlist_id
+            .strip_prefix("remote:opensubsonic:")
+            .and_then(|suffix| suffix.split_once(':'))
+            .map(|(profile_id, remote_playlist_id)| {
+                !profile_id.trim().is_empty() && !remote_playlist_id.trim().is_empty()
+            })
+            .unwrap_or(false)
+    }
+
+    fn find_external_cover_art(track_path: &Path) -> Option<PathBuf> {
+        let parent = track_path.parent()?;
+        let names = ["cover", "front", "folder", "album", "art"];
+        let extensions = ["jpg", "jpeg", "png", "webp"];
+
+        if let Ok(entries) = std::fs::read_dir(parent) {
+            let mut found_files = Vec::new();
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if !path.is_file() {
+                    continue;
+                }
+                let Some(file_stem) = path.file_stem().and_then(|s| s.to_str()) else {
+                    continue;
+                };
+                let file_stem_lower = file_stem.to_lowercase();
+                if !names.iter().any(|&name| file_stem_lower == name) {
+                    continue;
+                }
+                let Some(ext) = path.extension().and_then(|e| e.to_str()) else {
+                    continue;
+                };
+                if extensions
+                    .iter()
+                    .any(|candidate| ext.eq_ignore_ascii_case(candidate))
+                {
+                    found_files.push(path);
+                }
+            }
+            found_files.sort();
+            if let Some(found) = found_files.into_iter().next() {
+                return Some(found);
+            }
+        }
+
+        None
+    }
+
+    fn embedded_art_cache_stem(track_path: &Path) -> Option<String> {
+        let mut hasher = DefaultHasher::new();
+        track_path.hash(&mut hasher);
+        let hash = hasher.finish();
+        Some(format!("{hash:x}"))
+    }
+
+    fn detect_image_extension(bytes: &[u8]) -> Option<&'static str> {
+        if bytes.len() >= 8
+            && bytes[0] == 0x89
+            && bytes[1] == b'P'
+            && bytes[2] == b'N'
+            && bytes[3] == b'G'
+            && bytes[4] == 0x0D
+            && bytes[5] == 0x0A
+            && bytes[6] == 0x1A
+            && bytes[7] == 0x0A
+        {
+            return Some("png");
+        }
+        if bytes.len() >= 3 && bytes[0] == 0xFF && bytes[1] == 0xD8 && bytes[2] == 0xFF {
+            return Some("jpg");
+        }
+        if bytes.len() >= 12 && bytes[0..4] == *b"RIFF" && bytes[8..12] == *b"WEBP" {
+            return Some("webp");
+        }
+        if bytes.len() >= 6 && (&bytes[0..6] == b"GIF87a" || &bytes[0..6] == b"GIF89a") {
+            return Some("gif");
+        }
+        if bytes.len() >= 2 && bytes[0] == b'B' && bytes[1] == b'M' {
+            return Some("bmp");
+        }
+        None
+    }
+
+    fn is_valid_image_file(path: &Path) -> bool {
+        let mut file = match std::fs::File::open(path) {
+            Ok(file) => file,
+            Err(_) => return false,
+        };
+        let mut header = [0u8; 16];
+        let read = match file.read(&mut header) {
+            Ok(read) => read,
+            Err(_) => return false,
+        };
+        if read == 0 {
+            return false;
+        }
+        Self::detect_image_extension(&header[..read]).is_some()
+    }
+
+    fn embedded_art_cache_candidates(track_path: &Path) -> Option<Vec<PathBuf>> {
+        let cache_dir = Self::covers_cache_dir()?;
+        let stem = Self::embedded_art_cache_stem(track_path)?;
+        Some(
+            ["png", "jpg", "jpeg", "webp", "gif", "bmp"]
+                .iter()
+                .map(|ext| cache_dir.join(format!("{stem}.{ext}")))
+                .collect(),
+        )
+    }
+
+    fn embedded_art_cache_path_if_present(track_path: &Path) -> Option<PathBuf> {
+        let candidates = Self::embedded_art_cache_candidates(track_path)?;
+        for cache_path in candidates {
+            if Self::failed_cover_path(&cache_path) {
+                continue;
+            }
+            if !cache_path.exists() {
+                continue;
+            }
+            if !Self::is_valid_image_file(&cache_path) {
+                Self::delete_cached_image_file_if_managed(&cache_path);
+                continue;
+            }
+            return Some(cache_path);
+        }
+        None
+    }
+
+    fn make_opensubsonic_salt() -> String {
+        let mut bytes = [0u8; 8];
+        let _ = getrandom::fill(&mut bytes);
+        bytes.iter().map(|value| format!("{value:02x}")).collect()
+    }
+
+    fn opensubsonic_cover_art_url(
+        locator: &crate::integration_uri::OpenSubsonicTrackLocator,
+        password: &str,
+    ) -> String {
+        let salt = Self::make_opensubsonic_salt();
+        let token = format!("{:x}", md5::compute(format!("{}{}", password, salt)));
+        format!(
+            "{}/rest/getCoverArt.view?u={}&t={}&s={}&v={}&c={}&id={}",
+            locator.endpoint.trim().trim_end_matches('/'),
+            urlencoding::encode(locator.username.trim()),
+            token,
+            salt,
+            OPENSUBSONIC_API_VERSION,
+            OPENSUBSONIC_CLIENT_ID,
+            urlencoding::encode(locator.song_id.as_str()),
+        )
+    }
+
+    fn cache_cover_art_bytes(track_path: &Path, cover_bytes: &[u8]) -> Option<PathBuf> {
+        let cache_dir = Self::covers_cache_dir()?;
+        if !cache_dir.exists() {
+            std::fs::create_dir_all(&cache_dir).ok()?;
+        }
+
+        let extension = Self::detect_image_extension(cover_bytes)?;
+        let stem = Self::embedded_art_cache_stem(track_path)?;
+        let cache_path = cache_dir.join(format!("{stem}.{extension}"));
+        let temp_path = cache_dir.join(format!("{stem}.{extension}.tmp"));
+        if Self::failed_cover_path(&cache_path) {
+            return None;
+        }
+        if std::fs::write(&temp_path, cover_bytes).is_err() {
+            return None;
+        }
+        if !Self::is_valid_image_file(&temp_path) {
+            let _ = std::fs::remove_file(&temp_path);
+            return None;
+        }
+        if std::fs::rename(&temp_path, &cache_path).is_err() {
+            let _ = std::fs::remove_file(&temp_path);
+            return None;
+        }
+        Some(cache_path)
+    }
+
+    fn fetch_remote_cover_art(
+        track_path: &Path,
+        password_cache: &mut HashMap<String, Option<String>>,
+    ) -> Option<PathBuf> {
+        if let Some(cached) = Self::embedded_art_cache_path_if_present(track_path) {
+            return Some(cached);
+        }
+        let locator = parse_opensubsonic_track_uri(track_path)?;
+        let password = if let Some(cached) = password_cache.get(&locator.profile_id) {
+            cached.clone()
+        } else {
+            match get_opensubsonic_password(&locator.profile_id) {
+                Ok(password) => {
+                    password_cache.insert(locator.profile_id.clone(), password.clone());
+                    password
+                }
+                Err(error) => {
+                    warn!(
+                        "Failed to read OpenSubsonic credential for cover art (profile '{}'): {}",
+                        locator.profile_id, error
+                    );
+                    password_cache.insert(locator.profile_id.clone(), None);
+                    None
+                }
+            }
+        }?;
+
+        let url = Self::opensubsonic_cover_art_url(&locator, password.as_str());
+        let client = ureq::AgentBuilder::new()
+            .timeout_connect(Duration::from_secs(5))
+            .timeout_read(Duration::from_secs(20))
+            .timeout_write(Duration::from_secs(20))
+            .build();
+        let response = client.get(url.as_str()).call().ok()?;
+        let mut body = Vec::new();
+        response.into_reader().read_to_end(&mut body).ok()?;
+        if body.is_empty() {
+            return None;
+        }
+        let preview = String::from_utf8_lossy(&body[..body.len().min(512)]).to_ascii_lowercase();
+        if preview.contains("subsonic-response")
+            || preview.contains("<error")
+            || preview.contains("\"error\"")
+        {
+            return None;
+        }
+        Self::cache_cover_art_bytes(track_path, &body)
+    }
+
+    fn find_external_cover_art_cached(&mut self, track_path: &Path) -> Option<PathBuf> {
+        let parent = track_path.parent()?.to_path_buf();
+        if let Some(cached) = self.folder_cover_art_paths.get(&parent) {
+            return cached.clone();
+        }
+
+        let resolved = Self::find_external_cover_art(track_path);
+        self.folder_cover_art_paths.insert(parent, resolved.clone());
+        resolved
+    }
+
     fn library_track_number_leading(track_number: &str) -> String {
         let trimmed = track_number.trim();
         if trimmed.is_empty() {
@@ -289,21 +1036,21 @@ impl UiManager {
 
     fn build_artist_detail_entries(
         albums: Vec<protocol::LibraryAlbum>,
-        songs: Vec<protocol::LibrarySong>,
+        tracks: Vec<protocol::LibraryTrack>,
     ) -> Vec<LibraryEntry> {
-        let mut songs_by_album: HashMap<(String, String), Vec<protocol::LibrarySong>> =
+        let mut tracks_by_album: HashMap<(String, String), Vec<protocol::LibraryTrack>> =
             HashMap::new();
         let mut album_year_by_key: HashMap<(String, String), i32> = HashMap::new();
 
-        for song in songs {
-            let key = (song.album.clone(), song.album_artist.clone());
-            if let Some(year) = Self::parse_library_year(&song.year) {
+        for track in tracks {
+            let key = (track.album.clone(), track.album_artist.clone());
+            if let Some(year) = Self::parse_library_year(&track.year) {
                 album_year_by_key
                     .entry(key.clone())
                     .and_modify(|current_year| *current_year = (*current_year).max(year))
                     .or_insert(year);
             }
-            songs_by_album.entry(key).or_default().push(song);
+            tracks_by_album.entry(key).or_default().push(track);
         }
 
         let mut ordered_albums: Vec<((String, String), protocol::LibraryAlbum, Option<i32>)> =
@@ -319,15 +1066,15 @@ impl UiManager {
             ordered_albums.push((key, album, year));
         }
 
-        for (key, album_songs) in &songs_by_album {
+        for (key, album_tracks) in &tracks_by_album {
             if seen_album_keys.contains(key) {
                 continue;
             }
             let synthetic_album = protocol::LibraryAlbum {
                 album: key.0.clone(),
                 album_artist: key.1.clone(),
-                song_count: album_songs.len() as u32,
-                representative_track_path: album_songs.first().map(|song| song.path.clone()),
+                track_count: album_tracks.len() as u32,
+                representative_track_path: album_tracks.first().map(|track| track.path.clone()),
             };
             let year = album_year_by_key.get(key).copied();
             ordered_albums.push((key.clone(), synthetic_album, year));
@@ -356,15 +1103,15 @@ impl UiManager {
         let mut entries = Vec::new();
         for (key, album, _) in ordered_albums {
             entries.push(LibraryEntry::Album(album));
-            if let Some(album_songs) = songs_by_album.remove(&key) {
-                entries.extend(album_songs.into_iter().map(LibraryEntry::Song));
+            if let Some(album_tracks) = tracks_by_album.remove(&key) {
+                entries.extend(album_tracks.into_iter().map(LibraryEntry::Track));
             }
         }
 
-        if !songs_by_album.is_empty() {
-            let mut remaining_songs: Vec<protocol::LibrarySong> =
-                songs_by_album.into_values().flatten().collect();
-            remaining_songs.sort_by(|left, right| {
+        if !tracks_by_album.is_empty() {
+            let mut remaining_tracks: Vec<protocol::LibraryTrack> =
+                tracks_by_album.into_values().flatten().collect();
+            remaining_tracks.sort_by(|left, right| {
                 left.album
                     .to_ascii_lowercase()
                     .cmp(&right.album.to_ascii_lowercase())
@@ -375,31 +1122,31 @@ impl UiManager {
                     })
                     .then_with(|| left.path.cmp(&right.path))
             });
-            entries.extend(remaining_songs.into_iter().map(LibraryEntry::Song));
+            entries.extend(remaining_tracks.into_iter().map(LibraryEntry::Track));
         }
 
         entries
     }
 
     fn build_global_search_entries(
-        songs: Vec<protocol::LibrarySong>,
+        tracks: Vec<protocol::LibraryTrack>,
         artists: Vec<protocol::LibraryArtist>,
         albums: Vec<protocol::LibraryAlbum>,
     ) -> Vec<LibraryEntry> {
-        let mut entries = Vec::with_capacity(songs.len() + artists.len() + albums.len());
-        entries.extend(songs.into_iter().map(LibraryEntry::Song));
+        let mut entries = Vec::with_capacity(tracks.len() + artists.len() + albums.len());
+        entries.extend(tracks.into_iter().map(LibraryEntry::Track));
         entries.extend(artists.into_iter().map(LibraryEntry::Artist));
         entries.extend(albums.into_iter().map(LibraryEntry::Album));
         entries.sort_by(|left, right| {
             let left_key = match left {
-                LibraryEntry::Song(song) => song.title.to_ascii_lowercase(),
+                LibraryEntry::Track(track) => track.title.to_ascii_lowercase(),
                 LibraryEntry::Artist(artist) => artist.artist.to_ascii_lowercase(),
                 LibraryEntry::Album(album) => album.album.to_ascii_lowercase(),
                 LibraryEntry::Genre(genre) => genre.genre.to_ascii_lowercase(),
                 LibraryEntry::Decade(decade) => decade.decade.to_ascii_lowercase(),
             };
             let right_key = match right {
-                LibraryEntry::Song(song) => song.title.to_ascii_lowercase(),
+                LibraryEntry::Track(track) => track.title.to_ascii_lowercase(),
                 LibraryEntry::Artist(artist) => artist.artist.to_ascii_lowercase(),
                 LibraryEntry::Album(album) => album.album.to_ascii_lowercase(),
                 LibraryEntry::Genre(genre) => genre.genre.to_ascii_lowercase(),
@@ -408,14 +1155,14 @@ impl UiManager {
             let left_kind_rank = match left {
                 LibraryEntry::Artist(_) => 0,
                 LibraryEntry::Album(_) => 1,
-                LibraryEntry::Song(_) => 2,
+                LibraryEntry::Track(_) => 2,
                 LibraryEntry::Genre(_) => 3,
                 LibraryEntry::Decade(_) => 4,
             };
             let right_kind_rank = match right {
                 LibraryEntry::Artist(_) => 0,
                 LibraryEntry::Album(_) => 1,
-                LibraryEntry::Song(_) => 2,
+                LibraryEntry::Track(_) => 2,
                 LibraryEntry::Genre(_) => 3,
                 LibraryEntry::Decade(_) => 4,
             };
@@ -436,25 +1183,80 @@ impl UiManager {
         latest
     }
 
+    fn drain_metadata_lookup_requests(
+        first: MetadataLookupRequest,
+        request_rx: &StdReceiver<MetadataLookupRequest>,
+    ) -> Vec<MetadataLookupRequest> {
+        let mut pending = vec![first];
+        while let Ok(next) = request_rx.try_recv() {
+            pending.push(next);
+            if pending.len() >= 256 {
+                break;
+            }
+        }
+        pending
+    }
+
     /// Creates a UI manager and starts an internal cover-art lookup worker thread.
     pub fn new(
         ui: slint::Weak<AppWindow>,
         bus_receiver: Receiver<protocol::Message>,
         bus_sender: Sender<protocol::Message>,
+        initial_online_metadata_enabled: bool,
+        initial_online_metadata_prompt_pending: bool,
+        library_scan_progress_rx: StdReceiver<protocol::LibraryMessage>,
     ) -> Self {
         let (cover_art_lookup_tx, cover_art_lookup_rx) = mpsc::channel::<CoverArtLookupRequest>();
         let cover_art_bus_sender = bus_sender.clone();
         thread::spawn(move || {
+            let mut opensubsonic_password_cache: HashMap<String, Option<String>> = HashMap::new();
             while let Ok(request) = cover_art_lookup_rx.recv() {
                 let latest_request =
                     UiManager::coalesce_cover_art_requests(request, &cover_art_lookup_rx);
-                let cover_art_path = latest_request
-                    .track_path
-                    .as_ref()
-                    .and_then(UiManager::find_cover_art);
+                let cover_art_path = latest_request.track_path.as_ref().and_then(|path| {
+                    UiManager::find_cover_art(path.as_path(), &mut opensubsonic_password_cache)
+                });
                 let _ = cover_art_bus_sender.send(protocol::Message::Playback(
                     protocol::PlaybackMessage::CoverArtChanged(cover_art_path),
                 ));
+            }
+        });
+        let (metadata_lookup_tx, metadata_lookup_rx) = mpsc::channel::<MetadataLookupRequest>();
+        let metadata_bus_sender = bus_sender.clone();
+        thread::spawn(move || {
+            while let Ok(request) = metadata_lookup_rx.recv() {
+                let pending =
+                    UiManager::drain_metadata_lookup_requests(request, &metadata_lookup_rx);
+                let mut latest_by_track_id: HashMap<String, PathBuf> = HashMap::new();
+                for item in pending {
+                    latest_by_track_id.insert(item.track_id, item.track_path);
+                }
+                let mut updates = Vec::with_capacity(latest_by_track_id.len());
+                for (track_id, track_path) in latest_by_track_id {
+                    updates.push(protocol::TrackMetadataPatch {
+                        track_id,
+                        summary: UiManager::read_track_metadata_summary(track_path.as_path()),
+                    });
+                }
+                if updates.is_empty() {
+                    continue;
+                }
+                let _ = metadata_bus_sender.send(protocol::Message::Playlist(
+                    protocol::PlaylistMessage::TrackMetadataBatchUpdated { updates },
+                ));
+            }
+        });
+
+        let enrichment_prefetch_tick_sender = bus_sender.clone();
+        thread::spawn(move || loop {
+            thread::sleep(Duration::from_millis(240));
+            if enrichment_prefetch_tick_sender
+                .send(protocol::Message::Library(
+                    protocol::LibraryMessage::EnrichmentPrefetchTick,
+                ))
+                .is_err()
+            {
+                break;
             }
         });
 
@@ -462,11 +1264,15 @@ impl UiManager {
             ui: ui.clone(),
             bus_receiver,
             bus_sender,
+            library_scan_progress_rx,
             cover_art_lookup_tx,
+            metadata_lookup_tx,
             last_cover_art_lookup_path: None,
             active_playlist_id: String::new(),
             playlist_ids: Vec::new(),
             playlist_names: Vec::new(),
+            opensubsonic_sync_eligible_playlist_ids: HashSet::new(),
+            unavailable_track_ids: HashSet::new(),
             track_ids: Vec::new(),
             track_paths: Vec::new(),
             track_cover_art_paths: Vec::new(),
@@ -477,18 +1283,28 @@ impl UiManager {
             selection_anchor_track_id: None,
             copied_track_paths: Vec::new(),
             active_playing_index: None,
+            library_playing_index: None,
             drag_indices: Vec::new(),
             is_dragging: false,
             pressed_index: None,
+            pending_single_select_on_click: None,
             progress_rl: RateLimiter::direct(
                 Quota::with_period(Duration::from_millis(30)).unwrap(),
             ),
             last_elapsed_ms: 0,
             last_total_ms: 0,
-            current_playing_track_path: None,
-            current_playing_track_metadata: None,
+            playing_track: PlayingTrackState::default(),
+            display_target_priority: DisplayTargetPriority::Playing,
             current_technical_metadata: None,
             current_output_path_info: None,
+            cast_connected: false,
+            cast_connecting: false,
+            cast_discovering: false,
+            cast_device_name: String::new(),
+            cast_playback_path_kind: None,
+            cast_transcode_output_metadata: None,
+            cast_device_ids: Vec::new(),
+            cast_device_names: Vec::new(),
             playlist_columns: config::default_playlist_columns(),
             playlist_column_content_targets_px: Vec::new(),
             playlist_column_target_widths_px: HashMap::new(),
@@ -503,6 +1319,8 @@ impl UiManager {
             filter_sort_direction: None,
             filter_search_query: String::new(),
             filter_search_visible: false,
+            auto_scroll_to_playing_track: true,
+            playlist_scroll_center_token: 0,
             playback_active: false,
             processed_message_count: 0,
             lagged_message_count: 0,
@@ -510,13 +1328,40 @@ impl UiManager {
             last_progress_at: None,
             last_health_log_at: Instant::now(),
             collection_mode: COLLECTION_MODE_PLAYLIST,
-            library_view_stack: vec![LibraryViewState::SongsRoot],
+            library_view_stack: vec![LibraryViewState::TracksRoot],
             library_entries: Vec::new(),
             library_view_indices: Vec::new(),
             library_selected_indices: Vec::new(),
             library_selection_anchor: None,
+            library_root_counts: [0; 5],
             library_cover_art_paths: HashMap::new(),
+            folder_cover_art_paths: HashMap::new(),
+            library_enrichment: HashMap::new(),
+            library_enrichment_pending: HashSet::new(),
+            library_enrichment_last_request_at: HashMap::new(),
+            library_enrichment_retry_counts: HashMap::new(),
+            library_enrichment_retry_not_before: HashMap::new(),
+            library_enrichment_not_found_not_before: HashMap::new(),
+            library_enrichment_failed_attempt_counts: HashMap::new(),
+            library_last_detail_enrichment_entity: None,
+            library_online_metadata_enabled: initial_online_metadata_enabled,
+            library_online_metadata_prompt_pending: initial_online_metadata_prompt_pending,
+            library_artist_prefetch_first_row: 0,
+            library_artist_prefetch_row_count: 0,
+            library_scroll_positions: HashMap::new(),
+            pending_library_scroll_restore_row: None,
+            library_scroll_restore_token: 0,
+            library_scroll_center_token: 0,
+            library_artist_row_indices: HashMap::new(),
+            library_last_prefetch_entities: Vec::new(),
+            library_last_background_entities: Vec::new(),
             library_search_query: String::new(),
+            library_page_request_id: 0,
+            library_page_view: None,
+            library_page_next_offset: 0,
+            library_page_total: 0,
+            library_page_entries: Vec::new(),
+            library_page_query: String::new(),
             library_search_visible: false,
             library_scan_in_progress: false,
             library_status_text: String::new(),
@@ -525,6 +1370,7 @@ impl UiManager {
             library_toast_generation: 0,
             pending_paste_feedback: false,
             copied_library_selections: Vec::new(),
+            pending_library_remove_selections: Vec::new(),
             properties_request_nonce: 0,
             properties_pending_request_id: None,
             properties_pending_request_kind: None,
@@ -545,13 +1391,13 @@ impl UiManager {
         self.last_message_at = now;
     }
 
-    fn on_message_lagged(&mut self) {
-        self.lagged_message_count = self.lagged_message_count.saturating_add(1);
+    fn on_message_lagged(&mut self, skipped: u64) {
+        self.lagged_message_count = self.lagged_message_count.saturating_add(skipped.max(1));
         let now = Instant::now();
         if now.duration_since(self.last_health_log_at) >= Duration::from_secs(5) {
             warn!(
-                "UiManager: bus lagged. total_lagged={}, processed={}",
-                self.lagged_message_count, self.processed_message_count
+                "UiManager lagged on control bus, skipped={} total_lagged={} processed={}",
+                skipped, self.lagged_message_count, self.processed_message_count
             );
             self.last_health_log_at = now;
         }
@@ -591,48 +1437,125 @@ impl UiManager {
         self.last_health_log_at = now;
     }
 
-    fn render_technical_info_text(&self) -> String {
-        let mut parts = Vec::new();
-        if let Some(meta) = self.current_technical_metadata.as_ref() {
-            parts.push(format!(
-                "{} | {} kbps | {} Hz | {} ch",
-                meta.format, meta.bitrate_kbps, meta.sample_rate_hz, meta.channel_count
-            ));
-        }
-        if let Some(path_info) = self.current_output_path_info.as_ref() {
-            let output_format = match path_info.output_stream.sample_format {
-                protocol::OutputSampleFormat::F32 => "f32",
-                protocol::OutputSampleFormat::I16 => "i16",
-                protocol::OutputSampleFormat::U16 => "u16",
-                protocol::OutputSampleFormat::Unknown => "unknown",
-            };
-            let mut transforms = Vec::new();
-            if path_info.resampled {
-                transforms.push("resample");
-            }
-            if path_info.remixed_channels {
-                transforms.push("channel-map");
-            }
-            if path_info.dithered {
-                transforms.push("dither");
-            }
-            let transform_text = if transforms.is_empty() {
-                "direct".to_string()
+    fn format_rate_hz_text(rate_hz: u32) -> String {
+        if rate_hz >= 1000 {
+            let khz = rate_hz as f32 / 1000.0;
+            if khz == khz.round() {
+                format!("{}kHz", khz as u32)
             } else {
-                transforms.join("+")
-            };
-            parts.push(format!(
-                "Path: {} Hz/{} ch -> {} Hz/{} ch | {} bit {} ({})",
-                path_info.source_sample_rate_hz,
-                path_info.source_channel_count,
-                path_info.output_stream.sample_rate_hz,
-                path_info.output_stream.channel_count,
-                path_info.output_stream.bits_per_sample,
-                output_format,
-                transform_text
+                format!("{:.1}kHz", khz)
+            }
+        } else {
+            format!("{}Hz", rate_hz)
+        }
+    }
+
+    fn format_technical_metadata_text(meta: &protocol::TechnicalMetadata) -> String {
+        format!(
+            "{} ({} bit, {}, {}ch, {}kbps)",
+            meta.format,
+            meta.bits_per_sample,
+            Self::format_rate_hz_text(meta.sample_rate_hz),
+            meta.channel_count,
+            meta.bitrate_kbps
+        )
+    }
+
+    fn current_track_source_label(&self) -> Option<&'static str> {
+        self.playing_track
+            .path
+            .as_ref()
+            .and_then(|path| is_remote_track_path(path.as_path()).then_some("OpenSubsonic"))
+    }
+
+    fn render_local_transform_text(&self) -> String {
+        let Some(path_info) = self.current_output_path_info.as_ref() else {
+            return "Direct play".to_string();
+        };
+        let mut transforms = Vec::new();
+        if path_info.resampled {
+            transforms.push(format!(
+                "Resample: {} -> {}",
+                Self::format_rate_hz_text(path_info.source_sample_rate_hz),
+                Self::format_rate_hz_text(path_info.output_stream.sample_rate_hz)
             ));
         }
-        parts.join(" | ")
+        if let Some(channel_transform) = path_info.channel_transform {
+            let label = match channel_transform {
+                protocol::ChannelTransformKind::Downmix => "Downmix",
+                protocol::ChannelTransformKind::ChannelMap => "Channel map",
+            };
+            transforms.push(format!(
+                "{}: {}ch -> {}ch",
+                label, path_info.source_channel_count, path_info.output_stream.channel_count
+            ));
+        }
+        if path_info.dithered {
+            transforms.push("Dither".to_string());
+        }
+        if transforms.is_empty() {
+            "Direct play".to_string()
+        } else {
+            transforms.join(" / ")
+        }
+    }
+
+    fn render_technical_info_text(&self) -> String {
+        if self.current_technical_metadata.is_none()
+            && !self.cast_connected
+            && !self.cast_connecting
+        {
+            return String::new();
+        }
+
+        let mut sections = Vec::new();
+        let source_section = if let Some(meta) = self.current_technical_metadata.as_ref() {
+            let source_label = self.current_track_source_label();
+            let source_format_text = Self::format_technical_metadata_text(meta);
+            if let Some(source_label) = source_label {
+                format!("Source: {} | {}", source_label, source_format_text)
+            } else {
+                format!("Source: {}", source_format_text)
+            }
+        } else if self.cast_connected || self.cast_connecting {
+            "Source: Unknown".to_string()
+        } else {
+            String::new()
+        };
+        if !source_section.is_empty() {
+            sections.push(source_section);
+        }
+
+        if self.cast_connected {
+            sections.push("Casting".to_string());
+            let cast_transform = match self.cast_playback_path_kind {
+                Some(protocol::CastPlaybackPathKind::Direct) => Some("Direct play".to_string()),
+                Some(protocol::CastPlaybackPathKind::TranscodeWavPcm) => {
+                    if let Some(meta) = self.cast_transcode_output_metadata.as_ref() {
+                        Some(format!(
+                            "Transcode: {}",
+                            Self::format_technical_metadata_text(meta)
+                        ))
+                    } else {
+                        Some("Transcode: WAV".to_string())
+                    }
+                }
+                None => None,
+            };
+            if let Some(cast_transform) = cast_transform {
+                sections.push(cast_transform);
+            }
+        } else if self.cast_connecting {
+            sections.push("Casting: Connecting...".to_string());
+        } else {
+            sections.push(self.render_local_transform_text());
+        }
+
+        sections
+            .into_iter()
+            .filter(|section| !section.trim().is_empty())
+            .collect::<Vec<_>>()
+            .join(" | ")
     }
 
     fn refresh_technical_info_ui(&self) {
@@ -642,66 +1565,70 @@ impl UiManager {
         });
     }
 
-    fn find_cover_art(track_path: &PathBuf) -> Option<PathBuf> {
-        let parent = track_path.parent()?;
-        let names = ["cover", "front", "folder", "album", "art"];
-        let extensions = ["jpg", "jpeg", "png", "webp"];
-
-        // Priority 1: External files
-        if let Ok(entries) = std::fs::read_dir(parent) {
-            let mut found_files = Vec::new();
-            for entry in entries.flatten() {
-                let path = entry.path();
-                if path.is_file() {
-                    if let Some(file_stem) = path.file_stem().and_then(|s| s.to_str()) {
-                        let file_stem_lower = file_stem.to_lowercase();
-                        if names.iter().any(|&n| file_stem_lower == n) {
-                            if let Some(ext) = path.extension().and_then(|e| e.to_str()) {
-                                let ext_lower = ext.to_lowercase();
-                                if extensions.iter().any(|&e| ext_lower == e) {
-                                    found_files.push(path);
-                                }
-                            }
-                        }
-                    }
-                }
+    fn sync_cast_state_to_ui(&self) {
+        let connected = self.cast_connected;
+        let connecting = self.cast_connecting;
+        let discovering = self.cast_discovering;
+        let label = if connected {
+            if self.cast_device_name.is_empty() {
+                "Connected".to_string()
+            } else {
+                format!("Connected: {}", self.cast_device_name)
             }
-            // Sort to have some deterministic behavior if multiple files exist
-            found_files.sort();
-            if let Some(found) = found_files.into_iter().next() {
-                return Some(found);
-            }
-        }
-
-        // Priority 2: Embedded art
-        Self::extract_embedded_art(track_path)
+        } else if connecting {
+            "Connecting...".to_string()
+        } else if discovering {
+            "Searching...".to_string()
+        } else {
+            "Not Connected".to_string()
+        };
+        let device_names = self
+            .cast_device_names
+            .iter()
+            .cloned()
+            .map(slint::SharedString::from)
+            .collect::<Vec<_>>();
+        let device_ids = self
+            .cast_device_ids
+            .iter()
+            .cloned()
+            .map(slint::SharedString::from)
+            .collect::<Vec<_>>();
+        let _ = self.ui.upgrade_in_event_loop(move |ui| {
+            ui.set_cast_connected(connected);
+            ui.set_cast_connecting(connecting);
+            ui.set_cast_connection_label(label.into());
+            ui.set_cast_device_names(ModelRc::from(Rc::new(VecModel::from(device_names))));
+            ui.set_cast_device_ids(ModelRc::from(Rc::new(VecModel::from(device_ids))));
+        });
     }
 
-    fn extract_embedded_art(track_path: &PathBuf) -> Option<PathBuf> {
-        let mut hasher = DefaultHasher::new();
-        track_path.hash(&mut hasher);
-        let hash = hasher.finish();
-        let cache_dir = dirs::cache_dir()?.join("roqtune").join("covers");
+    fn find_local_cover_art(track_path: &Path) -> Option<PathBuf> {
+        Self::find_external_cover_art(track_path).or_else(|| Self::extract_embedded_art(track_path))
+    }
+
+    fn find_cover_art(
+        track_path: &Path,
+        password_cache: &mut HashMap<String, Option<String>>,
+    ) -> Option<PathBuf> {
+        if is_remote_track_path(track_path) {
+            return Self::fetch_remote_cover_art(track_path, password_cache);
+        }
+        Self::find_local_cover_art(track_path)
+    }
+
+    fn extract_embedded_art(track_path: &Path) -> Option<PathBuf> {
+        let cache_dir = Self::covers_cache_dir()?;
         if !cache_dir.exists() {
             std::fs::create_dir_all(&cache_dir).ok()?;
         }
 
-        let cache_path = cache_dir.join(format!("{:x}.png", hash));
-
-        // If already cached, return it
-        if cache_path.exists() {
-            return Some(cache_path);
+        if let Some(existing_path) = Self::embedded_art_cache_path_if_present(track_path) {
+            return Some(existing_path);
         }
 
-        if let Some(cover_bytes) = metadata_tags::read_embedded_cover_art(track_path) {
-            if let Ok(mut file) = std::fs::File::create(&cache_path) {
-                if file.write_all(&cover_bytes).is_ok() {
-                    return Some(cache_path);
-                }
-            }
-        }
-
-        None
+        let cover_bytes = metadata_tags::read_embedded_cover_art(track_path)?;
+        Self::cache_cover_art_bytes(track_path, &cover_bytes)
     }
 
     fn update_cover_art(&mut self, track_path: Option<&PathBuf>) {
@@ -732,14 +1659,36 @@ impl UiManager {
 
     fn resolve_track_cover_art_path(&mut self, source_index: usize) -> Option<PathBuf> {
         let track_path = self.track_paths.get(source_index).cloned()?;
+        let is_remote = is_remote_track_path(track_path.as_path());
         if let Some(Some(existing_path)) = self.track_cover_art_paths.get(source_index) {
+            if Self::failed_cover_path(existing_path) {
+                if let Some(cache_slot) = self.track_cover_art_paths.get_mut(source_index) {
+                    *cache_slot = None;
+                }
+                self.track_cover_art_missing_tracks
+                    .insert(track_path.clone());
+                return None;
+            }
             return Some(existing_path.clone());
+        }
+        if let Some(cached_embedded) = Self::embedded_art_cache_path_if_present(&track_path) {
+            if let Some(cache_slot) = self.track_cover_art_paths.get_mut(source_index) {
+                *cache_slot = Some(cached_embedded.clone());
+            }
+            self.track_cover_art_missing_tracks.remove(&track_path);
+            return Some(cached_embedded);
         }
         if self.track_cover_art_missing_tracks.contains(&track_path) {
             return None;
         }
 
-        let resolved_path = Self::find_cover_art(&track_path);
+        let resolved_path = if is_remote {
+            self.update_cover_art(Some(&track_path));
+            None
+        } else {
+            self.find_external_cover_art_cached(&track_path)
+                .or_else(|| Self::embedded_art_cache_path_if_present(&track_path))
+        };
         if let Some(cache_slot) = self.track_cover_art_paths.get_mut(source_index) {
             *cache_slot = resolved_path.clone();
         }
@@ -753,33 +1702,52 @@ impl UiManager {
         self.resolve_track_cover_art_path(source_index)
     }
 
-    fn load_track_row_cover_art_image(path: Option<&PathBuf>) -> Image {
-        let Some(path) = path.cloned() else {
-            return Image::default();
-        };
-        if TRACK_ROW_COVER_ART_FAILED_PATHS.with(|failed| failed.borrow().contains(&path)) {
-            return Image::default();
-        }
-        if let Some(cached) =
-            TRACK_ROW_COVER_ART_IMAGE_CACHE.with(|cache| cache.borrow().get(&path).cloned())
-        {
-            return cached;
+    fn approximate_cover_art_size_bytes(path: &Path) -> u64 {
+        std::fs::metadata(path)
+            .map(|meta| meta.len().max(1))
+            .unwrap_or(256 * 1024)
+    }
+
+    fn try_load_cover_art_image(path: &Path) -> Option<Image> {
+        if Self::failed_cover_path(path) {
+            return None;
         }
 
-        match Image::load_from_path(&path) {
+        let image_path = path.to_path_buf();
+        if let Some(cached) =
+            TRACK_ROW_COVER_ART_IMAGE_CACHE.with(|cache| cache.borrow_mut().get(&image_path))
+        {
+            return Some(cached);
+        }
+
+        match Image::load_from_path(path) {
             Ok(image) => {
+                let approx_bytes = Self::approximate_cover_art_size_bytes(path);
                 TRACK_ROW_COVER_ART_IMAGE_CACHE.with(|cache| {
-                    cache.borrow_mut().insert(path, image.clone());
+                    cache
+                        .borrow_mut()
+                        .insert(image_path.clone(), image.clone(), approx_bytes);
                 });
-                image
+                Some(image)
             }
-            Err(_) => {
+            Err(error) => {
+                debug!(
+                    "Failed loading cover art image {}: {}",
+                    path.display(),
+                    error
+                );
                 TRACK_ROW_COVER_ART_FAILED_PATHS.with(|failed| {
-                    failed.borrow_mut().insert(path);
+                    failed.borrow_mut().insert(image_path);
                 });
-                Image::default()
+                Self::delete_cached_image_file_if_managed(path);
+                None
             }
         }
+    }
+
+    fn load_track_row_cover_art_image(path: Option<&PathBuf>) -> Image {
+        path.and_then(|path| Self::try_load_cover_art_image(path))
+            .unwrap_or_default()
     }
 
     fn to_detailed_metadata(track_metadata: &TrackMetadata) -> protocol::DetailedMetadata {
@@ -886,6 +1854,26 @@ impl UiManager {
             .collect()
     }
 
+    fn apply_unavailable_title_override(
+        values: &mut [String],
+        playlist_columns: &[PlaylistColumnConfig],
+    ) {
+        for (visible_index, column) in playlist_columns
+            .iter()
+            .filter(|column| column.enabled)
+            .enumerate()
+        {
+            let normalized_format = Self::normalize_column_format(&column.format);
+            let normalized_name = column.name.trim().to_ascii_lowercase();
+            if normalized_format == "{title}" || normalized_name == "title" {
+                if let Some(value) = values.get_mut(visible_index) {
+                    *value = REMOTE_TRACK_UNAVAILABLE_TITLE.to_string();
+                }
+                break;
+            }
+        }
+    }
+
     fn visible_playlist_columns(&self) -> Vec<&PlaylistColumnConfig> {
         self.playlist_columns
             .iter()
@@ -937,8 +1925,95 @@ impl UiManager {
         width_px.max(1)
     }
 
+    fn apply_layout_column_width_overrides(
+        &mut self,
+        overrides: &[PlaylistColumnWidthOverrideConfig],
+    ) {
+        self.playlist_column_width_overrides_px.clear();
+        for override_item in overrides {
+            let key = override_item.column_key.trim();
+            if key.is_empty() {
+                continue;
+            }
+            let key_owned = key.to_string();
+            if !self
+                .playlist_columns
+                .iter()
+                .any(|column| Self::playlist_column_key(column) == key_owned)
+            {
+                continue;
+            }
+            let clamped_width_px = self.clamp_column_override_width_px(key, override_item.width_px);
+            self.playlist_column_width_overrides_px
+                .insert(key_owned, clamped_width_px);
+        }
+    }
+
     fn is_sortable_playlist_column(column: &PlaylistColumnConfig) -> bool {
         !Self::is_album_art_builtin_column(column)
+    }
+
+    fn playlist_column_class(column: &PlaylistColumnConfig) -> PlaylistColumnClass {
+        if Self::is_album_art_builtin_column(column) {
+            return PlaylistColumnClass::AlbumArt;
+        }
+
+        let normalized_format = column.format.trim().to_ascii_lowercase();
+        let normalized_name = column.name.trim().to_ascii_lowercase();
+
+        if normalized_format == "{track}"
+            || normalized_format == "{track_number}"
+            || normalized_format == "{tracknumber}"
+            || normalized_name == "track #"
+            || normalized_name == "track"
+        {
+            return PlaylistColumnClass::TrackNumber;
+        }
+
+        if normalized_format == "{disc}" || normalized_format == "{disc_number}" {
+            return PlaylistColumnClass::DiscNumber;
+        }
+
+        if normalized_format == "{year}"
+            || normalized_format == "{date}"
+            || normalized_name == "year"
+        {
+            return PlaylistColumnClass::YearDate;
+        }
+
+        if normalized_format == "{title}" || normalized_name == "title" {
+            return PlaylistColumnClass::Title;
+        }
+
+        if normalized_format == "{artist}"
+            || normalized_format == "{album_artist}"
+            || normalized_format == "{albumartist}"
+            || normalized_name == "artist"
+            || normalized_name == "album artist"
+        {
+            return PlaylistColumnClass::ArtistFamily;
+        }
+
+        if normalized_format == "{album}" || normalized_name == "album" {
+            return PlaylistColumnClass::Album;
+        }
+
+        if normalized_format == "{genre}" || normalized_name == "genre" {
+            return PlaylistColumnClass::Genre;
+        }
+
+        if normalized_name == "duration"
+            || normalized_name == "time"
+            || normalized_format == "{duration}"
+        {
+            return PlaylistColumnClass::Duration;
+        }
+
+        if column.custom {
+            return PlaylistColumnClass::Custom;
+        }
+
+        PlaylistColumnClass::Generic
     }
 
     fn album_art_column_width_profile(&self) -> ColumnWidthProfile {
@@ -955,106 +2030,138 @@ impl UiManager {
     }
 
     fn column_width_profile_for_column(&self, column: &PlaylistColumnConfig) -> ColumnWidthProfile {
-        if Self::is_album_art_builtin_column(column) {
-            return self.album_art_column_width_profile();
-        }
-
-        let normalized_format = column.format.trim().to_ascii_lowercase();
-        let normalized_name = column.name.trim().to_ascii_lowercase();
-
-        if normalized_format == "{track}"
-            || normalized_format == "{track_number}"
-            || normalized_format == "{tracknumber}"
-            || normalized_name == "track #"
-            || normalized_name == "track"
-        {
-            return ColumnWidthProfile {
+        match Self::playlist_column_class(column) {
+            PlaylistColumnClass::AlbumArt => self.album_art_column_width_profile(),
+            PlaylistColumnClass::TrackNumber => ColumnWidthProfile {
                 min_px: 52,
                 preferred_px: 68,
                 max_px: 90,
-            };
-        }
-
-        if normalized_format == "{disc}" || normalized_format == "{disc_number}" {
-            return ColumnWidthProfile {
+            },
+            PlaylistColumnClass::DiscNumber => ColumnWidthProfile {
                 min_px: 50,
                 preferred_px: 64,
                 max_px: 84,
-            };
-        }
-
-        if normalized_format == "{year}"
-            || normalized_format == "{date}"
-            || normalized_name == "year"
-        {
-            return ColumnWidthProfile {
+            },
+            PlaylistColumnClass::YearDate => ColumnWidthProfile {
                 min_px: 64,
                 preferred_px: 78,
                 max_px: 104,
-            };
-        }
-
-        if normalized_format == "{title}" || normalized_name == "title" {
-            return ColumnWidthProfile {
+            },
+            PlaylistColumnClass::Title => ColumnWidthProfile {
                 min_px: 140,
                 preferred_px: 230,
                 max_px: 440,
-            };
-        }
-
-        if normalized_format == "{artist}"
-            || normalized_format == "{album_artist}"
-            || normalized_format == "{albumartist}"
-            || normalized_name == "artist"
-            || normalized_name == "album artist"
-        {
-            return ColumnWidthProfile {
+            },
+            PlaylistColumnClass::ArtistFamily => ColumnWidthProfile {
                 min_px: 120,
                 preferred_px: 190,
                 max_px: 320,
-            };
-        }
-
-        if normalized_format == "{album}" || normalized_name == "album" {
-            return ColumnWidthProfile {
+            },
+            PlaylistColumnClass::Album => ColumnWidthProfile {
                 min_px: 140,
                 preferred_px: 220,
                 max_px: 360,
-            };
-        }
-
-        if normalized_format == "{genre}" || normalized_name == "genre" {
-            return ColumnWidthProfile {
+            },
+            PlaylistColumnClass::Genre => ColumnWidthProfile {
                 min_px: 100,
                 preferred_px: 140,
                 max_px: 210,
-            };
-        }
-
-        if normalized_name == "duration"
-            || normalized_name == "time"
-            || normalized_format == "{duration}"
-        {
-            return ColumnWidthProfile {
+            },
+            PlaylistColumnClass::Duration => ColumnWidthProfile {
                 min_px: 78,
                 preferred_px: 92,
                 max_px: 120,
-            };
-        }
-
-        if column.custom {
-            return ColumnWidthProfile {
+            },
+            PlaylistColumnClass::Custom => ColumnWidthProfile {
                 min_px: 110,
                 preferred_px: 180,
                 max_px: 340,
-            };
+            },
+            PlaylistColumnClass::Generic => ColumnWidthProfile {
+                min_px: 100,
+                preferred_px: 170,
+                max_px: 300,
+            },
         }
+    }
 
-        ColumnWidthProfile {
-            min_px: 100,
-            preferred_px: 170,
-            max_px: 300,
+    fn column_shrink_priority(class: PlaylistColumnClass) -> u8 {
+        match class {
+            PlaylistColumnClass::AlbumArt => 255,
+            PlaylistColumnClass::TrackNumber
+            | PlaylistColumnClass::DiscNumber
+            | PlaylistColumnClass::YearDate
+            | PlaylistColumnClass::Duration => 0,
+            PlaylistColumnClass::Genre
+            | PlaylistColumnClass::Custom
+            | PlaylistColumnClass::Generic => 1,
+            PlaylistColumnClass::ArtistFamily | PlaylistColumnClass::Album => 2,
+            PlaylistColumnClass::Title => 3,
         }
+    }
+
+    fn auto_growth_headroom_px(class: PlaylistColumnClass) -> u32 {
+        match class {
+            PlaylistColumnClass::AlbumArt => 0,
+            PlaylistColumnClass::TrackNumber
+            | PlaylistColumnClass::DiscNumber
+            | PlaylistColumnClass::YearDate
+            | PlaylistColumnClass::Duration => 24,
+            PlaylistColumnClass::Genre
+            | PlaylistColumnClass::Custom
+            | PlaylistColumnClass::Generic => 64,
+            PlaylistColumnClass::ArtistFamily | PlaylistColumnClass::Album => 72,
+            PlaylistColumnClass::Title => 96,
+        }
+    }
+
+    fn auto_growth_max_px_for_column(
+        class: PlaylistColumnClass,
+        profile: ColumnWidthProfile,
+        content_target_width_px: u32,
+    ) -> u32 {
+        if matches!(class, PlaylistColumnClass::AlbumArt) {
+            return profile.max_px;
+        }
+        content_target_width_px
+            .max(profile.preferred_px)
+            .saturating_add(Self::auto_growth_headroom_px(class))
+            .clamp(profile.min_px, profile.max_px)
+    }
+
+    fn semantic_floor_for_column(class: PlaylistColumnClass, profile: ColumnWidthProfile) -> u32 {
+        match class {
+            PlaylistColumnClass::AlbumArt => profile.preferred_px,
+            PlaylistColumnClass::TrackNumber => profile.min_px.max(52),
+            PlaylistColumnClass::DiscNumber => profile.min_px.max(50),
+            PlaylistColumnClass::YearDate => profile.min_px.max(64),
+            PlaylistColumnClass::Title => profile.min_px.max(140),
+            PlaylistColumnClass::ArtistFamily => profile.min_px.max(120),
+            PlaylistColumnClass::Album => profile.min_px.max(140),
+            PlaylistColumnClass::Genre => profile.min_px.max(100),
+            PlaylistColumnClass::Duration => profile.min_px.max(78),
+            PlaylistColumnClass::Custom => profile.min_px.max(110),
+            PlaylistColumnClass::Generic => profile.min_px.max(100),
+        }
+        .min(profile.max_px)
+    }
+
+    fn emergency_floor_for_column(class: PlaylistColumnClass, profile: ColumnWidthProfile) -> u32 {
+        let fallback = profile.min_px.min(64);
+        match class {
+            PlaylistColumnClass::AlbumArt => profile.preferred_px,
+            PlaylistColumnClass::TrackNumber => 24,
+            PlaylistColumnClass::DiscNumber => 24,
+            PlaylistColumnClass::YearDate => 36,
+            PlaylistColumnClass::Title => 72,
+            PlaylistColumnClass::ArtistFamily => 64,
+            PlaylistColumnClass::Album => 64,
+            PlaylistColumnClass::Genre => 52,
+            PlaylistColumnClass::Duration => 36,
+            PlaylistColumnClass::Custom => 52,
+            PlaylistColumnClass::Generic => fallback,
+        }
+        .min(profile.max_px)
     }
 
     fn refresh_playlist_column_content_targets(&mut self) {
@@ -1119,7 +2226,6 @@ impl UiManager {
 
     fn resolve_playlist_column_target_width_px(
         override_width_px: Option<u32>,
-        current_width_px: Option<u32>,
         stored_target_width_px: Option<u32>,
         content_target_width_px: u32,
         profile: ColumnWidthProfile,
@@ -1128,9 +2234,7 @@ impl UiManager {
         let base_width_px = if let Some(override_width_px) = override_width_px {
             override_width_px
         } else if preserve_current_widths {
-            stored_target_width_px
-                .or(current_width_px)
-                .unwrap_or(content_target_width_px)
+            stored_target_width_px.unwrap_or(content_target_width_px)
         } else {
             content_target_width_px
         };
@@ -1153,19 +2257,17 @@ impl UiManager {
         available_width_px: u32,
         preserve_current_widths: bool,
     ) -> (Vec<u32>, HashMap<String, u32>) {
-        const COLUMN_SPACING_PX: u32 = 10;
         let visible_columns = self.visible_playlist_columns();
         if visible_columns.is_empty() {
             return (Vec::new(), HashMap::new());
         }
 
-        let mut min_widths = Vec::with_capacity(visible_columns.len());
-        let mut max_widths = Vec::with_capacity(visible_columns.len());
-        let mut widths = Vec::with_capacity(visible_columns.len());
+        let mut layout_specs = Vec::with_capacity(visible_columns.len());
         let mut target_widths_by_key = HashMap::with_capacity(visible_columns.len());
 
         for (index, column) in visible_columns.iter().enumerate() {
             let profile = self.column_width_profile_for_column(column);
+            let class = Self::playlist_column_class(column);
             let column_key = Self::playlist_column_key(column);
             let override_width = self
                 .playlist_column_width_overrides_px
@@ -1176,42 +2278,54 @@ impl UiManager {
                 .get(index)
                 .copied()
                 .unwrap_or(profile.preferred_px);
+            let effective_max_px = if override_width.is_some() {
+                profile.max_px
+            } else {
+                Self::auto_growth_max_px_for_column(class, profile, content_target)
+            };
+            let effective_profile = ColumnWidthProfile {
+                min_px: profile.min_px,
+                preferred_px: profile.preferred_px.min(effective_max_px),
+                max_px: effective_max_px.max(profile.min_px),
+            };
             let stored_target = self
                 .playlist_column_target_widths_px
                 .get(&column_key)
                 .copied();
-            let current_width = self.playlist_column_widths_px.get(index).copied();
             let target = Self::resolve_playlist_column_target_width_px(
                 override_width,
-                current_width,
                 stored_target,
                 content_target,
-                profile,
+                effective_profile,
                 preserve_current_widths,
             );
             target_widths_by_key.insert(column_key, target);
-            min_widths.push(Self::layout_min_width_px_for_column(
-                column, profile, target,
-            ));
-            max_widths.push(profile.max_px);
-            widths.push(target);
+            let min_width_px =
+                Self::layout_min_width_px_for_column(column, effective_profile, target);
+            let emergency_floor_px =
+                Self::emergency_floor_for_column(class, effective_profile).min(min_width_px);
+            layout_specs.push(DeterministicColumnLayoutSpec {
+                min_px: min_width_px,
+                max_px: effective_profile.max_px.max(min_width_px),
+                target_px: target,
+                semantic_floor_px: Self::semantic_floor_for_column(class, effective_profile)
+                    .max(min_width_px),
+                emergency_floor_px,
+                shrink_priority: Self::column_shrink_priority(class),
+                fixed_width: Self::is_album_art_builtin_column(column),
+            });
         }
 
-        let spacing_total =
-            COLUMN_SPACING_PX.saturating_mul((widths.len().saturating_sub(1)) as u32);
-        let preferred_total: u32 = widths.iter().copied().sum();
+        let spacing_total = PLAYLIST_COLUMN_SPACING_PX
+            .saturating_mul((layout_specs.len().saturating_sub(1)) as u32);
+        let preferred_total: u32 = layout_specs.iter().map(|spec| spec.target_px).sum();
         let available_for_columns = if available_width_px == 0 {
             preferred_total
         } else {
             available_width_px.saturating_sub(spacing_total)
         };
 
-        fit_column_widths_to_available_space(
-            &mut widths,
-            &min_widths,
-            &max_widths,
-            available_for_columns,
-        );
+        let widths = fit_column_widths_deterministic(&layout_specs, available_for_columns);
 
         (widths, target_widths_by_key)
     }
@@ -1263,12 +2377,26 @@ impl UiManager {
             preserve_current_widths,
         );
         let row_height_px = self.compute_playlist_row_height_px(&widths);
-        let content_width = widths
-            .iter()
-            .copied()
-            .sum::<u32>()
-            .saturating_add(10u32.saturating_mul((widths.len().saturating_sub(1)) as u32));
-        self.playlist_column_target_widths_px = target_widths_by_key;
+        let content_width = widths.iter().copied().sum::<u32>().saturating_add(
+            PLAYLIST_COLUMN_SPACING_PX.saturating_mul((widths.len().saturating_sub(1)) as u32),
+        );
+        if preserve_current_widths {
+            for (key, value) in target_widths_by_key {
+                self.playlist_column_target_widths_px
+                    .entry(key)
+                    .or_insert(value);
+            }
+        } else {
+            self.playlist_column_target_widths_px = target_widths_by_key;
+        }
+
+        trace!(
+            "Playlist geometry: visible_band={} widths={:?} columns_content={} row_height={}",
+            self.playlist_columns_available_width_px,
+            widths,
+            content_width,
+            row_height_px
+        );
 
         if widths == self.playlist_column_widths_px
             && content_width == self.playlist_columns_content_width_px
@@ -1291,7 +2419,7 @@ impl UiManager {
         for (index, width_px) in widths_i32.iter().enumerate() {
             cursor_px = cursor_px.saturating_add((*width_px).max(0));
             if index + 1 < widths_i32.len() {
-                cursor_px = cursor_px.saturating_add(10);
+                cursor_px = cursor_px.saturating_add(PLAYLIST_COLUMN_SPACING_PX as i32);
             }
             gap_positions.push(cursor_px);
         }
@@ -1315,16 +2443,113 @@ impl UiManager {
         self.apply_playlist_column_layout_internal(true);
     }
 
-    fn status_text_from_track_metadata(track_metadata: &TrackMetadata) -> slint::SharedString {
-        let title = if track_metadata.title.is_empty() {
+    fn status_text_from_detailed_metadata(meta: &protocol::DetailedMetadata) -> String {
+        let title = if meta.title.is_empty() {
             "Unknown".to_string()
         } else {
-            track_metadata.title.clone()
+            meta.title.clone()
         };
-        if !track_metadata.artist.is_empty() {
-            format!("{} - {}", track_metadata.artist, title).into()
+        if !meta.artist.is_empty() {
+            format!("{} - {}", meta.artist, title)
         } else {
-            title.into()
+            title
+        }
+    }
+
+    fn status_selection_summary_text(selected_track_count: usize) -> String {
+        match selected_track_count {
+            0 => String::new(),
+            1 => "1 track selected".to_string(),
+            count => format!("{} tracks selected", count),
+        }
+    }
+
+    fn resolve_metadata_for_track_path_from_sources(
+        path: &Path,
+        track_paths: &[PathBuf],
+        track_metadata: &[TrackMetadata],
+        library_entries: &[LibraryEntry],
+    ) -> Option<protocol::DetailedMetadata> {
+        if let Some(index) = track_paths.iter().position(|candidate| candidate == path) {
+            if let Some(metadata) = track_metadata.get(index) {
+                return Some(Self::to_detailed_metadata(metadata));
+            }
+        }
+
+        if let Some(track) = library_entries.iter().find_map(|entry| match entry {
+            LibraryEntry::Track(track) if track.path.as_path() == path => Some(track),
+            _ => None,
+        }) {
+            return Some(Self::to_detailed_metadata_from_library_track(track));
+        }
+
+        None
+    }
+
+    fn resolve_metadata_for_track_path(&self, path: &Path) -> Option<protocol::DetailedMetadata> {
+        Self::resolve_metadata_for_track_path_from_sources(
+            path,
+            &self.track_paths,
+            &self.track_metadata,
+            &self.library_entries,
+        )
+        .or_else(|| Some(Self::fallback_detailed_metadata_from_path(path)))
+    }
+
+    fn set_playing_track(
+        &mut self,
+        path: Option<PathBuf>,
+        metadata_hint: Option<protocol::DetailedMetadata>,
+    ) -> bool {
+        let previous_path = self.playing_track.path.clone();
+        let path_changed = previous_path != path;
+        self.playing_track.path = path.clone();
+        self.playing_track.metadata = match (path.as_ref(), metadata_hint) {
+            (None, _) => None,
+            (Some(_), Some(metadata)) => Some(metadata),
+            (Some(path), None) if !path_changed => self.playing_track.metadata.clone(),
+            (Some(path), None) => self.resolve_metadata_for_track_path(path.as_path()),
+        };
+        path_changed
+    }
+
+    fn refresh_playing_track_metadata(&mut self) -> bool {
+        let Some(path) = self.playing_track.path.as_ref() else {
+            if self.playing_track.metadata.is_some() {
+                self.playing_track.metadata = None;
+                return true;
+            }
+            return false;
+        };
+        let resolved = self.resolve_metadata_for_track_path(path.as_path());
+        if Self::detailed_metadata_equal(&self.playing_track.metadata, &resolved) {
+            return false;
+        }
+        self.playing_track.metadata = resolved;
+        true
+    }
+
+    fn has_display_target(
+        path: &Option<PathBuf>,
+        metadata: &Option<protocol::DetailedMetadata>,
+    ) -> bool {
+        path.is_some() || metadata.is_some()
+    }
+
+    fn detailed_metadata_equal(
+        left: &Option<protocol::DetailedMetadata>,
+        right: &Option<protocol::DetailedMetadata>,
+    ) -> bool {
+        match (left.as_ref(), right.as_ref()) {
+            (None, None) => true,
+            (Some(left), Some(right)) => {
+                left.title == right.title
+                    && left.artist == right.artist
+                    && left.album == right.album
+                    && left.date == right.date
+                    && left.genre == right.genre
+            }
+            _ => false,
         }
     }
 
@@ -1334,25 +2559,52 @@ impl UiManager {
         track_metadata: &[TrackMetadata],
         playing_track_path: Option<&PathBuf>,
         playing_track_metadata: Option<&protocol::DetailedMetadata>,
+        prefer_playing: bool,
     ) -> (Option<PathBuf>, Option<protocol::DetailedMetadata>) {
-        if let Some(&selected_index) = selected_indices.first() {
-            let selected_path = track_paths.get(selected_index).cloned();
-            let selected_metadata = track_metadata
-                .get(selected_index)
-                .map(Self::to_detailed_metadata);
-            return (selected_path, selected_metadata);
-        }
+        let (selected_path, selected_metadata) =
+            if let Some(&selected_index) = selected_indices.first() {
+                (
+                    track_paths.get(selected_index).cloned(),
+                    track_metadata
+                        .get(selected_index)
+                        .map(Self::to_detailed_metadata),
+                )
+            } else {
+                (None, None)
+            };
 
         let playing_path = playing_track_path.cloned();
-        if let Some(path) = playing_track_path {
+        let (playing_path, playing_metadata) = if let Some(path) = playing_track_path {
             if let Some(index) = track_paths.iter().position(|candidate| candidate == path) {
                 if let Some(metadata) = track_metadata.get(index) {
-                    return (playing_path, Some(Self::to_detailed_metadata(metadata)));
+                    (playing_path, Some(Self::to_detailed_metadata(metadata)))
+                } else {
+                    (playing_path, playing_track_metadata.cloned())
                 }
+            } else {
+                (playing_path, playing_track_metadata.cloned())
+            }
+        } else {
+            (playing_path, playing_track_metadata.cloned())
+        };
+
+        if prefer_playing {
+            if Self::has_display_target(&playing_path, &playing_metadata) {
+                return (playing_path, playing_metadata);
+            }
+            if Self::has_display_target(&selected_path, &selected_metadata) {
+                return (selected_path, selected_metadata);
+            }
+        } else {
+            if Self::has_display_target(&selected_path, &selected_metadata) {
+                return (selected_path, selected_metadata);
+            }
+            if Self::has_display_target(&playing_path, &playing_metadata) {
+                return (playing_path, playing_metadata);
             }
         }
 
-        (playing_path, playing_track_metadata.cloned())
+        (None, None)
     }
 
     fn update_display_for_selection(
@@ -1360,6 +2612,7 @@ impl UiManager {
         selected_indices: &[usize],
         playing_track_path: Option<&PathBuf>,
         playing_track_metadata: Option<&protocol::DetailedMetadata>,
+        prefer_playing: bool,
     ) {
         let (display_path, display_metadata) = Self::resolve_display_target(
             selected_indices,
@@ -1367,6 +2620,7 @@ impl UiManager {
             &self.track_metadata,
             playing_track_path,
             playing_track_metadata,
+            prefer_playing,
         );
         self.update_cover_art(display_path.as_ref());
         let _ = self.bus_sender.send(protocol::Message::Playback(
@@ -1374,53 +2628,686 @@ impl UiManager {
         ));
     }
 
-    fn to_detailed_metadata_from_library_song(
-        library_song: &protocol::LibrarySong,
+    fn to_detailed_metadata_from_library_track(
+        library_track: &protocol::LibraryTrack,
     ) -> protocol::DetailedMetadata {
         protocol::DetailedMetadata {
-            title: library_song.title.clone(),
-            artist: library_song.artist.clone(),
-            album: library_song.album.clone(),
-            date: library_song.year.clone(),
-            genre: library_song.genre.clone(),
+            title: library_track.title.clone(),
+            artist: library_track.artist.clone(),
+            album: library_track.album.clone(),
+            date: library_track.year.clone(),
+            genre: library_track.genre.clone(),
+        }
+    }
+
+    fn fallback_detailed_metadata_from_path(path: &Path) -> protocol::DetailedMetadata {
+        if let Some(parsed) = metadata_tags::read_common_track_metadata(path) {
+            let has_any_metadata = !parsed.title.trim().is_empty()
+                || !parsed.artist.trim().is_empty()
+                || !parsed.album.trim().is_empty()
+                || !parsed.date.trim().is_empty()
+                || !parsed.year.trim().is_empty()
+                || !parsed.genre.trim().is_empty();
+            if has_any_metadata {
+                let title = if parsed.title.trim().is_empty() {
+                    path.file_stem()
+                        .and_then(|stem| stem.to_str())
+                        .or_else(|| path.file_name().and_then(|name| name.to_str()))
+                        .unwrap_or_default()
+                        .to_string()
+                } else {
+                    parsed.title
+                };
+                let date = if parsed.date.trim().is_empty() {
+                    parsed.year
+                } else {
+                    parsed.date
+                };
+                return protocol::DetailedMetadata {
+                    title,
+                    artist: parsed.artist,
+                    album: parsed.album,
+                    date,
+                    genre: parsed.genre,
+                };
+            }
+        }
+
+        let title = path
+            .file_stem()
+            .and_then(|stem| stem.to_str())
+            .or_else(|| path.file_name().and_then(|name| name.to_str()))
+            .unwrap_or_default()
+            .to_string();
+        protocol::DetailedMetadata {
+            title,
+            artist: String::new(),
+            album: String::new(),
+            date: String::new(),
+            genre: String::new(),
         }
     }
 
     fn resolve_library_display_target(
         selected_indices: &[usize],
         library_entries: &[LibraryEntry],
+        playlist_track_paths: &[PathBuf],
+        playlist_track_metadata: &[TrackMetadata],
         playing_track_path: Option<&PathBuf>,
         playing_track_metadata: Option<&protocol::DetailedMetadata>,
+        prefer_playing: bool,
     ) -> (Option<PathBuf>, Option<protocol::DetailedMetadata>) {
-        let selected_song = selected_indices
+        let selected_track = selected_indices
             .iter()
             .filter_map(|index| library_entries.get(*index))
             .find_map(|entry| match entry {
-                LibraryEntry::Song(song) => Some(song),
+                LibraryEntry::Track(track) => Some(track),
                 _ => None,
             });
-        if let Some(song) = selected_song {
-            return (
-                Some(song.path.clone()),
-                Some(Self::to_detailed_metadata_from_library_song(song)),
-            );
-        }
+        let (selected_path, selected_metadata) = if let Some(track) = selected_track {
+            (
+                Some(track.path.clone()),
+                Some(Self::to_detailed_metadata_from_library_track(track)),
+            )
+        } else {
+            (None, None)
+        };
 
         let playing_path = playing_track_path.cloned();
-        if let Some(path) = playing_track_path {
-            let playing_song = library_entries.iter().find_map(|entry| match entry {
-                LibraryEntry::Song(song) if &song.path == path => Some(song),
+        let (playing_path, playing_metadata) = if let Some(path) = playing_track_path {
+            let playing_track = library_entries.iter().find_map(|entry| match entry {
+                LibraryEntry::Track(track) if &track.path == path => Some(track),
                 _ => None,
             });
-            if let Some(song) = playing_song {
-                return (
+            if let Some(track) = playing_track {
+                (
                     playing_path,
-                    Some(Self::to_detailed_metadata_from_library_song(song)),
-                );
+                    Some(Self::to_detailed_metadata_from_library_track(track)),
+                )
+            } else if let Some(index) = playlist_track_paths
+                .iter()
+                .position(|candidate| candidate == path)
+            {
+                if let Some(metadata) = playlist_track_metadata.get(index) {
+                    (playing_path, Some(Self::to_detailed_metadata(metadata)))
+                } else if let Some(metadata) = playing_track_metadata {
+                    (playing_path, Some(metadata.clone()))
+                } else {
+                    (
+                        playing_path,
+                        Some(Self::fallback_detailed_metadata_from_path(path)),
+                    )
+                }
+            } else if let Some(metadata) = playing_track_metadata {
+                (playing_path, Some(metadata.clone()))
+            } else {
+                (
+                    playing_path,
+                    Some(Self::fallback_detailed_metadata_from_path(path)),
+                )
+            }
+        } else {
+            (playing_path, playing_track_metadata.cloned())
+        };
+
+        if prefer_playing {
+            if Self::has_display_target(&playing_path, &playing_metadata) {
+                return (playing_path, playing_metadata);
+            }
+            if Self::has_display_target(&selected_path, &selected_metadata) {
+                return (selected_path, selected_metadata);
+            }
+        } else {
+            if Self::has_display_target(&selected_path, &selected_metadata) {
+                return (selected_path, selected_metadata);
+            }
+            if Self::has_display_target(&playing_path, &playing_metadata) {
+                return (playing_path, playing_metadata);
             }
         }
 
-        (playing_path, playing_track_metadata.cloned())
+        (None, None)
+    }
+
+    fn resolve_display_target_with_mode(
+        selected_indices: &[usize],
+        track_paths: &[PathBuf],
+        track_metadata: &[TrackMetadata],
+        playing_track_path: Option<&PathBuf>,
+        playing_track_metadata: Option<&protocol::DetailedMetadata>,
+        mode: DisplayTargetResolutionMode,
+    ) -> (Option<PathBuf>, Option<protocol::DetailedMetadata>) {
+        match mode {
+            DisplayTargetResolutionMode::PreferSelection => Self::resolve_display_target(
+                selected_indices,
+                track_paths,
+                track_metadata,
+                playing_track_path,
+                playing_track_metadata,
+                false,
+            ),
+            DisplayTargetResolutionMode::PreferPlaying => Self::resolve_display_target(
+                selected_indices,
+                track_paths,
+                track_metadata,
+                playing_track_path,
+                playing_track_metadata,
+                true,
+            ),
+            DisplayTargetResolutionMode::SelectionOnly => Self::resolve_display_target(
+                selected_indices,
+                track_paths,
+                track_metadata,
+                None,
+                None,
+                false,
+            ),
+            DisplayTargetResolutionMode::PlayingOnly => Self::resolve_display_target(
+                &[],
+                track_paths,
+                track_metadata,
+                playing_track_path,
+                playing_track_metadata,
+                true,
+            ),
+        }
+    }
+
+    fn resolve_library_display_target_with_mode(
+        selected_indices: &[usize],
+        library_entries: &[LibraryEntry],
+        playlist_track_paths: &[PathBuf],
+        playlist_track_metadata: &[TrackMetadata],
+        playing_track_path: Option<&PathBuf>,
+        playing_track_metadata: Option<&protocol::DetailedMetadata>,
+        mode: DisplayTargetResolutionMode,
+    ) -> (Option<PathBuf>, Option<protocol::DetailedMetadata>) {
+        match mode {
+            DisplayTargetResolutionMode::PreferSelection => Self::resolve_library_display_target(
+                selected_indices,
+                library_entries,
+                playlist_track_paths,
+                playlist_track_metadata,
+                playing_track_path,
+                playing_track_metadata,
+                false,
+            ),
+            DisplayTargetResolutionMode::PreferPlaying => Self::resolve_library_display_target(
+                selected_indices,
+                library_entries,
+                playlist_track_paths,
+                playlist_track_metadata,
+                playing_track_path,
+                playing_track_metadata,
+                true,
+            ),
+            DisplayTargetResolutionMode::SelectionOnly => Self::resolve_library_display_target(
+                selected_indices,
+                library_entries,
+                playlist_track_paths,
+                playlist_track_metadata,
+                None,
+                None,
+                false,
+            ),
+            DisplayTargetResolutionMode::PlayingOnly => Self::resolve_library_display_target(
+                &[],
+                library_entries,
+                playlist_track_paths,
+                playlist_track_metadata,
+                playing_track_path,
+                playing_track_metadata,
+                true,
+            ),
+        }
+    }
+
+    fn display_resolution_mode_from_priority_code(
+        priority_code: i32,
+        last_event_priority: DisplayTargetPriority,
+    ) -> DisplayTargetResolutionMode {
+        match priority_code {
+            VIEWER_DISPLAY_PRIORITY_PREFER_SELECTION => {
+                DisplayTargetResolutionMode::PreferSelection
+            }
+            VIEWER_DISPLAY_PRIORITY_PREFER_NOW_PLAYING => {
+                DisplayTargetResolutionMode::PreferPlaying
+            }
+            VIEWER_DISPLAY_PRIORITY_SELECTION_ONLY => DisplayTargetResolutionMode::SelectionOnly,
+            VIEWER_DISPLAY_PRIORITY_NOW_PLAYING_ONLY => DisplayTargetResolutionMode::PlayingOnly,
+            _ => {
+                if last_event_priority == DisplayTargetPriority::Playing {
+                    DisplayTargetResolutionMode::PreferPlaying
+                } else {
+                    DisplayTargetResolutionMode::PreferSelection
+                }
+            }
+        }
+    }
+
+    fn viewer_panel_priority_index(priority_code: i32) -> usize {
+        match priority_code {
+            VIEWER_DISPLAY_PRIORITY_PREFER_SELECTION => 1,
+            VIEWER_DISPLAY_PRIORITY_PREFER_NOW_PLAYING => 2,
+            VIEWER_DISPLAY_PRIORITY_SELECTION_ONLY => 3,
+            VIEWER_DISPLAY_PRIORITY_NOW_PLAYING_ONLY => 4,
+            _ => 0,
+        }
+    }
+
+    fn viewer_panel_metadata_source_index(source_code: i32) -> usize {
+        match source_code {
+            VIEWER_METADATA_SOURCE_ALBUM_DESCRIPTION => 1,
+            VIEWER_METADATA_SOURCE_ARTIST_BIO => 2,
+            VIEWER_METADATA_SOURCE_TRACK => 0,
+            _ => 0,
+        }
+    }
+
+    fn viewer_panel_image_source_index(source_code: i32) -> usize {
+        match source_code {
+            VIEWER_IMAGE_SOURCE_ARTIST_IMAGE => 1,
+            VIEWER_IMAGE_SOURCE_ALBUM_ART => 0,
+            _ => 0,
+        }
+    }
+
+    fn viewer_track_context_for_display_target(
+        &self,
+        display_path: Option<&PathBuf>,
+        display_metadata: Option<&protocol::DetailedMetadata>,
+    ) -> ViewerTrackContext {
+        if let Some(path) = display_path {
+            if let Some(index) = self
+                .track_paths
+                .iter()
+                .position(|candidate| candidate == path)
+            {
+                if let Some(metadata) = self.track_metadata.get(index) {
+                    let artist = metadata.artist.trim().to_string();
+                    let album = metadata.album.trim().to_string();
+                    let album_artist = if metadata.album_artist.trim().is_empty() {
+                        artist.clone()
+                    } else {
+                        metadata.album_artist.trim().to_string()
+                    };
+                    return ViewerTrackContext {
+                        artist,
+                        album,
+                        album_artist,
+                    };
+                }
+            }
+
+            if let Some(library_track) = self.library_entries.iter().find_map(|entry| match entry {
+                LibraryEntry::Track(track) if &track.path == path => Some(track),
+                _ => None,
+            }) {
+                let artist = library_track.artist.trim().to_string();
+                let album = library_track.album.trim().to_string();
+                let album_artist = if library_track.album_artist.trim().is_empty() {
+                    artist.clone()
+                } else {
+                    library_track.album_artist.trim().to_string()
+                };
+                return ViewerTrackContext {
+                    artist,
+                    album,
+                    album_artist,
+                };
+            }
+        }
+
+        if let Some(metadata) = display_metadata {
+            let artist = metadata.artist.trim().to_string();
+            let album = metadata.album.trim().to_string();
+            let album_artist = artist.clone();
+            return ViewerTrackContext {
+                artist,
+                album,
+                album_artist,
+            };
+        }
+
+        ViewerTrackContext::default()
+    }
+
+    fn viewer_artist_entity_for_track_context(
+        context: &ViewerTrackContext,
+    ) -> Option<protocol::LibraryEnrichmentEntity> {
+        (!context.artist.is_empty()).then(|| protocol::LibraryEnrichmentEntity::Artist {
+            artist: context.artist.clone(),
+        })
+    }
+
+    fn viewer_album_entity_for_track_context(
+        context: &ViewerTrackContext,
+    ) -> Option<protocol::LibraryEnrichmentEntity> {
+        if context.album.is_empty() || context.album_artist.is_empty() {
+            return None;
+        }
+        Some(protocol::LibraryEnrichmentEntity::Album {
+            album: context.album.clone(),
+            album_artist: context.album_artist.clone(),
+        })
+    }
+
+    fn viewer_metadata_from_artist_bio_payload(
+        context: &ViewerTrackContext,
+        payload: &protocol::LibraryEnrichmentPayload,
+    ) -> Option<protocol::DetailedMetadata> {
+        if payload.status != protocol::LibraryEnrichmentStatus::Ready
+            || payload.blurb.trim().is_empty()
+        {
+            return None;
+        }
+        let title = if context.artist.is_empty() {
+            "Artist Bio".to_string()
+        } else {
+            context.artist.clone()
+        };
+        Some(protocol::DetailedMetadata {
+            title,
+            artist: payload.blurb.clone(),
+            album: String::new(),
+            date: String::new(),
+            genre: payload.source_name.clone(),
+        })
+    }
+
+    fn viewer_metadata_from_album_description_payload(
+        context: &ViewerTrackContext,
+        payload: &protocol::LibraryEnrichmentPayload,
+    ) -> Option<protocol::DetailedMetadata> {
+        if payload.status != protocol::LibraryEnrichmentStatus::Ready
+            || payload.blurb.trim().is_empty()
+        {
+            return None;
+        }
+        let title = if context.album.is_empty() {
+            "Album Description".to_string()
+        } else {
+            context.album.clone()
+        };
+        Some(protocol::DetailedMetadata {
+            title,
+            artist: payload.blurb.clone(),
+            album: String::new(),
+            date: String::new(),
+            genre: payload.source_name.clone(),
+        })
+    }
+
+    fn resolve_active_collection_display_target_with_mode(
+        &self,
+        mode: DisplayTargetResolutionMode,
+        playing_track_path: Option<&PathBuf>,
+        playing_track_metadata: Option<&protocol::DetailedMetadata>,
+    ) -> (Option<PathBuf>, Option<protocol::DetailedMetadata>) {
+        if self.collection_mode == COLLECTION_MODE_LIBRARY {
+            Self::resolve_library_display_target_with_mode(
+                &self.library_selected_indices,
+                &self.library_entries,
+                &self.track_paths,
+                &self.track_metadata,
+                playing_track_path,
+                playing_track_metadata,
+                mode,
+            )
+        } else {
+            Self::resolve_display_target_with_mode(
+                &self.selected_indices,
+                &self.track_paths,
+                &self.track_metadata,
+                playing_track_path,
+                playing_track_metadata,
+                mode,
+            )
+        }
+    }
+
+    fn resolve_cover_art_path_for_viewer_path(&mut self, track_path: &PathBuf) -> Option<PathBuf> {
+        let source_index = self
+            .track_paths
+            .iter()
+            .position(|candidate| candidate == track_path);
+        let mut cover_art_path =
+            source_index.and_then(|index| self.resolve_track_cover_art_path(index));
+        if cover_art_path.is_none() {
+            cover_art_path = self.resolve_library_cover_art_path(track_path);
+        }
+        if cover_art_path.is_none() {
+            cover_art_path = Self::find_local_cover_art(track_path.as_path());
+        }
+        if let Some(source_index) = source_index {
+            if let Some(slot) = self.track_cover_art_paths.get_mut(source_index) {
+                *slot = cover_art_path.clone();
+            }
+            if cover_art_path.is_some() {
+                self.track_cover_art_missing_tracks.remove(track_path);
+            } else {
+                self.track_cover_art_missing_tracks
+                    .insert(track_path.clone());
+            }
+        }
+        self.library_cover_art_paths
+            .insert(track_path.clone(), cover_art_path.clone());
+        cover_art_path
+    }
+
+    fn refresh_viewer_panel_models(
+        &self,
+        track_metadata_by_priority: Vec<Option<protocol::DetailedMetadata>>,
+        album_description_by_priority: Vec<Option<protocol::DetailedMetadata>>,
+        artist_bio_by_priority: Vec<Option<protocol::DetailedMetadata>>,
+        album_art_paths_by_priority: Vec<Option<PathBuf>>,
+        artist_image_paths_by_priority: Vec<Option<PathBuf>>,
+    ) {
+        let _ = self.ui.upgrade_in_event_loop(move |ui| {
+            let metadata_model = ui.get_layout_metadata_viewer_panels();
+            if let Some(vec_model) = metadata_model
+                .as_any()
+                .downcast_ref::<VecModel<LayoutMetadataViewerPanelModel>>()
+            {
+                let row_count = vec_model.row_count();
+                for row_index in 0..row_count {
+                    let Some(mut row_data) = vec_model.row_data(row_index) else {
+                        continue;
+                    };
+                    let priority_index =
+                        UiManager::viewer_panel_priority_index(row_data.display_priority);
+                    row_data.display_priority = priority_index as i32;
+                    let metadata_source_index =
+                        UiManager::viewer_panel_metadata_source_index(row_data.metadata_source);
+                    row_data.metadata_source = metadata_source_index as i32;
+                    let metadata = match metadata_source_index {
+                        1 => album_description_by_priority
+                            .get(priority_index)
+                            .and_then(|value| value.as_ref()),
+                        2 => artist_bio_by_priority
+                            .get(priority_index)
+                            .and_then(|value| value.as_ref()),
+                        _ => track_metadata_by_priority
+                            .get(priority_index)
+                            .and_then(|value| value.as_ref()),
+                    };
+                    if let Some(metadata) = metadata {
+                        row_data.display_title = metadata.title.as_str().into();
+                        row_data.display_artist = metadata.artist.as_str().into();
+                        row_data.display_album = metadata.album.as_str().into();
+                        row_data.display_date = metadata.date.as_str().into();
+                        row_data.display_genre = metadata.genre.as_str().into();
+                    } else {
+                        row_data.display_title = "".into();
+                        row_data.display_artist = "".into();
+                        row_data.display_album = "".into();
+                        row_data.display_date = "".into();
+                        row_data.display_genre = "".into();
+                    }
+                    vec_model.set_row_data(row_index, row_data);
+                }
+            }
+
+            let album_art_model = ui.get_layout_album_art_viewer_panels();
+            if let Some(vec_model) = album_art_model
+                .as_any()
+                .downcast_ref::<VecModel<LayoutAlbumArtViewerPanelModel>>()
+            {
+                let row_count = vec_model.row_count();
+                for row_index in 0..row_count {
+                    let Some(mut row_data) = vec_model.row_data(row_index) else {
+                        continue;
+                    };
+                    let priority_index =
+                        UiManager::viewer_panel_priority_index(row_data.display_priority);
+                    row_data.display_priority = priority_index as i32;
+                    let image_source_index =
+                        UiManager::viewer_panel_image_source_index(row_data.image_source);
+                    row_data.image_source = image_source_index as i32;
+                    let art_path = match image_source_index {
+                        1 => artist_image_paths_by_priority.get(priority_index),
+                        _ => album_art_paths_by_priority.get(priority_index),
+                    }
+                    .cloned()
+                    .unwrap_or(None);
+                    let art_source = art_path
+                        .as_ref()
+                        .and_then(|path| UiManager::try_load_cover_art_image(path))
+                        .unwrap_or_default();
+                    let has_art = art_path.is_some();
+                    row_data.art_source = art_source;
+                    row_data.has_art = has_art;
+                    vec_model.set_row_data(row_index, row_data);
+                }
+            }
+        });
+    }
+
+    fn update_viewer_panel_content_for_all_priorities(
+        &mut self,
+        playing_track_path: Option<&PathBuf>,
+        playing_track_metadata: Option<&protocol::DetailedMetadata>,
+    ) {
+        let priority_codes = [
+            VIEWER_DISPLAY_PRIORITY_DEFAULT,
+            VIEWER_DISPLAY_PRIORITY_PREFER_SELECTION,
+            VIEWER_DISPLAY_PRIORITY_PREFER_NOW_PLAYING,
+            VIEWER_DISPLAY_PRIORITY_SELECTION_ONLY,
+            VIEWER_DISPLAY_PRIORITY_NOW_PLAYING_ONLY,
+        ];
+        let mut track_metadata_by_priority = Vec::with_capacity(priority_codes.len());
+        let mut display_paths_by_priority = Vec::with_capacity(priority_codes.len());
+        let mut display_contexts_by_priority = Vec::with_capacity(priority_codes.len());
+        let mut album_entities_by_priority = Vec::with_capacity(priority_codes.len());
+        let mut artist_entities_by_priority = Vec::with_capacity(priority_codes.len());
+        for priority_code in priority_codes {
+            let mode = Self::display_resolution_mode_from_priority_code(
+                priority_code,
+                self.display_target_priority,
+            );
+            let (display_path, display_metadata) = self
+                .resolve_active_collection_display_target_with_mode(
+                    mode,
+                    playing_track_path,
+                    playing_track_metadata,
+                );
+            let display_context = self.viewer_track_context_for_display_target(
+                display_path.as_ref(),
+                display_metadata.as_ref(),
+            );
+            let album_entity = Self::viewer_album_entity_for_track_context(&display_context);
+            let artist_entity = Self::viewer_artist_entity_for_track_context(&display_context);
+            display_paths_by_priority.push(display_path);
+            track_metadata_by_priority.push(display_metadata);
+            display_contexts_by_priority.push(display_context);
+            album_entities_by_priority.push(album_entity);
+            artist_entities_by_priority.push(artist_entity);
+        }
+
+        let mut cover_art_cache: HashMap<Option<PathBuf>, Option<PathBuf>> = HashMap::new();
+        let mut album_art_paths_by_priority = Vec::with_capacity(display_paths_by_priority.len());
+        for display_path in &display_paths_by_priority {
+            let cache_key = display_path.clone();
+            let entry = cover_art_cache.entry(cache_key.clone()).or_insert_with(|| {
+                if let Some(path) = cache_key.as_ref() {
+                    self.resolve_cover_art_path_for_viewer_path(path)
+                } else {
+                    None
+                }
+            });
+            album_art_paths_by_priority.push(entry.clone());
+        }
+
+        let mut album_description_by_priority = Vec::with_capacity(priority_codes.len());
+        let mut artist_bio_by_priority = Vec::with_capacity(priority_codes.len());
+        let mut artist_image_paths_by_priority = Vec::with_capacity(priority_codes.len());
+        for index in 0..priority_codes.len() {
+            let context = display_contexts_by_priority
+                .get(index)
+                .cloned()
+                .unwrap_or_default();
+            let album_entity = album_entities_by_priority.get(index).cloned().flatten();
+            let artist_entity = artist_entities_by_priority.get(index).cloned().flatten();
+
+            if let Some(entity) = album_entity.as_ref() {
+                self.request_enrichment(
+                    entity.clone(),
+                    protocol::LibraryEnrichmentPriority::Interactive,
+                );
+            }
+            if let Some(entity) = artist_entity.as_ref() {
+                self.request_enrichment(
+                    entity.clone(),
+                    protocol::LibraryEnrichmentPriority::Interactive,
+                );
+            }
+
+            let album_description = album_entity
+                .as_ref()
+                .and_then(|entity| self.library_enrichment.get(entity))
+                .and_then(|payload| {
+                    Self::viewer_metadata_from_album_description_payload(&context, payload)
+                });
+            album_description_by_priority.push(album_description);
+
+            let artist_bio = artist_entity
+                .as_ref()
+                .and_then(|entity| self.library_enrichment.get(entity))
+                .and_then(|payload| {
+                    Self::viewer_metadata_from_artist_bio_payload(&context, payload)
+                });
+            artist_bio_by_priority.push(artist_bio);
+
+            let artist_image_path = artist_entity.as_ref().and_then(|entity| match entity {
+                protocol::LibraryEnrichmentEntity::Artist { artist } => {
+                    self.artist_enrichment_image_path(artist)
+                }
+                _ => None,
+            });
+            artist_image_paths_by_priority.push(artist_image_path);
+        }
+
+        self.refresh_viewer_panel_models(
+            track_metadata_by_priority,
+            album_description_by_priority,
+            artist_bio_by_priority,
+            album_art_paths_by_priority,
+            artist_image_paths_by_priority,
+        );
+    }
+
+    fn update_library_playing_index(&mut self) {
+        if let Some(playing_path) = &self.playing_track.path {
+            self.library_playing_index = self.library_entries.iter().position(|entry| {
+                if let LibraryEntry::Track(track) = entry {
+                    &track.path == playing_path
+                } else {
+                    false
+                }
+            });
+        } else {
+            self.library_playing_index = None;
+        }
     }
 
     fn update_display_for_library_selection(
@@ -1428,12 +3315,16 @@ impl UiManager {
         selected_indices: &[usize],
         playing_track_path: Option<&PathBuf>,
         playing_track_metadata: Option<&protocol::DetailedMetadata>,
+        prefer_playing: bool,
     ) {
         let (display_path, display_metadata) = Self::resolve_library_display_target(
             selected_indices,
             &self.library_entries,
+            &self.track_paths,
+            &self.track_metadata,
             playing_track_path,
             playing_track_metadata,
+            prefer_playing,
         );
         self.update_cover_art(display_path.as_ref());
         let _ = self.bus_sender.send(protocol::Message::Playback(
@@ -1441,26 +3332,31 @@ impl UiManager {
         ));
     }
 
-    fn update_display_for_active_collection(
-        &mut self,
-        playing_track_path: Option<&PathBuf>,
-        playing_track_metadata: Option<&protocol::DetailedMetadata>,
-    ) {
+    fn update_display_for_active_collection(&mut self) {
+        let playing_track_path = self.playing_track.path.clone();
+        let playing_track_metadata = self.playing_track.metadata.clone();
+        let prefer_playing = self.display_target_priority == DisplayTargetPriority::Playing;
         if self.collection_mode == COLLECTION_MODE_LIBRARY {
             let selected_indices = self.library_selected_indices.clone();
             self.update_display_for_library_selection(
                 &selected_indices,
-                playing_track_path,
-                playing_track_metadata,
+                playing_track_path.as_ref(),
+                playing_track_metadata.as_ref(),
+                prefer_playing,
             );
         } else {
             let selected_indices = self.selected_indices.clone();
             self.update_display_for_selection(
                 &selected_indices,
-                playing_track_path,
-                playing_track_metadata,
+                playing_track_path.as_ref(),
+                playing_track_metadata.as_ref(),
+                prefer_playing,
             );
         }
+        self.update_viewer_panel_content_for_all_priorities(
+            playing_track_path.as_ref(),
+            playing_track_metadata.as_ref(),
+        );
     }
 
     fn next_properties_request_id(&mut self) -> u64 {
@@ -1496,13 +3392,14 @@ impl UiManager {
             return None;
         }
         let source_index = *self.library_selected_indices.first()?;
-        let song = match self.library_entries.get(source_index)? {
-            LibraryEntry::Song(song) => song,
+        let track = match self.library_entries.get(source_index)? {
+            LibraryEntry::Track(track) => track,
             _ => return None,
         };
-        let title = song.title.trim().to_string();
+        let title = track.title.trim().to_string();
         let display_title = if title.is_empty() {
-            song.path
+            track
+                .path
                 .file_name()
                 .and_then(|name| name.to_str())
                 .map(str::to_string)
@@ -1510,7 +3407,7 @@ impl UiManager {
         } else {
             title
         };
-        Some((song.path.clone(), display_title))
+        Some((track.path.clone(), display_title))
     }
 
     fn active_properties_target(&self) -> Option<(PathBuf, String)> {
@@ -1769,7 +3666,7 @@ impl UiManager {
             }
         }
 
-        if self.current_playing_track_path.as_deref() == Some(path) {
+        if self.playing_track.path.as_deref() == Some(path) {
             let detailed = protocol::DetailedMetadata {
                 title: summary.title.clone(),
                 artist: summary.artist.clone(),
@@ -1777,7 +3674,7 @@ impl UiManager {
                 date,
                 genre: summary.genre.clone(),
             };
-            if self.current_playing_track_metadata.as_ref().map(|meta| {
+            if self.playing_track.metadata.as_ref().map(|meta| {
                 meta.title == detailed.title
                     && meta.artist == detailed.artist
                     && meta.album == detailed.album
@@ -1785,7 +3682,7 @@ impl UiManager {
                     && meta.genre == detailed.genre
             }) != Some(true)
             {
-                self.current_playing_track_metadata = Some(detailed);
+                self.playing_track.metadata = Some(detailed);
                 changed = true;
             }
         }
@@ -1800,39 +3697,39 @@ impl UiManager {
     ) -> bool {
         let mut changed = false;
         for entry in &mut self.library_entries {
-            let LibraryEntry::Song(song) = entry else {
+            let LibraryEntry::Track(track) = entry else {
                 continue;
             };
-            if song.path.as_path() != path {
+            if track.path.as_path() != path {
                 continue;
             }
 
-            if song.title != summary.title {
-                song.title = summary.title.clone();
+            if track.title != summary.title {
+                track.title = summary.title.clone();
                 changed = true;
             }
-            if song.artist != summary.artist {
-                song.artist = summary.artist.clone();
+            if track.artist != summary.artist {
+                track.artist = summary.artist.clone();
                 changed = true;
             }
-            if song.album != summary.album {
-                song.album = summary.album.clone();
+            if track.album != summary.album {
+                track.album = summary.album.clone();
                 changed = true;
             }
-            if song.album_artist != summary.album_artist {
-                song.album_artist = summary.album_artist.clone();
+            if track.album_artist != summary.album_artist {
+                track.album_artist = summary.album_artist.clone();
                 changed = true;
             }
-            if song.genre != summary.genre {
-                song.genre = summary.genre.clone();
+            if track.genre != summary.genre {
+                track.genre = summary.genre.clone();
                 changed = true;
             }
-            if song.year != summary.year {
-                song.year = summary.year.clone();
+            if track.year != summary.year {
+                track.year = summary.year.clone();
                 changed = true;
             }
-            if song.track_number != summary.track_number {
-                song.track_number = summary.track_number.clone();
+            if track.track_number != summary.track_number {
+                track.track_number = summary.track_number.clone();
                 changed = true;
             }
         }
@@ -1871,12 +3768,8 @@ impl UiManager {
             self.request_library_view_data();
         }
 
-        let playing_track_path = self.current_playing_track_path.clone();
-        let playing_track_metadata = self.current_playing_track_metadata.clone();
-        self.update_display_for_active_collection(
-            playing_track_path.as_ref(),
-            playing_track_metadata.as_ref(),
-        );
+        self.refresh_playing_track_metadata();
+        self.update_display_for_active_collection();
 
         if let Some(warning) = db_sync_warning {
             self.library_status_text = warning.clone();
@@ -1949,6 +3842,68 @@ impl UiManager {
             .position(|&candidate| candidate == source_index)
     }
 
+    fn map_library_source_to_view_index(&self, source_index: usize) -> Option<usize> {
+        if self.library_view_indices.is_empty() {
+            return (source_index < self.library_entries.len()).then_some(source_index);
+        }
+        self.library_view_indices
+            .iter()
+            .position(|&candidate| candidate == source_index)
+    }
+
+    fn center_playlist_view_on_playing_track(&mut self) {
+        let Some(source_index) = self.active_playing_index else {
+            return;
+        };
+        let Some(view_index) = self.map_source_to_view_index(source_index) else {
+            return;
+        };
+        self.playlist_scroll_center_token = self.playlist_scroll_center_token.wrapping_add(1);
+        let token = self.playlist_scroll_center_token;
+        let row = view_index as i32;
+        let _ = self.ui.upgrade_in_event_loop(move |ui| {
+            ui.set_playlist_scroll_target_row(row);
+            ui.set_playlist_scroll_center_token(token);
+        });
+    }
+
+    fn center_library_view_on_playing_track(&mut self) {
+        let Some(source_index) = self.library_playing_index else {
+            return;
+        };
+        let Some(view_index) = self.map_library_source_to_view_index(source_index) else {
+            return;
+        };
+        self.library_scroll_center_token = self.library_scroll_center_token.wrapping_add(1);
+        let immediate_token = self.library_scroll_center_token;
+        self.library_scroll_center_token = self.library_scroll_center_token.wrapping_add(1);
+        let deferred_token = self.library_scroll_center_token;
+        let row = view_index as i32;
+        let ui_handle = self.ui.clone();
+        let _ = self.ui.upgrade_in_event_loop(move |ui| {
+            ui.set_library_scroll_target_row(row);
+            ui.set_library_scroll_center_token(immediate_token);
+            let deferred_ui_handle = ui_handle.clone();
+            slint::Timer::single_shot(Duration::from_millis(24), move || {
+                if let Some(ui) = deferred_ui_handle.upgrade() {
+                    ui.set_library_scroll_target_row(row);
+                    ui.set_library_scroll_center_token(deferred_token);
+                }
+            });
+        });
+    }
+
+    fn auto_scroll_active_collection_to_playing_track(&mut self) {
+        if !self.auto_scroll_to_playing_track {
+            return;
+        }
+        if self.collection_mode == COLLECTION_MODE_LIBRARY {
+            self.center_library_view_on_playing_track();
+        } else {
+            self.center_playlist_view_on_playing_track();
+        }
+    }
+
     fn map_library_view_to_source_index(&self, view_index: usize) -> Option<usize> {
         if self.library_view_indices.is_empty() {
             if self.library_entries.is_empty() {
@@ -1971,36 +3926,36 @@ impl UiManager {
             return true;
         }
         match entry {
-            LibraryEntry::Song(song) => {
-                Self::library_text_matches_search(&song.title, normalized_query)
-                    || Self::library_text_matches_search(&song.artist, normalized_query)
-                    || Self::library_text_matches_search(&song.album, normalized_query)
-                    || Self::library_text_matches_search(&song.album_artist, normalized_query)
-                    || Self::library_text_matches_search(&song.genre, normalized_query)
-                    || Self::library_text_matches_search(&song.year, normalized_query)
-                    || Self::library_text_matches_search(&song.track_number, normalized_query)
+            LibraryEntry::Track(track) => {
+                Self::library_text_matches_search(&track.title, normalized_query)
+                    || Self::library_text_matches_search(&track.artist, normalized_query)
+                    || Self::library_text_matches_search(&track.album, normalized_query)
+                    || Self::library_text_matches_search(&track.album_artist, normalized_query)
+                    || Self::library_text_matches_search(&track.genre, normalized_query)
+                    || Self::library_text_matches_search(&track.year, normalized_query)
+                    || Self::library_text_matches_search(&track.track_number, normalized_query)
                     || Self::library_text_matches_search(
-                        &song.path.to_string_lossy(),
+                        &track.path.to_string_lossy(),
                         normalized_query,
                     )
             }
             LibraryEntry::Artist(artist) => {
                 Self::library_text_matches_search(&artist.artist, normalized_query)
                     || artist.album_count.to_string().contains(normalized_query)
-                    || artist.song_count.to_string().contains(normalized_query)
+                    || artist.track_count.to_string().contains(normalized_query)
             }
             LibraryEntry::Album(album) => {
                 Self::library_text_matches_search(&album.album, normalized_query)
                     || Self::library_text_matches_search(&album.album_artist, normalized_query)
-                    || album.song_count.to_string().contains(normalized_query)
+                    || album.track_count.to_string().contains(normalized_query)
             }
             LibraryEntry::Genre(genre) => {
                 Self::library_text_matches_search(&genre.genre, normalized_query)
-                    || genre.song_count.to_string().contains(normalized_query)
+                    || genre.track_count.to_string().contains(normalized_query)
             }
             LibraryEntry::Decade(decade) => {
                 Self::library_text_matches_search(&decade.decade, normalized_query)
-                    || decade.song_count.to_string().contains(normalized_query)
+                    || decade.track_count.to_string().contains(normalized_query)
             }
         }
     }
@@ -2033,6 +3988,12 @@ impl UiManager {
         self.selection_anchor_track_id = self.track_ids.get(source_index).cloned();
     }
 
+    fn prune_unavailable_track_ids(&mut self) {
+        let active_track_ids: HashSet<String> = self.track_ids.iter().cloned().collect();
+        self.unavailable_track_ids
+            .retain(|track_id| active_track_ids.contains(track_id));
+    }
+
     fn build_shift_selection_from_view_order(
         view_indices: &[usize],
         anchor_source_index: Option<usize>,
@@ -2057,6 +4018,21 @@ impl UiManager {
         let start = anchor_view_index.min(clicked_view_index);
         let end = anchor_view_index.max(clicked_view_index);
         view_indices[start..=end].to_vec()
+    }
+
+    fn resolve_shift_anchor_source_index(
+        selected_indices: &[usize],
+        current_anchor_source_index: Option<usize>,
+    ) -> Option<usize> {
+        if selected_indices.is_empty() {
+            return None;
+        }
+        if let Some(anchor_source_index) = current_anchor_source_index {
+            if selected_indices.contains(&anchor_source_index) {
+                return Some(anchor_source_index);
+            }
+        }
+        selected_indices.last().copied()
     }
 
     fn active_sort_column_state(&self) -> Option<(usize, String)> {
@@ -2158,6 +4134,15 @@ impl UiManager {
         });
     }
 
+    fn sync_library_scan_status_to_ui(&self) {
+        let scan_in_progress = self.library_scan_in_progress;
+        let status_text = self.library_status_text.clone();
+        let _ = self.ui.upgrade_in_event_loop(move |ui| {
+            ui.set_library_scan_in_progress(scan_in_progress);
+            ui.set_library_status_text(status_text.into());
+        });
+    }
+
     fn sync_filter_state_to_ui(&self) {
         let sort_states = self.sort_state_model();
         let filter_active = self.is_filter_view_active();
@@ -2177,6 +4162,7 @@ impl UiManager {
     }
 
     fn rebuild_track_model(&mut self) {
+        self.prune_unavailable_track_ids();
         let normalized_query = Self::normalized_search_query(&self.filter_search_query);
         let mut active_sort = self.active_sort_column_state();
 
@@ -2201,7 +4187,15 @@ impl UiManager {
 
         let mut rows: Vec<ViewRow> = Vec::with_capacity(self.track_metadata.len());
         for (source_index, metadata) in self.track_metadata.iter().enumerate() {
-            let values = Self::build_playlist_row_values(metadata, &self.playlist_columns);
+            let mut values = Self::build_playlist_row_values(metadata, &self.playlist_columns);
+            let track_unavailable = self
+                .track_ids
+                .get(source_index)
+                .map(|track_id| self.unavailable_track_ids.contains(track_id))
+                .unwrap_or(false);
+            if track_unavailable {
+                Self::apply_unavailable_title_override(&mut values, &self.playlist_columns);
+            }
             if !normalized_query.is_empty()
                 && !values
                     .iter()
@@ -2238,6 +4232,8 @@ impl UiManager {
 
         self.view_indices = rows.iter().map(|row| row.source_index).collect();
         let selected_set: HashSet<usize> = self.selected_indices.iter().copied().collect();
+        let selected_track_count = selected_set.len();
+        let selection_summary_text = Self::status_selection_summary_text(selected_track_count);
         let active_playing_index = self.active_playing_index;
         let playback_active = self.playback_active;
         let selected_view_index = self
@@ -2250,10 +4246,18 @@ impl UiManager {
             .and_then(|source_index| self.map_source_to_view_index(source_index))
             .map(|index| index as i32)
             .unwrap_or(-1);
-        let row_data: Vec<(Vec<String>, Option<PathBuf>, bool, String)> = rows
+        type TrackRowPayload = (Vec<String>, Option<PathBuf>, String, bool, String, bool);
+        let row_data: Vec<TrackRowPayload> = rows
             .into_iter()
             .map(|row| {
-                let status = if Some(row.source_index) == active_playing_index {
+                let track_unavailable = self
+                    .track_ids
+                    .get(row.source_index)
+                    .map(|track_id| self.unavailable_track_ids.contains(track_id))
+                    .unwrap_or(false);
+                let status = if track_unavailable {
+                    ""
+                } else if Some(row.source_index) == active_playing_index {
                     if playback_active {
                         "▶️"
                     } else {
@@ -2265,40 +4269,41 @@ impl UiManager {
                 let album_art_path = album_art_column_visible
                     .then(|| self.row_cover_art_path(row.source_index))
                     .flatten();
+                let source_badge = self
+                    .track_paths
+                    .get(row.source_index)
+                    .map(|path| Self::source_badge_for_track_path(path.as_path()))
+                    .unwrap_or_default();
                 (
                     row.values,
                     album_art_path,
+                    source_badge,
                     selected_set.contains(&row.source_index),
                     status.to_string(),
+                    track_unavailable,
                 )
             })
             .collect();
 
         let _ = self.ui.upgrade_in_event_loop(move |ui| {
-            let track_model_strong = ui.get_track_model();
-            let track_model = track_model_strong
-                .as_any()
-                .downcast_ref::<VecModel<TrackRowData>>()
-                .expect("VecModel<TrackRowData> expected");
-
-            while track_model.row_count() > 0 {
-                track_model.remove(0);
-            }
-
-            for (values, album_art_path, selected, status) in row_data {
+            let mut rows = Vec::with_capacity(row_data.len());
+            for (values, album_art_path, source_badge, selected, status, unavailable) in row_data {
                 let values_shared: Vec<slint::SharedString> =
                     values.into_iter().map(Into::into).collect();
-                let album_art = UiManager::load_track_row_cover_art_image(album_art_path.as_ref());
-                track_model.push(TrackRowData {
+                rows.push(TrackRowData {
                     status: status.into(),
                     values: ModelRc::from(values_shared.as_slice()),
-                    album_art,
+                    album_art: UiManager::load_track_row_cover_art_image(album_art_path.as_ref()),
+                    source_badge: source_badge.into(),
                     selected,
+                    unavailable,
                 });
             }
+            UiManager::update_or_replace_track_model(&ui, rows);
 
             ui.set_selected_track_index(selected_view_index);
             ui.set_playing_track_index(playing_view_index);
+            ui.set_status_selection_summary(selection_summary_text.into());
         });
 
         self.sync_filter_state_to_ui();
@@ -2322,6 +4327,10 @@ impl UiManager {
 
     fn set_playlist_search_query(&mut self, query: String) {
         self.filter_search_visible = true;
+        if self.filter_search_query == query {
+            self.sync_filter_state_to_ui();
+            return;
+        }
         self.filter_search_query = query;
         self.rebuild_track_model();
     }
@@ -2349,7 +4358,11 @@ impl UiManager {
         self.library_search_visible = false;
         if !self.library_search_query.is_empty() {
             self.library_search_query.clear();
-            self.sync_library_ui();
+            if matches!(self.current_library_view(), LibraryViewState::GlobalSearch) {
+                self.request_library_view_data();
+            } else {
+                self.sync_library_ui();
+            }
         } else {
             self.sync_library_search_state_to_ui();
         }
@@ -2357,8 +4370,19 @@ impl UiManager {
 
     fn set_library_search_query(&mut self, query: String) {
         self.library_search_visible = true;
+        if self.library_search_query == query {
+            self.sync_library_search_state_to_ui();
+            return;
+        }
         self.library_search_query = query;
-        self.sync_library_ui();
+        if matches!(self.current_library_view(), LibraryViewState::GlobalSearch)
+            && !self.library_search_query.trim().is_empty()
+            && self.library_entries.is_empty()
+        {
+            self.request_library_view_data();
+        } else {
+            self.sync_library_ui();
+        }
     }
 
     fn open_global_library_search(&mut self) {
@@ -2469,17 +4493,15 @@ impl UiManager {
             .and_then(|playing_id| self.track_ids.iter().position(|id| id == playing_id));
         if self.active_playing_index.is_none() {
             self.playback_active = false;
-            self.current_playing_track_path = None;
-            self.current_playing_track_metadata = None;
+            self.playing_track = PlayingTrackState::default();
         }
 
         self.reset_filter_state();
 
         self.refresh_playlist_column_content_targets();
         self.apply_playlist_column_layout();
-        let playing_path = self.current_playing_track_path.clone();
-        let playing_metadata = self.current_playing_track_metadata.clone();
-        self.update_display_for_active_collection(playing_path.as_ref(), playing_metadata.as_ref());
+        self.refresh_playing_track_metadata();
+        self.update_display_for_active_collection();
         self.rebuild_track_model();
     }
 
@@ -2554,23 +4576,23 @@ impl UiManager {
                 continue;
             };
             let (key, count) = match entry {
-                LibraryEntry::Song(song) => {
-                    (format!("song:{}", song.path.to_string_lossy()), 1usize)
+                LibraryEntry::Track(track) => {
+                    (format!("track:{}", track.path.to_string_lossy()), 1usize)
                 }
                 LibraryEntry::Artist(artist) => (
                     format!("artist:{}", artist.artist),
-                    artist.song_count as usize,
+                    artist.track_count as usize,
                 ),
                 LibraryEntry::Album(album) => (
                     format!("album:{}\u{001f}{}", album.album, album.album_artist),
-                    album.song_count as usize,
+                    album.track_count as usize,
                 ),
                 LibraryEntry::Genre(genre) => {
-                    (format!("genre:{}", genre.genre), genre.song_count as usize)
+                    (format!("genre:{}", genre.genre), genre.track_count as usize)
                 }
                 LibraryEntry::Decade(decade) => (
                     format!("decade:{}", decade.decade),
-                    decade.song_count as usize,
+                    decade.track_count as usize,
                 ),
             };
             if seen.insert(key) {
@@ -2600,6 +4622,37 @@ impl UiManager {
         );
     }
 
+    fn request_library_remove_selection_confirmation(&mut self) {
+        let selections = self.build_library_selection_specs();
+        if selections.is_empty() {
+            return;
+        }
+        self.pending_library_remove_selections = selections;
+        let _ = self.ui.upgrade_in_event_loop(move |ui| {
+            ui.set_show_library_remove_confirm(true);
+        });
+    }
+
+    fn confirm_library_remove_selection(&mut self) {
+        let selections = std::mem::take(&mut self.pending_library_remove_selections);
+        let _ = self.ui.upgrade_in_event_loop(move |ui| {
+            ui.set_show_library_remove_confirm(false);
+        });
+        if selections.is_empty() {
+            return;
+        }
+        let _ = self.bus_sender.send(protocol::Message::Library(
+            protocol::LibraryMessage::RemoveSelectionFromLibrary { selections },
+        ));
+    }
+
+    fn cancel_library_remove_selection(&mut self) {
+        self.pending_library_remove_selections.clear();
+        let _ = self.ui.upgrade_in_event_loop(move |ui| {
+            ui.set_show_library_remove_confirm(false);
+        });
+    }
+
     fn paste_copied_tracks(&mut self) {
         if !self.copied_track_paths.is_empty() {
             self.pending_paste_feedback = true;
@@ -2614,17 +4667,23 @@ impl UiManager {
         }
 
         self.pending_paste_feedback = true;
+        // Route library-copy paste through playlist paste handling so insertion
+        // stays anchored after current selection (or appends when no selection).
         let _ = self.bus_sender.send(protocol::Message::Library(
-            protocol::LibraryMessage::AddSelectionToPlaylists {
+            protocol::LibraryMessage::PasteSelectionToActivePlaylist {
                 selections: self.copied_library_selections.clone(),
-                playlist_ids: vec![self.active_playlist_id.clone()],
             },
         ));
     }
 
+    fn cut_selected_library_items(&mut self) {
+        self.copy_selected_library_items();
+        self.request_library_remove_selection_confirmation();
+    }
+
     fn cut_selected_tracks(&mut self) {
         if self.collection_mode == COLLECTION_MODE_LIBRARY {
-            self.copy_selected_library_items();
+            self.cut_selected_library_items();
             return;
         }
         if self.is_filter_view_active() || self.selected_indices.is_empty() {
@@ -2640,18 +4699,52 @@ impl UiManager {
         self.library_view_stack
             .last()
             .cloned()
-            .unwrap_or(LibraryViewState::SongsRoot)
+            .unwrap_or(LibraryViewState::TracksRoot)
+    }
+
+    fn scroll_view_key_for_library_view(view: &LibraryViewState) -> Option<LibraryScrollViewKey> {
+        match view {
+            LibraryViewState::TracksRoot => Some(LibraryScrollViewKey::TracksRoot),
+            LibraryViewState::ArtistsRoot => Some(LibraryScrollViewKey::ArtistsRoot),
+            LibraryViewState::AlbumsRoot => Some(LibraryScrollViewKey::AlbumsRoot),
+            LibraryViewState::GenresRoot => Some(LibraryScrollViewKey::GenresRoot),
+            LibraryViewState::DecadesRoot => Some(LibraryScrollViewKey::DecadesRoot),
+            LibraryViewState::GlobalSearch => Some(LibraryScrollViewKey::GlobalSearch),
+            LibraryViewState::ArtistDetail { .. }
+            | LibraryViewState::AlbumDetail { .. }
+            | LibraryViewState::GenreDetail { .. }
+            | LibraryViewState::DecadeDetail { .. } => None,
+        }
+    }
+
+    fn remember_scroll_position_for_view(&mut self, view: &LibraryViewState, first_row: usize) {
+        if let Some(key) = Self::scroll_view_key_for_library_view(view) {
+            self.library_scroll_positions.insert(key, first_row);
+        }
+    }
+
+    fn remember_current_library_scroll_position(&mut self) {
+        let current_view = self.current_library_view();
+        self.remember_scroll_position_for_view(
+            &current_view,
+            self.library_artist_prefetch_first_row,
+        );
+    }
+
+    fn saved_scroll_position_for_view(&self, view: &LibraryViewState) -> Option<usize> {
+        let key = Self::scroll_view_key_for_library_view(view)?;
+        self.library_scroll_positions.get(&key).copied()
     }
 
     fn current_library_root_index(&self) -> i32 {
         match self.library_view_stack.first() {
-            Some(LibraryViewState::SongsRoot) => 0,
+            Some(LibraryViewState::TracksRoot) => 0,
             Some(LibraryViewState::ArtistsRoot) => 1,
             Some(LibraryViewState::AlbumsRoot) => 2,
             Some(LibraryViewState::GenresRoot) => 3,
             Some(LibraryViewState::DecadesRoot) => 4,
             Some(LibraryViewState::GlobalSearch) => match self.library_view_stack.first() {
-                Some(LibraryViewState::SongsRoot) => 0,
+                Some(LibraryViewState::TracksRoot) => 0,
                 Some(LibraryViewState::ArtistsRoot) => 1,
                 Some(LibraryViewState::AlbumsRoot) => 2,
                 Some(LibraryViewState::GenresRoot) => 3,
@@ -2668,39 +4761,729 @@ impl UiManager {
 
     fn library_view_labels(view: &LibraryViewState) -> (String, String) {
         match view {
-            LibraryViewState::SongsRoot => ("Songs".to_string(), "All songs".to_string()),
-            LibraryViewState::ArtistsRoot => ("Artists".to_string(), "All artists".to_string()),
-            LibraryViewState::AlbumsRoot => ("Albums".to_string(), "All albums".to_string()),
-            LibraryViewState::GenresRoot => ("Genres".to_string(), "All genres".to_string()),
-            LibraryViewState::DecadesRoot => ("Decades".to_string(), "All decades".to_string()),
-            LibraryViewState::GlobalSearch => (
-                "Global Search".to_string(),
-                "Type to search songs, artists, and albums".to_string(),
-            ),
-            LibraryViewState::ArtistDetail { artist } => {
-                (artist.clone(), "Songs grouped by album".to_string())
-            }
+            LibraryViewState::TracksRoot => ("Tracks".to_string(), String::new()),
+            LibraryViewState::ArtistsRoot => ("Artists".to_string(), String::new()),
+            LibraryViewState::AlbumsRoot => ("Albums".to_string(), String::new()),
+            LibraryViewState::GenresRoot => ("Genres".to_string(), String::new()),
+            LibraryViewState::DecadesRoot => ("Decades".to_string(), String::new()),
+            LibraryViewState::GlobalSearch => ("Global Search".to_string(), String::new()),
+            LibraryViewState::ArtistDetail { artist } => (artist.clone(), String::new()),
             LibraryViewState::AlbumDetail {
                 album,
                 album_artist,
             } => (album.clone(), format!("by {}", album_artist)),
-            LibraryViewState::GenreDetail { genre } => {
-                (genre.clone(), "Songs in genre".to_string())
-            }
-            LibraryViewState::DecadeDetail { decade } => {
-                (decade.clone(), "Songs in decade".to_string())
-            }
+            LibraryViewState::GenreDetail { genre } => (genre.clone(), String::new()),
+            LibraryViewState::DecadeDetail { decade } => (decade.clone(), String::new()),
         }
     }
 
-    fn resolve_library_cover_art_path(&mut self, track_path: &PathBuf) -> Option<PathBuf> {
-        if let Some(cached) = self.library_cover_art_paths.get(track_path) {
-            return cached.clone();
+    fn detail_enrichment_entity_for_view(
+        view: &LibraryViewState,
+    ) -> Option<protocol::LibraryEnrichmentEntity> {
+        match view {
+            LibraryViewState::ArtistDetail { artist } => {
+                Some(protocol::LibraryEnrichmentEntity::Artist {
+                    artist: artist.clone(),
+                })
+            }
+            LibraryViewState::AlbumDetail {
+                album,
+                album_artist,
+            } => Some(protocol::LibraryEnrichmentEntity::Album {
+                album: album.clone(),
+                album_artist: album_artist.clone(),
+            }),
+            _ => None,
         }
-        let resolved = Self::find_cover_art(track_path);
+    }
+
+    fn artist_enrichment_image_path(&self, artist: &str) -> Option<PathBuf> {
+        let key = protocol::LibraryEnrichmentEntity::Artist {
+            artist: artist.to_string(),
+        };
+        self.library_enrichment.get(&key).and_then(|payload| {
+            (payload.status == protocol::LibraryEnrichmentStatus::Ready)
+                .then(|| {
+                    payload
+                        .image_path
+                        .as_ref()
+                        .filter(|path| path.exists())
+                        .cloned()
+                })
+                .flatten()
+        })
+    }
+
+    fn retryable_enrichment_error_kind(
+        payload: &protocol::LibraryEnrichmentPayload,
+    ) -> Option<protocol::LibraryEnrichmentErrorKind> {
+        if payload.status != protocol::LibraryEnrichmentStatus::Error {
+            return None;
+        }
+        match payload.error_kind {
+            Some(protocol::LibraryEnrichmentErrorKind::Timeout)
+            | Some(protocol::LibraryEnrichmentErrorKind::RateLimited)
+            | Some(protocol::LibraryEnrichmentErrorKind::BudgetExhausted) => payload.error_kind,
+            _ => None,
+        }
+    }
+
+    fn is_retryable_enrichment_result(payload: &protocol::LibraryEnrichmentPayload) -> bool {
+        Self::retryable_enrichment_error_kind(payload).is_some()
+    }
+
+    fn is_counted_failed_enrichment_result(payload: &protocol::LibraryEnrichmentPayload) -> bool {
+        match payload.status {
+            protocol::LibraryEnrichmentStatus::NotFound => true,
+            protocol::LibraryEnrichmentStatus::Error => {
+                payload.error_kind != Some(protocol::LibraryEnrichmentErrorKind::RateLimited)
+            }
+            _ => false,
+        }
+    }
+
+    fn failed_enrichment_attempt_cap_reached(attempts: u32) -> bool {
+        attempts >= ENRICHMENT_FAILED_ATTEMPT_CAP
+    }
+
+    fn is_enrichment_attempt_capped(&self, entity: &protocol::LibraryEnrichmentEntity) -> bool {
+        let attempts = self
+            .library_enrichment_failed_attempt_counts
+            .get(entity)
+            .copied()
+            .unwrap_or(0);
+        Self::failed_enrichment_attempt_cap_reached(attempts)
+    }
+
+    fn update_failed_enrichment_attempt_state(
+        &mut self,
+        entity: &protocol::LibraryEnrichmentEntity,
+        payload: &protocol::LibraryEnrichmentPayload,
+    ) {
+        if payload.status == protocol::LibraryEnrichmentStatus::Ready
+            || payload.status == protocol::LibraryEnrichmentStatus::Disabled
+        {
+            self.library_enrichment_failed_attempt_counts.remove(entity);
+            return;
+        }
+        if !Self::is_counted_failed_enrichment_result(payload) {
+            return;
+        }
+        let attempts = self
+            .library_enrichment_failed_attempt_counts
+            .entry(entity.clone())
+            .and_modify(|value| *value = value.saturating_add(1))
+            .or_insert(1);
+        if *attempts == ENRICHMENT_FAILED_ATTEMPT_CAP {
+            debug!(
+                "Enrichment attempts capped for {:?} after {} failed attempts",
+                entity, attempts
+            );
+        }
+    }
+
+    fn clear_enrichment_retry_state(&mut self, entity: &protocol::LibraryEnrichmentEntity) {
+        self.library_enrichment_retry_counts.remove(entity);
+        self.library_enrichment_retry_not_before.remove(entity);
+    }
+
+    fn clear_enrichment_not_found_backoff_state(
+        &mut self,
+        entity: &protocol::LibraryEnrichmentEntity,
+    ) {
+        self.library_enrichment_not_found_not_before.remove(entity);
+    }
+
+    fn schedule_enrichment_not_found_backoff(
+        &mut self,
+        entity: &protocol::LibraryEnrichmentEntity,
+    ) {
+        self.library_enrichment_not_found_not_before.insert(
+            entity.clone(),
+            Instant::now() + NOT_FOUND_ENRICHMENT_RETRY_INTERVAL,
+        );
+    }
+
+    fn enrichment_not_found_backoff_elapsed(
+        &self,
+        entity: &protocol::LibraryEnrichmentEntity,
+    ) -> bool {
+        Self::enrichment_backoff_elapsed(self.library_enrichment_not_found_not_before.get(entity))
+    }
+
+    fn schedule_enrichment_retry_backoff(
+        &mut self,
+        entity: &protocol::LibraryEnrichmentEntity,
+        payload: &protocol::LibraryEnrichmentPayload,
+    ) {
+        if !Self::is_retryable_enrichment_result(payload) {
+            return;
+        }
+
+        let attempt = self
+            .library_enrichment_retry_counts
+            .entry(entity.clone())
+            .and_modify(|value| *value = value.saturating_add(1))
+            .or_insert(1);
+        let exponent = (*attempt).saturating_sub(1).min(3);
+        let delay = PREFETCH_RETRY_BASE_DELAY
+            .checked_mul(1u32 << exponent)
+            .unwrap_or(Duration::from_secs(4))
+            .min(Duration::from_secs(4));
+        self.library_enrichment_retry_not_before
+            .insert(entity.clone(), Instant::now() + delay);
+    }
+
+    fn enrichment_retry_backoff_elapsed(&self, entity: &protocol::LibraryEnrichmentEntity) -> bool {
+        Self::enrichment_backoff_elapsed(self.library_enrichment_retry_not_before.get(entity))
+    }
+
+    fn enrichment_backoff_elapsed(not_before: Option<&Instant>) -> bool {
+        not_before.is_none_or(|deadline| Instant::now() >= *deadline)
+    }
+
+    fn should_request_prefetch_for_entity(
+        &mut self,
+        entity: &protocol::LibraryEnrichmentEntity,
+    ) -> bool {
+        if self.is_enrichment_attempt_capped(entity) {
+            return false;
+        }
+        let Some(existing) = self.library_enrichment.get(entity).cloned() else {
+            return true;
+        };
+        if existing.status == protocol::LibraryEnrichmentStatus::Ready {
+            if matches!(entity, protocol::LibraryEnrichmentEntity::Artist { .. })
+                && existing
+                    .image_path
+                    .as_ref()
+                    .is_some_and(|path| !path.exists())
+            {
+                self.library_enrichment.remove(entity);
+                return true;
+            }
+            return false;
+        }
+        if existing.status == protocol::LibraryEnrichmentStatus::Disabled
+            || (existing.status == protocol::LibraryEnrichmentStatus::NotFound
+                && existing.attempt_kind == protocol::LibraryEnrichmentAttemptKind::Detail)
+        {
+            return false;
+        }
+
+        if !Self::is_retryable_enrichment_result(&existing) {
+            return false;
+        }
+
+        let attempts = self
+            .library_enrichment_retry_counts
+            .get(entity)
+            .copied()
+            .unwrap_or(0);
+        if attempts >= PREFETCH_RETRY_MAX_ATTEMPTS {
+            debug!(
+                "Enrichment prefetch retry capped for {:?} after {} attempts",
+                entity, attempts
+            );
+            return false;
+        }
+        if self.enrichment_retry_backoff_elapsed(entity) {
+            self.library_enrichment.remove(entity);
+            return true;
+        }
+        false
+    }
+
+    fn request_enrichment(
+        &mut self,
+        entity: protocol::LibraryEnrichmentEntity,
+        priority: protocol::LibraryEnrichmentPriority,
+    ) {
+        if !self.library_online_metadata_enabled {
+            return;
+        }
+        if self.is_enrichment_attempt_capped(&entity) {
+            return;
+        }
+        if self
+            .library_enrichment
+            .get(&entity)
+            .is_some_and(|payload| payload.status == protocol::LibraryEnrichmentStatus::Disabled)
+        {
+            self.library_enrichment.remove(&entity);
+        }
+        if let Some(existing) = self.library_enrichment.get(&entity).cloned() {
+            if existing.status == protocol::LibraryEnrichmentStatus::NotFound {
+                if self.enrichment_not_found_backoff_elapsed(&entity) {
+                    self.library_enrichment.remove(&entity);
+                    self.clear_enrichment_not_found_backoff_state(&entity);
+                } else {
+                    return;
+                }
+            } else if Self::is_retryable_enrichment_result(&existing)
+                && self.enrichment_retry_backoff_elapsed(&entity)
+            {
+                self.library_enrichment.remove(&entity);
+            }
+        }
+
+        if self.library_enrichment_pending.contains(&entity) {
+            if priority == protocol::LibraryEnrichmentPriority::Interactive {
+                let should_retry = self
+                    .library_enrichment_last_request_at
+                    .get(&entity)
+                    .is_none_or(|requested_at| {
+                        requested_at.elapsed() >= DETAIL_ENRICHMENT_RETRY_INTERVAL
+                    });
+                if should_retry {
+                    let _ = self.bus_sender.send(protocol::Message::Library(
+                        protocol::LibraryMessage::RequestEnrichment {
+                            entity: entity.clone(),
+                            priority,
+                        },
+                    ));
+                    self.library_enrichment_last_request_at
+                        .insert(entity, Instant::now());
+                }
+            }
+            return;
+        }
+        if self.library_enrichment.contains_key(&entity) {
+            return;
+        }
+
+        if priority == protocol::LibraryEnrichmentPriority::Interactive {
+            self.library_enrichment_pending.insert(entity.clone());
+        }
+        let _ = self.bus_sender.send(protocol::Message::Library(
+            protocol::LibraryMessage::RequestEnrichment {
+                entity: entity.clone(),
+                priority,
+            },
+        ));
+        if priority == protocol::LibraryEnrichmentPriority::Interactive {
+            self.library_enrichment_last_request_at
+                .insert(entity, Instant::now());
+        }
+    }
+
+    fn retain_pending_detail_entity_only(&mut self) {
+        self.library_enrichment_pending
+            .retain(|entity| self.library_last_detail_enrichment_entity.as_ref() == Some(entity));
+        self.library_enrichment_last_request_at
+            .retain(|entity, _| self.library_enrichment_pending.contains(entity));
+    }
+
+    fn replace_prefetch_queue_if_changed(
+        &mut self,
+        entities: Vec<protocol::LibraryEnrichmentEntity>,
+    ) {
+        if self.library_last_prefetch_entities == entities {
+            return;
+        }
+        self.library_last_prefetch_entities = entities.clone();
+        let _ = self.bus_sender.send(protocol::Message::Library(
+            protocol::LibraryMessage::ReplaceEnrichmentPrefetchQueue { entities },
+        ));
+    }
+
+    fn replace_background_queue_if_changed(
+        &mut self,
+        entities: Vec<protocol::LibraryEnrichmentEntity>,
+    ) {
+        if self.library_last_background_entities == entities {
+            return;
+        }
+        self.library_last_background_entities = entities.clone();
+        let _ = self.bus_sender.send(protocol::Message::Library(
+            protocol::LibraryMessage::ReplaceEnrichmentBackgroundQueue { entities },
+        ));
+    }
+
+    fn maybe_retry_stalled_detail_enrichment(&mut self) {
+        let view = self.current_library_view();
+        let Some(entity) = Self::detail_enrichment_entity_for_view(&view) else {
+            return;
+        };
+        self.request_enrichment(entity, protocol::LibraryEnrichmentPriority::Interactive);
+    }
+
+    fn request_current_detail_enrichment_if_needed(&mut self, view: &LibraryViewState) {
+        let Some(entity) = Self::detail_enrichment_entity_for_view(view) else {
+            self.library_last_detail_enrichment_entity = None;
+            return;
+        };
+
+        let is_new_detail_entity =
+            self.library_last_detail_enrichment_entity.as_ref() != Some(&entity);
+        if is_new_detail_entity {
+            let should_refresh =
+                self.library_enrichment.get(&entity).is_some_and(|payload| {
+                    payload.status == protocol::LibraryEnrichmentStatus::Error
+                }) && !self.is_enrichment_attempt_capped(&entity);
+            if should_refresh {
+                self.library_enrichment.remove(&entity);
+            }
+        }
+        self.library_last_detail_enrichment_entity = Some(entity.clone());
+        self.request_enrichment(entity, protocol::LibraryEnrichmentPriority::Interactive);
+    }
+
+    fn should_request_background_warm_for_entity(
+        &mut self,
+        entity: &protocol::LibraryEnrichmentEntity,
+    ) -> bool {
+        if self.is_enrichment_attempt_capped(entity) {
+            return false;
+        }
+        let Some(existing) = self.library_enrichment.get(entity).cloned() else {
+            return true;
+        };
+        if existing.status == protocol::LibraryEnrichmentStatus::Disabled {
+            return false;
+        }
+        if existing.status == protocol::LibraryEnrichmentStatus::Ready
+            && existing
+                .image_path
+                .as_ref()
+                .is_some_and(|path| path.exists())
+        {
+            return false;
+        }
+        if existing.status == protocol::LibraryEnrichmentStatus::Ready
+            && existing
+                .image_path
+                .as_ref()
+                .is_some_and(|path| !path.exists())
+        {
+            self.library_enrichment.remove(entity);
+            return true;
+        }
+        if existing.status == protocol::LibraryEnrichmentStatus::NotFound
+            && existing.attempt_kind == protocol::LibraryEnrichmentAttemptKind::Detail
+        {
+            return false;
+        }
+        if existing.status == protocol::LibraryEnrichmentStatus::Error
+            && existing.error_kind == Some(protocol::LibraryEnrichmentErrorKind::Hard)
+        {
+            return false;
+        }
+        if !Self::is_retryable_enrichment_result(&existing) {
+            return false;
+        }
+        let attempts = self
+            .library_enrichment_retry_counts
+            .get(entity)
+            .copied()
+            .unwrap_or(0);
+        if attempts >= PREFETCH_RETRY_MAX_ATTEMPTS {
+            return false;
+        }
+        if self.enrichment_retry_backoff_elapsed(entity) {
+            self.library_enrichment.remove(entity);
+            return true;
+        }
+        false
+    }
+
+    fn prefetch_artist_enrichment_window(&mut self, first_row: usize, row_count: usize) {
+        if !matches!(self.current_library_view(), LibraryViewState::ArtistsRoot) {
+            self.retain_pending_detail_entity_only();
+            self.replace_prefetch_queue_if_changed(Vec::new());
+            self.replace_background_queue_if_changed(Vec::new());
+            return;
+        }
+        if !self.library_online_metadata_enabled {
+            self.retain_pending_detail_entity_only();
+            self.replace_prefetch_queue_if_changed(Vec::new());
+            self.replace_background_queue_if_changed(Vec::new());
+            return;
+        }
+        if row_count == 0 {
+            // Viewport row count can transiently report zero during list/model churn.
+            // Keep the last prefetch queue instead of clearing it, so loading keeps progressing.
+            return;
+        }
+
+        let start = first_row
+            .saturating_sub(LIBRARY_PREFETCH_TOP_OVERSCAN_ROWS)
+            .min(self.library_view_indices.len());
+        let end = first_row
+            .saturating_add(row_count)
+            .saturating_add(LIBRARY_PREFETCH_BOTTOM_OVERSCAN_ROWS)
+            .min(self.library_view_indices.len());
+        let mut prefetch_entities = Vec::new();
+        let mut seen_entities = HashSet::new();
+        let mut visible_artist_entities = HashSet::new();
+        let mut ordered_artist_entities = Vec::new();
+        let mut seen_all_artists = HashSet::new();
+        for source_index in self.library_view_indices.iter().copied() {
+            let Some(LibraryEntry::Artist(artist)) = self.library_entries.get(source_index) else {
+                continue;
+            };
+            let entity = protocol::LibraryEnrichmentEntity::Artist {
+                artist: artist.artist.clone(),
+            };
+            if seen_all_artists.insert(entity.clone()) {
+                ordered_artist_entities.push(entity);
+            }
+        }
+        for row in start..end {
+            let Some(source_index) = self.library_view_indices.get(row).copied() else {
+                continue;
+            };
+            let Some(LibraryEntry::Artist(artist)) = self.library_entries.get(source_index) else {
+                continue;
+            };
+            let entity = protocol::LibraryEnrichmentEntity::Artist {
+                artist: artist.artist.clone(),
+            };
+            if !seen_entities.insert(entity.clone()) {
+                continue;
+            }
+            visible_artist_entities.insert(entity.clone());
+            if self.should_request_prefetch_for_entity(&entity) {
+                prefetch_entities.push(entity);
+            }
+        }
+        let mut background_entities = Vec::new();
+        for entity in ordered_artist_entities {
+            if background_entities.len() >= LIBRARY_BACKGROUND_WARM_QUEUE_SIZE {
+                break;
+            }
+            if visible_artist_entities.contains(&entity) {
+                continue;
+            }
+            if self.should_request_background_warm_for_entity(&entity) {
+                background_entities.push(entity);
+            }
+        }
+
+        self.library_enrichment_retry_counts
+            .retain(|entity, _| match entity {
+                protocol::LibraryEnrichmentEntity::Artist { .. } => {
+                    visible_artist_entities.contains(entity)
+                        || self.library_last_detail_enrichment_entity.as_ref() == Some(entity)
+                }
+                protocol::LibraryEnrichmentEntity::Album { .. } => true,
+            });
+        self.library_enrichment_retry_not_before
+            .retain(|entity, _| match entity {
+                protocol::LibraryEnrichmentEntity::Artist { .. } => {
+                    visible_artist_entities.contains(entity)
+                        || self.library_last_detail_enrichment_entity.as_ref() == Some(entity)
+                }
+                protocol::LibraryEnrichmentEntity::Album { .. } => true,
+            });
+        self.retain_pending_detail_entity_only();
+        self.replace_prefetch_queue_if_changed(prefetch_entities);
+        self.replace_background_queue_if_changed(background_entities);
+    }
+
+    fn on_enrichment_prefetch_tick(&mut self) {
+        if !self.library_online_metadata_enabled || self.collection_mode != COLLECTION_MODE_LIBRARY
+        {
+            self.replace_prefetch_queue_if_changed(Vec::new());
+            self.replace_background_queue_if_changed(Vec::new());
+            return;
+        }
+        self.maybe_retry_stalled_detail_enrichment();
+
+        if matches!(self.current_library_view(), LibraryViewState::ArtistsRoot) {
+            let prefetch_row_count = if self.library_artist_prefetch_row_count == 0 {
+                LIBRARY_PREFETCH_FALLBACK_VISIBLE_ROWS
+            } else {
+                self.library_artist_prefetch_row_count
+            };
+            self.prefetch_artist_enrichment_window(
+                self.library_artist_prefetch_first_row,
+                prefetch_row_count,
+            );
+        } else {
+            self.prefetch_artist_enrichment_window(0, 0);
+        }
+    }
+
+    fn refresh_visible_artist_rows(&mut self, artist_name: &str) -> bool {
+        let view = self.current_library_view();
+        if !matches!(
+            view,
+            LibraryViewState::ArtistsRoot | LibraryViewState::GlobalSearch
+        ) {
+            return false;
+        }
+
+        let Some(row_indices) = self.library_artist_row_indices.get(artist_name).cloned() else {
+            return false;
+        };
+        let selected_set: HashSet<usize> = self.library_selected_indices.iter().copied().collect();
+        let mut updates: Vec<(usize, LibraryRowPresentation)> = Vec::new();
+
+        for row_index in row_indices {
+            let Some(source_index) = self.library_view_indices.get(row_index).copied() else {
+                continue;
+            };
+            let Some(LibraryEntry::Artist(artist)) = self.library_entries.get(source_index) else {
+                continue;
+            };
+            let presentation = self.library_row_presentation_from_entry(
+                &LibraryEntry::Artist(artist.clone()),
+                &view,
+                selected_set.contains(&source_index),
+                true,
+            );
+            updates.push((row_index, presentation));
+        }
+
+        if updates.is_empty() {
+            return false;
+        }
+
+        let _ = self.ui.upgrade_in_event_loop(move |ui| {
+            let current_model = ui.get_library_model();
+            let Some(vec_model) = current_model
+                .as_any()
+                .downcast_ref::<VecModel<LibraryRowData>>()
+            else {
+                return;
+            };
+
+            for (row_index, presentation) in updates {
+                if row_index < vec_model.row_count() {
+                    let row_data = UiManager::library_row_data_from_presentation(presentation);
+                    vec_model.set_row_data(row_index, row_data);
+                }
+            }
+        });
+        true
+    }
+
+    fn refresh_visible_library_cover_art_rows(&mut self) -> bool {
+        if self.collection_mode != COLLECTION_MODE_LIBRARY || self.library_view_indices.is_empty() {
+            return false;
+        }
+
+        let view = self.current_library_view();
+        let detail_header_visible = matches!(
+            view,
+            LibraryViewState::AlbumDetail { .. } | LibraryViewState::ArtistDetail { .. }
+        );
+        let (cover_decode_start, cover_decode_end) =
+            self.library_cover_decode_window(self.library_view_indices.len());
+        let (row_start, row_end) = if detail_header_visible {
+            (0usize, self.library_view_indices.len())
+        } else {
+            (cover_decode_start, cover_decode_end)
+        };
+        if row_start >= row_end {
+            return false;
+        }
+
+        let selected_set: HashSet<usize> = self.library_selected_indices.iter().copied().collect();
+        let mut updates: Vec<(usize, LibraryRowPresentation)> = Vec::new();
+
+        for row_index in row_start..row_end {
+            let Some(source_index) = self.library_view_indices.get(row_index).copied() else {
+                continue;
+            };
+            let Some(entry) = self.library_entries.get(source_index).cloned() else {
+                continue;
+            };
+            let resolve_cover_art = matches!(entry, LibraryEntry::Artist(_))
+                || detail_header_visible
+                || (row_index >= cover_decode_start && row_index < cover_decode_end);
+            if !resolve_cover_art {
+                continue;
+            }
+
+            let presentation = self.library_row_presentation_from_entry(
+                &entry,
+                &view,
+                selected_set.contains(&source_index),
+                true,
+            );
+            if presentation.cover_art_path.is_none() {
+                continue;
+            }
+            updates.push((row_index, presentation));
+        }
+
+        if updates.is_empty() {
+            return false;
+        }
+
+        let _ = self.ui.upgrade_in_event_loop(move |ui| {
+            let current_model = ui.get_library_model();
+            let Some(vec_model) = current_model
+                .as_any()
+                .downcast_ref::<VecModel<LibraryRowData>>()
+            else {
+                return;
+            };
+
+            for (row_index, presentation) in updates {
+                if row_index < vec_model.row_count() {
+                    let row_data = UiManager::library_row_data_from_presentation(presentation);
+                    vec_model.set_row_data(row_index, row_data);
+                }
+            }
+        });
+        true
+    }
+
+    fn resolve_library_cover_art_path(&mut self, track_path: &PathBuf) -> Option<PathBuf> {
+        if let Some(cached) = self.library_cover_art_paths.get(track_path).cloned() {
+            if let Some(path) = cached.clone() {
+                if Self::failed_cover_path(&path) {
+                    self.library_cover_art_paths
+                        .insert(track_path.clone(), None);
+                    return None;
+                }
+            } else if let Some(cached_embedded) =
+                Self::embedded_art_cache_path_if_present(track_path)
+            {
+                self.library_cover_art_paths
+                    .insert(track_path.clone(), Some(cached_embedded.clone()));
+                self.track_cover_art_missing_tracks.remove(track_path);
+                return Some(cached_embedded);
+            } else if is_remote_track_path(track_path.as_path())
+                && !self.track_cover_art_missing_tracks.contains(track_path)
+            {
+                self.update_cover_art(Some(track_path));
+                self.track_cover_art_missing_tracks
+                    .insert(track_path.clone());
+            }
+            return cached;
+        }
+        let resolved = if is_remote_track_path(track_path.as_path()) {
+            self.update_cover_art(Some(track_path));
+            None
+        } else {
+            self.find_external_cover_art_cached(track_path)
+                .or_else(|| Self::embedded_art_cache_path_if_present(track_path))
+        };
         self.library_cover_art_paths
             .insert(track_path.clone(), resolved.clone());
+        if resolved.is_none() {
+            self.track_cover_art_missing_tracks
+                .insert(track_path.clone());
+        } else {
+            self.track_cover_art_missing_tracks.remove(track_path);
+        }
         resolved
+    }
+
+    fn update_or_replace_track_model(ui: &AppWindow, rows: Vec<TrackRowData>) {
+        let current_model = ui.get_track_model();
+        if let Some(vec_model) = current_model
+            .as_any()
+            .downcast_ref::<VecModel<TrackRowData>>()
+        {
+            vec_model.set_vec(rows);
+            return;
+        }
+        ui.set_track_model(ModelRc::from(Rc::new(VecModel::from(rows))));
     }
 
     fn reset_library_selection(&mut self) {
@@ -2724,6 +5507,25 @@ impl UiManager {
             return;
         }
         ui.set_library_model(ModelRc::from(Rc::new(VecModel::from(rows))));
+    }
+
+    fn library_row_data_from_presentation(entry: LibraryRowPresentation) -> LibraryRowData {
+        let album_art = entry
+            .cover_art_path
+            .as_deref()
+            .and_then(UiManager::try_load_cover_art_image);
+        let has_album_art = album_art.is_some();
+        LibraryRowData {
+            leading: entry.leading.into(),
+            primary: entry.primary.into(),
+            secondary: entry.secondary.into(),
+            item_kind: entry.item_kind,
+            album_art: album_art.unwrap_or_default(),
+            has_album_art,
+            source_badge: entry.source_badge.into(),
+            is_playing: entry.is_playing,
+            selected: entry.selected,
+        }
     }
 
     fn sync_library_selection_to_ui(&self) {
@@ -2779,6 +5581,17 @@ impl UiManager {
         });
     }
 
+    fn sync_library_root_counts_to_ui(&self) {
+        let counts: Vec<i32> = self
+            .library_root_counts
+            .iter()
+            .map(|count| (*count).min(i32::MAX as usize) as i32)
+            .collect();
+        let _ = self.ui.upgrade_in_event_loop(move |ui| {
+            ui.set_library_root_counts(ModelRc::from(Rc::new(VecModel::from(counts))));
+        });
+    }
+
     fn select_library_list_item(
         &mut self,
         index: usize,
@@ -2830,16 +5643,13 @@ impl UiManager {
 
         self.library_selected_indices.sort_unstable();
         self.library_selected_indices.dedup();
-        if self.library_selected_indices.is_empty() {
-            self.library_selection_anchor = None;
-        }
-
-        let playing_track_path = self.current_playing_track_path.clone();
-        let playing_track_metadata = self.current_playing_track_metadata.clone();
-        self.update_display_for_active_collection(
-            playing_track_path.as_ref(),
-            playing_track_metadata.as_ref(),
+        self.library_selection_anchor = Self::resolve_shift_anchor_source_index(
+            &self.library_selected_indices,
+            self.library_selection_anchor,
         );
+
+        self.display_target_priority = DisplayTargetPriority::Selection;
+        self.update_display_for_active_collection();
 
         self.sync_library_selection_to_ui();
         self.sync_library_add_to_playlist_ui();
@@ -2864,10 +5674,10 @@ impl UiManager {
                 continue;
             };
             let (key, spec) = match entry {
-                LibraryEntry::Song(song) => (
-                    format!("song:{}", song.path.to_string_lossy()),
-                    protocol::LibrarySelectionSpec::Song {
-                        path: song.path.clone(),
+                LibraryEntry::Track(track) => (
+                    format!("track:{}", track.path.to_string_lossy()),
+                    protocol::LibrarySelectionSpec::Track {
+                        path: track.path.clone(),
                     },
                 ),
                 LibraryEntry::Artist(artist) => (
@@ -3014,34 +5824,36 @@ impl UiManager {
         entry: &LibraryEntry,
         view: &LibraryViewState,
         selected: bool,
+        resolve_cover_art: bool,
     ) -> LibraryRowPresentation {
-        let compact_song_row_view = matches!(
+        let compact_track_row_view = matches!(
             view,
             LibraryViewState::AlbumDetail { .. } | LibraryViewState::ArtistDetail { .. }
         );
         let global_search_view = matches!(view, LibraryViewState::GlobalSearch);
         match entry {
-            LibraryEntry::Song(song) => LibraryRowPresentation {
-                leading: if compact_song_row_view {
-                    Self::library_track_number_leading(&song.track_number)
+            LibraryEntry::Track(track) => LibraryRowPresentation {
+                leading: if compact_track_row_view {
+                    Self::library_track_number_leading(&track.track_number)
                 } else {
                     String::new()
                 },
-                primary: song.title.clone(),
-                secondary: if compact_song_row_view {
-                    song.artist.clone()
+                primary: track.title.clone(),
+                secondary: if compact_track_row_view {
+                    track.artist.clone()
                 } else if global_search_view {
-                    format!("Song • {} • {}", song.artist, song.album)
+                    format!("Track • {} • {}", track.artist, track.album)
                 } else {
-                    format!("{} • {}", song.artist, song.album)
+                    format!("{} • {}", track.artist, track.album)
                 },
                 item_kind: LIBRARY_ITEM_KIND_SONG,
-                cover_art_path: if compact_song_row_view {
+                cover_art_path: if compact_track_row_view || !resolve_cover_art {
                     None
                 } else {
-                    self.resolve_library_cover_art_path(&song.path)
+                    self.resolve_library_cover_art_path(&track.path)
                 },
-                is_playing: self.current_playing_track_path.as_ref() == Some(&song.path),
+                source_badge: Self::source_badge_for_track_path(track.path.as_path()),
+                is_playing: self.playing_track.path.as_ref() == Some(&track.path),
                 selected,
             },
             LibraryEntry::Artist(artist) => LibraryRowPresentation {
@@ -3049,17 +5861,22 @@ impl UiManager {
                 primary: artist.artist.clone(),
                 secondary: if global_search_view {
                     format!(
-                        "Artist • {} albums • {} songs",
-                        artist.album_count, artist.song_count
+                        "Artist • {} albums • {} tracks",
+                        artist.album_count, artist.track_count
                     )
                 } else {
                     format!(
-                        "{} albums • {} songs",
-                        artist.album_count, artist.song_count
+                        "{} albums • {} tracks",
+                        artist.album_count, artist.track_count
                     )
                 },
                 item_kind: LIBRARY_ITEM_KIND_ARTIST,
-                cover_art_path: None,
+                cover_art_path: if resolve_cover_art {
+                    self.artist_enrichment_image_path(&artist.artist)
+                } else {
+                    None
+                },
+                source_badge: String::new(),
                 is_playing: false,
                 selected,
             },
@@ -3068,45 +5885,78 @@ impl UiManager {
                 primary: album.album.clone(),
                 secondary: if global_search_view {
                     format!(
-                        "Album • {} • {} songs",
-                        album.album_artist, album.song_count
+                        "Album • {} • {} tracks",
+                        album.album_artist, album.track_count
                     )
                 } else {
-                    format!("{} • {} songs", album.album_artist, album.song_count)
+                    format!("{} • {} tracks", album.album_artist, album.track_count)
                 },
                 item_kind: LIBRARY_ITEM_KIND_ALBUM,
-                cover_art_path: album
-                    .representative_track_path
-                    .as_ref()
-                    .and_then(|track_path| self.resolve_library_cover_art_path(track_path)),
+                cover_art_path: if resolve_cover_art {
+                    album
+                        .representative_track_path
+                        .as_ref()
+                        .and_then(|track_path| self.resolve_library_cover_art_path(track_path))
+                } else {
+                    None
+                },
+                source_badge: String::new(),
                 is_playing: false,
                 selected,
             },
             LibraryEntry::Genre(genre) => LibraryRowPresentation {
                 leading: String::new(),
                 primary: genre.genre.clone(),
-                secondary: format!("{} songs", genre.song_count),
+                secondary: format!("{} tracks", genre.track_count),
                 item_kind: LIBRARY_ITEM_KIND_GENRE,
                 cover_art_path: None,
+                source_badge: String::new(),
                 is_playing: false,
                 selected,
             },
             LibraryEntry::Decade(decade) => LibraryRowPresentation {
                 leading: String::new(),
                 primary: decade.decade.clone(),
-                secondary: format!("{} songs", decade.song_count),
+                secondary: format!("{} tracks", decade.track_count),
                 item_kind: LIBRARY_ITEM_KIND_DECADE,
                 cover_art_path: None,
+                source_badge: String::new(),
                 is_playing: false,
                 selected,
             },
         }
     }
 
+    fn library_cover_decode_window(&self, total_rows: usize) -> (usize, usize) {
+        if total_rows == 0 {
+            return (0, 0);
+        }
+        let default_rows = 24usize;
+        let lookahead_rows = 24usize;
+        let row_count = if self.library_artist_prefetch_row_count == 0 {
+            default_rows
+        } else {
+            self.library_artist_prefetch_row_count.min(128)
+        };
+        let start = self
+            .library_artist_prefetch_first_row
+            .saturating_sub(6)
+            .min(total_rows);
+        let end = start
+            .saturating_add(row_count)
+            .saturating_add(lookahead_rows)
+            .min(total_rows);
+        (start, end)
+    }
+
     fn sync_library_ui(&mut self) {
         let view = self.current_library_view();
         let (title, subtitle) = Self::library_view_labels(&view);
-        let album_header_visible = matches!(view, LibraryViewState::AlbumDetail { .. });
+        let detail_header_visible = matches!(
+            view,
+            LibraryViewState::AlbumDetail { .. } | LibraryViewState::ArtistDetail { .. }
+        );
+        self.request_current_detail_enrichment_if_needed(&view);
         let can_go_back = self.library_view_stack.len() > 1;
         let root_index = self.current_library_root_index();
         let scan_in_progress = self.library_scan_in_progress;
@@ -3120,30 +5970,22 @@ impl UiManager {
             Self::build_library_view_indices_for_query(&entries, &self.library_search_query)
         };
         let library_view_indices = self.library_view_indices.clone();
+        let (cover_decode_start, cover_decode_end) =
+            self.library_cover_decode_window(library_view_indices.len());
+        let allow_cover_decode_for_all = detail_header_visible;
         let selected_set: HashSet<usize> = self.library_selected_indices.iter().copied().collect();
-        let album_header_art_path = if matches!(view, LibraryViewState::AlbumDetail { .. }) {
-            entries.iter().find_map(|entry| {
-                if let LibraryEntry::Song(song) = entry {
-                    self.resolve_library_cover_art_path(&song.path)
-                } else {
-                    None
-                }
-            })
-        } else {
-            None
-        };
-        let album_song_count = if album_header_visible {
+        let detail_track_count = if detail_header_visible {
             entries
                 .iter()
-                .filter(|entry| matches!(entry, LibraryEntry::Song(_)))
+                .filter(|entry| matches!(entry, LibraryEntry::Track(_)))
                 .count()
         } else {
             0
         };
-        let album_year = if album_header_visible {
+        let album_year = if matches!(view, LibraryViewState::AlbumDetail { .. }) {
             entries.iter().find_map(|entry| {
-                if let LibraryEntry::Song(song) = entry {
-                    let year = song.year.trim();
+                if let LibraryEntry::Track(track) = entry {
+                    let year = track.year.trim();
                     if year.is_empty() {
                         None
                     } else {
@@ -3156,69 +5998,202 @@ impl UiManager {
         } else {
             None
         };
-        let album_header_meta = if album_header_visible {
-            let songs_label = if album_song_count == 1 {
-                "song"
-            } else {
-                "songs"
-            };
-            if let Some(year) = album_year {
-                format!("{} • {} {}", year, album_song_count, songs_label)
-            } else {
-                format!("{} {}", album_song_count, songs_label)
-            }
+        let detail_album_count = if matches!(view, LibraryViewState::ArtistDetail { .. }) {
+            entries
+                .iter()
+                .filter(|entry| matches!(entry, LibraryEntry::Album(_)))
+                .count()
         } else {
-            String::new()
+            0
         };
+        let detail_header_meta = match &view {
+            LibraryViewState::AlbumDetail { .. } => {
+                let tracks_label = if detail_track_count == 1 {
+                    "track"
+                } else {
+                    "tracks"
+                };
+                if let Some(year) = album_year {
+                    format!("{} • {} {}", year, detail_track_count, tracks_label)
+                } else {
+                    format!("{} {}", detail_track_count, tracks_label)
+                }
+            }
+            LibraryViewState::ArtistDetail { .. } => {
+                let albums_label = if detail_album_count == 1 {
+                    "album"
+                } else {
+                    "albums"
+                };
+                let tracks_label = if detail_track_count == 1 {
+                    "track"
+                } else {
+                    "tracks"
+                };
+                format!(
+                    "{} {} • {} {}",
+                    detail_album_count, albums_label, detail_track_count, tracks_label
+                )
+            }
+            _ => String::new(),
+        };
+        let detail_entity = Self::detail_enrichment_entity_for_view(&view);
+        let mut detail_header_blurb = String::new();
+        let mut detail_header_source_name = String::new();
+        let mut detail_header_source_url = String::new();
+        let mut detail_header_source_visible = false;
+        let mut detail_header_loading = false;
+        let mut detail_header_art_path = if matches!(view, LibraryViewState::AlbumDetail { .. }) {
+            entries.iter().find_map(|entry| {
+                if let LibraryEntry::Track(track) = entry {
+                    self.resolve_library_cover_art_path(&track.path)
+                } else {
+                    None
+                }
+            })
+        } else {
+            None
+        };
+        if let Some(entity) = detail_entity.clone() {
+            if let Some(payload) = self.library_enrichment.get(&entity) {
+                match payload.status {
+                    protocol::LibraryEnrichmentStatus::Ready => {
+                        detail_header_blurb = payload.blurb.clone();
+                        detail_header_source_name = payload.source_name.clone();
+                        detail_header_source_url = payload.source_url.clone();
+                        detail_header_source_visible =
+                            !payload.source_name.is_empty() && !payload.source_url.is_empty();
+                        if matches!(entity, protocol::LibraryEnrichmentEntity::Artist { .. }) {
+                            detail_header_art_path = payload.image_path.clone();
+                        }
+                    }
+                    protocol::LibraryEnrichmentStatus::NotFound => {
+                        detail_header_blurb =
+                            "No matching internet metadata found for this item.".to_string();
+                    }
+                    protocol::LibraryEnrichmentStatus::Disabled => {
+                        detail_header_blurb =
+                            "Internet metadata is disabled in Settings.".to_string();
+                    }
+                    protocol::LibraryEnrichmentStatus::Error => {
+                        if matches!(
+                            payload.error_kind,
+                            Some(protocol::LibraryEnrichmentErrorKind::Timeout)
+                                | Some(protocol::LibraryEnrichmentErrorKind::RateLimited)
+                                | Some(protocol::LibraryEnrichmentErrorKind::BudgetExhausted)
+                        ) {
+                            detail_header_loading = true;
+                        } else {
+                            detail_header_blurb = if payload.blurb.trim().is_empty() {
+                                "Could not load internet metadata right now.".to_string()
+                            } else {
+                                payload.blurb.clone()
+                            };
+                        }
+                    }
+                }
+            } else {
+                detail_header_loading = self.library_online_metadata_enabled;
+            }
+        }
+        let mut artist_row_indices: HashMap<String, Vec<usize>> = HashMap::new();
         let rows: Vec<LibraryRowPresentation> = library_view_indices
             .iter()
-            .filter_map(|source_index| {
+            .enumerate()
+            .filter_map(|(row_index, source_index)| {
                 entries.get(*source_index).map(|entry| {
-                    self.library_row_presentation_from_entry(
+                    if let LibraryEntry::Artist(artist) = entry {
+                        artist_row_indices
+                            .entry(artist.artist.clone())
+                            .or_default()
+                            .push(row_index);
+                    }
+                    let resolve_cover_art = matches!(entry, LibraryEntry::Artist(_))
+                        || allow_cover_decode_for_all
+                        || (row_index >= cover_decode_start && row_index < cover_decode_end);
+                    let mut presentation = self.library_row_presentation_from_entry(
                         entry,
                         &view,
                         selected_set.contains(source_index),
-                    )
+                        resolve_cover_art,
+                    );
+                    if let Some(playing_idx) = self.library_playing_index {
+                        if *source_index == playing_idx {
+                            presentation.is_playing = true;
+                        }
+                    }
+                    presentation
                 })
             })
             .collect();
-        let album_header_has_art = album_header_art_path.is_some();
+        let mut scroll_restore_row: Option<i32> = None;
+        if let Some(saved_row) = self.pending_library_scroll_restore_row {
+            if !rows.is_empty() {
+                let clamped_row = saved_row.min(rows.len().saturating_sub(1));
+                scroll_restore_row = Some(clamped_row as i32);
+                self.pending_library_scroll_restore_row = None;
+                self.library_scroll_restore_token =
+                    self.library_scroll_restore_token.wrapping_add(1);
+            }
+        }
+        let scroll_restore_token = self.library_scroll_restore_token;
+        self.library_artist_row_indices = artist_row_indices;
         let collection_mode = self.collection_mode;
+        let library_playing_view_index = self
+            .library_playing_index
+            .and_then(|playing_index| {
+                library_view_indices
+                    .iter()
+                    .position(|source_index| *source_index == playing_index)
+            })
+            .map(|index| index as i32)
+            .unwrap_or(-1);
+        let fetch_capable_view =
+            detail_entity.is_some() || matches!(view, LibraryViewState::ArtistsRoot);
+        let online_prompt_visible = self.collection_mode == COLLECTION_MODE_LIBRARY
+            && fetch_capable_view
+            && self.library_online_metadata_prompt_pending;
 
         let _ = self.ui.upgrade_in_event_loop(move |ui| {
             let rows: Vec<LibraryRowData> = rows
                 .into_iter()
-                .map(|entry| {
-                    let album_art =
-                        UiManager::load_track_row_cover_art_image(entry.cover_art_path.as_ref());
-                    let has_album_art = entry.cover_art_path.is_some();
-                    LibraryRowData {
-                        leading: entry.leading.into(),
-                        primary: entry.primary.into(),
-                        secondary: entry.secondary.into(),
-                        item_kind: entry.item_kind,
-                        album_art,
-                        has_album_art,
-                        is_playing: entry.is_playing,
-                        selected: entry.selected,
-                    }
-                })
+                .map(UiManager::library_row_data_from_presentation)
                 .collect();
             ui.set_collection_mode(collection_mode);
             ui.set_library_root_index(root_index);
             ui.set_library_view_title(title.into());
             ui.set_library_view_subtitle(subtitle.into());
-            ui.set_library_album_header_visible(album_header_visible);
+            ui.set_library_album_header_visible(detail_header_visible);
             ui.set_library_can_go_back(can_go_back);
             ui.set_library_scan_in_progress(scan_in_progress);
             ui.set_library_status_text(status_text.into());
-            let album_header_art =
-                UiManager::load_track_row_cover_art_image(album_header_art_path.as_ref());
-            ui.set_library_album_header_has_art(album_header_has_art);
-            ui.set_library_album_header_art(album_header_art);
-            ui.set_library_album_header_meta(album_header_meta.into());
+            let album_header_art = detail_header_art_path
+                .as_deref()
+                .and_then(UiManager::try_load_cover_art_image);
+            ui.set_library_album_header_has_art(album_header_art.is_some());
+            ui.set_library_album_header_art(album_header_art.unwrap_or_default());
+            ui.set_library_album_header_meta(detail_header_meta.into());
+            ui.set_library_detail_header_blurb(detail_header_blurb.into());
+            ui.set_library_detail_header_source_name(detail_header_source_name.into());
+            ui.set_library_detail_header_source_url(detail_header_source_url.into());
+            ui.set_library_detail_header_source_visible(detail_header_source_visible);
+            ui.set_library_detail_header_loading(detail_header_loading);
+            ui.set_library_online_prompt_visible(online_prompt_visible);
+            ui.set_library_playing_track_index(library_playing_view_index);
             Self::update_or_replace_library_model(&ui, rows);
         });
+        if let Some(restore_row) = scroll_restore_row {
+            let ui_handle = self.ui.clone();
+            let _ = self.ui.upgrade_in_event_loop(move |_| {
+                let deferred_ui_handle_late = ui_handle.clone();
+                slint::Timer::single_shot(Duration::from_millis(16), move || {
+                    if let Some(ui) = deferred_ui_handle_late.upgrade() {
+                        ui.set_library_scroll_target_row(restore_row);
+                        ui.set_library_scroll_restore_token(scroll_restore_token);
+                    }
+                });
+            });
+        }
         self.sync_library_search_state_to_ui();
         self.sync_properties_action_state();
     }
@@ -3234,39 +6209,45 @@ impl UiManager {
         }
         self.collection_mode = normalized_mode;
         if self.collection_mode == COLLECTION_MODE_LIBRARY {
+            self.update_library_playing_index();
             self.request_library_view_data();
         } else {
             self.library_add_to_dialog_visible = false;
             self.sync_library_add_to_playlist_ui();
         }
-        let playing_track_path = self.current_playing_track_path.clone();
-        let playing_track_metadata = self.current_playing_track_metadata.clone();
-        self.update_display_for_active_collection(
-            playing_track_path.as_ref(),
-            playing_track_metadata.as_ref(),
-        );
+        self.update_display_for_active_collection();
         self.sync_library_ui();
+        self.auto_scroll_active_collection_to_playing_track();
+    }
+
+    fn prepare_library_view_transition(&mut self) {
+        self.library_entries.clear();
+        self.library_view_indices.clear();
+        self.reset_library_page_state();
+        self.library_artist_row_indices.clear();
+        self.reset_library_selection();
+        self.library_add_to_dialog_visible = false;
+        self.replace_prefetch_queue_if_changed(Vec::new());
+        self.replace_background_queue_if_changed(Vec::new());
+        self.sync_library_add_to_playlist_ui();
     }
 
     fn set_library_root_section(&mut self, section: i32) {
+        self.remember_current_library_scroll_position();
         let root = match section {
             1 => LibraryViewState::ArtistsRoot,
             2 => LibraryViewState::AlbumsRoot,
             3 => LibraryViewState::GenresRoot,
             4 => LibraryViewState::DecadesRoot,
-            _ => LibraryViewState::SongsRoot,
+            _ => LibraryViewState::TracksRoot,
         };
         self.library_view_stack.clear();
         self.library_view_stack.push(root);
-        self.reset_library_selection();
-        self.library_add_to_dialog_visible = false;
-        self.sync_library_add_to_playlist_ui();
-        let playing_track_path = self.current_playing_track_path.clone();
-        let playing_track_metadata = self.current_playing_track_metadata.clone();
-        self.update_display_for_active_collection(
-            playing_track_path.as_ref(),
-            playing_track_metadata.as_ref(),
-        );
+        self.library_artist_prefetch_first_row = 0;
+        self.library_artist_prefetch_row_count = 0;
+        self.pending_library_scroll_restore_row = None;
+        self.prepare_library_view_transition();
+        self.update_display_for_active_collection();
         self.request_library_view_data();
         self.sync_library_ui();
     }
@@ -3275,92 +6256,410 @@ impl UiManager {
         if self.library_view_stack.len() <= 1 {
             return;
         }
-        self.library_view_stack.pop();
-        self.reset_library_selection();
-        self.library_add_to_dialog_visible = false;
-        self.sync_library_add_to_playlist_ui();
-        let playing_track_path = self.current_playing_track_path.clone();
-        let playing_track_metadata = self.current_playing_track_metadata.clone();
-        self.update_display_for_active_collection(
-            playing_track_path.as_ref(),
-            playing_track_metadata.as_ref(),
+        let current_view = self.current_library_view();
+        self.remember_scroll_position_for_view(
+            &current_view,
+            self.library_artist_prefetch_first_row,
         );
+        let popped = self.library_view_stack.pop();
+        let target_view = self.current_library_view();
+        let restoring_from_detail = matches!(
+            popped,
+            Some(
+                LibraryViewState::ArtistDetail { .. }
+                    | LibraryViewState::AlbumDetail { .. }
+                    | LibraryViewState::GenreDetail { .. }
+                    | LibraryViewState::DecadeDetail { .. }
+            )
+        );
+        if restoring_from_detail {
+            let restore_row = self
+                .saved_scroll_position_for_view(&target_view)
+                .unwrap_or(0);
+            self.pending_library_scroll_restore_row = Some(restore_row);
+            self.library_artist_prefetch_first_row = restore_row;
+        } else {
+            self.pending_library_scroll_restore_row = None;
+            self.library_artist_prefetch_first_row = 0;
+        }
+        self.library_artist_prefetch_row_count = 0;
+        self.prepare_library_view_transition();
+        self.update_display_for_active_collection();
         self.request_library_view_data();
         self.sync_library_ui();
     }
 
-    fn request_library_view_data(&mut self) {
-        let message = match self.current_library_view() {
-            LibraryViewState::SongsRoot => protocol::LibraryMessage::RequestSongs,
-            LibraryViewState::ArtistsRoot => protocol::LibraryMessage::RequestArtists,
-            LibraryViewState::AlbumsRoot => protocol::LibraryMessage::RequestAlbums,
-            LibraryViewState::GenresRoot => protocol::LibraryMessage::RequestGenres,
-            LibraryViewState::DecadesRoot => protocol::LibraryMessage::RequestDecades,
-            LibraryViewState::GlobalSearch => protocol::LibraryMessage::RequestGlobalSearchData,
-            LibraryViewState::ArtistDetail { artist } => {
-                protocol::LibraryMessage::RequestArtistDetail { artist }
-            }
+    fn library_page_query_for_view(view: &LibraryViewState) -> protocol::LibraryViewQuery {
+        match view {
+            LibraryViewState::TracksRoot => protocol::LibraryViewQuery::Tracks,
+            LibraryViewState::ArtistsRoot => protocol::LibraryViewQuery::Artists,
+            LibraryViewState::AlbumsRoot => protocol::LibraryViewQuery::Albums,
+            LibraryViewState::GenresRoot => protocol::LibraryViewQuery::Genres,
+            LibraryViewState::DecadesRoot => protocol::LibraryViewQuery::Decades,
+            LibraryViewState::GlobalSearch => protocol::LibraryViewQuery::GlobalSearch,
+            LibraryViewState::ArtistDetail { artist } => protocol::LibraryViewQuery::ArtistDetail {
+                artist: artist.clone(),
+            },
             LibraryViewState::AlbumDetail {
                 album,
                 album_artist,
-            } => protocol::LibraryMessage::RequestAlbumSongs {
-                album,
-                album_artist,
+            } => protocol::LibraryViewQuery::AlbumDetail {
+                album: album.clone(),
+                album_artist: album_artist.clone(),
             },
-            LibraryViewState::GenreDetail { genre } => {
-                protocol::LibraryMessage::RequestGenreSongs { genre }
-            }
-            LibraryViewState::DecadeDetail { decade } => {
-                protocol::LibraryMessage::RequestDecadeSongs { decade }
-            }
+            LibraryViewState::GenreDetail { genre } => protocol::LibraryViewQuery::GenreDetail {
+                genre: genre.clone(),
+            },
+            LibraryViewState::DecadeDetail { decade } => protocol::LibraryViewQuery::DecadeDetail {
+                decade: decade.clone(),
+            },
+        }
+    }
+
+    fn reset_library_page_state(&mut self) {
+        self.library_page_view = None;
+        self.library_page_next_offset = 0;
+        self.library_page_total = 0;
+        self.library_page_entries.clear();
+        self.library_page_query.clear();
+    }
+
+    fn library_entry_from_payload(payload: protocol::LibraryEntryPayload) -> LibraryEntry {
+        match payload {
+            protocol::LibraryEntryPayload::Track(track) => LibraryEntry::Track(track),
+            protocol::LibraryEntryPayload::Artist(artist) => LibraryEntry::Artist(artist),
+            protocol::LibraryEntryPayload::Album(album) => LibraryEntry::Album(album),
+            protocol::LibraryEntryPayload::Genre(genre) => LibraryEntry::Genre(genre),
+            protocol::LibraryEntryPayload::Decade(decade) => LibraryEntry::Decade(decade),
+        }
+    }
+
+    fn request_next_library_page(&mut self) {
+        let Some(view) = self.library_page_view.clone() else {
+            return;
         };
-        let _ = self.bus_sender.send(protocol::Message::Library(message));
+        let request_id = self.library_page_request_id;
+        let offset = self.library_page_next_offset;
+        let query = self.library_page_query.clone();
+        let _ = self.bus_sender.send(protocol::Message::Library(
+            protocol::LibraryMessage::RequestLibraryPage {
+                request_id,
+                view,
+                offset,
+                limit: LIBRARY_PAGE_FETCH_LIMIT,
+                query,
+            },
+        ));
+    }
+
+    fn handle_library_page_result(
+        &mut self,
+        request_id: u64,
+        total: usize,
+        entries: Vec<protocol::LibraryEntryPayload>,
+    ) {
+        if request_id != self.library_page_request_id || self.library_page_view.is_none() {
+            return;
+        }
+        self.library_page_total = total;
+        self.library_page_next_offset = self.library_page_next_offset.saturating_add(entries.len());
+        self.library_page_entries.extend(entries);
+
+        if self.library_page_next_offset < self.library_page_total {
+            self.request_next_library_page();
+            return;
+        }
+
+        let page_view = self.library_page_view.clone();
+        let mut final_entries: Vec<LibraryEntry> = std::mem::take(&mut self.library_page_entries)
+            .into_iter()
+            .map(Self::library_entry_from_payload)
+            .collect();
+        if matches!(
+            page_view,
+            Some(protocol::LibraryViewQuery::ArtistDetail { .. })
+        ) {
+            let mut albums = Vec::new();
+            let mut tracks = Vec::new();
+            for entry in final_entries {
+                match entry {
+                    LibraryEntry::Album(album) => albums.push(album),
+                    LibraryEntry::Track(track) => tracks.push(track),
+                    LibraryEntry::Artist(_) | LibraryEntry::Genre(_) | LibraryEntry::Decade(_) => {}
+                }
+            }
+            final_entries = Self::build_artist_detail_entries(albums, tracks);
+        }
+        self.reset_library_page_state();
+        self.set_library_entries(final_entries);
+    }
+
+    fn request_library_view_data(&mut self) {
+        let view = self.current_library_view();
+        if matches!(view, LibraryViewState::GlobalSearch)
+            && self.library_search_query.trim().is_empty()
+        {
+            self.reset_library_page_state();
+            self.set_library_entries(Vec::new());
+            return;
+        }
+        self.library_page_request_id = self.library_page_request_id.wrapping_add(1);
+        self.library_page_view = Some(Self::library_page_query_for_view(&view));
+        self.library_page_next_offset = 0;
+        self.library_page_total = 0;
+        self.library_page_entries.clear();
+        self.library_page_query = if matches!(view, LibraryViewState::GlobalSearch) {
+            self.library_search_query.clone()
+        } else {
+            String::new()
+        };
+        self.request_next_library_page();
+    }
+
+    fn request_library_root_counts(&self) {
+        let _ = self.bus_sender.send(protocol::Message::Library(
+            protocol::LibraryMessage::RequestRootCounts,
+        ));
     }
 
     fn set_library_entries(&mut self, entries: Vec<LibraryEntry>) {
         self.library_entries = entries;
+        self.update_library_playing_index();
         self.reset_library_selection();
         self.library_add_to_dialog_visible = false;
         self.sync_library_add_to_playlist_ui();
-        let playing_track_path = self.current_playing_track_path.clone();
-        let playing_track_metadata = self.current_playing_track_metadata.clone();
-        self.update_display_for_active_collection(
-            playing_track_path.as_ref(),
-            playing_track_metadata.as_ref(),
-        );
+        self.update_display_for_active_collection();
         self.sync_library_ui();
+        if self.collection_mode == COLLECTION_MODE_LIBRARY {
+            self.auto_scroll_active_collection_to_playing_track();
+        }
     }
 
-    fn play_library_song_from_entries(&mut self, selected_song_id: &str) {
-        let songs: Vec<protocol::LibrarySong> = self
-            .library_entries
-            .iter()
-            .filter_map(|entry| match entry {
-                LibraryEntry::Song(song) => Some(song.clone()),
-                _ => None,
-            })
-            .collect();
-        if songs.is_empty() {
-            return;
+    fn handle_scan_status_message(&mut self, message: protocol::LibraryMessage) {
+        match message {
+            protocol::LibraryMessage::ScanStarted => {
+                self.library_scan_in_progress = true;
+                self.library_status_text = "Scanning library...".to_string();
+                self.library_cover_art_paths.clear();
+                self.folder_cover_art_paths.clear();
+                self.library_enrichment_pending.clear();
+                self.library_enrichment_last_request_at.clear();
+                self.library_enrichment_retry_counts.clear();
+                self.library_enrichment_retry_not_before.clear();
+                self.library_enrichment_not_found_not_before.clear();
+                self.library_enrichment_failed_attempt_counts.clear();
+                self.replace_prefetch_queue_if_changed(Vec::new());
+                self.replace_background_queue_if_changed(Vec::new());
+                self.library_last_detail_enrichment_entity = None;
+                self.library_add_to_dialog_visible = false;
+                self.sync_library_add_to_playlist_ui();
+                self.sync_library_scan_status_to_ui();
+            }
+            protocol::LibraryMessage::ScanProgress {
+                discovered,
+                indexed,
+                metadata_pending,
+            } => {
+                self.library_status_text = format!(
+                    "Scanning library: discovered {}, indexed {}, metadata pending {}",
+                    discovered, indexed, metadata_pending
+                );
+                self.sync_library_scan_status_to_ui();
+            }
+            protocol::LibraryMessage::ScanCompleted { indexed_tracks } => {
+                self.library_scan_in_progress = false;
+                self.library_status_text = format!("Indexed {} tracks", indexed_tracks);
+                self.library_cover_art_paths.clear();
+                self.folder_cover_art_paths.clear();
+                self.library_enrichment.clear();
+                self.library_enrichment_pending.clear();
+                self.library_enrichment_last_request_at.clear();
+                self.library_enrichment_retry_counts.clear();
+                self.library_enrichment_retry_not_before.clear();
+                self.library_enrichment_not_found_not_before.clear();
+                self.library_enrichment_failed_attempt_counts.clear();
+                self.replace_prefetch_queue_if_changed(Vec::new());
+                self.replace_background_queue_if_changed(Vec::new());
+                self.library_last_detail_enrichment_entity = None;
+                self.sync_library_scan_status_to_ui();
+                self.request_library_view_data();
+                self.request_library_root_counts();
+            }
+            protocol::LibraryMessage::MetadataBackfillProgress { updated, remaining } => {
+                if remaining == 0 {
+                    self.library_status_text =
+                        format!("Metadata backfill complete ({} updated)", updated);
+                    self.sync_library_scan_status_to_ui();
+                    self.request_library_view_data();
+                    self.request_library_root_counts();
+                } else {
+                    self.library_status_text = format!(
+                        "Metadata backfill: {} updated, {} remaining",
+                        updated, remaining
+                    );
+                    self.sync_library_scan_status_to_ui();
+                }
+            }
+            protocol::LibraryMessage::ScanFailed(error_text) => {
+                self.library_scan_in_progress = false;
+                self.library_status_text = error_text;
+                self.sync_library_scan_status_to_ui();
+            }
+            _ => {}
         }
-        let Some(start_index) = songs.iter().position(|song| song.id == selected_song_id) else {
+    }
+
+    fn drain_scan_progress_queue(&mut self) {
+        while let Ok(message) = self.library_scan_progress_rx.try_recv() {
+            self.handle_scan_status_message(message);
+        }
+    }
+
+    fn has_paused_playback_queue(&self) -> bool {
+        !self.playback_active && self.playing_track.path.is_some()
+    }
+
+    fn build_playlist_queue_request(
+        &self,
+        preferred_view_index: Option<usize>,
+    ) -> Option<protocol::PlaybackQueueRequest> {
+        let preferred_source_index =
+            preferred_view_index.and_then(|view_index| self.map_view_to_source_index(view_index));
+        let (tracks, start_index) = Self::build_playlist_queue_snapshot(
+            &self.track_ids,
+            &self.track_paths,
+            &self.view_indices,
+            &self.selected_indices,
+            preferred_source_index,
+        )?;
+        Some(protocol::PlaybackQueueRequest {
+            source: protocol::PlaybackQueueSource::Playlist {
+                playlist_id: self.active_playlist_id.clone(),
+            },
+            tracks,
+            start_index,
+        })
+    }
+
+    fn build_playlist_queue_snapshot(
+        track_ids: &[String],
+        track_paths: &[PathBuf],
+        view_indices: &[usize],
+        selected_indices: &[usize],
+        preferred_source_index: Option<usize>,
+    ) -> Option<(Vec<protocol::RestoredTrack>, usize)> {
+        let selected_set: HashSet<usize> = selected_indices.iter().copied().collect();
+        let mut selected_start_index = None;
+        let mut explicit_start_index = None;
+        let mut tracks = Vec::with_capacity(view_indices.len());
+
+        for source_index in view_indices.iter().copied() {
+            let Some(track_id) = track_ids.get(source_index) else {
+                continue;
+            };
+            let Some(track_path) = track_paths.get(source_index) else {
+                continue;
+            };
+            let queue_index = tracks.len();
+            if preferred_source_index == Some(source_index) {
+                explicit_start_index = Some(queue_index);
+            }
+            if selected_start_index.is_none() && selected_set.contains(&source_index) {
+                selected_start_index = Some(queue_index);
+            }
+            tracks.push(protocol::RestoredTrack {
+                id: track_id.clone(),
+                path: track_path.clone(),
+            });
+        }
+
+        if tracks.is_empty() {
+            return None;
+        }
+
+        let start_index = explicit_start_index.or(selected_start_index).unwrap_or(0);
+        Some((tracks, start_index))
+    }
+
+    fn resolve_active_playing_source_index(
+        track_paths: &[PathBuf],
+        is_playing_active_playlist: bool,
+        playing_index: Option<usize>,
+        playing_track_path: Option<&PathBuf>,
+    ) -> Option<usize> {
+        if !is_playing_active_playlist {
+            return None;
+        }
+        if let Some(index) = playing_index.filter(|index| *index < track_paths.len()) {
+            return Some(index);
+        }
+        playing_track_path.and_then(|playing_path| {
+            track_paths
+                .iter()
+                .position(|candidate| candidate == playing_path)
+        })
+    }
+
+    fn build_library_queue_request(
+        &self,
+        preferred_source_index: Option<usize>,
+    ) -> Option<protocol::PlaybackQueueRequest> {
+        let selected_set: HashSet<usize> = self.library_selected_indices.iter().copied().collect();
+        let mut selected_start_index = None;
+        let mut explicit_start_index = None;
+        let mut tracks = Vec::new();
+
+        for source_index in self.library_view_indices.iter().copied() {
+            let Some(LibraryEntry::Track(track)) = self.library_entries.get(source_index) else {
+                continue;
+            };
+            let queue_index = tracks.len();
+            if preferred_source_index == Some(source_index) {
+                explicit_start_index = Some(queue_index);
+            }
+            if selected_start_index.is_none() && selected_set.contains(&source_index) {
+                selected_start_index = Some(queue_index);
+            }
+            tracks.push(protocol::RestoredTrack {
+                id: track.id.clone(),
+                path: track.path.clone(),
+            });
+        }
+
+        if tracks.is_empty() {
+            return None;
+        }
+
+        let start_index = explicit_start_index.or(selected_start_index).unwrap_or(0);
+        Some(protocol::PlaybackQueueRequest {
+            source: protocol::PlaybackQueueSource::Library,
+            tracks,
+            start_index,
+        })
+    }
+
+    fn start_queue_if_possible(&self, request: Option<protocol::PlaybackQueueRequest>) {
+        let Some(request) = request else {
             return;
         };
-
-        let tracks: Vec<protocol::RestoredTrack> = songs
-            .into_iter()
-            .map(|song| protocol::RestoredTrack {
-                id: song.id,
-                path: song.path,
-            })
-            .collect();
-
-        let _ = self.bus_sender.send(protocol::Message::Playlist(
-            protocol::PlaylistMessage::PlayLibraryQueue {
-                tracks,
-                start_index,
-            },
+        let _ = self.bus_sender.send(protocol::Message::Playback(
+            protocol::PlaybackMessage::StartQueue(request),
         ));
+    }
+
+    fn play_active_collection(&self) {
+        if self.has_paused_playback_queue() {
+            let _ = self
+                .bus_sender
+                .send(protocol::Message::Playback(protocol::PlaybackMessage::Play));
+            return;
+        }
+        let request = if self.collection_mode == COLLECTION_MODE_LIBRARY {
+            self.build_library_queue_request(None)
+        } else {
+            self.build_playlist_queue_request(None)
+        };
+        self.start_queue_if_possible(request);
     }
 
     fn activate_library_item(&mut self, index: usize) {
@@ -3369,73 +6668,71 @@ impl UiManager {
         };
 
         match entry {
-            LibraryEntry::Song(song) => {
-                self.play_library_song_from_entries(&song.id);
+            LibraryEntry::Track(_) => {
+                self.start_queue_if_possible(self.build_library_queue_request(Some(index)));
             }
             LibraryEntry::Artist(artist) => {
+                self.remember_current_library_scroll_position();
                 self.library_view_stack
                     .push(LibraryViewState::ArtistDetail {
                         artist: artist.artist,
                     });
-                self.reset_library_selection();
-                self.library_add_to_dialog_visible = false;
-                self.sync_library_add_to_playlist_ui();
+                self.library_artist_prefetch_first_row = 0;
+                self.library_artist_prefetch_row_count = 0;
+                self.prepare_library_view_transition();
                 self.request_library_view_data();
                 self.sync_library_ui();
             }
             LibraryEntry::Album(album) => {
+                self.remember_current_library_scroll_position();
                 self.library_view_stack.push(LibraryViewState::AlbumDetail {
                     album: album.album,
                     album_artist: album.album_artist,
                 });
-                self.reset_library_selection();
-                self.library_add_to_dialog_visible = false;
-                self.sync_library_add_to_playlist_ui();
+                self.library_artist_prefetch_first_row = 0;
+                self.library_artist_prefetch_row_count = 0;
+                self.prepare_library_view_transition();
                 self.request_library_view_data();
                 self.sync_library_ui();
             }
             LibraryEntry::Genre(genre) => {
+                self.remember_current_library_scroll_position();
                 self.library_view_stack
                     .push(LibraryViewState::GenreDetail { genre: genre.genre });
-                self.reset_library_selection();
-                self.library_add_to_dialog_visible = false;
-                self.sync_library_add_to_playlist_ui();
+                self.library_artist_prefetch_first_row = 0;
+                self.library_artist_prefetch_row_count = 0;
+                self.prepare_library_view_transition();
                 self.request_library_view_data();
                 self.sync_library_ui();
             }
             LibraryEntry::Decade(decade) => {
+                self.remember_current_library_scroll_position();
                 self.library_view_stack
                     .push(LibraryViewState::DecadeDetail {
                         decade: decade.decade,
                     });
-                self.reset_library_selection();
-                self.library_add_to_dialog_visible = false;
-                self.sync_library_add_to_playlist_ui();
+                self.library_artist_prefetch_first_row = 0;
+                self.library_artist_prefetch_row_count = 0;
+                self.prepare_library_view_transition();
                 self.request_library_view_data();
                 self.sync_library_ui();
             }
         }
     }
 
-    fn read_track_metadata(&self, path: &Path) -> TrackMetadata {
-        debug!("Reading metadata for: {}", path.display());
-
-        if let Some(parsed) = metadata_tags::read_common_track_metadata(path) {
-            if !parsed.title.is_empty() || !parsed.artist.is_empty() || !parsed.album.is_empty() {
-                return TrackMetadata {
-                    title: parsed.title,
-                    artist: parsed.artist,
-                    album: parsed.album,
-                    album_artist: parsed.album_artist,
-                    date: parsed.date,
-                    year: parsed.year,
-                    genre: parsed.genre,
-                    track_number: parsed.track_number,
-                };
-            }
+    fn fallback_track_metadata(path: &Path) -> TrackMetadata {
+        if is_remote_track_path(path) {
+            return TrackMetadata {
+                title: "Remote track".to_string(),
+                artist: "".to_string(),
+                album: "".to_string(),
+                album_artist: "".to_string(),
+                date: "".to_string(),
+                year: "".to_string(),
+                genre: "".to_string(),
+                track_number: "".to_string(),
+            };
         }
-
-        // If no tags found, use filename as title
         let filename = path
             .file_name()
             .and_then(|name| name.to_str())
@@ -3454,19 +6751,129 @@ impl UiManager {
         }
     }
 
+    fn read_track_metadata_summary(path: &Path) -> protocol::TrackMetadataSummary {
+        if let Some(parsed) = metadata_tags::read_common_track_metadata(path) {
+            if !parsed.title.is_empty() || !parsed.artist.is_empty() || !parsed.album.is_empty() {
+                return protocol::TrackMetadataSummary {
+                    title: parsed.title,
+                    artist: parsed.artist,
+                    album: parsed.album,
+                    album_artist: parsed.album_artist,
+                    date: parsed.date,
+                    genre: parsed.genre,
+                    year: parsed.year,
+                    track_number: parsed.track_number,
+                };
+            }
+        }
+
+        let fallback = Self::fallback_track_metadata(path);
+        protocol::TrackMetadataSummary {
+            title: fallback.title,
+            artist: fallback.artist,
+            album: fallback.album,
+            album_artist: fallback.album_artist,
+            date: fallback.date,
+            genre: fallback.genre,
+            year: fallback.year,
+            track_number: fallback.track_number,
+        }
+    }
+
+    fn track_metadata_from_summary(summary: &protocol::TrackMetadataSummary) -> TrackMetadata {
+        TrackMetadata {
+            title: summary.title.clone(),
+            artist: summary.artist.clone(),
+            album: summary.album.clone(),
+            album_artist: summary.album_artist.clone(),
+            date: summary.date.clone(),
+            year: summary.year.clone(),
+            genre: summary.genre.clone(),
+            track_number: summary.track_number.clone(),
+        }
+    }
+
+    fn queue_track_metadata_lookup(&self, track_id: String, track_path: PathBuf) {
+        if is_remote_track_path(track_path.as_path()) {
+            return;
+        }
+        let _ = self.metadata_lookup_tx.send(MetadataLookupRequest {
+            track_id,
+            track_path,
+        });
+    }
+
+    fn queue_track_metadata_lookup_batch(&self, tracks: &[protocol::RestoredTrack]) {
+        for track in tracks {
+            self.queue_track_metadata_lookup(track.id.clone(), track.path.clone());
+        }
+    }
+
+    fn apply_track_metadata_batch_updates(
+        &mut self,
+        updates: Vec<protocol::TrackMetadataPatch>,
+    ) -> bool {
+        if updates.is_empty() {
+            return false;
+        }
+        let index_by_track_id: HashMap<String, usize> = self
+            .track_ids
+            .iter()
+            .enumerate()
+            .map(|(index, track_id)| (track_id.clone(), index))
+            .collect();
+        let mut changed = false;
+        for update in updates {
+            let Some(index) = index_by_track_id.get(&update.track_id).copied() else {
+                continue;
+            };
+            if update.summary.title == REMOTE_TRACK_UNAVAILABLE_TITLE {
+                self.unavailable_track_ids.insert(update.track_id.clone());
+            } else {
+                self.unavailable_track_ids.remove(&update.track_id);
+            }
+            let next = Self::track_metadata_from_summary(&update.summary);
+            if let Some(current) = self.track_metadata.get_mut(index) {
+                if current.title != next.title
+                    || current.artist != next.artist
+                    || current.album != next.album
+                    || current.album_artist != next.album_artist
+                    || current.date != next.date
+                    || current.year != next.year
+                    || current.genre != next.genre
+                    || current.track_number != next.track_number
+                {
+                    *current = next;
+                    changed = true;
+                }
+            }
+        }
+        changed
+    }
+
     /// Handles selection gesture start from the UI overlay.
     pub fn on_pointer_down(&mut self, pressed_index: usize, ctrl: bool, shift: bool) {
-        debug!(
+        trace!(
             "on_pointer_down: index={}, ctrl={}, shift={}",
-            pressed_index, ctrl, shift
+            pressed_index,
+            ctrl,
+            shift
         );
         let Some(source_index) = self.map_view_to_source_index(pressed_index) else {
             self.pressed_index = None;
+            self.pending_single_select_on_click = None;
             return;
         };
         self.pressed_index = Some(source_index);
+        self.pending_single_select_on_click = None;
 
         let is_already_selected = self.selected_indices.contains(&source_index);
+        if is_already_selected && !ctrl && !shift && self.selected_indices.len() > 1 {
+            // Defer collapse to pointer-up so dragging still moves the full selection.
+            self.pending_single_select_on_click = Some(source_index);
+            self.set_selection_anchor_from_source_index(source_index);
+            return;
+        }
         if !is_already_selected || ctrl || shift {
             if shift && !self.view_indices.is_empty() {
                 let shift_selected_indices = Self::build_shift_selection_from_view_order(
@@ -3497,28 +6904,31 @@ impl UiManager {
         if self.is_filter_view_active() {
             self.drag_indices.clear();
             self.is_dragging = false;
+            self.pending_single_select_on_click = None;
             return;
         }
+        self.pending_single_select_on_click = None;
 
         let Some(source_index) = self.map_view_to_source_index(pressed_index) else {
             return;
         };
-        debug!(
+        trace!(
             ">>> on_drag_start START: pressed_index={}, self.selected_indices={:?}",
-            source_index, self.selected_indices
+            source_index,
+            self.selected_indices
         );
         if self.selected_indices.contains(&source_index) {
             self.drag_indices = self.selected_indices.clone();
-            debug!(
+            trace!(
                 ">>> MULTI-SELECT DRAG: using drag_indices {:?}",
                 self.drag_indices
             );
         } else {
             self.drag_indices = vec![source_index];
-            debug!(">>> SINGLE DRAG: using index {:?}", self.drag_indices);
+            trace!(">>> SINGLE DRAG: using index {:?}", self.drag_indices);
         }
         self.drag_indices.sort();
-        debug!(
+        trace!(
             ">>> on_drag_start END: drag_indices={:?}",
             self.drag_indices
         );
@@ -3543,6 +6953,7 @@ impl UiManager {
             self.drag_indices.clear();
             self.is_dragging = false;
             self.pressed_index = None;
+            self.pending_single_select_on_click = None;
             let _ = self.ui.upgrade_in_event_loop(move |ui| {
                 ui.set_is_dragging(false);
                 ui.set_drop_index(-1);
@@ -3551,20 +6962,27 @@ impl UiManager {
             return;
         }
 
-        debug!(
+        trace!(
             ">>> on_drag_end START: is_dragging={}, drop_gap={}, drag_indices={:?}",
-            self.is_dragging, drop_gap, self.drag_indices
+            self.is_dragging,
+            drop_gap,
+            self.drag_indices
         );
         if self.is_dragging && !self.drag_indices.is_empty() {
             let indices = self.drag_indices.clone();
             let to = drop_gap;
-            debug!(
+            trace!(
                 ">>> on_drag_end SENDING ReorderTracks: indices={:?}, to={}",
-                indices, to
+                indices,
+                to
             );
 
             let _ = self.bus_sender.send(protocol::Message::Playlist(
                 protocol::PlaylistMessage::ReorderTracks { indices, to },
+            ));
+        } else if let Some(source_index) = self.pending_single_select_on_click.take() {
+            let _ = self.bus_sender.send(protocol::Message::Playlist(
+                protocol::PlaylistMessage::SelectionChanged(vec![source_index]),
             ));
         }
 
@@ -3582,10 +7000,18 @@ impl UiManager {
     /// Starts the blocking UI event loop that listens for bus messages.
     pub fn run(&mut self) {
         self.sync_library_ui();
+        self.sync_cast_state_to_ui();
+        self.refresh_technical_info_ui();
         self.sync_library_add_to_playlist_ui();
+        self.sync_library_root_counts_to_ui();
+        self.request_library_root_counts();
+        let _ = self.bus_sender.send(protocol::Message::Playlist(
+            protocol::PlaylistMessage::RequestPlaylistState,
+        ));
         self.sync_properties_action_state();
         self.sync_properties_dialog_ui();
         loop {
+            self.drain_scan_progress_queue();
             match self.bus_receiver.blocking_recv() {
                 Ok(message) => {
                     self.on_message_received();
@@ -3640,34 +7066,66 @@ impl UiManager {
                             protocol::LibraryMessage::SetSearchQuery(query) => {
                                 self.set_library_search_query(query);
                             }
-                            protocol::LibraryMessage::ScanStarted => {
-                                self.library_scan_in_progress = true;
-                                self.library_status_text = "Scanning library...".to_string();
-                                self.library_cover_art_paths.clear();
-                                self.library_add_to_dialog_visible = false;
-                                self.sync_library_add_to_playlist_ui();
-                                self.sync_library_ui();
+                            protocol::LibraryMessage::CopySelected => {
+                                self.copy_selected_library_items();
                             }
-                            protocol::LibraryMessage::ScanCompleted { indexed_tracks } => {
-                                self.library_scan_in_progress = false;
-                                self.library_status_text =
-                                    format!("Indexed {} tracks", indexed_tracks);
-                                self.library_cover_art_paths.clear();
-                                self.request_library_view_data();
-                                self.sync_library_ui();
+                            protocol::LibraryMessage::CutSelected => {
+                                self.cut_selected_library_items();
                             }
-                            protocol::LibraryMessage::ScanFailed(error_text) => {
-                                self.library_scan_in_progress = false;
-                                self.library_status_text = error_text;
-                                self.sync_library_ui();
+                            protocol::LibraryMessage::DeleteSelected => {
+                                self.request_library_remove_selection_confirmation();
                             }
-                            protocol::LibraryMessage::SongsResult(songs) => {
+                            protocol::LibraryMessage::ConfirmRemoveSelection => {
+                                self.confirm_library_remove_selection();
+                            }
+                            protocol::LibraryMessage::CancelRemoveSelection => {
+                                self.cancel_library_remove_selection();
+                            }
+                            protocol::LibraryMessage::LibraryViewportChanged {
+                                first_row,
+                                row_count,
+                            } => {
+                                trace!(
+                                    "Library viewport changed: first_row={}, row_count={}",
+                                    first_row,
+                                    row_count
+                                );
+                                self.library_artist_prefetch_first_row = first_row;
+                                let current_view = self.current_library_view();
+                                self.remember_scroll_position_for_view(&current_view, first_row);
+                                if row_count > 0 {
+                                    self.library_artist_prefetch_row_count = row_count;
+                                }
+                                let effective_row_count = if row_count > 0 {
+                                    row_count
+                                } else if self.library_artist_prefetch_row_count == 0 {
+                                    LIBRARY_PREFETCH_FALLBACK_VISIBLE_ROWS
+                                } else {
+                                    self.library_artist_prefetch_row_count
+                                };
+                                self.prefetch_artist_enrichment_window(
+                                    first_row,
+                                    effective_row_count,
+                                );
+                                self.refresh_visible_library_cover_art_rows();
+                            }
+                            protocol::LibraryMessage::EnrichmentPrefetchTick => {
+                                self.on_enrichment_prefetch_tick();
+                            }
+                            protocol::LibraryMessage::ScanStarted
+                            | protocol::LibraryMessage::ScanProgress { .. }
+                            | protocol::LibraryMessage::ScanCompleted { .. }
+                            | protocol::LibraryMessage::MetadataBackfillProgress { .. }
+                            | protocol::LibraryMessage::ScanFailed(_) => {
+                                self.handle_scan_status_message(library_message);
+                            }
+                            protocol::LibraryMessage::TracksResult(tracks) => {
                                 if matches!(
                                     self.current_library_view(),
-                                    LibraryViewState::SongsRoot
+                                    LibraryViewState::TracksRoot
                                 ) {
                                     self.set_library_entries(
-                                        songs.into_iter().map(LibraryEntry::Song).collect(),
+                                        tracks.into_iter().map(LibraryEntry::Track).collect(),
                                     );
                                 }
                             }
@@ -3711,8 +7169,19 @@ impl UiManager {
                                     );
                                 }
                             }
+                            protocol::LibraryMessage::RootCountsResult {
+                                tracks,
+                                artists,
+                                albums,
+                                genres,
+                                decades,
+                            } => {
+                                self.library_root_counts =
+                                    [tracks, artists, albums, genres, decades];
+                                self.sync_library_root_counts_to_ui();
+                            }
                             protocol::LibraryMessage::GlobalSearchDataResult {
-                                songs,
+                                tracks,
                                 artists,
                                 albums,
                             } => {
@@ -3721,14 +7190,14 @@ impl UiManager {
                                     LibraryViewState::GlobalSearch
                                 ) {
                                     self.set_library_entries(Self::build_global_search_entries(
-                                        songs, artists, albums,
+                                        tracks, artists, albums,
                                     ));
                                 }
                             }
                             protocol::LibraryMessage::ArtistDetailResult {
                                 artist,
                                 albums,
-                                songs,
+                                tracks,
                             } => {
                                 if let LibraryViewState::ArtistDetail {
                                     artist: requested_artist,
@@ -3736,15 +7205,15 @@ impl UiManager {
                                 {
                                     if requested_artist == artist {
                                         self.set_library_entries(
-                                            Self::build_artist_detail_entries(albums, songs),
+                                            Self::build_artist_detail_entries(albums, tracks),
                                         );
                                     }
                                 }
                             }
-                            protocol::LibraryMessage::AlbumSongsResult {
+                            protocol::LibraryMessage::AlbumTracksResult {
                                 album,
                                 album_artist,
-                                songs,
+                                tracks,
                             } => {
                                 if let LibraryViewState::AlbumDetail {
                                     album: requested_album,
@@ -3755,34 +7224,119 @@ impl UiManager {
                                         && requested_album_artist == album_artist
                                     {
                                         self.set_library_entries(
-                                            songs.into_iter().map(LibraryEntry::Song).collect(),
+                                            tracks.into_iter().map(LibraryEntry::Track).collect(),
                                         );
                                     }
                                 }
                             }
-                            protocol::LibraryMessage::GenreSongsResult { genre, songs } => {
+                            protocol::LibraryMessage::GenreTracksResult { genre, tracks } => {
                                 if let LibraryViewState::GenreDetail {
                                     genre: requested_genre,
                                 } = self.current_library_view()
                                 {
                                     if requested_genre == genre {
                                         self.set_library_entries(
-                                            songs.into_iter().map(LibraryEntry::Song).collect(),
+                                            tracks.into_iter().map(LibraryEntry::Track).collect(),
                                         );
                                     }
                                 }
                             }
-                            protocol::LibraryMessage::DecadeSongsResult { decade, songs } => {
+                            protocol::LibraryMessage::DecadeTracksResult { decade, tracks } => {
                                 if let LibraryViewState::DecadeDetail {
                                     decade: requested_decade,
                                 } = self.current_library_view()
                                 {
                                     if requested_decade == decade {
                                         self.set_library_entries(
-                                            songs.into_iter().map(LibraryEntry::Song).collect(),
+                                            tracks.into_iter().map(LibraryEntry::Track).collect(),
                                         );
                                     }
                                 }
+                            }
+                            protocol::LibraryMessage::LibraryPageResult {
+                                request_id,
+                                total,
+                                entries,
+                            } => {
+                                self.handle_library_page_result(request_id, total, entries);
+                            }
+                            protocol::LibraryMessage::EnrichmentResult(payload) => {
+                                self.library_enrichment_pending.remove(&payload.entity);
+                                self.library_enrichment_last_request_at
+                                    .remove(&payload.entity);
+                                let entity = payload.entity.clone();
+                                let view = self.current_library_view();
+                                let is_current_detail_entity =
+                                    Self::detail_enrichment_entity_for_view(&view)
+                                        .as_ref()
+                                        .is_some_and(|current| current == &entity);
+                                let is_visible_prefetch_artist =
+                                    matches!(
+                                        &entity,
+                                        protocol::LibraryEnrichmentEntity::Artist { .. }
+                                    ) && self.library_last_prefetch_entities.contains(&entity);
+                                self.update_failed_enrichment_attempt_state(&entity, &payload);
+                                if Self::is_retryable_enrichment_result(&payload)
+                                    && (is_current_detail_entity || is_visible_prefetch_artist)
+                                {
+                                    self.schedule_enrichment_retry_backoff(&entity, &payload);
+                                } else {
+                                    self.clear_enrichment_retry_state(&entity);
+                                }
+                                if payload.status == protocol::LibraryEnrichmentStatus::NotFound {
+                                    self.schedule_enrichment_not_found_backoff(&entity);
+                                } else {
+                                    self.clear_enrichment_not_found_backoff_state(&entity);
+                                }
+                                self.library_enrichment.insert(entity.clone(), payload);
+                                self.update_display_for_active_collection();
+
+                                let mut updated = false;
+                                if let protocol::LibraryEnrichmentEntity::Artist { artist } =
+                                    &entity
+                                {
+                                    updated = self.refresh_visible_artist_rows(artist);
+                                }
+
+                                if Self::detail_enrichment_entity_for_view(&view)
+                                    .as_ref()
+                                    .is_some_and(|current| current == &entity)
+                                {
+                                    self.sync_library_ui();
+                                    updated = true;
+                                }
+
+                                if !updated && matches!(view, LibraryViewState::GlobalSearch) {
+                                    self.sync_library_search_state_to_ui();
+                                }
+                            }
+                            protocol::LibraryMessage::EnrichmentCacheCleared {
+                                cleared_rows,
+                                deleted_images,
+                            } => {
+                                self.library_enrichment.clear();
+                                self.library_enrichment_pending.clear();
+                                self.library_enrichment_last_request_at.clear();
+                                self.library_enrichment_retry_counts.clear();
+                                self.library_enrichment_retry_not_before.clear();
+                                self.library_enrichment_not_found_not_before.clear();
+                                self.library_enrichment_failed_attempt_counts.clear();
+                                self.replace_prefetch_queue_if_changed(Vec::new());
+                                self.replace_background_queue_if_changed(Vec::new());
+                                self.library_last_detail_enrichment_entity = None;
+                                TRACK_ROW_COVER_ART_IMAGE_CACHE.with(|cache| {
+                                    cache.borrow_mut().clear();
+                                });
+                                TRACK_ROW_COVER_ART_FAILED_PATHS.with(|failed| {
+                                    failed.borrow_mut().clear();
+                                });
+                                let toast_text = format!(
+                                    "Cleared internet metadata cache ({} entries, {} images)",
+                                    cleared_rows, deleted_images
+                                );
+                                self.library_status_text = toast_text.clone();
+                                self.show_library_toast(toast_text);
+                                self.sync_library_ui();
                             }
                             protocol::LibraryMessage::AddToPlaylistsCompleted {
                                 playlist_count,
@@ -3812,23 +7366,62 @@ impl UiManager {
                                 self.library_status_text = toast_text.clone();
                                 self.show_library_toast(toast_text);
                             }
+                            protocol::LibraryMessage::RemoveSelectionCompleted {
+                                removed_tracks,
+                            } => {
+                                self.pending_library_remove_selections.clear();
+                                let _ = self.ui.upgrade_in_event_loop(move |ui| {
+                                    ui.set_show_library_remove_confirm(false);
+                                });
+                                let toast_text =
+                                    format!("Removed {} track(s) from library", removed_tracks);
+                                self.library_status_text = toast_text.clone();
+                                self.show_library_toast(toast_text);
+                                self.library_cover_art_paths.clear();
+                                self.folder_cover_art_paths.clear();
+                                self.request_library_view_data();
+                                self.request_library_root_counts();
+                            }
+                            protocol::LibraryMessage::RemoveSelectionFailed(error_text) => {
+                                self.pending_library_remove_selections.clear();
+                                let _ = self.ui.upgrade_in_event_loop(move |ui| {
+                                    ui.set_show_library_remove_confirm(false);
+                                });
+                                let toast_text =
+                                    format!("Failed to remove from library: {}", error_text);
+                                self.library_status_text = toast_text.clone();
+                                self.show_library_toast(toast_text);
+                            }
                             protocol::LibraryMessage::ToastTimeout { generation } => {
                                 if generation == self.library_toast_generation {
                                     self.hide_library_toast();
                                 }
                             }
+                            protocol::LibraryMessage::DrainScanProgressQueue => {
+                                self.drain_scan_progress_queue();
+                            }
                             protocol::LibraryMessage::RequestScan
-                            | protocol::LibraryMessage::RequestSongs
+                            | protocol::LibraryMessage::RequestRootCounts
+                            | protocol::LibraryMessage::RequestTracks
                             | protocol::LibraryMessage::RequestArtists
                             | protocol::LibraryMessage::RequestAlbums
                             | protocol::LibraryMessage::RequestGenres
                             | protocol::LibraryMessage::RequestDecades
                             | protocol::LibraryMessage::RequestGlobalSearchData
                             | protocol::LibraryMessage::RequestArtistDetail { .. }
-                            | protocol::LibraryMessage::RequestAlbumSongs { .. }
-                            | protocol::LibraryMessage::RequestGenreSongs { .. }
-                            | protocol::LibraryMessage::RequestDecadeSongs { .. }
-                            | protocol::LibraryMessage::AddSelectionToPlaylists { .. } => {}
+                            | protocol::LibraryMessage::RequestAlbumTracks { .. }
+                            | protocol::LibraryMessage::RequestGenreTracks { .. }
+                            | protocol::LibraryMessage::RequestDecadeTracks { .. }
+                            | protocol::LibraryMessage::RequestLibraryPage { .. }
+                            | protocol::LibraryMessage::RequestEnrichment { .. }
+                            | protocol::LibraryMessage::ReplaceEnrichmentPrefetchQueue { .. }
+                            | protocol::LibraryMessage::ReplaceEnrichmentBackgroundQueue {
+                                ..
+                            }
+                            | protocol::LibraryMessage::ClearEnrichmentCache
+                            | protocol::LibraryMessage::AddSelectionToPlaylists { .. }
+                            | protocol::LibraryMessage::PasteSelectionToActivePlaylist { .. }
+                            | protocol::LibraryMessage::RemoveSelectionFromLibrary { .. } => {}
                         },
                         protocol::Message::Metadata(metadata_message) => match metadata_message {
                             protocol::MetadataMessage::OpenPropertiesForCurrentSelection => {
@@ -3887,12 +7480,47 @@ impl UiManager {
                             | protocol::MetadataMessage::SaveTrackProperties { .. } => {}
                         },
                         protocol::Message::Playlist(
+                            protocol::PlaylistMessage::OpenSubsonicSyncEligiblePlaylists(
+                                playlist_ids,
+                            ),
+                        ) => {
+                            self.opensubsonic_sync_eligible_playlist_ids =
+                                playlist_ids.into_iter().collect();
+                            let sync_flags = self
+                                .playlist_ids
+                                .iter()
+                                .map(|playlist_id| {
+                                    self.opensubsonic_sync_eligible_playlist_ids
+                                        .contains(playlist_id)
+                                })
+                                .collect::<Vec<_>>();
+                            let _ = self.ui.upgrade_in_event_loop(move |ui| {
+                                ui.set_playlist_can_sync_opensubsonic(ModelRc::from(Rc::new(
+                                    VecModel::from(sync_flags),
+                                )));
+                            });
+                        }
+                        protocol::Message::Playlist(
                             protocol::PlaylistMessage::PlaylistsRestored(playlists),
                         ) => {
+                            let old_playlist_ids = self.playlist_ids.clone();
                             let old_len = self.playlist_ids.len();
                             self.playlist_ids = playlists.iter().map(|p| p.id.clone()).collect();
                             self.playlist_names =
                                 playlists.iter().map(|p| p.name.clone()).collect::<Vec<_>>();
+                            let remote_playlist_flags = self
+                                .playlist_ids
+                                .iter()
+                                .map(|playlist_id| Self::is_pure_remote_playlist_id(playlist_id))
+                                .collect::<Vec<_>>();
+                            let sync_flags = self
+                                .playlist_ids
+                                .iter()
+                                .map(|playlist_id| {
+                                    self.opensubsonic_sync_eligible_playlist_ids
+                                        .contains(playlist_id)
+                                })
+                                .collect::<Vec<_>>();
                             self.library_add_to_playlist_checked =
                                 vec![false; self.playlist_ids.len()];
                             self.sync_library_add_to_playlist_ui();
@@ -3901,13 +7529,34 @@ impl UiManager {
                             for p in playlists {
                                 slint_playlists.push(StandardListViewItem::from(p.name.as_str()));
                             }
+                            let new_playlist_edit_index = if new_len == old_len + 1 && old_len > 0 {
+                                self.playlist_ids
+                                    .iter()
+                                    .position(|playlist_id| !old_playlist_ids.contains(playlist_id))
+                                    .filter(|index| {
+                                        !remote_playlist_flags.get(*index).copied().unwrap_or(false)
+                                    })
+                                    .map(|index| index as i32)
+                                    .unwrap_or(-1)
+                            } else {
+                                -1
+                            };
 
                             let _ = self.ui.upgrade_in_event_loop(move |ui| {
                                 ui.set_playlists(ModelRc::from(Rc::new(VecModel::from(
                                     slint_playlists,
                                 ))));
-                                if new_len > old_len && old_len > 0 {
-                                    ui.set_editing_playlist_index((new_len - 1) as i32);
+                                ui.set_playlist_is_remote(ModelRc::from(Rc::new(VecModel::from(
+                                    remote_playlist_flags,
+                                ))));
+                                ui.set_playlist_can_sync_opensubsonic(ModelRc::from(Rc::new(
+                                    VecModel::from(sync_flags),
+                                )));
+                                if new_playlist_edit_index >= 0 {
+                                    ui.set_editing_playlist_index(new_playlist_edit_index);
+                                    ui.set_new_playlist_edit_index(new_playlist_edit_index);
+                                } else {
+                                    ui.set_new_playlist_edit_index(-1);
                                 }
                             });
                         }
@@ -3916,7 +7565,6 @@ impl UiManager {
                         ) => {
                             self.active_playlist_id = id.clone();
                             self.selection_anchor_track_id = None;
-                            self.playlist_column_width_overrides_px.clear();
                             self.playlist_column_target_widths_px.clear();
                             self.apply_playlist_column_layout();
                             if let Some(index) =
@@ -3924,6 +7572,7 @@ impl UiManager {
                             {
                                 let _ = self.ui.upgrade_in_event_loop(move |ui| {
                                     ui.set_active_playlist_index(index as i32);
+                                    ui.set_new_playlist_edit_index(-1);
                                 });
                             }
                         }
@@ -3938,13 +7587,14 @@ impl UiManager {
                             self.track_paths.clear();
                             self.track_cover_art_paths.clear();
                             self.track_metadata.clear();
-                            for track in tracks {
+                            for track in &tracks {
                                 self.track_ids.push(track.id.clone());
                                 self.track_paths.push(track.path.clone());
                                 self.track_cover_art_paths.push(None);
-                                let metadata = self.read_track_metadata(track.path.as_path());
-                                self.track_metadata.push(metadata);
+                                self.track_metadata
+                                    .push(Self::fallback_track_metadata(track.path.as_path()));
                             }
+                            self.queue_track_metadata_lookup_batch(&tracks);
                             self.refresh_playlist_column_content_targets();
                             self.apply_playlist_column_layout();
                             self.rebuild_track_model();
@@ -3956,8 +7606,9 @@ impl UiManager {
                             self.track_ids.push(id.clone());
                             self.track_paths.push(path.clone());
                             self.track_cover_art_paths.push(None);
-                            let tags = self.read_track_metadata(path.as_path());
-                            self.track_metadata.push(tags);
+                            self.track_metadata
+                                .push(Self::fallback_track_metadata(path.as_path()));
+                            self.queue_track_metadata_lookup(id, path);
                             self.refresh_playlist_column_content_targets();
                             self.apply_playlist_column_layout();
                             self.rebuild_track_model();
@@ -3986,6 +7637,10 @@ impl UiManager {
                             self.rebuild_track_model();
                         }
                         protocol::Message::Playlist(protocol::PlaylistMessage::DeleteSelected) => {
+                            if self.collection_mode == COLLECTION_MODE_LIBRARY {
+                                self.request_library_remove_selection_confirmation();
+                                continue;
+                            }
                             if self.is_filter_view_active() {
                                 continue;
                             }
@@ -4020,14 +7675,17 @@ impl UiManager {
                         ) => {
                             let inserted_count = tracks.len();
                             let mut insert_cursor = insert_at.min(self.track_ids.len());
-                            for track in tracks {
-                                let metadata = self.read_track_metadata(track.path.as_path());
-                                self.track_ids.insert(insert_cursor, track.id);
-                                self.track_paths.insert(insert_cursor, track.path);
+                            for track in &tracks {
+                                self.track_ids.insert(insert_cursor, track.id.clone());
+                                self.track_paths.insert(insert_cursor, track.path.clone());
                                 self.track_cover_art_paths.insert(insert_cursor, None);
-                                self.track_metadata.insert(insert_cursor, metadata);
+                                self.track_metadata.insert(
+                                    insert_cursor,
+                                    Self::fallback_track_metadata(track.path.as_path()),
+                                );
                                 insert_cursor += 1;
                             }
+                            self.queue_track_metadata_lookup_batch(&tracks);
                             if self.pending_paste_feedback {
                                 self.pending_paste_feedback = false;
                                 let toast_text = format!("Pasted {} tracks", inserted_count);
@@ -4039,13 +7697,86 @@ impl UiManager {
                             self.rebuild_track_model();
                         }
                         protocol::Message::Playlist(
+                            protocol::PlaylistMessage::TracksInsertedBatch { tracks, insert_at },
+                        ) => {
+                            let inserted_count = tracks.len();
+                            let mut insert_cursor = insert_at.min(self.track_ids.len());
+                            for track in &tracks {
+                                self.track_ids.insert(insert_cursor, track.id.clone());
+                                self.track_paths.insert(insert_cursor, track.path.clone());
+                                self.track_cover_art_paths.insert(insert_cursor, None);
+                                self.track_metadata.insert(
+                                    insert_cursor,
+                                    Self::fallback_track_metadata(track.path.as_path()),
+                                );
+                                insert_cursor += 1;
+                            }
+                            self.queue_track_metadata_lookup_batch(&tracks);
+                            if self.pending_paste_feedback {
+                                self.pending_paste_feedback = false;
+                                let toast_text = format!("Pasted {} tracks", inserted_count);
+                                self.library_status_text = toast_text.clone();
+                                self.show_library_toast(toast_text);
+                            }
+                            self.refresh_playlist_column_content_targets();
+                            self.apply_playlist_column_layout();
+                            self.rebuild_track_model();
+                        }
+                        protocol::Message::Playlist(
+                            protocol::PlaylistMessage::TrackMetadataBatchUpdated { updates },
+                        ) => {
+                            if self.apply_track_metadata_batch_updates(updates) {
+                                self.refresh_playlist_column_content_targets();
+                                self.apply_playlist_column_layout();
+                                self.refresh_playing_track_metadata();
+                                self.update_display_for_active_collection();
+                                self.rebuild_track_model();
+                            }
+                        }
+                        protocol::Message::Playlist(
+                            protocol::PlaylistMessage::TrackUnavailable { id, reason },
+                        ) => {
+                            let newly_unavailable = self.unavailable_track_ids.insert(id.clone());
+                            if newly_unavailable {
+                                info!(
+                                    "UiManager: track marked unavailable id={} reason={}",
+                                    id, reason
+                                );
+                            }
+                            if let Some(index) =
+                                self.track_ids.iter().position(|track_id| track_id == &id)
+                            {
+                                if let Some(metadata) = self.track_metadata.get_mut(index) {
+                                    metadata.title = REMOTE_TRACK_UNAVAILABLE_TITLE.to_string();
+                                    metadata.artist.clear();
+                                    metadata.album.clear();
+                                    metadata.album_artist.clear();
+                                    metadata.date.clear();
+                                    metadata.genre.clear();
+                                    metadata.year.clear();
+                                    metadata.track_number.clear();
+                                }
+                            }
+                            self.refresh_playlist_column_content_targets();
+                            self.apply_playlist_column_layout();
+                            self.refresh_playing_track_metadata();
+                            self.update_display_for_active_collection();
+                            self.rebuild_track_model();
+                        }
+                        protocol::Message::Playlist(
                             protocol::PlaylistMessage::PlayTrackByViewIndex(view_index),
                         ) => {
-                            if let Some(source_index) = self.map_view_to_source_index(view_index) {
-                                let _ = self.bus_sender.send(protocol::Message::Playback(
-                                    protocol::PlaybackMessage::PlayTrackByIndex(source_index),
-                                ));
+                            let unavailable = self
+                                .map_view_to_source_index(view_index)
+                                .and_then(|source_index| self.track_ids.get(source_index))
+                                .map(|track_id| self.unavailable_track_ids.contains(track_id))
+                                .unwrap_or(false);
+                            if unavailable {
+                                continue;
                             }
+                            self.start_queue_if_possible(
+                                self.build_playlist_queue_request(Some(view_index)),
+                            );
                         }
                         protocol::Message::Playlist(
                             protocol::PlaylistMessage::OpenPlaylistSearch,
@@ -4089,27 +7820,9 @@ impl UiManager {
                             self.apply_filter_view_snapshot_locally(source_indices);
                         }
                         protocol::Message::Playback(
-                            protocol::PlaybackMessage::PlayTrackByIndex(index),
+                            protocol::PlaybackMessage::PlayActiveCollection,
                         ) => {
-                            self.active_playing_index = Some(index);
-                            self.playback_active = true;
-                            let status_text = self
-                                .track_metadata
-                                .get(index)
-                                .map(Self::status_text_from_track_metadata)
-                                .unwrap_or_else(|| "".into());
-                            let _ = self.ui.upgrade_in_event_loop(move |ui| {
-                                ui.set_status_text(status_text);
-                            });
-                            self.rebuild_track_model();
-                        }
-                        protocol::Message::Playback(protocol::PlaybackMessage::Play) => {
-                            self.playback_active = true;
-                            self.rebuild_track_model();
-                        }
-                        protocol::Message::Playback(protocol::PlaybackMessage::Pause) => {
-                            self.playback_active = false;
-                            self.rebuild_track_model();
+                            self.play_active_collection();
                         }
                         protocol::Message::Playback(
                             protocol::PlaybackMessage::PlaybackProgress {
@@ -4167,16 +7880,93 @@ impl UiManager {
                             self.current_output_path_info = Some(path_info);
                             self.refresh_technical_info_ui();
                         }
+                        protocol::Message::Cast(protocol::CastMessage::DevicesUpdated(devices)) => {
+                            self.cast_device_ids =
+                                devices.iter().map(|device| device.id.clone()).collect();
+                            self.cast_device_names = devices
+                                .iter()
+                                .map(|device| {
+                                    if device.model.trim().is_empty() {
+                                        device.name.clone()
+                                    } else {
+                                        format!("{} ({})", device.name, device.model)
+                                    }
+                                })
+                                .collect();
+                            self.sync_cast_state_to_ui();
+                        }
+                        protocol::Message::Cast(
+                            protocol::CastMessage::ConnectionStateChanged {
+                                state,
+                                device,
+                                reason,
+                            },
+                        ) => {
+                            self.cast_connected = state == protocol::CastConnectionState::Connected;
+                            self.cast_connecting =
+                                state == protocol::CastConnectionState::Connecting;
+                            self.cast_discovering =
+                                state == protocol::CastConnectionState::Discovering;
+                            self.cast_device_name =
+                                device.map(|device| device.name).unwrap_or_default();
+                            if !self.cast_connected {
+                                self.cast_playback_path_kind = None;
+                                self.cast_transcode_output_metadata = None;
+                            }
+                            if let Some(reason) = reason {
+                                let trimmed = reason.trim();
+                                if !trimmed.is_empty() {
+                                    self.library_status_text = trimmed.to_string();
+                                    self.show_library_toast(trimmed);
+                                }
+                            }
+                            self.sync_cast_state_to_ui();
+                            self.refresh_technical_info_ui();
+                        }
+                        protocol::Message::Cast(protocol::CastMessage::PlaybackPathChanged {
+                            kind,
+                            description: _description,
+                            transcode_output_metadata,
+                        }) => {
+                            self.cast_playback_path_kind = Some(kind);
+                            self.cast_transcode_output_metadata = transcode_output_metadata;
+                            self.refresh_technical_info_ui();
+                        }
+                        protocol::Message::Cast(protocol::CastMessage::PlaybackError {
+                            track_id,
+                            message,
+                            can_retry_with_transcode,
+                        }) => {
+                            let mut trimmed = message.trim().to_string();
+                            if let Some(track_id) = track_id {
+                                if !track_id.trim().is_empty() {
+                                    trimmed = format!("{} [track: {}]", trimmed, track_id);
+                                }
+                            }
+                            if can_retry_with_transcode {
+                                trimmed = format!(
+                                    "{} (direct cast failed; transcode fallback available)",
+                                    trimmed
+                                );
+                            }
+                            if !trimmed.is_empty() {
+                                self.library_status_text = trimmed.clone();
+                                self.show_library_toast(trimmed);
+                            }
+                        }
                         protocol::Message::Playback(protocol::PlaybackMessage::Stop) => {
                             self.playback_active = false;
                             self.active_playing_index = None;
                             self.last_progress_at = None;
-                            let had_playing_track = self.current_playing_track_path.is_some();
-                            self.current_playing_track_path = None;
-                            self.current_playing_track_metadata = None;
+                            let had_playing_track = self.playing_track.path.is_some();
+                            self.playing_track = PlayingTrackState::default();
                             self.current_technical_metadata = None;
                             self.current_output_path_info = None;
-                            self.update_display_for_active_collection(None, None);
+                            self.library_playing_index = None;
+                            if had_playing_track {
+                                self.display_target_priority = DisplayTargetPriority::Playing;
+                            }
+                            self.update_display_for_active_collection();
 
                             // Reset cached progress values
                             self.last_elapsed_ms = 0;
@@ -4195,26 +7985,14 @@ impl UiManager {
                             self.rebuild_track_model();
                         }
                         protocol::Message::Playlist(protocol::PlaylistMessage::TrackStarted {
-                            index,
+                            index: _index,
                             playlist_id,
+                            ..
                         }) => {
-                            let is_active_playlist = playlist_id == self.active_playlist_id;
-                            self.active_playing_index = if is_active_playlist {
-                                Some(index)
-                            } else {
-                                None
-                            };
-                            self.playback_active = is_active_playlist;
-                            let status_text = self
-                                .track_metadata
-                                .get(index)
-                                .map(Self::status_text_from_track_metadata)
-                                .unwrap_or_else(|| "".into());
-
-                            let _ = self.ui.upgrade_in_event_loop(move |ui| {
-                                ui.set_status_text(status_text);
-                            });
-                            self.rebuild_track_model();
+                            self.playback_active = true;
+                            if playlist_id != self.active_playlist_id {
+                                self.active_playing_index = None;
+                            }
                         }
                         protocol::Message::Playlist(
                             protocol::PlaylistMessage::PlaylistIndicesChanged {
@@ -4232,29 +8010,41 @@ impl UiManager {
                             if !is_playing {
                                 self.last_progress_at = None;
                             }
+                            let previous_active_playing_index = self.active_playing_index;
                             let selected_indices_clone = selected_indices.clone();
                             self.selected_indices = selected_indices_clone.clone();
                             let is_playing_active_playlist =
                                 playing_playlist_id.as_ref() == Some(&self.active_playlist_id);
-                            self.active_playing_index = if is_playing_active_playlist {
-                                playing_index
-                            } else {
-                                None
-                            };
-
-                            let previous_playing_track_path =
-                                self.current_playing_track_path.clone();
-                            self.current_playing_track_path = playing_track_path.clone();
-                            self.current_playing_track_metadata = playing_track_metadata.clone();
-                            self.update_display_for_active_collection(
+                            self.active_playing_index = Self::resolve_active_playing_source_index(
+                                &self.track_paths,
+                                is_playing_active_playlist,
+                                playing_index,
                                 playing_track_path.as_ref(),
-                                playing_track_metadata.as_ref(),
                             );
-                            if previous_playing_track_path != self.current_playing_track_path {
+
+                            let playing_track_changed = self.set_playing_track(
+                                playing_track_path.clone(),
+                                playing_track_metadata.clone(),
+                            );
+                            if playing_track_changed {
+                                self.display_target_priority = DisplayTargetPriority::Playing;
+                            }
+                            self.update_library_playing_index();
+                            self.update_display_for_active_collection();
+                            if playing_track_changed {
                                 self.sync_library_ui();
                             }
 
+                            let status_text = self
+                                .playing_track
+                                .metadata
+                                .as_ref()
+                                .map(Self::status_text_from_detailed_metadata);
+
                             let _ = self.ui.upgrade_in_event_loop(move |ui| {
+                                if let Some(text) = status_text {
+                                    ui.set_status_text(text.into());
+                                }
                                 let repeat_int = match repeat_mode {
                                     protocol::RepeatMode::Off => 0,
                                     protocol::RepeatMode::Playlist => 1,
@@ -4270,6 +8060,11 @@ impl UiManager {
                                 ui.set_playback_order_index(order_int);
                             });
                             self.rebuild_track_model();
+                            if playing_track_changed
+                                || previous_active_playing_index != self.active_playing_index
+                            {
+                                self.auto_scroll_active_collection_to_playing_track();
+                            }
                         }
                         protocol::Message::Playlist(
                             protocol::PlaylistMessage::SelectionChanged(indices),
@@ -4280,23 +8075,24 @@ impl UiManager {
                             );
                             let indices_clone = indices.clone();
                             self.selected_indices = indices_clone.clone();
-                            if indices_clone.is_empty() {
+                            let next_anchor_source_index = Self::resolve_shift_anchor_source_index(
+                                &self.selected_indices,
+                                self.selection_anchor_source_index(),
+                            );
+                            if let Some(anchor_source_index) = next_anchor_source_index {
+                                self.set_selection_anchor_from_source_index(anchor_source_index);
+                            } else {
                                 self.selection_anchor_track_id = None;
                             }
+                            self.display_target_priority = DisplayTargetPriority::Selection;
                             debug!(
                                 "After SelectionChanged: self.selected_indices = {:?}",
                                 self.selected_indices
                             );
 
-                            // Update cover art and metadata display based on selection.
-                            // If nothing is selected, fall back to the currently playing track.
-                            let playing_track_path = self.current_playing_track_path.clone();
-                            let playing_track_metadata =
-                                self.current_playing_track_metadata.clone();
-                            self.update_display_for_active_collection(
-                                playing_track_path.as_ref(),
-                                playing_track_metadata.as_ref(),
-                            );
+                            // Selection interaction is the most recent user change, so it
+                            // temporarily owns metadata/cover-art display until playback changes.
+                            self.update_display_for_active_collection();
                             self.rebuild_track_model();
                         }
                         protocol::Message::Playlist(protocol::PlaylistMessage::OnPointerDown {
@@ -4403,9 +8199,15 @@ impl UiManager {
                         protocol::Message::Playback(
                             protocol::PlaybackMessage::CoverArtChanged(path),
                         ) => {
+                            if path.is_some() {
+                                self.refresh_visible_library_cover_art_rows();
+                                if self.is_album_art_column_visible() {
+                                    self.rebuild_track_model();
+                                }
+                            }
                             let _ = self.ui.upgrade_in_event_loop(move |ui| {
                                 if let Some(path) = path {
-                                    if let Ok(img) = slint::Image::load_from_path(&path) {
+                                    if let Some(img) = UiManager::try_load_cover_art_image(&path) {
                                         ui.set_current_cover_art(img);
                                         ui.set_current_cover_art_available(true);
                                     } else {
@@ -4440,6 +8242,23 @@ impl UiManager {
                         protocol::Message::Config(protocol::ConfigMessage::ConfigChanged(
                             config,
                         )) => {
+                            self.auto_scroll_to_playing_track =
+                                config.ui.auto_scroll_to_playing_track;
+                            self.library_online_metadata_enabled =
+                                config.library.online_metadata_enabled;
+                            self.library_online_metadata_prompt_pending =
+                                config.library.online_metadata_prompt_pending;
+                            if !self.library_online_metadata_enabled {
+                                self.library_enrichment_pending.clear();
+                                self.library_enrichment_last_request_at.clear();
+                                self.library_enrichment_retry_counts.clear();
+                                self.library_enrichment_retry_not_before.clear();
+                                self.library_enrichment_not_found_not_before.clear();
+                                self.library_enrichment_failed_attempt_counts.clear();
+                                self.replace_prefetch_queue_if_changed(Vec::new());
+                                self.replace_background_queue_if_changed(Vec::new());
+                                self.library_last_detail_enrichment_entity = None;
+                            }
                             self.playlist_columns = config.ui.playlist_columns.clone();
                             self.album_art_column_min_width_px =
                                 config.ui.playlist_album_art_column_min_width_px;
@@ -4450,8 +8269,9 @@ impl UiManager {
                                 .iter()
                                 .map(Self::playlist_column_key)
                                 .collect();
-                            self.playlist_column_width_overrides_px
-                                .retain(|key, _| valid_column_keys.contains(key));
+                            self.apply_layout_column_width_overrides(
+                                &config.ui.layout.playlist_column_width_overrides,
+                            );
                             self.playlist_column_target_widths_px
                                 .retain(|key, _| valid_column_keys.contains(key));
                             self.refresh_playlist_column_content_targets();
@@ -4494,7 +8314,9 @@ impl UiManager {
                                     VecModel::from(menu_is_custom),
                                 )));
                             });
+                            self.sync_library_ui();
                             self.rebuild_track_model();
+                            self.update_display_for_active_collection();
                         }
                         protocol::Message::Playlist(
                             protocol::PlaylistMessage::PlaylistViewportWidthChanged(width_px),
@@ -4505,49 +8327,33 @@ impl UiManager {
                             }
                         }
                         protocol::Message::Playlist(
-                            protocol::PlaylistMessage::ActivePlaylistColumnWidthOverrides(
-                                overrides,
-                            ),
-                        ) => {
-                            self.playlist_column_width_overrides_px.clear();
-                            if let Some(overrides) = overrides {
-                                for override_item in overrides {
-                                    if override_item.column_key.trim().is_empty() {
-                                        continue;
-                                    }
-                                    let clamped_width_px = self.clamp_column_override_width_px(
-                                        &override_item.column_key,
-                                        override_item.width_px,
-                                    );
-                                    self.playlist_column_width_overrides_px
-                                        .insert(override_item.column_key, clamped_width_px);
-                                }
-                            }
-                            self.apply_playlist_column_layout();
-                        }
-                        protocol::Message::Playlist(
                             protocol::PlaylistMessage::SetActivePlaylistColumnWidthOverride {
                                 column_key,
                                 width_px,
-                                ..
                             },
                         ) => {
                             if column_key.trim().is_empty() {
                                 continue;
                             }
+                            if !self
+                                .playlist_columns
+                                .iter()
+                                .any(|column| Self::playlist_column_key(column) == column_key)
+                            {
+                                continue;
+                            }
                             let clamped_width_px =
                                 self.clamp_column_override_width_px(&column_key, width_px);
+                            if self
+                                .playlist_column_width_overrides_px
+                                .get(&column_key)
+                                .copied()
+                                == Some(clamped_width_px)
+                            {
+                                continue;
+                            }
                             self.playlist_column_width_overrides_px
                                 .insert(column_key, clamped_width_px);
-                            self.apply_playlist_column_layout();
-                        }
-                        protocol::Message::Playlist(
-                            protocol::PlaylistMessage::ClearActivePlaylistColumnWidthOverride {
-                                column_key,
-                                ..
-                            },
-                        ) => {
-                            self.playlist_column_width_overrides_px.remove(&column_key);
                             self.apply_playlist_column_layout();
                         }
                         protocol::Message::Playlist(
@@ -4566,8 +8372,8 @@ impl UiManager {
                         _ => {}
                     }
                 }
-                Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
-                    self.on_message_lagged();
+                Err(tokio::sync::broadcast::error::RecvError::Lagged(skipped)) => {
+                    self.on_message_lagged(skipped);
                 }
                 Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
             }
@@ -4578,12 +8384,14 @@ impl UiManager {
 #[cfg(test)]
 mod tests {
     use super::{
-        fit_column_widths_to_available_space, ColumnWidthProfile, CoverArtLookupRequest,
-        LibraryEntry, LibraryViewState, PlaylistSortDirection, TrackMetadata, UiManager,
+        fit_column_widths_deterministic, ColumnWidthProfile, CoverArtLookupRequest,
+        DeterministicColumnLayoutSpec, LibraryEntry, LibraryViewState, PlaylistColumnClass,
+        PlaylistSortDirection, TrackMetadata, UiManager, ENRICHMENT_FAILED_ATTEMPT_CAP,
     };
     use crate::{config::PlaylistColumnConfig, protocol};
     use std::path::PathBuf;
     use std::sync::mpsc;
+    use std::time::{Duration, Instant};
 
     fn make_meta(title: &str) -> TrackMetadata {
         TrackMetadata {
@@ -4598,8 +8406,8 @@ mod tests {
         }
     }
 
-    fn make_library_song(id: &str, title: &str, path: &str) -> protocol::LibrarySong {
-        protocol::LibrarySong {
+    fn make_library_track(id: &str, title: &str, path: &str) -> protocol::LibraryTrack {
+        protocol::LibraryTrack {
             id: id.to_string(),
             path: PathBuf::from(path),
             title: title.to_string(),
@@ -4612,7 +8420,7 @@ mod tests {
         }
     }
 
-    fn make_library_song_in_album(
+    fn make_library_track_in_album(
         id: &str,
         title: &str,
         path: &str,
@@ -4620,8 +8428,8 @@ mod tests {
         album_artist: &str,
         year: &str,
         track_number: &str,
-    ) -> protocol::LibrarySong {
-        protocol::LibrarySong {
+    ) -> protocol::LibraryTrack {
+        protocol::LibraryTrack {
             id: id.to_string(),
             path: PathBuf::from(path),
             title: title.to_string(),
@@ -4638,7 +8446,7 @@ mod tests {
         protocol::LibraryAlbum {
             album: album.to_string(),
             album_artist: album_artist.to_string(),
-            song_count: 3,
+            track_count: 3,
             representative_track_path: Some(PathBuf::from(format!("{album}.mp3"))),
         }
     }
@@ -4646,12 +8454,12 @@ mod tests {
     fn make_library_artist(
         name: &str,
         album_count: u32,
-        song_count: u32,
+        track_count: u32,
     ) -> protocol::LibraryArtist {
         protocol::LibraryArtist {
             artist: name.to_string(),
             album_count,
-            song_count,
+            track_count,
         }
     }
 
@@ -4749,6 +8557,93 @@ mod tests {
     }
 
     #[test]
+    fn test_build_playlist_queue_snapshot_uses_rendered_view_order() {
+        let track_ids = vec![
+            "t0".to_string(),
+            "t1".to_string(),
+            "t2".to_string(),
+            "t3".to_string(),
+        ];
+        let track_paths = vec![
+            PathBuf::from("a.mp3"),
+            PathBuf::from("b.mp3"),
+            PathBuf::from("c.mp3"),
+            PathBuf::from("d.mp3"),
+        ];
+        let view_indices = vec![2usize, 0, 3];
+        let selected_indices = vec![0usize];
+
+        let (tracks, start_index) = UiManager::build_playlist_queue_snapshot(
+            &track_ids,
+            &track_paths,
+            &view_indices,
+            &selected_indices,
+            None,
+        )
+        .expect("queue snapshot should exist");
+
+        assert_eq!(tracks.len(), 3);
+        assert_eq!(tracks[0].id, "t2");
+        assert_eq!(tracks[1].id, "t0");
+        assert_eq!(tracks[2].id, "t3");
+        assert_eq!(start_index, 1);
+    }
+
+    #[test]
+    fn test_build_playlist_queue_snapshot_preferred_source_index_overrides_selection() {
+        let track_ids = vec!["t0".to_string(), "t1".to_string(), "t2".to_string()];
+        let track_paths = vec![
+            PathBuf::from("a.mp3"),
+            PathBuf::from("b.mp3"),
+            PathBuf::from("c.mp3"),
+        ];
+        let view_indices = vec![2usize, 0, 1];
+        let selected_indices = vec![0usize, 1];
+
+        let (_, start_index) = UiManager::build_playlist_queue_snapshot(
+            &track_ids,
+            &track_paths,
+            &view_indices,
+            &selected_indices,
+            Some(2),
+        )
+        .expect("queue snapshot should exist");
+
+        assert_eq!(start_index, 0);
+    }
+
+    #[test]
+    fn test_resolve_active_playing_source_index_prefers_playing_index_over_path_match() {
+        let track_paths = vec![
+            PathBuf::from("a.mp3"),
+            PathBuf::from("b.mp3"),
+            PathBuf::from("a.mp3"),
+            PathBuf::from("c.mp3"),
+        ];
+        let playing_path = PathBuf::from("a.mp3");
+        let resolved = UiManager::resolve_active_playing_source_index(
+            &track_paths,
+            true,
+            Some(2),
+            Some(&playing_path),
+        );
+        assert_eq!(resolved, Some(2));
+    }
+
+    #[test]
+    fn test_resolve_active_playing_source_index_falls_back_to_path_when_index_missing() {
+        let track_paths = vec![PathBuf::from("a.mp3"), PathBuf::from("b.mp3")];
+        let playing_path = PathBuf::from("b.mp3");
+        let resolved = UiManager::resolve_active_playing_source_index(
+            &track_paths,
+            true,
+            None,
+            Some(&playing_path),
+        );
+        assert_eq!(resolved, Some(1));
+    }
+
+    #[test]
     fn test_build_shift_selection_from_view_order_uses_rendered_range() {
         let view_indices = vec![2usize, 0, 3, 1];
         let selected = UiManager::build_shift_selection_from_view_order(&view_indices, Some(0), 1);
@@ -4760,6 +8655,101 @@ mod tests {
         let view_indices = vec![2usize, 0, 3, 1];
         let selected = UiManager::build_shift_selection_from_view_order(&view_indices, None, 3);
         assert_eq!(selected, vec![3]);
+    }
+
+    #[test]
+    fn test_resolve_shift_anchor_source_index_keeps_current_anchor_when_selected() {
+        let selected = vec![4usize, 7, 9];
+        let anchor = UiManager::resolve_shift_anchor_source_index(&selected, Some(7));
+        assert_eq!(anchor, Some(7));
+    }
+
+    #[test]
+    fn test_resolve_shift_anchor_source_index_falls_back_when_anchor_not_selected() {
+        let selected = vec![2usize, 5, 6];
+        let anchor = UiManager::resolve_shift_anchor_source_index(&selected, Some(1));
+        assert_eq!(anchor, Some(6));
+    }
+
+    #[test]
+    fn test_resolve_shift_anchor_source_index_none_when_no_selection() {
+        let selected: Vec<usize> = Vec::new();
+        let anchor = UiManager::resolve_shift_anchor_source_index(&selected, Some(4));
+        assert_eq!(anchor, None);
+    }
+
+    #[test]
+    fn test_is_counted_failed_enrichment_result_counts_not_found() {
+        let payload = protocol::LibraryEnrichmentPayload {
+            entity: protocol::LibraryEnrichmentEntity::Artist {
+                artist: "Example Artist".to_string(),
+            },
+            status: protocol::LibraryEnrichmentStatus::NotFound,
+            blurb: String::new(),
+            image_path: None,
+            source_name: "Wikipedia".to_string(),
+            source_url: String::new(),
+            error_kind: None,
+            attempt_kind: protocol::LibraryEnrichmentAttemptKind::Detail,
+        };
+        assert!(UiManager::is_counted_failed_enrichment_result(&payload));
+    }
+
+    #[test]
+    fn test_is_counted_failed_enrichment_result_ignores_rate_limited_error() {
+        let payload = protocol::LibraryEnrichmentPayload {
+            entity: protocol::LibraryEnrichmentEntity::Artist {
+                artist: "Example Artist".to_string(),
+            },
+            status: protocol::LibraryEnrichmentStatus::Error,
+            blurb: String::new(),
+            image_path: None,
+            source_name: "TheAudioDB".to_string(),
+            source_url: String::new(),
+            error_kind: Some(protocol::LibraryEnrichmentErrorKind::RateLimited),
+            attempt_kind: protocol::LibraryEnrichmentAttemptKind::VisiblePrefetch,
+        };
+        assert!(!UiManager::is_counted_failed_enrichment_result(&payload));
+    }
+
+    #[test]
+    fn test_is_counted_failed_enrichment_result_counts_non_rate_limited_error() {
+        let payload = protocol::LibraryEnrichmentPayload {
+            entity: protocol::LibraryEnrichmentEntity::Artist {
+                artist: "Example Artist".to_string(),
+            },
+            status: protocol::LibraryEnrichmentStatus::Error,
+            blurb: String::new(),
+            image_path: None,
+            source_name: "Wikipedia".to_string(),
+            source_url: String::new(),
+            error_kind: Some(protocol::LibraryEnrichmentErrorKind::Timeout),
+            attempt_kind: protocol::LibraryEnrichmentAttemptKind::VisiblePrefetch,
+        };
+        assert!(UiManager::is_counted_failed_enrichment_result(&payload));
+    }
+
+    #[test]
+    fn test_failed_enrichment_attempt_cap_reached_uses_threshold() {
+        assert!(!UiManager::failed_enrichment_attempt_cap_reached(
+            ENRICHMENT_FAILED_ATTEMPT_CAP.saturating_sub(1),
+        ));
+        assert!(UiManager::failed_enrichment_attempt_cap_reached(
+            ENRICHMENT_FAILED_ATTEMPT_CAP,
+        ));
+    }
+
+    #[test]
+    fn test_enrichment_backoff_elapsed_true_for_missing_or_past_deadline() {
+        assert!(UiManager::enrichment_backoff_elapsed(None));
+        let past = Instant::now() - Duration::from_secs(1);
+        assert!(UiManager::enrichment_backoff_elapsed(Some(&past)));
+    }
+
+    #[test]
+    fn test_enrichment_backoff_elapsed_false_for_future_deadline() {
+        let future = Instant::now() + Duration::from_secs(10);
+        assert!(!UiManager::enrichment_backoff_elapsed(Some(&future)));
     }
 
     #[test]
@@ -4782,11 +8772,33 @@ mod tests {
             &metadata,
             playing_path.as_ref(),
             Some(&playing_meta),
+            false,
         );
 
         assert_eq!(path, Some(PathBuf::from("b.mp3")));
         let meta = meta.expect("selected metadata should exist");
         assert_eq!(meta.title, "B");
+    }
+
+    #[test]
+    fn test_resolve_display_target_prefers_playing_when_requested() {
+        let selected = vec![1usize];
+        let paths = vec![PathBuf::from("a.mp3"), PathBuf::from("b.mp3")];
+        let metadata = vec![make_meta("A"), make_meta("B")];
+        let playing_path = Some(PathBuf::from("a.mp3"));
+
+        let (path, meta) = UiManager::resolve_display_target(
+            &selected,
+            &paths,
+            &metadata,
+            playing_path.as_ref(),
+            None,
+            true,
+        );
+
+        assert_eq!(path, Some(PathBuf::from("a.mp3")));
+        let meta = meta.expect("playing metadata should exist");
+        assert_eq!(meta.title, "A");
     }
 
     #[test]
@@ -4809,6 +8821,7 @@ mod tests {
             &metadata,
             playing_path.as_ref(),
             Some(&playing_meta),
+            false,
         );
 
         assert_eq!(path, Some(PathBuf::from("playing.mp3")));
@@ -4836,6 +8849,7 @@ mod tests {
             &metadata,
             playing_path.as_ref(),
             Some(&stale_playing_meta),
+            false,
         );
 
         assert_eq!(path, Some(PathBuf::from("b.mp3")));
@@ -4851,18 +8865,18 @@ mod tests {
         let metadata = vec![make_meta("A")];
 
         let (path, meta) =
-            UiManager::resolve_display_target(&selected, &paths, &metadata, None, None);
+            UiManager::resolve_display_target(&selected, &paths, &metadata, None, None, false);
 
         assert!(path.is_none());
         assert!(meta.is_none());
     }
 
     #[test]
-    fn test_resolve_library_display_target_prefers_selected_song() {
+    fn test_resolve_library_display_target_prefers_selected_track() {
         let selected = vec![1usize];
         let entries = vec![
-            LibraryEntry::Song(make_library_song("song-a", "A", "a.mp3")),
-            LibraryEntry::Song(make_library_song("song-b", "B", "b.mp3")),
+            LibraryEntry::Track(make_library_track("track-a", "A", "a.mp3")),
+            LibraryEntry::Track(make_library_track("track-b", "B", "b.mp3")),
         ];
         let playing_path = Some(PathBuf::from("playing.mp3"));
         let playing_meta = protocol::DetailedMetadata {
@@ -4876,23 +8890,51 @@ mod tests {
         let (path, meta) = UiManager::resolve_library_display_target(
             &selected,
             &entries,
+            &[],
+            &[],
             playing_path.as_ref(),
             Some(&playing_meta),
+            false,
         );
 
         assert_eq!(path, Some(PathBuf::from("b.mp3")));
-        let meta = meta.expect("selected library song metadata should exist");
+        let meta = meta.expect("selected library track metadata should exist");
         assert_eq!(meta.title, "B");
         assert_eq!(meta.artist, "B-artist");
     }
 
     #[test]
-    fn test_resolve_library_display_target_falls_back_when_selection_has_no_song() {
+    fn test_resolve_library_display_target_prefers_playing_when_requested() {
+        let selected = vec![1usize];
+        let entries = vec![
+            LibraryEntry::Track(make_library_track("track-a", "A", "a.mp3")),
+            LibraryEntry::Track(make_library_track("track-b", "B", "b.mp3")),
+        ];
+        let playing_path = Some(PathBuf::from("a.mp3"));
+
+        let (path, meta) = UiManager::resolve_library_display_target(
+            &selected,
+            &entries,
+            &[],
+            &[],
+            playing_path.as_ref(),
+            None,
+            true,
+        );
+
+        assert_eq!(path, Some(PathBuf::from("a.mp3")));
+        let meta = meta.expect("playing library metadata should exist");
+        assert_eq!(meta.title, "A");
+        assert_eq!(meta.artist, "A-artist");
+    }
+
+    #[test]
+    fn test_resolve_library_display_target_falls_back_when_selection_has_no_track() {
         let selected = vec![0usize];
         let entries = vec![LibraryEntry::Artist(protocol::LibraryArtist {
             artist: "Artist".to_string(),
             album_count: 2,
-            song_count: 10,
+            track_count: 10,
         })];
         let playing_path = Some(PathBuf::from("playing.mp3"));
         let playing_meta = protocol::DetailedMetadata {
@@ -4906,8 +8948,11 @@ mod tests {
         let (path, meta) = UiManager::resolve_library_display_target(
             &selected,
             &entries,
+            &[],
+            &[],
             playing_path.as_ref(),
             Some(&playing_meta),
+            false,
         );
 
         assert_eq!(path, Some(PathBuf::from("playing.mp3")));
@@ -4916,52 +8961,143 @@ mod tests {
     }
 
     #[test]
-    fn test_build_artist_detail_entries_groups_songs_by_album_and_sorts_year_desc() {
+    fn test_resolve_library_display_target_uses_playlist_metadata_when_detail_view_has_no_track_rows(
+    ) {
+        let selected = vec![];
+        let entries = vec![LibraryEntry::Artist(protocol::LibraryArtist {
+            artist: "Artist".to_string(),
+            album_count: 1,
+            track_count: 8,
+        })];
+        let playlist_paths = vec![PathBuf::from("playing.mp3")];
+        let playlist_metadata = vec![make_meta("Now Playing")];
+        let playing_path = Some(PathBuf::from("playing.mp3"));
+
+        let (path, meta) = UiManager::resolve_library_display_target(
+            &selected,
+            &entries,
+            &playlist_paths,
+            &playlist_metadata,
+            playing_path.as_ref(),
+            None,
+            false,
+        );
+
+        assert_eq!(path, Some(PathBuf::from("playing.mp3")));
+        let meta = meta.expect("playlist metadata should be used for playing fallback");
+        assert_eq!(meta.title, "Now Playing");
+        assert_eq!(meta.artist, "Now Playing-artist");
+    }
+
+    #[test]
+    fn test_resolve_library_display_target_falls_back_to_path_metadata_when_missing_everywhere() {
+        let selected = vec![];
+        let entries = vec![LibraryEntry::Artist(protocol::LibraryArtist {
+            artist: "Artist".to_string(),
+            album_count: 1,
+            track_count: 8,
+        })];
+        let playing_path = Some(PathBuf::from("/tmp/Example Track.flac"));
+
+        let (path, meta) = UiManager::resolve_library_display_target(
+            &selected,
+            &entries,
+            &[],
+            &[],
+            playing_path.as_ref(),
+            None,
+            false,
+        );
+
+        assert_eq!(path, Some(PathBuf::from("/tmp/Example Track.flac")));
+        let meta = meta.expect("fallback metadata should be synthesized from path");
+        assert_eq!(meta.title, "Example Track");
+        assert!(meta.artist.is_empty());
+    }
+
+    #[test]
+    fn test_resolve_metadata_for_track_path_from_sources_uses_library_when_playlist_missing() {
+        let path = PathBuf::from("library-only.mp3");
+        let metadata = UiManager::resolve_metadata_for_track_path_from_sources(
+            &path,
+            &[],
+            &[],
+            &[LibraryEntry::Track(make_library_track(
+                "track-library",
+                "Library Track",
+                "library-only.mp3",
+            ))],
+        )
+        .expect("library metadata should resolve");
+        assert_eq!(metadata.title, "Library Track");
+        assert_eq!(metadata.artist, "Library Track-artist");
+    }
+
+    #[test]
+    fn test_resolve_metadata_for_track_path_from_sources_prefers_playlist_cache_when_available() {
+        let path = PathBuf::from("shared.mp3");
+        let metadata = UiManager::resolve_metadata_for_track_path_from_sources(
+            &path,
+            &[PathBuf::from("shared.mp3")],
+            &[make_meta("Playlist Track")],
+            &[LibraryEntry::Track(make_library_track(
+                "track-library",
+                "Library Track",
+                "shared.mp3",
+            ))],
+        )
+        .expect("playlist metadata should resolve");
+        assert_eq!(metadata.title, "Playlist Track");
+        assert_eq!(metadata.artist, "Playlist Track-artist");
+    }
+
+    #[test]
+    fn test_build_artist_detail_entries_groups_tracks_by_album_and_sorts_year_desc() {
         let albums = vec![
             make_library_album("Alpha", "Artist"),
             make_library_album("No Year", "Artist"),
             make_library_album("Zeta", "Artist"),
         ];
-        let songs = vec![
-            make_library_song_in_album(
+        let tracks = vec![
+            make_library_track_in_album(
                 "alpha-1",
-                "Alpha Song 1",
+                "Alpha Track 1",
                 "alpha-1.mp3",
                 "Alpha",
                 "Artist",
                 "1998",
                 "1",
             ),
-            make_library_song_in_album(
+            make_library_track_in_album(
                 "alpha-2",
-                "Alpha Song 2",
+                "Alpha Track 2",
                 "alpha-2.mp3",
                 "Alpha",
                 "Artist",
                 "1998",
                 "2",
             ),
-            make_library_song_in_album(
+            make_library_track_in_album(
                 "noyear-1",
-                "No Year Song 1",
+                "No Year Track 1",
                 "noyear-1.mp3",
                 "No Year",
                 "Artist",
                 "",
                 "1",
             ),
-            make_library_song_in_album(
+            make_library_track_in_album(
                 "zeta-1",
-                "Zeta Song 1",
+                "Zeta Track 1",
                 "zeta-1.mp3",
                 "Zeta",
                 "Artist",
                 "2024",
                 "1",
             ),
-            make_library_song_in_album(
+            make_library_track_in_album(
                 "zeta-2",
-                "Zeta Song 2",
+                "Zeta Track 2",
                 "zeta-2.mp3",
                 "Zeta",
                 "Artist",
@@ -4970,14 +9106,16 @@ mod tests {
             ),
         ];
 
-        let entries = UiManager::build_artist_detail_entries(albums, songs);
+        let entries = UiManager::build_artist_detail_entries(albums, tracks);
         let summary: Vec<String> = entries
             .iter()
             .map(|entry| match entry {
                 LibraryEntry::Album(album) => {
                     format!("album:{}\u{001f}{}", album.album, album.album_artist)
                 }
-                LibraryEntry::Song(song) => format!("song:{}\u{001f}{}", song.album, song.title),
+                LibraryEntry::Track(track) => {
+                    format!("track:{}\u{001f}{}", track.album, track.title)
+                }
                 LibraryEntry::Artist(_) | LibraryEntry::Genre(_) | LibraryEntry::Decade(_) => {
                     "unexpected".to_string()
                 }
@@ -4988,23 +9126,23 @@ mod tests {
             summary,
             vec![
                 "album:Zeta\u{001f}Artist",
-                "song:Zeta\u{001f}Zeta Song 1",
-                "song:Zeta\u{001f}Zeta Song 2",
+                "track:Zeta\u{001f}Zeta Track 1",
+                "track:Zeta\u{001f}Zeta Track 2",
                 "album:Alpha\u{001f}Artist",
-                "song:Alpha\u{001f}Alpha Song 1",
-                "song:Alpha\u{001f}Alpha Song 2",
+                "track:Alpha\u{001f}Alpha Track 1",
+                "track:Alpha\u{001f}Alpha Track 2",
                 "album:No Year\u{001f}Artist",
-                "song:No Year\u{001f}No Year Song 1",
+                "track:No Year\u{001f}No Year Track 1",
             ]
         );
     }
 
     #[test]
-    fn test_build_artist_detail_entries_creates_album_header_for_song_only_album() {
+    fn test_build_artist_detail_entries_creates_album_header_for_track_only_album() {
         let albums = vec![];
-        let songs = vec![make_library_song_in_album(
+        let tracks = vec![make_library_track_in_album(
             "beta-1",
-            "Beta Song 1",
+            "Beta Track 1",
             "beta-1.mp3",
             "Beta",
             "Artist",
@@ -5012,7 +9150,7 @@ mod tests {
             "1",
         )];
 
-        let entries = UiManager::build_artist_detail_entries(albums, songs);
+        let entries = UiManager::build_artist_detail_entries(albums, tracks);
         assert_eq!(entries.len(), 2);
 
         match &entries[0] {
@@ -5023,12 +9161,12 @@ mod tests {
             other => panic!("expected synthetic album header, got {:?}", other),
         }
         match &entries[1] {
-            LibraryEntry::Song(song) => {
-                assert_eq!(song.album, "Beta");
-                assert_eq!(song.title, "Beta Song 1");
+            LibraryEntry::Track(track) => {
+                assert_eq!(track.album, "Beta");
+                assert_eq!(track.title, "Beta Track 1");
             }
             other => panic!(
-                "expected song row under synthetic album header, got {:?}",
+                "expected track row under synthetic album header, got {:?}",
                 other
             ),
         }
@@ -5036,18 +9174,18 @@ mod tests {
 
     #[test]
     fn test_build_global_search_entries_orders_by_name_then_kind() {
-        let songs = vec![
-            make_library_song("song-alpha", "Alpha", "alpha.mp3"),
-            make_library_song("song-beta", "Beta", "beta.mp3"),
+        let tracks = vec![
+            make_library_track("track-alpha", "Alpha", "alpha.mp3"),
+            make_library_track("track-beta", "Beta", "beta.mp3"),
         ];
         let artists = vec![make_library_artist("Alpha", 3, 25)];
         let albums = vec![make_library_album("Alpha", "Artist One")];
 
-        let entries = UiManager::build_global_search_entries(songs, artists, albums);
+        let entries = UiManager::build_global_search_entries(tracks, artists, albums);
         let summary: Vec<String> = entries
             .into_iter()
             .map(|entry| match entry {
-                LibraryEntry::Song(song) => format!("song:{}", song.title),
+                LibraryEntry::Track(track) => format!("track:{}", track.title),
                 LibraryEntry::Artist(artist) => format!("artist:{}", artist.artist),
                 LibraryEntry::Album(album) => format!("album:{}", album.album),
                 LibraryEntry::Genre(_) | LibraryEntry::Decade(_) => "unexpected".to_string(),
@@ -5056,7 +9194,7 @@ mod tests {
 
         assert_eq!(
             summary,
-            vec!["artist:Alpha", "album:Alpha", "song:Alpha", "song:Beta"]
+            vec!["artist:Alpha", "album:Alpha", "track:Alpha", "track:Beta"]
         );
     }
 
@@ -5064,31 +9202,31 @@ mod tests {
     fn test_library_view_labels_for_global_search() {
         let (title, subtitle) = UiManager::library_view_labels(&LibraryViewState::GlobalSearch);
         assert_eq!(title, "Global Search");
-        assert_eq!(subtitle, "Type to search songs, artists, and albums");
+        assert_eq!(subtitle, "");
     }
 
     #[test]
     fn test_build_library_view_indices_for_query_matches_current_view_entries() {
         let entries = vec![
-            LibraryEntry::Song(make_library_song("song-a", "Midnight Train", "train.mp3")),
+            LibraryEntry::Track(make_library_track("track-a", "Midnight Train", "train.mp3")),
             LibraryEntry::Artist(protocol::LibraryArtist {
                 artist: "Daft Punk".to_string(),
                 album_count: 4,
-                song_count: 30,
+                track_count: 30,
             }),
             LibraryEntry::Album(make_library_album("Discovery", "Daft Punk")),
             LibraryEntry::Genre(protocol::LibraryGenre {
                 genre: "Electronic".to_string(),
-                song_count: 12,
+                track_count: 12,
             }),
             LibraryEntry::Decade(protocol::LibraryDecade {
                 decade: "2000s".to_string(),
-                song_count: 99,
+                track_count: 99,
             }),
         ];
 
-        let song_match = UiManager::build_library_view_indices_for_query(&entries, "train");
-        assert_eq!(song_match, vec![0]);
+        let track_match = UiManager::build_library_view_indices_for_query(&entries, "train");
+        assert_eq!(track_match, vec![0]);
 
         let artist_match = UiManager::build_library_view_indices_for_query(&entries, "daft");
         assert_eq!(artist_match, vec![1, 2]);
@@ -5100,11 +9238,11 @@ mod tests {
     #[test]
     fn test_build_library_view_indices_for_query_returns_all_when_query_empty() {
         let entries = vec![
-            LibraryEntry::Song(make_library_song("song-a", "A", "a.mp3")),
+            LibraryEntry::Track(make_library_track("track-a", "A", "a.mp3")),
             LibraryEntry::Artist(protocol::LibraryArtist {
                 artist: "Artist".to_string(),
                 album_count: 1,
-                song_count: 1,
+                track_count: 1,
             }),
             LibraryEntry::Album(make_library_album("Album", "Artist")),
         ];
@@ -5116,20 +9254,20 @@ mod tests {
     #[test]
     fn test_build_library_selection_specs_for_entries_expands_supported_item_types() {
         let entries = vec![
-            LibraryEntry::Song(make_library_song("song-a", "A", "a.mp3")),
+            LibraryEntry::Track(make_library_track("track-a", "A", "a.mp3")),
             LibraryEntry::Artist(protocol::LibraryArtist {
                 artist: "Artist A".to_string(),
                 album_count: 2,
-                song_count: 20,
+                track_count: 20,
             }),
             LibraryEntry::Album(make_library_album("Album A", "Artist A")),
             LibraryEntry::Genre(protocol::LibraryGenre {
                 genre: "Rock".to_string(),
-                song_count: 15,
+                track_count: 15,
             }),
             LibraryEntry::Decade(protocol::LibraryDecade {
                 decade: "1990s".to_string(),
-                song_count: 40,
+                track_count: 40,
             }),
         ];
         let selected_indices = vec![1usize, 2, 0, 3, 4];
@@ -5153,10 +9291,10 @@ mod tests {
             other => panic!("expected album spec, got {:?}", other),
         }
         match &specs[2] {
-            protocol::LibrarySelectionSpec::Song { path } => {
+            protocol::LibrarySelectionSpec::Track { path } => {
                 assert_eq!(path, &PathBuf::from("a.mp3"));
             }
-            other => panic!("expected song spec, got {:?}", other),
+            other => panic!("expected track spec, got {:?}", other),
         }
         match &specs[3] {
             protocol::LibrarySelectionSpec::Genre { genre } => assert_eq!(genre, "Rock"),
@@ -5171,8 +9309,8 @@ mod tests {
     #[test]
     fn test_build_library_selection_specs_for_entries_deduplicates_items() {
         let entries = vec![
-            LibraryEntry::Song(make_library_song("song-a", "A", "a.mp3")),
-            LibraryEntry::Song(make_library_song("song-b", "B", "b.mp3")),
+            LibraryEntry::Track(make_library_track("track-a", "A", "a.mp3")),
+            LibraryEntry::Track(make_library_track("track-b", "B", "b.mp3")),
             LibraryEntry::Album(make_library_album("Album A", "Artist A")),
         ];
         let selected_indices = vec![0usize, 2, 0, 1, 2, 99];
@@ -5182,10 +9320,10 @@ mod tests {
         assert_eq!(specs.len(), 3);
 
         match &specs[0] {
-            protocol::LibrarySelectionSpec::Song { path } => {
+            protocol::LibrarySelectionSpec::Track { path } => {
                 assert_eq!(path, &PathBuf::from("a.mp3"));
             }
-            other => panic!("expected first song spec, got {:?}", other),
+            other => panic!("expected first track spec, got {:?}", other),
         }
         match &specs[1] {
             protocol::LibrarySelectionSpec::Album {
@@ -5198,25 +9336,25 @@ mod tests {
             other => panic!("expected album spec, got {:?}", other),
         }
         match &specs[2] {
-            protocol::LibrarySelectionSpec::Song { path } => {
+            protocol::LibrarySelectionSpec::Track { path } => {
                 assert_eq!(path, &PathBuf::from("b.mp3"));
             }
-            other => panic!("expected second song spec, got {:?}", other),
+            other => panic!("expected second track spec, got {:?}", other),
         }
     }
 
     #[test]
     fn test_render_column_value_replaces_placeholders() {
-        let metadata = make_meta("Song");
+        let metadata = make_meta("Track");
         let rendered = UiManager::render_column_value(&metadata, "{album} ({year})");
-        assert_eq!(rendered, "Song-album (2026)");
+        assert_eq!(rendered, "Track-album (2026)");
     }
 
     #[test]
     fn test_render_column_value_handles_escaping_and_unknown_fields() {
-        let metadata = make_meta("Song");
+        let metadata = make_meta("Track");
         let rendered = UiManager::render_column_value(&metadata, "{{{unknown}}} - {artist}");
-        assert_eq!(rendered, "{} - Song-artist");
+        assert_eq!(rendered, "{} - Track-artist");
     }
 
     #[test]
@@ -5240,7 +9378,7 @@ mod tests {
 
     #[test]
     fn test_build_playlist_row_values_keeps_album_art_builtin_empty() {
-        let metadata = make_meta("Song");
+        let metadata = make_meta("Track");
         let columns = vec![
             PlaylistColumnConfig {
                 name: "Title".to_string(),
@@ -5263,7 +9401,7 @@ mod tests {
         ];
 
         let values = UiManager::build_playlist_row_values(&metadata, &columns);
-        assert_eq!(values[0], "Song");
+        assert_eq!(values[0], "Track");
         assert_eq!(values[1], "");
         assert_eq!(values[2], "");
     }
@@ -5384,59 +9522,282 @@ mod tests {
     }
 
     #[test]
-    fn test_fit_column_widths_shrinks_to_available_width() {
-        let mut widths = vec![220u32, 180u32, 200u32];
-        let mins = vec![100u32, 120u32, 130u32];
-        let maxs = vec![400u32, 360u32, 380u32];
+    fn test_fit_column_widths_deterministic_respects_available_space() {
+        let specs = vec![
+            DeterministicColumnLayoutSpec {
+                min_px: 100,
+                max_px: 400,
+                target_px: 220,
+                semantic_floor_px: 100,
+                emergency_floor_px: 64,
+                shrink_priority: 1,
+                fixed_width: false,
+            },
+            DeterministicColumnLayoutSpec {
+                min_px: 120,
+                max_px: 360,
+                target_px: 180,
+                semantic_floor_px: 120,
+                emergency_floor_px: 64,
+                shrink_priority: 2,
+                fixed_width: false,
+            },
+            DeterministicColumnLayoutSpec {
+                min_px: 130,
+                max_px: 380,
+                target_px: 200,
+                semantic_floor_px: 130,
+                emergency_floor_px: 72,
+                shrink_priority: 3,
+                fixed_width: false,
+            },
+        ];
 
-        fit_column_widths_to_available_space(&mut widths, &mins, &maxs, 420);
-
+        let widths = fit_column_widths_deterministic(&specs, 420);
         assert_eq!(widths.iter().copied().sum::<u32>(), 420);
-        assert!(widths[0] >= mins[0] && widths[0] <= maxs[0]);
-        assert!(widths[1] >= mins[1] && widths[1] <= maxs[1]);
-        assert!(widths[2] >= mins[2] && widths[2] <= maxs[2]);
+        assert_eq!(widths, vec![100, 120, 200]);
     }
 
     #[test]
-    fn test_fit_column_widths_keeps_targets_when_space_is_available() {
-        let mut widths = vec![120u32, 140u32, 160u32];
-        let mins = vec![90u32, 100u32, 120u32];
-        let maxs = vec![260u32, 280u32, 300u32];
+    fn test_auto_growth_max_for_title_tracks_content_target_with_headroom() {
+        let profile = ColumnWidthProfile {
+            min_px: 140,
+            preferred_px: 230,
+            max_px: 440,
+        };
 
-        fit_column_widths_to_available_space(&mut widths, &mins, &maxs, 640);
-
-        assert_eq!(widths, vec![120u32, 140u32, 160u32]);
+        let max_px =
+            UiManager::auto_growth_max_px_for_column(PlaylistColumnClass::Title, profile, 143);
+        assert_eq!(max_px, 326);
     }
 
     #[test]
-    fn test_fit_column_widths_stops_at_minimums_when_viewport_too_small() {
-        let mut widths = vec![150u32, 170u32, 190u32];
-        let mins = vec![100u32, 120u32, 140u32];
-        let maxs = vec![260u32, 280u32, 300u32];
+    fn test_auto_growth_max_for_title_respects_profile_max() {
+        let profile = ColumnWidthProfile {
+            min_px: 140,
+            preferred_px: 230,
+            max_px: 440,
+        };
 
-        fit_column_widths_to_available_space(&mut widths, &mins, &maxs, 120);
-
-        assert_eq!(widths, mins);
+        let max_px =
+            UiManager::auto_growth_max_px_for_column(PlaylistColumnClass::Title, profile, 400);
+        assert_eq!(max_px, 440);
     }
 
     #[test]
-    fn test_resolve_playlist_column_target_width_preserves_current_width_on_viewport_resize() {
+    fn test_fit_column_widths_deterministic_grows_to_use_available_space() {
+        let specs = vec![
+            DeterministicColumnLayoutSpec {
+                min_px: 100,
+                max_px: 400,
+                target_px: 220,
+                semantic_floor_px: 100,
+                emergency_floor_px: 64,
+                shrink_priority: 1,
+                fixed_width: false,
+            },
+            DeterministicColumnLayoutSpec {
+                min_px: 120,
+                max_px: 360,
+                target_px: 180,
+                semantic_floor_px: 120,
+                emergency_floor_px: 64,
+                shrink_priority: 2,
+                fixed_width: false,
+            },
+            DeterministicColumnLayoutSpec {
+                min_px: 130,
+                max_px: 380,
+                target_px: 200,
+                semantic_floor_px: 130,
+                emergency_floor_px: 72,
+                shrink_priority: 3,
+                fixed_width: false,
+            },
+        ];
+
+        let widths = fit_column_widths_deterministic(&specs, 760);
+        assert_eq!(widths.iter().copied().sum::<u32>(), 760);
+        assert!(widths[0] >= 220);
+        assert!(widths[1] >= 180);
+        assert!(widths[2] >= 200);
+    }
+
+    #[test]
+    fn test_fit_column_widths_deterministic_monotonic_for_adjacent_widths() {
+        let specs = vec![
+            DeterministicColumnLayoutSpec {
+                min_px: 140,
+                max_px: 440,
+                target_px: 230,
+                semantic_floor_px: 140,
+                emergency_floor_px: 72,
+                shrink_priority: 3,
+                fixed_width: false,
+            },
+            DeterministicColumnLayoutSpec {
+                min_px: 120,
+                max_px: 320,
+                target_px: 190,
+                semantic_floor_px: 120,
+                emergency_floor_px: 64,
+                shrink_priority: 2,
+                fixed_width: false,
+            },
+            DeterministicColumnLayoutSpec {
+                min_px: 140,
+                max_px: 360,
+                target_px: 220,
+                semantic_floor_px: 140,
+                emergency_floor_px: 64,
+                shrink_priority: 2,
+                fixed_width: false,
+            },
+        ];
+
+        let widths_narrow = fit_column_widths_deterministic(&specs, 449);
+        let widths_wide = fit_column_widths_deterministic(&specs, 450);
+        for (narrow, wide) in widths_narrow.iter().zip(widths_wide.iter()) {
+            assert!(
+                *wide >= *narrow,
+                "column width decreased for wider viewport: {} -> {}",
+                narrow,
+                wide
+            );
+        }
+        assert!(widths_wide
+            .iter()
+            .zip(widths_narrow.iter())
+            .all(|(wide, narrow)| (*wide as i32 - *narrow as i32).abs() <= 1));
+    }
+
+    #[test]
+    fn test_fit_column_widths_deterministic_keeps_fixed_album_art_width() {
+        let specs = vec![
+            DeterministicColumnLayoutSpec {
+                min_px: 96,
+                max_px: 96,
+                target_px: 96,
+                semantic_floor_px: 96,
+                emergency_floor_px: 96,
+                shrink_priority: 255,
+                fixed_width: true,
+            },
+            DeterministicColumnLayoutSpec {
+                min_px: 140,
+                max_px: 440,
+                target_px: 230,
+                semantic_floor_px: 140,
+                emergency_floor_px: 72,
+                shrink_priority: 3,
+                fixed_width: false,
+            },
+            DeterministicColumnLayoutSpec {
+                min_px: 120,
+                max_px: 320,
+                target_px: 190,
+                semantic_floor_px: 120,
+                emergency_floor_px: 64,
+                shrink_priority: 2,
+                fixed_width: false,
+            },
+        ];
+
+        let widths = fit_column_widths_deterministic(&specs, 260);
+        assert_eq!(widths[0], 96);
+        assert!(widths[1] >= 72);
+        assert!(widths[2] >= 64);
+    }
+
+    #[test]
+    fn test_fit_column_widths_deterministic_monotonic_across_full_resize_range() {
+        let specs = vec![
+            DeterministicColumnLayoutSpec {
+                min_px: 16,
+                max_px: 220,
+                target_px: 72,
+                semantic_floor_px: 72,
+                emergency_floor_px: 72,
+                shrink_priority: 255,
+                fixed_width: true,
+            },
+            DeterministicColumnLayoutSpec {
+                min_px: 140,
+                max_px: 440,
+                target_px: 230,
+                semantic_floor_px: 140,
+                emergency_floor_px: 72,
+                shrink_priority: 3,
+                fixed_width: false,
+            },
+            DeterministicColumnLayoutSpec {
+                min_px: 120,
+                max_px: 320,
+                target_px: 190,
+                semantic_floor_px: 120,
+                emergency_floor_px: 64,
+                shrink_priority: 2,
+                fixed_width: false,
+            },
+            DeterministicColumnLayoutSpec {
+                min_px: 140,
+                max_px: 360,
+                target_px: 220,
+                semantic_floor_px: 140,
+                emergency_floor_px: 64,
+                shrink_priority: 2,
+                fixed_width: false,
+            },
+        ];
+
+        let mut previous = fit_column_widths_deterministic(&specs, 320);
+        for available in 321..760 {
+            let current = fit_column_widths_deterministic(&specs, available);
+            for (index, (prev_width, current_width)) in
+                previous.iter().zip(current.iter()).enumerate()
+            {
+                assert!(
+                    *current_width >= *prev_width,
+                    "column {index} decreased while growing width: {} -> {} (available={})",
+                    prev_width,
+                    current_width,
+                    available
+                );
+            }
+            previous = current;
+        }
+
+        let mut previous = fit_column_widths_deterministic(&specs, 760);
+        for available in (320..760).rev() {
+            let current = fit_column_widths_deterministic(&specs, available);
+            for (index, (prev_width, current_width)) in
+                previous.iter().zip(current.iter()).enumerate()
+            {
+                assert!(
+                    *current_width <= *prev_width,
+                    "column {index} increased while shrinking width: {} -> {} (available={})",
+                    prev_width,
+                    current_width,
+                    available
+                );
+            }
+            previous = current;
+        }
+    }
+
+    #[test]
+    fn test_resolve_playlist_column_target_width_falls_back_to_content_when_preserving_without_stored_target(
+    ) {
         let profile = ColumnWidthProfile {
             min_px: 60,
             preferred_px: 160,
             max_px: 320,
         };
 
-        let target = UiManager::resolve_playlist_column_target_width_px(
-            None,
-            Some(140),
-            None,
-            220,
-            profile,
-            true,
-        );
+        let target =
+            UiManager::resolve_playlist_column_target_width_px(None, None, 220, profile, true);
 
-        assert_eq!(target, 140);
+        assert_eq!(target, 220);
     }
 
     #[test]
@@ -5449,20 +9810,13 @@ mod tests {
 
         let from_override = UiManager::resolve_playlist_column_target_width_px(
             Some(12),
-            Some(200),
             Some(240),
             72,
             profile,
             true,
         );
-        let from_content = UiManager::resolve_playlist_column_target_width_px(
-            None,
-            Some(200),
-            Some(240),
-            72,
-            profile,
-            false,
-        );
+        let from_content =
+            UiManager::resolve_playlist_column_target_width_px(None, Some(240), 72, profile, false);
 
         assert_eq!(from_override, 16);
         assert_eq!(from_content, 72);
@@ -5476,14 +9830,8 @@ mod tests {
             max_px: 480,
         };
 
-        let target = UiManager::resolve_playlist_column_target_width_px(
-            None,
-            Some(24),
-            Some(96),
-            72,
-            profile,
-            true,
-        );
+        let target =
+            UiManager::resolve_playlist_column_target_width_px(None, Some(96), 72, profile, true);
 
         assert_eq!(target, 96);
     }

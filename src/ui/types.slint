@@ -2,16 +2,19 @@ export struct TrackRowData {
     status: string,
     values: [string],
     album_art: image,
+    source_badge: string,
     selected: bool,
+    unavailable: bool,
 }
 
 export struct LibraryRowData {
     leading: string,
     primary: string,
     secondary: string,
-    item_kind: int, // 0 song, 1 artist, 2 album, 3 genre, 4 decade
+    item_kind: int, // 0 track, 1 artist, 2 album, 3 genre, 4 decade
     album_art: image,
     has_album_art: bool,
+    source_badge: string,
     is_playing: bool,
     selected: bool,
 }
@@ -45,4 +48,33 @@ export struct LayoutButtonClusterPanelModel {
     height_px: int,
     visible: bool,
     actions: [int],
+}
+
+export struct LayoutMetadataViewerPanelModel {
+    leaf_id: string,
+    x_px: int,
+    y_px: int,
+    width_px: int,
+    height_px: int,
+    visible: bool,
+    display_priority: int,
+    metadata_source: int,
+    display_title: string,
+    display_artist: string,
+    display_album: string,
+    display_date: string,
+    display_genre: string,
+}
+
+export struct LayoutAlbumArtViewerPanelModel {
+    leaf_id: string,
+    x_px: int,
+    y_px: int,
+    width_px: int,
+    height_px: int,
+    visible: bool,
+    display_priority: int,
+    image_source: int,
+    art_source: image,
+    has_art: bool,
 }

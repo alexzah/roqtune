@@ -1,14 +1,27 @@
-import { Button, ComboBox, VerticalBox, StandardTableView, ScrollView, LineEdit, ListView, Switch } from "std-widgets.slint";
+import { Button, ComboBox, VerticalBox, StandardTableView, ScrollView, LineEdit, ListView, Switch, Palette } from "std-widgets.slint";
 
-import { LayoutButtonClusterPanelModel, LayoutSplitterModel, LibraryRowData, MetadataEditorField, TrackRowData } from "ui/types.slint";
+import {
+    LayoutAlbumArtViewerPanelModel,
+    LayoutButtonClusterPanelModel,
+    LayoutMetadataViewerPanelModel,
+    LayoutSplitterModel,
+    LibraryRowData,
+    MetadataEditorField,
+    TrackRowData
+} from "ui/types.slint";
 import { ColumnHeaderMenu, ConfirmationDialog, InfoDialog } from "ui/components/menus.slint";
-import { PlayerButton, ButtonCluster } from "ui/components/controls.slint";
+import { PlayerButton, ButtonCluster, TooltipHoverArea } from "ui/components/controls.slint";
 import { VolumeSliderControl, SeekBarControl, MetadataViewer, AlbumArtViewer } from "ui/components/media.slint";
 import { PlaylistRow, TrackRow } from "ui/components/playlist.slint";
 import { ModeTabs } from "ui/components/tabs.slint";
 import { LibraryRow } from "ui/components/library.slint";
 import { SettingsDropdownControl } from "ui/components/settings.slint";
 import { StatusBar } from "ui/components/status.slint";
+import { AppIcons } from "ui/icons.slint";
+
+export global AppPalette {
+    in-out property <ColorScheme> color-scheme <=> Palette.color-scheme;
+}
 
 export component AppWindow inherits Window {
     preferred-width: 900px;
@@ -16,7 +29,16 @@ export component AppWindow inherits Window {
     min-width: 600px;
     min-height: 400px;
     title: "roqtune";
-    background: #282828;
+    in-out property <bool> ui_dark_mode: true;
+    property <brush> theme_window_bg: root.ui_dark_mode ? #282828 : #eff3f9;
+    property <brush> theme_surface_bg: root.ui_dark_mode ? #202020 : #ffffff;
+    property <brush> theme_surface_alt_bg: root.ui_dark_mode ? #252525 : #eef3f9;
+    property <brush> theme_border: root.ui_dark_mode ? #3a3a3a : #c7d1dd;
+    property <brush> theme_separator: root.ui_dark_mode ? #333 : #d4dde8;
+    property <brush> theme_text_primary: root.ui_dark_mode ? #eee : #253444;
+    property <brush> theme_text_secondary: root.ui_dark_mode ? #aaa : #556576;
+    property <brush> theme_text_muted: root.ui_dark_mode ? #888 : #6c7a89;
+    background: root.theme_window_bg;
 
     key-handler := FocusScope {
         width: 0px;
@@ -66,8 +88,20 @@ export component AppWindow inherits Window {
                 root.show_import_menu = false;
                 return accept;
             }
+            if (event.text == Key.Escape && root.show_library_folder_menu) {
+                root.show_library_folder_menu = false;
+                return accept;
+            }
             if (event.text == Key.Escape && root.show_settings_menu) {
                 root.show_settings_menu = false;
+                return accept;
+            }
+            if (event.text == Key.Escape && root.show_cast_menu) {
+                root.show_cast_menu = false;
+                return accept;
+            }
+            if (event.text == Key.Escape && root.show_viewer_panel_settings_menu) {
+                root.show_viewer_panel_settings_menu = false;
                 return accept;
             }
             if (event.text == Key.Escape && root.show_library_context_menu) {
@@ -78,6 +112,11 @@ export component AppWindow inherits Window {
                 root.show_playlist_track_context_menu = false;
                 return accept;
             }
+            if (event.text == Key.Escape && root.show_library_remove_confirm) {
+                root.library_cancel_remove_selection();
+                root.show_library_remove_confirm = false;
+                return accept;
+            }
             if (event.text == Key.Escape && root.library_add_to_dialog_visible) {
                 root.library_cancel_add_to_playlists();
                 return accept;
@@ -86,8 +125,13 @@ export component AppWindow inherits Window {
                 root.properties_cancel();
                 return accept;
             }
-            if (event.text == Key.Escape && root.show_library_first_start_dialog) {
-                root.library_skip_first_start();
+            if (event.text == Key.Escape && root.show_subsonic_session_password_prompt) {
+                root.subsonic_session_password_cancel();
+                return accept;
+            }
+            if (event.text == Key.Escape && root.show_subsonic_keyring_notice) {
+                root.show_subsonic_keyring_notice = false;
+                root.refocus_main();
                 return accept;
             }
             if (event.text == Key.Escape && root.layout_edit_mode) {
@@ -113,20 +157,33 @@ export component AppWindow inherits Window {
                 return accept;
             }
             if (event.text == Key.Delete) {
-                if (root.editing_playlist_index != -1
-                        || root.show_confirm_dialog
-                        || root.show_apply_filter_view_confirm) {
-                    return reject;
-                }
-                if (root.sidebar_has_focus) {
-                    root.confirm_delete_playlist(root.active_playlist_index);
-                } else {
+                if (root.collection_mode == 1) {
+                    if (root.show_library_remove_confirm
+                            || root.show_confirm_dialog
+                            || root.show_remote_detach_confirm
+                            || root.show_apply_filter_view_confirm) {
+                        return reject;
+                    }
                     root.delete_selected_tracks();
+                    return accept;
+                } else {
+                    if (root.editing_playlist_index != -1
+                            || root.show_confirm_dialog
+                            || root.show_remote_detach_confirm
+                            || root.show_apply_filter_view_confirm) {
+                        return reject;
+                    }
+                    if (root.sidebar_has_focus) {
+                        root.confirm_delete_playlist(root.active_playlist_index);
+                    } else {
+                        root.delete_selected_tracks();
+                    }
+                    return accept;
                 }
-                return accept;
             }
             if (event.text == Key.F2) {
                 root.editing_playlist_index = root.active_playlist_index;
+                root.new_playlist_edit_index = -1;
                 return accept;
             }
             reject
@@ -163,13 +220,27 @@ export component AppWindow inherits Window {
     property <int> delete_target_index: -1;
     property <string> delete_confirm_message: "";
     in-out property <bool> show_confirm_dialog: false;
+    in-out property <bool> show_remote_detach_confirm: false;
+    in-out property <string> remote_detach_confirm_message: "";
+    in-out property <string> remote_detach_target_playlist_id: "";
     in-out property <bool> show_apply_filter_view_confirm: false;
+    in-out property <bool> show_library_remove_confirm: false;
     in-out property <string> apply_filter_view_confirm_message: "";
     in-out property <int> delete_custom_column_index: -1;
     in-out property <string> delete_custom_column_message: "";
     in-out property <bool> show_delete_custom_column_confirm: false;
     in-out property <bool> sidebar_has_focus: false;
     property <length> null-column-width: 120px;
+    property <length> playlist-row-padding-x: 8px;
+    property <length> playlist-column-spacing: 10px;
+    property <length> playlist-status-lane-width: 40px;
+    property <length> playlist-columns-band-offset-x: root.playlist-row-padding-x
+        + root.playlist-status-lane-width
+        + root.playlist-column-spacing;
+    property <length> playlist-fixed-chrome-width: root.playlist-row-padding-x * 2
+        + root.playlist-status-lane-width
+        + root.null-column-width
+        + root.playlist-column-spacing * 3;
     property <length> column-menu-x: 0px;
     property <length> column-menu-y: 0px;
     in-out property <int> column_drag_from: -1;
@@ -192,26 +263,65 @@ export component AppWindow inherits Window {
     in-out property <[int]> playlist_column_gap_positions_px: [];
     in-out property <int> playlist_columns_content_width_px: 0;
     in-out property <int> playlist_columns_available_width_px: 0;
+    property <length> playlist-content-width: root.playlist-fixed-chrome-width
+        + max(0px, root.playlist_columns_content_width_px * 1px);
     in-out property <[LayoutButtonClusterPanelModel]> layout_button_cluster_panels: [];
+    in-out property <[LayoutMetadataViewerPanelModel]> layout_metadata_viewer_panels: [];
+    in-out property <[LayoutAlbumArtViewerPanelModel]> layout_album_art_viewer_panels: [];
     in-out property <bool> show_import_menu: false;
+    property <length> import_menu_width: 176px;
+    property <length> import_menu_height: 104px;
     property <length> import_menu_x: 0px;
     property <length> import_menu_y: 0px;
+    in-out property <bool> show_library_folder_menu: false;
+    property <length> library_folder_menu_width: 196px;
+    property <length> library_folder_menu_height: 70px;
+    property <length> library_folder_menu_x: 0px;
+    property <length> library_folder_menu_y: 0px;
     in-out property <bool> show_settings_menu: false;
     property <length> settings_menu_x: 0px;
     property <length> settings_menu_y: 0px;
+    in-out property <bool> show_cast_menu: false;
+    property <length> cast_menu_x: 0px;
+    property <length> cast_menu_y: 0px;
     in-out property <bool> show_control_cluster_menu: false;
     in-out property <string> control_cluster_menu_target_leaf_id: "";
     in-out property <[int]> control_cluster_menu_actions: [];
     in-out property <int> control_cluster_add_option_index: 0;
     in-out property <length> control_cluster_menu_x: 0px;
     in-out property <length> control_cluster_menu_y: 0px;
+    in-out property <bool> show_viewer_panel_settings_menu: false;
+    in-out property <string> viewer_panel_settings_target_leaf_id: "";
+    in-out property <int> viewer_panel_settings_target_panel_kind: root.panel_kind_none;
+    in-out property <int> viewer_panel_settings_display_priority_index: 0;
+    in-out property <int> viewer_panel_settings_metadata_source_index: 0;
+    in-out property <int> viewer_panel_settings_image_source_index: 0;
+    in-out property <length> viewer_panel_settings_x: 0px;
+    in-out property <length> viewer_panel_settings_y: 0px;
+    property <[string]> viewer_panel_display_priority_options: [
+        "Balanced (Default)",
+        "Prefer Selection",
+        "Prefer Now Playing",
+        "Selection Only",
+        "Now Playing Only"
+    ];
+    property <[string]> viewer_panel_metadata_source_options: [
+        "Track (Default)",
+        "Album Description",
+        "Artist Bio"
+    ];
+    property <[string]> viewer_panel_image_source_options: [
+        "Album Art (Default)",
+        "Artist Image"
+    ];
     in-out property <int> sidebar_width_px: 220;
     in-out property <int> collection_mode: 0; // 0: Playlist, 1: Library
-    in-out property <int> library_root_index: 0; // 0: Songs, 1: Artists, 2: Albums, 3: Genres, 4: Decades
+    in-out property <int> library_root_index: 0; // 0: Tracks, 1: Artists, 2: Albums, 3: Genres, 4: Decades
+    in-out property <[int]> library_root_counts: [0, 0, 0, 0, 0];
     in-out property <bool> library_can_go_back: false;
     in-out property <bool> library_scan_in_progress: false;
-    in-out property <string> library_view_title: "Songs";
-    in-out property <string> library_view_subtitle: "All songs";
+    in-out property <string> library_view_title: "Tracks";
+    in-out property <string> library_view_subtitle: "";
     in-out property <string> library_status_text: "";
     in-out property <string> library_toast_text: "";
     in-out property <bool> library_toast_visible: false;
@@ -219,6 +329,17 @@ export component AppWindow inherits Window {
     in-out property <bool> library_album_header_has_art: false;
     in-out property <image> library_album_header_art;
     in-out property <string> library_album_header_meta: "";
+    in-out property <string> library_detail_header_blurb: "";
+    in-out property <string> library_detail_header_source_name: "";
+    in-out property <string> library_detail_header_source_url: "";
+    in-out property <bool> library_detail_header_source_visible: false;
+    in-out property <bool> library_detail_header_loading: false;
+    in-out property <bool> library_online_prompt_visible: false;
+    in-out property <int> playlist_scroll_target_row: 0;
+    in-out property <int> playlist_scroll_center_token: 0;
+    in-out property <int> library_scroll_target_row: 0;
+    in-out property <int> library_scroll_restore_token: 0;
+    in-out property <int> library_scroll_center_token: 0;
     in-out property <[LibraryRowData]> library_model: [];
     in-out property <bool> show_library_context_menu: false;
     property <length> library_context_menu_x: 0px;
@@ -239,9 +360,9 @@ export component AppWindow inherits Window {
     in-out property <string> properties_target_title: "";
     in-out property <[MetadataEditorField]> properties_fields: [];
     in-out property <bool> properties_save_enabled: false;
-    in-out property <bool> show_library_first_start_dialog: false;
     in-out property <[string]> settings_library_folders: [];
     in-out property <int> settings_library_selected_folder_index: -1;
+    in-out property <bool> settings_library_online_metadata_enabled: false;
     in-out property <bool> layout_edit_mode: false;
     in-out property <bool> show_layout_editor_dialog: false;
     in-out property <bool> show_layout_leaf_context_menu: false;
@@ -291,7 +412,7 @@ export component AppWindow inherits Window {
         "Playlist Switcher",
         "Track List",
         "Metadata Viewer",
-        "Album Art Viewer",
+        "Image Metadata Viewer",
         "Status Bar"
     ];
     property <[int]> layout_panel_submenu_codes: [
@@ -407,7 +528,7 @@ export component AppWindow inherits Window {
             return "Metadata Viewer";
         }
         if panel-kind == root.panel_kind_album_art_viewer {
-            return "Album Art Viewer";
+            return "Image Metadata Viewer";
         }
         if panel-kind == root.panel_kind_spacer {
             return "Spacer";
@@ -428,7 +549,9 @@ export component AppWindow inherits Window {
 
     pure function layout-selected-panel-has-settings() -> bool {
         let panel-kind = root.layout-selected-panel-kind();
-        return panel-kind == root.panel_kind_button_cluster;
+        return panel-kind == root.panel_kind_button_cluster
+            || panel-kind == root.panel_kind_metadata_viewer
+            || panel-kind == root.panel_kind_album_art_viewer;
     }
 
     pure function control-action-label(action-id: int) -> string {
@@ -442,6 +565,7 @@ export component AppWindow inherits Window {
         if action-id == 8 { return "Repeat"; }
         if action-id == 9 { return "Layout Editor"; }
         if action-id == 10 { return "Settings"; }
+        if action-id == 11 { return "Cast"; }
         return "Unknown";
     }
 
@@ -458,11 +582,12 @@ export component AppWindow inherits Window {
 
     // Status display at the bottom showing the currently playing track
     in-out property <string> status-text: "";
+    in-out property <string> status-selection-summary: "";
 
     VerticalLayout {
         layout-workspace := Rectangle {
             vertical-stretch: 1;
-            background: #282828;
+            background: root.theme_window_bg;
             clip: true;
             changed width => {
                 root.layout_workspace_resized(max(0, floor(self.width / 1px)), max(0, floor(self.height / 1px)));
@@ -480,10 +605,10 @@ export component AppWindow inherits Window {
                     && root.layout-region-panel-kind(i) == root.panel_kind_spacer;
                 background: root.layout_edit_mode ? #252525 : #202020;
                 border-width: root.layout_edit_mode ? 1px : 0px;
-                border-color: #3a3a3a;
+                border-color: root.theme_border;
                 if root.layout_edit_mode : Text {
                     text: "Spacer";
-                    color: #666;
+                    color: root.theme_text_muted;
                     horizontal-alignment: center;
                     vertical-alignment: center;
                 }
@@ -496,7 +621,7 @@ export component AppWindow inherits Window {
                 height: cluster-panel.height_px * 1px;
                 visible: cluster-panel.visible;
                 clip: true;
-                background: #202020;
+                background: root.theme_surface_bg;
                 HorizontalLayout {
                     padding-left: 8px;
                     padding-right: 8px;
@@ -506,14 +631,21 @@ export component AppWindow inherits Window {
                         button-actions: cluster-panel.actions;
                         playback-order-index: root.playback_order_index;
                         repeat-mode: root.repeat_mode;
+                        cast-connected: root.cast_connected;
+                        cast-connecting: root.cast_connecting;
+                        collection-mode: root.collection_mode;
                         layout-edit-mode: root.layout_edit_mode;
                         action-invoked(action-id) => {
-                            if (action-id == 1) {
+                            if (action-id == 1 && root.collection_mode == 0) {
                                 root.show_settings_menu = false;
+                                root.show_library_folder_menu = false;
                                 root.show_import_menu = true;
-                                root.import_menu_x = min(root.width - 168px, max(8px, cluster-panel.x_px * 1px + 8px));
+                                root.import_menu_x = min(
+                                    root.width - root.import_menu_width,
+                                    max(8px, cluster-panel.x_px * 1px + 8px)
+                                );
                                 root.import_menu_y = min(
-                                    root.height - 96px,
+                                    root.height - root.import_menu_height,
                                     max(8px, cluster-panel.y_px * 1px + cluster-panel.height_px * 1px + 4px)
                                 );
                             }
@@ -531,12 +663,26 @@ export component AppWindow inherits Window {
                             if (action-id == 9) { root.open_layout_editor(); }
                             if (action-id == 10) {
                                 root.show_import_menu = false;
+                                root.show_library_folder_menu = false;
+                                root.show_cast_menu = false;
                                 root.show_settings_menu = true;
                                 root.settings_menu_x = min(root.width - 220px, max(8px, cluster-panel.x_px * 1px + 8px));
                                 root.settings_menu_y = min(
                                     root.height - 120px,
                                     max(8px, cluster-panel.y_px * 1px + cluster-panel.height_px * 1px + 4px)
                                 );
+                            }
+                            if (action-id == 11) {
+                                root.show_settings_menu = false;
+                                root.show_import_menu = false;
+                                root.show_library_folder_menu = false;
+                                root.show_cast_menu = true;
+                                root.cast_menu_x = min(root.width - 300px, max(8px, cluster-panel.x_px * 1px + 8px));
+                                root.cast_menu_y = min(
+                                    root.height - 260px,
+                                    max(8px, cluster-panel.y_px * 1px + cluster-panel.height_px * 1px + 4px)
+                                );
+                                root.cast_refresh_devices();
                             }
                         }
                         request-add-menu(cluster-leaf-id) => {
@@ -561,7 +707,7 @@ export component AppWindow inherits Window {
                 visible: root.layout-region-is-visible(i)
                     && root.layout-region-panel-kind(i) == root.panel_kind_volume_slider;
                 clip: true;
-                background: #202020;
+                background: root.theme_surface_bg;
                 VolumeSliderControl {
                     x: 8px;
                     y: 0px;
@@ -598,7 +744,7 @@ export component AppWindow inherits Window {
                 visible: root.layout-region-is-visible(i)
                     && root.layout-region-panel-kind(i) == root.panel_kind_playlist_switcher;
                 clip: true;
-                background: #202020;
+                background: root.theme_surface_bg;
                 VerticalLayout {
                     padding: 8px;
                     spacing: 6px;
@@ -614,24 +760,42 @@ export component AppWindow inherits Window {
                         HorizontalLayout {
                             Text {
                                 text: "Playlists";
-                                color: #888;
+                                color: root.theme_text_muted;
                                 font-size: 12px;
                                 font-weight: 700;
                                 vertical-alignment: center;
                             }
                             Rectangle { horizontal-stretch: 1; }
-                            PlayerButton {
-                                icon-text: "+";
+                            playlist-switcher-import-button := PlayerButton {
+                                icon-source: AppIcons.plus;
+                                icon-text: "";
                                 font-size: 18px;
-                                tooltip-text: "Create playlist";
+                                tooltip-text: "Import tracks or folders";
                                 tooltip_hover_changed(is-hovered, tooltip, anchor-x-px, anchor-y-px) => {
                                     root.tooltip_hover_changed(is-hovered, tooltip, anchor-x-px, anchor-y-px);
                                 }
-                                clicked => { root.create_playlist(); }
+                                clicked => {
+                                    root.show_settings_menu = false;
+                                    root.show_library_folder_menu = false;
+                                    root.show_import_menu = true;
+                                    root.import_menu_x = min(
+                                        root.width - root.import_menu_width,
+                                        max(8px, playlist-switcher-import-button.absolute-position.x)
+                                    );
+                                    root.import_menu_y = min(
+                                        root.height - root.import_menu_height,
+                                        max(
+                                            8px,
+                                            playlist-switcher-import-button.absolute-position.y
+                                                + playlist-switcher-import-button.height
+                                                + 4px
+                                        )
+                                    );
+                                }
                             }
                         }
 
-                        Rectangle { height: 1px; background: #333; }
+                        Rectangle { height: 1px; background: root.theme_separator; }
                         ScrollView {
                             vertical-stretch: 1;
                             VerticalLayout {
@@ -640,26 +804,39 @@ export component AppWindow inherits Window {
                                     name: p.text;
                                     is-active: root.active_playlist_index == i;
                                     is-editing: root.editing_playlist_index == i;
+                                    is-remote: i < root.playlist_is_remote.length && root.playlist_is_remote[i];
+                                    is-new-playlist-edit: root.new_playlist_edit_index == i;
+                                    can-sync-opensubsonic: i < root.playlist_can_sync_opensubsonic.length
+                                        && root.playlist_can_sync_opensubsonic[i];
                                     clicked => {
                                         root.switch_playlist(i);
                                         root.editing_playlist_index = -1;
+                                        root.new_playlist_edit_index = -1;
                                         root.sidebar_has_focus = true;
                                         root.refocus_main();
                                     }
                                     renamed(new-name) => {
                                         root.rename_playlist(i, new-name);
                                         root.editing_playlist_index = -1;
+                                        root.new_playlist_edit_index = -1;
                                         root.refocus_main();
                                     }
                                     cancel-edit() => {
                                         root.editing_playlist_index = -1;
+                                        root.new_playlist_edit_index = -1;
                                         root.refocus_main();
                                     }
                                     context-menu-rename() => {
                                         root.editing_playlist_index = i;
+                                        root.new_playlist_edit_index = -1;
                                     }
                                     context-menu-delete() => {
+                                        root.new_playlist_edit_index = -1;
                                         root.confirm_delete_playlist(i);
+                                    }
+                                    context-menu-sync() => {
+                                        root.new_playlist_edit_index = -1;
+                                        root.sync_playlist_to_opensubsonic(i);
                                     }
                                 }
                             }
@@ -672,14 +849,15 @@ export component AppWindow inherits Window {
                         HorizontalLayout {
                             Text {
                                 text: "Library";
-                                color: #ddd;
+                                color: root.theme_text_primary;
                                 font-size: 12px;
                                 font-weight: 700;
                                 vertical-alignment: center;
                                 horizontal-stretch: 1;
                             }
                             PlayerButton {
-                                icon-text: "⌕";
+                                icon-source: AppIcons.search;
+                                icon-text: "";
                                 font-size: 14px;
                                 tooltip-text: "Search entire library";
                                 tooltip_hover_changed(is-hovered, tooltip, anchor-x-px, anchor-y-px) => {
@@ -687,8 +865,36 @@ export component AppWindow inherits Window {
                                 }
                                 clicked => { root.open_global_library_search(); }
                             }
+                            library-switcher-folder-button := PlayerButton {
+                                icon-source: AppIcons.folder;
+                                icon-text: "";
+                                font-size: 18px;
+                                tooltip-text: "Library folder options";
+                                tooltip_hover_changed(is-hovered, tooltip, anchor-x-px, anchor-y-px) => {
+                                    root.tooltip_hover_changed(is-hovered, tooltip, anchor-x-px, anchor-y-px);
+                                }
+                                clicked => {
+                                    root.show_settings_menu = false;
+                                    root.show_import_menu = false;
+                                    root.show_library_folder_menu = true;
+                                    root.library_folder_menu_x = min(
+                                        root.width - root.library_folder_menu_width,
+                                        max(8px, library-switcher-folder-button.absolute-position.x)
+                                    );
+                                    root.library_folder_menu_y = min(
+                                        root.height - root.library_folder_menu_height,
+                                        max(
+                                            8px,
+                                            library-switcher-folder-button.absolute-position.y
+                                                + library-switcher-folder-button.height
+                                                + 4px
+                                        )
+                                    );
+                                }
+                            }
                             PlayerButton {
-                                icon-text: "↻";
+                                icon-source: AppIcons.refresh;
+                                icon-text: "";
                                 font-size: 14px;
                                 tooltip-text: "Rescan library folders";
                                 tooltip_hover_changed(is-hovered, tooltip, anchor-x-px, anchor-y-px) => {
@@ -700,18 +906,41 @@ export component AppWindow inherits Window {
 
                         VerticalLayout {
                             spacing: 2px;
-                            for root-label[index] in ["Songs", "Artists", "Albums", "Genres", "Decades"] : Rectangle {
+                            for root-label[index] in ["Tracks", "Artists", "Albums", "Genres", "Decades"] : Rectangle {
+                                property <int> root-count: index < root.library_root_counts.length ? root.library_root_counts[index] : 0;
                                 height: 24px;
                                 border-radius: 2px;
-                                background: root.library_root_index == index ? #3d3d3d : library-root-ta.has-hover ? #333 : transparent;
+                                background: root.library_root_index == index
+                                    ? (root.ui_dark_mode ? #3d3d3d : #d8e6f7)
+                                    : library-root-ta.has-hover
+                                        ? (root.ui_dark_mode ? #333 : #e4ebf5)
+                                        : transparent;
 
-                                Text {
+                                HorizontalLayout {
                                     x: 8px;
-                                    text: root-label;
-                                    color: root.library_root_index == index ? #eee : #aaa;
-                                    font-size: 13px;
-                                    vertical-alignment: center;
-                                    horizontal-alignment: left;
+                                    width: parent.width - 16px;
+                                    spacing: 8px;
+
+                                    Text {
+                                        text: root-label;
+                                        color: root.library_root_index == index
+                                            ? root.theme_text_primary
+                                            : root.theme_text_secondary;
+                                        font-size: 13px;
+                                        vertical-alignment: center;
+                                        horizontal-alignment: left;
+                                        horizontal-stretch: 1;
+                                    }
+
+                                    Text {
+                                        text: root-count + "";
+                                        color: root.library_root_index == index
+                                            ? (root.ui_dark_mode ? #cfd4de : #4f637a)
+                                            : (root.ui_dark_mode ? #8b8f99 : #6a7989);
+                                        font-size: 12px;
+                                        vertical-alignment: center;
+                                        horizontal-alignment: right;
+                                    }
                                 }
 
                                 library-root-ta := TouchArea {
@@ -720,11 +949,11 @@ export component AppWindow inherits Window {
                             }
                         }
 
-                        Rectangle { height: 1px; background: #333; }
+                        Rectangle { height: 1px; background: root.theme_separator; }
 
                         if root.library_scan_in_progress : Text {
                             text: "Scanning library...";
-                            color: #7f8ea3;
+                            color: root.ui_dark_mode ? #7f8ea3 : #4f6f93;
                             font-size: 11px;
                             height: 16px;
                             overflow: elide;
@@ -734,44 +963,42 @@ export component AppWindow inherits Window {
 
             }
 
-            for leaf-id[i] in root.layout_leaf_ids : Rectangle {
-                x: root.layout-region-x(i);
-                y: root.layout-region-y(i);
-                width: root.layout-region-width(i);
-                height: root.layout-region-height(i);
-                visible: root.layout-region-is-visible(i)
-                    && root.layout-region-panel-kind(i) == root.panel_kind_metadata_viewer;
+            for panel in root.layout_metadata_viewer_panels : Rectangle {
+                x: panel.x_px * 1px;
+                y: panel.y_px * 1px;
+                width: panel.width_px * 1px;
+                height: panel.height_px * 1px;
+                visible: panel.visible;
                 clip: true;
-                background: #202020;
+                background: root.theme_surface_bg;
                 MetadataViewer {
                     x: 10px;
                     y: 10px;
                     width: parent.width - 20px;
                     height: parent.height - 20px;
-                    display-title: root.display_title;
-                    display-artist: root.display_artist;
-                    display-album: root.display_album;
-                    display-date: root.display_date;
-                    display-genre: root.display_genre;
+                    display-title: panel.display_title;
+                    display-artist: panel.display_artist;
+                    display-album: panel.display_album;
+                    display-date: panel.display_date;
+                    display-genre: panel.display_genre;
                 }
             }
 
-            for leaf-id[i] in root.layout_leaf_ids : Rectangle {
-                x: root.layout-region-x(i);
-                y: root.layout-region-y(i);
-                width: root.layout-region-width(i);
-                height: root.layout-region-height(i);
-                visible: root.layout-region-is-visible(i)
-                    && root.layout-region-panel-kind(i) == root.panel_kind_album_art_viewer;
+            for panel in root.layout_album_art_viewer_panels : Rectangle {
+                x: panel.x_px * 1px;
+                y: panel.y_px * 1px;
+                width: panel.width_px * 1px;
+                height: panel.height_px * 1px;
+                visible: panel.visible;
                 clip: true;
-                background: #202020;
+                background: root.theme_surface_bg;
                 AlbumArtViewer {
                     x: 10px;
                     y: 10px;
                     width: parent.width - 20px;
                     height: parent.height - 20px;
-                    art-source: root.current_cover_art;
-                    has-art: root.current_cover_art_available;
+                    art-source: panel.art_source;
+                    has-art: panel.has_art;
                 }
             }
 
@@ -783,35 +1010,42 @@ export component AppWindow inherits Window {
                 visible: root.layout-region-is-visible(i)
                     && root.layout-region-panel-kind(i) == root.panel_kind_track_list;
                 clip: true;
-                background: #282828;
+                background: root.theme_window_bg;
 
                 if root.collection_mode == 0 : VerticalLayout {
                     Rectangle {
                         height: 28px;
                         clip: true;
-                        background: #202020;
-                        property <int> viewport-width-px: max(0, floor((self.width - 16px - 40px - root.null-column-width - 20px) / 1px));
-                        changed viewport-width-px => {
-                            if self.viewport-width-px != root.playlist_columns_available_width_px {
-                                root.playlist_columns_available_width_px = self.viewport-width-px;
-                                root.playlist_columns_viewport_resized(self.viewport-width-px);
+                        background: root.theme_surface_bg;
+                        property <length> columns-band-width: max(0px, track-list.visible-width - root.playlist-fixed-chrome-width);
+                        property <int> columns-band-width-px: max(0, floor(self.columns-band-width / 1px));
+                        changed columns-band-width-px => {
+                            if !(root.layout-region-is-visible(i)
+                                    && root.layout-region-panel-kind(i) == root.panel_kind_track_list) {
+                                return;
+                            }
+                            if self.columns-band-width-px != root.playlist_columns_available_width_px {
+                                root.playlist_columns_available_width_px = self.columns-band-width-px;
+                                root.playlist_columns_viewport_resized(self.columns-band-width-px);
                             }
                         }
                         HorizontalLayout {
                             x: track-list.viewport-x;
-                            width: max(parent.width, track-list.viewport-width);
+                            width: max(track-list.visible-width, root.playlist-content-width);
                             height: parent.height;
-                            padding-left: 8px;
-                            padding-right: 8px;
-                            spacing: 10px;
+                            padding-left: root.playlist-row-padding-x;
+                            padding-right: root.playlist-row-padding-x;
+                            spacing: root.playlist-column-spacing;
                             Rectangle {
-                                width: 40px;
-                                Text {
-                                    text: "▶";
-                                    color: #555;
-                                    font-size: 11px;
-                                    horizontal-alignment: center;
-                                    vertical-alignment: center;
+                                width: root.playlist-status-lane-width;
+                                Image {
+                                    source: AppIcons.player-play;
+                                    width: 11px;
+                                    height: 11px;
+                                    x: (parent.width - self.width) / 2;
+                                    y: (parent.height - self.height) / 2;
+                                    image-fit: contain;
+                                    colorize: root.theme_text_muted;
                                 }
                             }
                             for column-header[i] in root.playlist_visible_column_headers : Rectangle {
@@ -827,7 +1061,9 @@ export component AppWindow inherits Window {
                                     text: parent.sort-state == 1 ? column-header + " ▲"
                                         : parent.sort-state == 2 ? column-header + " ▼"
                                         : column-header;
-                                    color: (parent.is-drag-source || parent.is-resize-target || parent.sort-state != 0) ? #afc4de : #888;
+                                    color: (parent.is-drag-source || parent.is-resize-target || parent.sort-state != 0)
+                                        ? (root.ui_dark_mode ? #afc4de : #365a81)
+                                        : root.theme_text_muted;
                                     font-size: 12px;
                                     x: 0px;
                                     width: parent.width;
@@ -841,26 +1077,28 @@ export component AppWindow inherits Window {
                                     width: 1px;
                                     height: parent.height - 8px;
                                     background: (root.column_resize_active && root.column_resize_index == i)
-                                        || (!root.column_resize_active && root.column_hover_divider == i) ? #5da8ff : #3a3a3a;
+                                        || (!root.column_resize_active && root.column_hover_divider == i)
+                                        ? #5da8ff
+                                        : root.theme_border;
                                 }
                             }
                             Rectangle { horizontal-stretch: 1; }
                             Rectangle {
                                 width: root.null-column-width;
-                                background: #202020;
+                                background: root.theme_surface_bg;
                             }
                         }
 
                         column-header-drag-ta := TouchArea {
-                            x: 8px + 40px + 10px;
+                            x: root.playlist-columns-band-offset-x + track-list.viewport-x;
                             y: 0px;
-                            property <length> max-drag-width: max(0px, parent.width - 16px - 40px - root.null-column-width - 20px);
                             width: root.playlist_columns_content_width_px > 0
                                 ? min(self.max-drag-width, root.playlist_columns_content_width_px * 1px)
                                 : self.max-drag-width;
                             height: parent.height;
+                            property <length> max-drag-width: max(0px, track-list.visible-width - root.playlist-fixed-chrome-width);
                             property <int> visible_column_count: root.playlist_visible_column_headers.length;
-                            property <int> content-mouse-x-px: floor((self.mouse-x - track-list.viewport-x) / 1px);
+                            property <int> content-mouse-x-px: floor(self.mouse-x / 1px);
                             mouse-cursor: (root.column_resize_active || root.column_hover_divider != -1) ? col-resize : default;
                             pointer-event(event) => {
                                 if (event.button == PointerEventButton.right && event.kind == PointerEventKind.down) {
@@ -993,7 +1231,7 @@ export component AppWindow inherits Window {
                                 && root.column_drop_gap != -1
                                 && column-header-drag-ta.visible_column_count > 0
                                 && root.column_drop_gap < root.playlist_column_gap_positions_px.length : Rectangle {
-                            x: column-header-drag-ta.x + track-list.viewport-x
+                            x: column-header-drag-ta.x
                                 + root.playlist_column_gap_positions_px[root.column_drop_gap] * 1px - 1px;
                             y: 3px;
                             width: 2px;
@@ -1005,7 +1243,7 @@ export component AppWindow inherits Window {
                         if root.column_resize_active
                                 && root.column_resize_index >= 0
                                 && root.column_resize_index < root.playlist_column_widths_px.length : Rectangle {
-                            x: column-header-drag-ta.x + track-list.viewport-x
+                            x: column-header-drag-ta.x
                                 + root.playlist-column-divider-x(root.column_resize_index) * 1px - 1px;
                             y: 3px;
                             width: 2px;
@@ -1018,10 +1256,38 @@ export component AppWindow inherits Window {
 
                     track-list-container := Rectangle {
                         clip: true;
+                        property <length> stack-base-y: 6px;
+                        property <length> stack-gap-y: 6px;
+                        property <int> first-visible-row: max(
+                            0,
+                            floor(max(0px, -track-list.viewport-y) / track-list.row-height)
+                        );
+                        property <int> visible-row-count: max(
+                            1,
+                            floor(track-list.height / track-list.row-height)
+                        );
+                        property <bool> has-partial-bottom-row: ceil(track-list.height / track-list.row-height)
+                            > floor(track-list.height / track-list.row-height);
+                        property <bool> last-track-partially-visible-at-bottom: self.has-playing-row
+                            && self.has-partial-bottom-row
+                            && root.playing_track_index == root.track_model.length - 1
+                            && root.playing_track_index == self.first-visible-row + self.visible-row-count;
+                        property <bool> has-playing-row: root.playing_track_index >= 0
+                            && root.playing_track_index < root.track_model.length;
+                        property <bool> playing-above-viewport: self.has-playing-row
+                            && root.playing_track_index < self.first-visible-row;
+                        property <bool> playing-below-viewport: self.has-playing-row
+                            && root.playing_track_index >= self.first-visible-row + self.visible-row-count
+                            && !self.last-track-partially-visible-at-bottom;
+                        property <bool> show-scroll-to-playing-toast: self.playing-above-viewport
+                            || self.playing-below-viewport;
+                        property <length> scroll-toast-y: self.stack-base-y
+                            + (root.playlist_filter_active ? (26px + self.stack-gap-y) : 0px)
+                            + (root.playlist_search_visible ? (30px + self.stack-gap-y) : 0px);
 
                         if root.playlist_filter_active : Rectangle {
                             x: max(8px, parent.width - self.width - 8px);
-                            y: 6px;
+                            y: track-list-container.stack-base-y;
                             width: 156px;
                             height: 26px;
                             border-radius: 4px;
@@ -1053,29 +1319,14 @@ export component AppWindow inherits Window {
                                 background: save-view-ta.has-hover ? #2f4b67 : #29425b;
                                 border-width: 1px;
                                 border-color: #5d7ea0;
-                                // Draw a simple floppy icon using geometry to avoid font/icon fallback issues.
-                                Rectangle {
-                                    x: 3px;
-                                    y: 2px;
-                                    width: 9px;
-                                    height: 11px;
-                                    background: transparent;
-                                    border-width: 1px;
-                                    border-color: #d9e8f8;
-                                }
-                                Rectangle {
-                                    x: 5px;
-                                    y: 3px;
-                                    width: 5px;
-                                    height: 3px;
-                                    background: #d9e8f8;
-                                }
-                                Rectangle {
-                                    x: 5px;
-                                    y: 8px;
-                                    width: 5px;
-                                    height: 4px;
-                                    background: #d9e8f8;
+                                Image {
+                                    source: AppIcons.pencil-down;
+                                    width: 12px;
+                                    height: 12px;
+                                    x: (parent.width - self.width) / 2;
+                                    y: (parent.height - self.height) / 2;
+                                    image-fit: contain;
+                                    colorize: #d9e8f8;
                                 }
                                 save-view-ta := TouchArea {
                                     clicked => {
@@ -1093,14 +1344,14 @@ export component AppWindow inherits Window {
                                 background: clear-view-ta.has-hover ? #2f4b67 : #29425b;
                                 border-width: 1px;
                                 border-color: #5d7ea0;
-                                Text {
-                                    text: "×";
-                                    color: #d9e8f8;
-                                    font-size: 12px;
-                                    width: parent.width;
-                                    height: parent.height;
-                                    horizontal-alignment: center;
-                                    vertical-alignment: center;
+                                Image {
+                                    source: AppIcons.close;
+                                    width: 10px;
+                                    height: 10px;
+                                    x: (parent.width - self.width) / 2;
+                                    y: (parent.height - self.height) / 2;
+                                    image-fit: contain;
+                                    colorize: #d9e8f8;
                                 }
                                 clear-view-ta := TouchArea {
                                     clicked => {
@@ -1113,7 +1364,8 @@ export component AppWindow inherits Window {
 
                         if root.playlist_search_visible : Rectangle {
                             x: max(8px, parent.width - self.width - 8px);
-                            y: root.playlist_filter_active ? 38px : 6px;
+                            y: track-list-container.stack-base-y
+                                + (root.playlist_filter_active ? (26px + track-list-container.stack-gap-y) : 0px);
                             width: 320px;
                             height: 30px;
                             border-radius: 4px;
@@ -1146,7 +1398,8 @@ export component AppWindow inherits Window {
                                 }
 
                                 PlayerButton {
-                                    icon-text: "✕";
+                                    icon-source: AppIcons.close;
+                                    icon-text: "";
                                     font-size: 12px;
                                     tooltip-text: "Close playlist search";
                                     tooltip_hover_changed(is-hovered, tooltip, anchor-x-px, anchor-y-px) => {
@@ -1160,12 +1413,74 @@ export component AppWindow inherits Window {
                             }
                         }
 
+                        if track-list-container.show-scroll-to-playing-toast : Rectangle {
+                            x: max(8px, parent.width - self.width - 8px);
+                            y: track-list-container.scroll-toast-y;
+                            width: max(146px, min(parent.width - 16px, playlist-scroll-toast-text.preferred-width + 24px));
+                            height: 26px;
+                            border-radius: 4px;
+                            border-width: 1px;
+                            border-color: #4d6f90;
+                            background: #1f3347e8;
+                            z: 6;
+
+                            playlist-scroll-toast-text := Text {
+                                text: (track-list-container.playing-above-viewport ? "▲ " : "▼ ") + "Scroll to playing";
+                                color: #dcecff;
+                                font-size: 11px;
+                                horizontal-alignment: center;
+                                vertical-alignment: center;
+                                overflow: elide;
+                            }
+
+                            playlist-scroll-toast-ta := TouchArea {
+                                mouse-cursor: pointer;
+                                clicked => {
+                                    if (track-list-container.has-playing-row) {
+                                        let max-first-row = max(
+                                            0,
+                                            root.track_model.length - track-list-container.visible-row-count
+                                        );
+                                        let centered-first-row = min(
+                                            max-first-row,
+                                            max(
+                                                0,
+                                                root.playing_track_index
+                                                    - floor(track-list-container.visible-row-count / 2)
+                                            )
+                                        );
+                                        track-list.viewport-y = 0px - centered-first-row * track-list.row-height;
+                                    }
+                                }
+                            }
+                        }
+
                         track-list := ListView {
                             y: 0px;
                             height: parent.height;
                             property <length> row-height: max(30px, root.playlist_row_height_px * 1px);
                             property <length> header-height: 28px;
+                            property <int> center-token: root.playlist_scroll_center_token;
+                            changed center-token => {
+                                let row-height = self.row-height;
+                                let first-visible-row = track-list-container.first-visible-row;
+                                let visible-rows = track-list-container.visible-row-count;
+                                if root.playlist_scroll_target_row >= first-visible-row
+                                        && root.playlist_scroll_target_row < first-visible-row + visible-rows {
+                                    return;
+                                }
+                                let max-first-row = max(0, root.track_model.length - visible-rows);
+                                let centered-first-row = min(
+                                    max-first-row,
+                                    max(
+                                        0,
+                                        root.playlist_scroll_target_row - floor(visible-rows / 2)
+                                    )
+                                );
+                                self.viewport-y = 0px - centered-first-row * row-height;
+                            }
                             for track[i] in root.track_model : TrackRow {
+                                width: max(track-list.visible-width, root.playlist-content-width);
                                 data: track;
                                 is-playing: root.playing_track_index == i;
                                 is-hover: root.hover-index == i && !root.is-dragging;
@@ -1174,6 +1489,9 @@ export component AppWindow inherits Window {
                                 column-widths-px: root.playlist_column_widths_px;
                                 row-height: track-list.row-height;
                                 null-column-width: root.null-column-width;
+                                horizontal-padding: root.playlist-row-padding-x;
+                                column-spacing: root.playlist-column-spacing;
+                                status-lane-width: root.playlist-status-lane-width;
                             }
                         }
 
@@ -1194,7 +1512,7 @@ export component AppWindow inherits Window {
                             property <int> raw-row: floor(content-y / row-height);
                             property <bool> is-in-rows: self.in-viewport && raw-row >= 0 && raw-row < root.track_model.length;
                             property <bool> in-null-column: self.in-viewport
-                                && self.mouse-x >= (track-list.viewport-width - root.null-column-width);
+                                && self.mouse-x >= (track-list.visible-width - root.null-column-width);
                             property <int> hovered-row: is-in-rows ? raw-row : -1;
                             property <int> drop-gap: max(0, min(root.track_model.length, floor((content-y + row-height / 2) / row-height)));
 
@@ -1245,7 +1563,7 @@ export component AppWindow inherits Window {
                                     let click-x = root.layout-region-x(i) + parent.x + self.x + self.mouse-x;
                                     let click-y = root.layout-region-y(i) + parent.y + self.y + self.mouse-y;
                                     root.playlist_track_context_menu_x = min(root.width - 170px, max(8px, click-x));
-                                    root.playlist_track_context_menu_y = min(root.height - 42px, max(8px, click-y));
+                                    root.playlist_track_context_menu_y = min(root.height - 160px, max(8px, click-y));
                                     root.show_playlist_track_context_menu = true;
                                 }
                             }
@@ -1300,7 +1618,8 @@ export component AppWindow inherits Window {
 
                     HorizontalLayout {
                         if root.library_can_go_back : PlayerButton {
-                            icon-text: "←";
+                            icon-source: AppIcons.arrow-left;
+                            icon-text: "";
                             font-size: 14px;
                             tooltip-text: "Back";
                             tooltip_hover_changed(is-hovered, tooltip, anchor-x-px, anchor-y-px) => {
@@ -1308,27 +1627,25 @@ export component AppWindow inherits Window {
                             }
                             clicked => { root.library_back(); }
                         }
-                        if !root.library_can_go_back : Rectangle {
-                            width: 32px;
-                        }
                         if root.library_album_header_visible && root.library_can_go_back : Text {
-                            text: "Back to Albums";
-                            color: #8fa7c6;
+                            text: root.library_root_index == 1 ? "Back to Artists" : "Back to Albums";
+                            color: root.ui_dark_mode ? #8fa7c6 : #466a92;
                             font-size: 11px;
                             vertical-alignment: center;
                         }
                         if !root.library_album_header_visible : Text {
                             text: root.library_view_title;
-                            color: #ddd;
-                            font-size: 13px;
-                            font-weight: 700;
+                            color: root.theme_text_primary;
+                            font-size: 16px;
+                            font-weight: 800;
                             horizontal-stretch: 1;
-                            vertical-alignment: center;
+                            horizontal-alignment: left;
+                            vertical-alignment: bottom;
                             overflow: elide;
                         }
                         if root.library_scan_in_progress : Text {
                             text: "Scanning...";
-                            color: #7f8ea3;
+                            color: root.ui_dark_mode ? #7f8ea3 : #4f6f93;
                             font-size: 11px;
                             vertical-alignment: center;
                         }
@@ -1336,14 +1653,14 @@ export component AppWindow inherits Window {
 
                     if !root.library_album_header_visible : Text {
                         text: root.library_view_subtitle;
-                        color: #888;
+                        color: root.theme_text_muted;
                         font-size: 11px;
                         height: 16px;
                         overflow: elide;
                     }
 
                     if root.library_album_header_visible : Rectangle {
-                        height: 190px;
+                        height: 220px;
                         HorizontalLayout {
                             spacing: 14px;
                             Rectangle {
@@ -1351,20 +1668,22 @@ export component AppWindow inherits Window {
                                 height: 176px;
                                 border-radius: 4px;
                                 border-width: 1px;
-                                border-color: #3a3a3a;
-                                background: #1f1f1f;
+                                border-color: root.theme_border;
+                                background: root.ui_dark_mode ? #1f1f1f : #f4f7fb;
                                 if root.library_album_header_has_art : Image {
                                     width: parent.width;
                                     height: parent.height;
                                     source: root.library_album_header_art;
                                     image-fit: contain;
                                 }
-                                if !root.library_album_header_has_art : Text {
-                                    text: "▦";
-                                    color: #8fa7c6;
-                                    font-size: 22px;
-                                    horizontal-alignment: center;
-                                    vertical-alignment: center;
+                                if !root.library_album_header_has_art : Image {
+                                    source: root.library_root_index == 1 ? AppIcons.user : AppIcons.disc;
+                                    width: 22px;
+                                    height: 22px;
+                                    x: (parent.width - self.width) / 2;
+                                    y: (parent.height - self.height) / 2;
+                                    image-fit: contain;
+                                    colorize: root.ui_dark_mode ? #8fa7c6 : #466a92;
                                 }
                             }
                             Rectangle {
@@ -1374,7 +1693,7 @@ export component AppWindow inherits Window {
                                     Rectangle { vertical-stretch: 1; }
                                     Text {
                                         text: root.library_view_title;
-                                        color: #e4e4e4;
+                                        color: root.theme_text_primary;
                                         font-size: 20px;
                                         font-weight: 800;
                                         overflow: elide;
@@ -1382,17 +1701,51 @@ export component AppWindow inherits Window {
                                     }
                                     Text {
                                         text: root.library_view_subtitle;
-                                        color: #b3b3b3;
+                                        color: root.theme_text_secondary;
                                         font-size: 12px;
                                         overflow: elide;
                                         horizontal-alignment: left;
                                     }
                                     Text {
                                         text: root.library_album_header_meta;
-                                        color: #8fa7c6;
+                                        color: root.ui_dark_mode ? #8fa7c6 : #466a92;
                                         font-size: 11px;
                                         overflow: elide;
                                         horizontal-alignment: left;
+                                    }
+                                    Text {
+                                        text: root.library_detail_header_loading
+                                            ? "Loading internet metadata..."
+                                            : root.library_detail_header_blurb;
+                                        color: root.ui_dark_mode ? #c7c7c7 : #5c6b7a;
+                                        font-size: 11px;
+                                        wrap: word-wrap;
+                                        max-height: 76px;
+                                        overflow: clip;
+                                        horizontal-alignment: left;
+                                    }
+                                    if root.library_detail_header_source_visible : Rectangle {
+                                        height: 18px;
+                                        background: library-source-link-ta.has-hover
+                                            ? (root.ui_dark_mode ? #2b2b2b : #e4ebf5)
+                                            : transparent;
+                                        border-radius: 3px;
+                                        Text {
+                                            x: 6px;
+                                            width: max(0px, parent.width - 12px);
+                                            text: "Source: " + root.library_detail_header_source_name;
+                                            color: root.ui_dark_mode ? #9fbedf : #3f648c;
+                                            font-size: 10px;
+                                            vertical-alignment: center;
+                                            overflow: elide;
+                                        }
+                                        library-source-link-ta := TouchArea {
+                                            clicked => {
+                                                if root.library_detail_header_source_url != "" {
+                                                    root.open_external_url(root.library_detail_header_source_url);
+                                                }
+                                            }
+                                        }
                                     }
                                     Rectangle { vertical-stretch: 1; }
                                 }
@@ -1410,9 +1763,9 @@ export component AppWindow inherits Window {
                             }
                         }
                         border-radius: 4px;
-                        background: #1c1c1cec;
+                        background: root.ui_dark_mode ? #1c1c1cec : #f4f7fbec;
                         border-width: 1px;
-                        border-color: #3f3f3f;
+                        border-color: root.theme_border;
 
                         HorizontalLayout {
                             spacing: 6px;
@@ -1428,7 +1781,7 @@ export component AppWindow inherits Window {
                             }
                             Text {
                                 text: root.library_search_result_text;
-                                color: #a5a5a5;
+                                color: root.theme_text_secondary;
                                 font-size: 11px;
                                 width: 54px;
                                 horizontal-alignment: right;
@@ -1436,7 +1789,8 @@ export component AppWindow inherits Window {
                             }
 
                             PlayerButton {
-                                icon-text: "✕";
+                                icon-source: AppIcons.close;
+                                icon-text: "";
                                 font-size: 12px;
                                 tooltip-text: "Close library search";
                                 tooltip_hover_changed(is-hovered, tooltip, anchor-x-px, anchor-y-px) => {
@@ -1450,63 +1804,308 @@ export component AppWindow inherits Window {
                         }
                     }
 
-                    Rectangle { height: 1px; background: #333; }
+                    Rectangle { height: 1px; background: root.theme_separator; }
 
-                        ScrollView {
-                            vertical-stretch: 1;
-                            VerticalLayout {
-                                alignment: start;
-                                for item[row] in root.library_model : Rectangle {
-                                    horizontal-stretch: 1;
-                                    height: item.item_kind == 2 ? 38px
-                                        : item.item_kind == 0 ? 32px
-                                        : 34px;
-                                    LibraryRow {
-                                        width: parent.width;
-                                        height: parent.height;
-                                        data: item;
-                                        is-hover: library-list-row-ta.has-hover;
-                                    }
-                                    library-list-row-ta := TouchArea {
-                                        pointer-event(event) => {
-                                            if (event.kind == PointerEventKind.down && event.button == PointerEventButton.left) {
-                                                root.show_library_context_menu = false;
-                                                root.show_playlist_track_context_menu = false;
-                                                root.sidebar_has_focus = false;
-                                                key-handler.focus();
-                                                root.library_select_list_item(
-                                                    row,
-                                                    event.modifiers.control,
-                                                    event.modifiers.shift,
-                                                    false
-                                                );
-                                            } else if (event.kind == PointerEventKind.down && event.button == PointerEventButton.right) {
-                                                root.show_playlist_track_context_menu = false;
-                                                root.sidebar_has_focus = false;
-                                                key-handler.focus();
-                                                root.library_select_list_item(
-                                                    row,
-                                                    event.modifiers.control,
-                                                    event.modifiers.shift,
-                                                    true
-                                                );
-                                                let click-x = root.layout-region-x(i) + parent.x + self.x + self.mouse-x;
-                                                let click-y = root.layout-region-y(i) + parent.y + self.y + self.mouse-y;
-                                                root.library_context_menu_x = min(root.width - 170px, max(8px, click-x));
-                                                root.library_context_menu_y = min(root.height - 70px, max(8px, click-y));
-                                                root.show_library_context_menu = true;
-                                            }
-                                        }
-                                        double-clicked => {
+                    library-list-container := Rectangle {
+                        vertical-stretch: 1;
+                        clip: true;
+                        property <bool> has-configured-folders: root.settings_library_folders.length > 0;
+                        property <int> first-visible-row: max(
+                            0,
+                            floor(max(0px, -library-list-view.viewport-y) / (library-list-view.row-height-px * 1px))
+                        );
+                        property <int> visible-row-count: max(
+                            1,
+                            floor(
+                                library-list-view.height / (library-list-view.row-height-px * 1px)
+                            )
+                        );
+                        property <bool> has-partial-bottom-row: ceil(
+                            library-list-view.height / (library-list-view.row-height-px * 1px)
+                        ) > floor(
+                            library-list-view.height / (library-list-view.row-height-px * 1px)
+                        );
+                        property <bool> last-track-partially-visible-at-bottom: self.has-playing-row
+                            && self.has-partial-bottom-row
+                            && root.library_playing_track_index == root.library_model.length - 1
+                            && root.library_playing_track_index == self.first-visible-row + self.visible-row-count;
+                        property <bool> has-playing-row: self.has-configured-folders
+                            && root.library_playing_track_index >= 0
+                            && root.library_playing_track_index < root.library_model.length;
+                        property <bool> playing-above-viewport: self.has-playing-row
+                            && root.library_playing_track_index < self.first-visible-row;
+                        property <bool> playing-below-viewport: self.has-playing-row
+                            && root.library_playing_track_index >= self.first-visible-row + self.visible-row-count
+                            && !self.last-track-partially-visible-at-bottom;
+                        property <bool> show-scroll-to-playing-toast: self.playing-above-viewport
+                            || self.playing-below-viewport;
+                        property <length> stack-base-y: 6px;
+                        property <length> stack-gap-y: 6px;
+                        property <length> online-prompt-y: self.stack-base-y;
+                        property <length> scroll-toast-y: self.stack-base-y
+                            + (root.library_online_prompt_visible ? (34px + self.stack-gap-y) : 0px);
+
+                        library-list-view := ListView {
+                            y: 0px;
+                            width: parent.width;
+                            height: parent.height;
+                            visible: library-list-container.has-configured-folders;
+                            property <int> row-height-px: root.library_root_index == 2 ? 38
+                                : root.library_root_index == 0 ? 32
+                                : 34;
+                            property <int> restore-token: root.library_scroll_restore_token;
+                            property <int> center-token: root.library_scroll_center_token;
+                            changed restore-token => {
+                                let clamped-row = min(max(0, root.library_scroll_target_row), max(0, root.library_model.length - 1));
+                                self.viewport-y = 0px - clamped-row * (self.row-height-px * 1px);
+                            }
+                            changed center-token => {
+                                let row-height = self.row-height-px * 1px;
+                                let clamped-row = min(max(0, root.library_scroll_target_row), max(0, root.library_model.length - 1));
+                                let first-visible-row = library-list-container.first-visible-row;
+                                let visible-rows = library-list-container.visible-row-count;
+                                if clamped-row >= first-visible-row
+                                        && clamped-row < first-visible-row + visible-rows {
+                                    return;
+                                }
+                                let max-first-row = max(0, root.library_model.length - visible-rows);
+                                let centered-first-row = min(
+                                    max-first-row,
+                                    max(0, clamped-row - floor(visible-rows / 2))
+                                );
+                                self.viewport-y = 0px - centered-first-row * row-height;
+                            }
+                            changed viewport-y => {
+                                let scroll-offset-y = max(0px, -self.viewport-y);
+                                let first-row = max(0, floor(scroll-offset-y / (self.row-height-px * 1px)));
+                                let visible-rows = max(1, floor(self.height / (self.row-height-px * 1px)) + 6);
+                                root.library_viewport_changed(first-row, visible-rows);
+                            }
+                            changed height => {
+                                let scroll-offset-y = max(0px, -self.viewport-y);
+                                let first-row = max(0, floor(scroll-offset-y / (self.row-height-px * 1px)));
+                                let visible-rows = max(1, floor(self.height / (self.row-height-px * 1px)) + 6);
+                                root.library_viewport_changed(first-row, visible-rows);
+                            }
+                            changed row-height-px => {
+                                let scroll-offset-y = max(0px, -self.viewport-y);
+                                let first-row = max(0, floor(scroll-offset-y / (self.row-height-px * 1px)));
+                                let visible-rows = max(1, floor(self.height / (self.row-height-px * 1px)) + 6);
+                                root.library_viewport_changed(first-row, visible-rows);
+                            }
+                            init => {
+                                let visible-rows = max(1, floor(self.height / (self.row-height-px * 1px)) + 6);
+                                root.library_viewport_changed(0, visible-rows);
+                            }
+                            for item[row] in root.library_model : Rectangle {
+                                horizontal-stretch: 1;
+                                height: item.item_kind == 2 ? 38px
+                                    : item.item_kind == 0 ? 32px
+                                    : 34px;
+                                LibraryRow {
+                                    width: parent.width;
+                                    height: parent.height;
+                                    data: item;
+                                    is-hover: library-list-row-ta.has-hover;
+                                }
+                                library-list-row-ta := TouchArea {
+                                    pointer-event(event) => {
+                                        if (event.kind == PointerEventKind.down && event.button == PointerEventButton.left) {
                                             root.show_library_context_menu = false;
+                                            root.show_playlist_track_context_menu = false;
                                             root.sidebar_has_focus = false;
                                             key-handler.focus();
-                                            root.library_item_activated(row);
+                                            root.library_select_list_item(
+                                                row,
+                                                event.modifiers.control,
+                                                event.modifiers.shift,
+                                                false
+                                            );
+                                        } else if (event.kind == PointerEventKind.down && event.button == PointerEventButton.right) {
+                                            root.show_playlist_track_context_menu = false;
+                                            root.sidebar_has_focus = false;
+                                            key-handler.focus();
+                                            root.library_select_list_item(
+                                                row,
+                                                event.modifiers.control,
+                                                event.modifiers.shift,
+                                                true
+                                            );
+                                            let click-x = root.layout-region-x(i) + parent.x + self.x + self.mouse-x;
+                                            let click-y = root.layout-region-y(i) + parent.y + self.y + self.mouse-y;
+                                            root.library_context_menu_x = min(root.width - 170px, max(8px, click-x));
+                                            root.library_context_menu_y = min(root.height - 184px, max(8px, click-y));
+                                            root.show_library_context_menu = true;
                                         }
+                                    }
+                                    double-clicked => {
+                                        root.show_library_context_menu = false;
+                                        root.sidebar_has_focus = false;
+                                        key-handler.focus();
+                                        root.library_item_activated(row);
                                     }
                                 }
                             }
                         }
+
+                        if !library-list-container.has-configured-folders : Rectangle {
+                            x: 12px;
+                            y: 12px;
+                            width: max(0px, parent.width - 24px);
+                            height: max(0px, parent.height - 24px);
+                            border-radius: 8px;
+                            border-width: 1px;
+                            border-color: #3c3c3c;
+                            background: #202020;
+
+                            Rectangle {
+                                width: min(parent.width - 28px, 540px);
+                                height: 170px;
+                                x: (parent.width - self.width) / 2;
+                                y: (parent.height - self.height) / 2;
+
+                                VerticalLayout {
+                                    spacing: 12px;
+
+                                    Text {
+                                        text: "Add folders to get started";
+                                        color: #f0f0f0;
+                                        font-size: 26px;
+                                        font-weight: 800;
+                                        horizontal-alignment: center;
+                                    }
+
+                                    Text {
+                                        text: "Library mode stays empty until at least one music folder is configured.";
+                                        color: #adadad;
+                                        font-size: 13px;
+                                        horizontal-alignment: center;
+                                        wrap: word-wrap;
+                                    }
+
+                                    HorizontalLayout {
+                                        Rectangle { horizontal-stretch: 1; }
+                                        Button {
+                                            text: "Add Folder";
+                                            primary: true;
+                                            clicked => {
+                                                root.library_add_folder();
+                                            }
+                                        }
+                                        Rectangle { horizontal-stretch: 1; }
+                                    }
+                                }
+                            }
+                        }
+
+                        if library-list-container.has-configured-folders
+                                && library-list-container.show-scroll-to-playing-toast : Rectangle {
+                            x: max(8px, parent.width - self.width - 8px);
+                            y: library-list-container.scroll-toast-y;
+                            width: max(146px, min(parent.width - 16px, library-scroll-toast-text.preferred-width + 24px));
+                            height: 26px;
+                            border-radius: 4px;
+                            border-width: 1px;
+                            border-color: #4d6f90;
+                            background: #1f3347e8;
+                            z: 6;
+
+                            library-scroll-toast-text := Text {
+                                text: (library-list-container.playing-above-viewport ? "▲ " : "▼ ") + "Scroll to playing";
+                                color: #dcecff;
+                                font-size: 11px;
+                                horizontal-alignment: center;
+                                vertical-alignment: center;
+                                overflow: elide;
+                            }
+
+                            library-scroll-toast-ta := TouchArea {
+                                mouse-cursor: pointer;
+                                clicked => {
+                                    if (library-list-container.has-playing-row) {
+                                        let max-first-row = max(
+                                            0,
+                                            root.library_model.length - library-list-container.visible-row-count
+                                        );
+                                        let centered-first-row = min(
+                                            max-first-row,
+                                            max(
+                                                0,
+                                                root.library_playing_track_index
+                                                    - floor(library-list-container.visible-row-count / 2)
+                                            )
+                                        );
+                                        library-list-view.viewport-y = 0px - centered-first-row * (library-list-view.row-height-px * 1px);
+                                    }
+                                }
+                            }
+                        }
+
+                        if root.library_online_prompt_visible : Rectangle {
+                            z: 7;
+                            x: max(8px, parent.width - self.width - 8px);
+                            y: library-list-container.online-prompt-y;
+                            width: min(parent.width - 16px, 460px);
+                            height: 34px;
+                            border-radius: 4px;
+                            border-width: 1px;
+                            border-color: #3a4f68;
+                            background: #18314adf;
+
+                            HorizontalLayout {
+                                spacing: 8px;
+                                padding-left: 10px;
+                                padding-right: 6px;
+
+                                Text {
+                                    text: "Fetch artist/album page metadata from internet";
+                                    color: #dbe9f8;
+                                    font-size: 11px;
+                                    horizontal-stretch: 1;
+                                    vertical-alignment: center;
+                                    overflow: elide;
+                                }
+
+                                Rectangle {
+                                    width: 22px;
+                                    height: 22px;
+                                    border-radius: 3px;
+                                    background: prompt-accept-ta.has-hover ? #2c5c86 : #234a6c;
+                                    Image {
+                                        source: AppIcons.check;
+                                        width: 12px;
+                                        height: 12px;
+                                        x: (parent.width - self.width) / 2;
+                                        y: (parent.height - self.height) / 2;
+                                        image-fit: contain;
+                                        colorize: #e8f3ff;
+                                    }
+                                    prompt-accept-ta := TouchArea {
+                                        clicked => { root.library_online_metadata_prompt_accept(); }
+                                    }
+                                }
+
+                                Rectangle {
+                                    width: 22px;
+                                    height: 22px;
+                                    border-radius: 3px;
+                                    background: prompt-deny-ta.has-hover ? #663838 : #4f2e2e;
+                                    Image {
+                                        source: AppIcons.close;
+                                        width: 11px;
+                                        height: 11px;
+                                        x: (parent.width - self.width) / 2;
+                                        y: (parent.height - self.height) / 2;
+                                        image-fit: contain;
+                                        colorize: #ffe8e8;
+                                    }
+                                    prompt-deny-ta := TouchArea {
+                                        clicked => { root.library_online_metadata_prompt_deny(); }
+                                    }
+                                }
+                            }
+                        }
+                    }
                     }
 
                 }
@@ -1534,6 +2133,7 @@ export component AppWindow inherits Window {
                         overflow: elide;
                     }
                 }
+
             }
 
             for leaf-id[i] in root.layout_leaf_ids : StatusBar {
@@ -1545,7 +2145,7 @@ export component AppWindow inherits Window {
                     && root.layout-region-panel-kind(i) == root.panel_kind_status_bar;
                 status-text: root.status-text;
                 technical-info: root.technical-info;
-                time-range: root.format-time-range(root.elapsed-ms, root.total-ms);
+                selection-summary: root.status-selection-summary;
             }
 
             for leaf-id[i] in root.layout_leaf_ids : Rectangle {
@@ -1779,12 +2379,14 @@ export component AppWindow inherits Window {
                         border-width: 1px;
                         border-color: #5a5a5a;
                         background: layout-intro-checkbox-ta.has-hover ? #363636 : #2d2d2d;
-                        Text {
-                            text: root.layout_intro_dont_show_again ? "✓" : "";
-                            color: #8cb1ff;
-                            font-size: 12px;
-                            horizontal-alignment: center;
-                            vertical-alignment: center;
+                        if root.layout_intro_dont_show_again : Image {
+                            source: AppIcons.check;
+                            width: 10px;
+                            height: 10px;
+                            x: (parent.width - self.width) / 2;
+                            y: (parent.height - self.height) / 2;
+                            image-fit: contain;
+                            colorize: #8cb1ff;
                         }
                         layout-intro-checkbox-ta := TouchArea {
                             clicked => {
@@ -1793,7 +2395,7 @@ export component AppWindow inherits Window {
                         }
                     }
                     Text {
-                        text: "Don’t show this again";
+                        text: "Don't show this again";
                         color: #ccc;
                         font-size: 12px;
                         vertical-alignment: center;
@@ -1850,13 +2452,14 @@ export component AppWindow inherits Window {
                     x: 8px;
                     vertical-alignment: center;
                 }
-                Text {
-                    text: "▸";
-                    color: #888;
-                    font-size: 12px;
-                    width: parent.width - 8px;
-                    horizontal-alignment: right;
-                    vertical-alignment: center;
+                Image {
+                    source: AppIcons.arrow-right;
+                    width: 10px;
+                    height: 10px;
+                    x: parent.width - self.width - 8px;
+                    y: (parent.height - self.height) / 2;
+                    image-fit: contain;
+                    colorize: #888;
                 }
                 replace-action-ta := TouchArea {
                     changed has-hover => {
@@ -1938,11 +2541,22 @@ export component AppWindow inherits Window {
                     clicked => {
                         if root.layout_selected_leaf_index >= 0
                                 && root.layout_selected_leaf_index < root.layout_leaf_ids.length {
-                            root.open_control_cluster_menu_for_leaf(
-                                root.layout_leaf_ids[root.layout_selected_leaf_index],
-                                max(8, floor((root.layout_leaf_context_menu_x + parent.width + 6px) / 1px)),
-                                max(8, floor((root.layout_leaf_context_menu_y + 6px) / 1px))
-                            );
+                            let selected-panel-kind = root.layout-selected-panel-kind();
+                            if (selected-panel-kind == root.panel_kind_button_cluster) {
+                                root.open_control_cluster_menu_for_leaf(
+                                    root.layout_leaf_ids[root.layout_selected_leaf_index],
+                                    max(8, floor((root.layout_leaf_context_menu_x + parent.width + 6px) / 1px)),
+                                    max(8, floor((root.layout_leaf_context_menu_y + 6px) / 1px))
+                                );
+                            } else if (selected-panel-kind == root.panel_kind_metadata_viewer
+                                    || selected-panel-kind == root.panel_kind_album_art_viewer) {
+                                root.open_viewer_panel_settings_for_leaf(
+                                    root.layout_leaf_ids[root.layout_selected_leaf_index],
+                                    selected-panel-kind,
+                                    max(8, floor((root.layout_leaf_context_menu_x + parent.width + 6px) / 1px)),
+                                    max(8, floor((root.layout_leaf_context_menu_y + 6px) / 1px))
+                                );
+                            }
                         }
                         root.show_layout_leaf_replace_submenu = false;
                         root.layout_leaf_replace_submenu_hover = false;
@@ -2044,13 +2658,14 @@ export component AppWindow inherits Window {
                         x: 8px;
                         vertical-alignment: center;
                     }
-                    Text {
-                        text: "▸";
-                        color: #888;
-                        font-size: 12px;
-                        width: parent.width - 8px;
-                        horizontal-alignment: right;
-                        vertical-alignment: center;
+                    Image {
+                        source: AppIcons.arrow-right;
+                        width: 10px;
+                        height: 10px;
+                        x: parent.width - self.width - 8px;
+                        y: (parent.height - self.height) / 2;
+                        image-fit: contain;
+                        colorize: #888;
                     }
                     panels-action-ta := TouchArea {
                         changed has-hover => {
@@ -2081,13 +2696,14 @@ export component AppWindow inherits Window {
                         x: 8px;
                         vertical-alignment: center;
                     }
-                    Text {
-                        text: "▸";
-                        color: #888;
-                        font-size: 12px;
-                        width: parent.width - 8px;
-                        horizontal-alignment: right;
-                        vertical-alignment: center;
+                    Image {
+                        source: AppIcons.arrow-right;
+                        width: 10px;
+                        height: 10px;
+                        x: parent.width - self.width - 8px;
+                        y: (parent.height - self.height) / 2;
+                        image-fit: contain;
+                        colorize: #888;
                     }
                     presets-action-ta := TouchArea {
                         changed has-hover => {
@@ -2276,6 +2892,151 @@ export component AppWindow inherits Window {
         }
     }
 
+    if root.show_viewer_panel_settings_menu : Rectangle {
+        z: 145;
+        background: transparent;
+        TouchArea {
+            clicked => {
+                root.show_viewer_panel_settings_menu = false;
+            }
+        }
+    }
+
+    if root.show_viewer_panel_settings_menu : Rectangle {
+        z: 146;
+        x: root.viewer_panel_settings_x;
+        y: root.viewer_panel_settings_y;
+        width: 360px;
+        height: 176px;
+        border-radius: 6px;
+        background: #262626;
+        border-width: 1px;
+        border-color: #3d3d3d;
+
+        VerticalLayout {
+            padding: 10px;
+            spacing: 8px;
+
+            Text {
+                text: (root.viewer_panel_settings_target_panel_kind == root.panel_kind_album_art_viewer
+                    ? "Image Metadata Viewer"
+                    : "Metadata Viewer") + " Settings";
+                color: #eee;
+                font-size: 13px;
+                font-weight: 700;
+            }
+
+            Rectangle { height: 1px; background: #3a3a3a; }
+
+            HorizontalLayout {
+                spacing: 8px;
+                label-host := Rectangle {
+                    horizontal-stretch: 1;
+                    height: 24px;
+                    background: transparent;
+                    Text {
+                        text: "Display Priority";
+                        color: #ddd;
+                        font-size: 12px;
+                        vertical-alignment: center;
+                        horizontal-alignment: left;
+                        width: parent.width;
+                    }
+                    label-tooltip-ta := TooltipHoverArea {
+                        width: parent.width;
+                        height: parent.height;
+                        tooltip-text: "Balanced (Default): latest event wins (selection or playback).\nPrefer Selection: selection first, then now playing.\nPrefer Now Playing: now playing first, then selection.\nSelection Only: only selection is shown.\nNow Playing Only: only now playing is shown.";
+                        tooltip_hover_changed(is-hovered, tooltip, anchor-x-px, anchor-y-px) => {
+                            root.tooltip_hover_changed(is-hovered, tooltip, anchor-x-px, anchor-y-px);
+                        }
+                    }
+                }
+                Rectangle {
+                    width: 190px;
+                    height: 30px;
+                    ComboBox {
+                        width: parent.width;
+                        height: parent.height;
+                        model: root.viewer_panel_display_priority_options;
+                        current-index <=> root.viewer_panel_settings_display_priority_index;
+                        selected(_) => {
+                            root.set_viewer_panel_display_priority(
+                                root.viewer_panel_settings_target_leaf_id,
+                                root.viewer_panel_settings_display_priority_index
+                            );
+                        }
+                    }
+                }
+            }
+
+            if root.viewer_panel_settings_target_panel_kind == root.panel_kind_metadata_viewer : HorizontalLayout {
+                spacing: 8px;
+                Rectangle {
+                    horizontal-stretch: 1;
+                    height: 24px;
+                    background: transparent;
+                    Text {
+                        text: "Metadata Source";
+                        color: #ddd;
+                        font-size: 12px;
+                        vertical-alignment: center;
+                        horizontal-alignment: left;
+                        width: parent.width;
+                    }
+                }
+                Rectangle {
+                    width: 190px;
+                    height: 30px;
+                    ComboBox {
+                        width: parent.width;
+                        height: parent.height;
+                        model: root.viewer_panel_metadata_source_options;
+                        current-index <=> root.viewer_panel_settings_metadata_source_index;
+                        selected(_) => {
+                            root.set_viewer_panel_metadata_source(
+                                root.viewer_panel_settings_target_leaf_id,
+                                root.viewer_panel_settings_metadata_source_index
+                            );
+                        }
+                    }
+                }
+            }
+
+            if root.viewer_panel_settings_target_panel_kind == root.panel_kind_album_art_viewer : HorizontalLayout {
+                spacing: 8px;
+                Rectangle {
+                    horizontal-stretch: 1;
+                    height: 24px;
+                    background: transparent;
+                    Text {
+                        text: "Image Source";
+                        color: #ddd;
+                        font-size: 12px;
+                        vertical-alignment: center;
+                        horizontal-alignment: left;
+                        width: parent.width;
+                    }
+                }
+                Rectangle {
+                    width: 190px;
+                    height: 30px;
+                    ComboBox {
+                        width: parent.width;
+                        height: parent.height;
+                        model: root.viewer_panel_image_source_options;
+                        current-index <=> root.viewer_panel_settings_image_source_index;
+                        selected(_) => {
+                            root.set_viewer_panel_image_source(
+                                root.viewer_panel_settings_target_leaf_id,
+                                root.viewer_panel_settings_image_source_index
+                            );
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     if root.show_settings_menu : Rectangle {
         z: 147;
         background: transparent;
@@ -2293,9 +3054,9 @@ export component AppWindow inherits Window {
         width: 210px;
         height: 70px;
         border-radius: 6px;
-        background: #262626;
+        background: root.ui_dark_mode ? #262626 : #f4f7fb;
         border-width: 1px;
-        border-color: #3d3d3d;
+        border-color: root.theme_border;
 
         VerticalLayout {
             padding: 4px;
@@ -2304,21 +3065,23 @@ export component AppWindow inherits Window {
             Rectangle {
                 height: 28px;
                 border-radius: 4px;
-                background: layout-edit-toggle-ta.has-hover ? #363636 : transparent;
+                background: layout-edit-toggle-ta.has-hover
+                    ? (root.ui_dark_mode ? #363636 : #dbe5f1)
+                    : transparent;
                 HorizontalLayout {
                     padding-left: 10px;
                     padding-right: 10px;
                     spacing: 6px;
                     Text {
                         text: "Layout Editing Mode";
-                        color: #ddd;
+                        color: root.theme_text_primary;
                         font-size: 12px;
                         vertical-alignment: center;
                         horizontal-stretch: 1;
                         overflow: elide;
                     }
                     quick-layout-toggle := Switch {
-                        width: 18px;
+                        width: 36px;
                         text: "";
                         checked: root.layout_edit_mode;
                         toggled => {
@@ -2339,12 +3102,14 @@ export component AppWindow inherits Window {
             Rectangle {
                 height: 28px;
                 border-radius: 4px;
-                background: open-settings-ta.has-hover ? #363636 : transparent;
+                background: open-settings-ta.has-hover
+                    ? (root.ui_dark_mode ? #363636 : #dbe5f1)
+                    : transparent;
                 Text {
                     x: 10px;
                     width: parent.width - 20px;
                     text: "Settings";
-                    color: #ddd;
+                    color: root.theme_text_primary;
                     font-size: 12px;
                     vertical-alignment: center;
                 }
@@ -2352,6 +3117,183 @@ export component AppWindow inherits Window {
                     clicked => {
                         root.show_settings_menu = false;
                         root.open_settings();
+                    }
+                }
+            }
+        }
+    }
+
+    if root.show_library_folder_menu : Rectangle {
+        z: 149;
+        background: transparent;
+        TouchArea {
+            clicked => {
+                root.show_library_folder_menu = false;
+            }
+        }
+    }
+
+    if root.show_cast_menu : Rectangle {
+        z: 149;
+        background: transparent;
+        TouchArea {
+            clicked => {
+                root.show_cast_menu = false;
+            }
+        }
+    }
+
+    if root.show_cast_menu : Rectangle {
+        z: 150;
+        x: root.cast_menu_x;
+        y: root.cast_menu_y;
+        width: 300px;
+        height: 250px;
+        border-radius: 6px;
+        background: root.ui_dark_mode ? #262626 : #f4f7fb;
+        border-width: 1px;
+        border-color: root.theme_border;
+
+        VerticalLayout {
+            padding: 8px;
+            spacing: 6px;
+
+            Text {
+                text: "Cast";
+                color: root.theme_text_primary;
+                font-size: 13px;
+                font-weight: 700;
+            }
+
+            Text {
+                text: root.cast_connection_label;
+                color: root.theme_text_muted;
+                font-size: 11px;
+                overflow: elide;
+            }
+
+            Rectangle { height: 1px; background: root.theme_border; }
+
+            ScrollView {
+                vertical-stretch: 1;
+                VerticalLayout {
+                    spacing: 2px;
+                    if root.cast_device_names.length == 0 : Rectangle {
+                        height: 28px;
+                        Text {
+                            x: 8px;
+                            width: parent.width - 16px;
+                            text: "No cast devices found";
+                            color: root.theme_text_muted;
+                            font-size: 11px;
+                            vertical-alignment: center;
+                            overflow: elide;
+                        }
+                    }
+                    for cast-device-label[index] in root.cast_device_names : Rectangle {
+                        height: 26px;
+                        border-radius: 4px;
+                        background: cast-device-ta.has-hover
+                            ? (root.ui_dark_mode ? #363636 : #dbe5f1)
+                            : transparent;
+                        Text {
+                            x: 8px;
+                            width: parent.width - 16px;
+                            text: cast-device-label;
+                            color: root.theme_text_primary;
+                            font-size: 11px;
+                            vertical-alignment: center;
+                            overflow: elide;
+                        }
+                        cast-device-ta := TouchArea {
+                            clicked => {
+                                if index < root.cast_device_ids.length {
+                                    root.cast_connect_device(root.cast_device_ids[index]);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            Rectangle { height: 1px; background: root.theme_border; }
+
+            HorizontalLayout {
+                spacing: 8px;
+                Button {
+                    text: "Refresh";
+                    clicked => { root.cast_refresh_devices(); }
+                }
+                Button {
+                    text: "Disconnect";
+                    enabled: root.cast_connected || root.cast_connecting;
+                    clicked => { root.cast_disconnect(); }
+                }
+                Rectangle { horizontal-stretch: 1; }
+                Button {
+                    text: "Close";
+                    clicked => { root.show_cast_menu = false; }
+                }
+            }
+        }
+    }
+
+    if root.show_library_folder_menu : Rectangle {
+        z: 150;
+        x: root.library_folder_menu_x;
+        y: root.library_folder_menu_y;
+        width: root.library_folder_menu_width;
+        height: root.library_folder_menu_height;
+        border-radius: 6px;
+        background: root.ui_dark_mode ? #262626 : #f4f7fb;
+        border-width: 1px;
+        border-color: root.theme_border;
+
+        VerticalLayout {
+            padding: 4px;
+            spacing: 2px;
+
+            Rectangle {
+                height: 28px;
+                border-radius: 4px;
+                background: library-menu-add-folder-ta.has-hover
+                    ? (root.ui_dark_mode ? #363636 : #dbe5f1)
+                    : transparent;
+                Text {
+                    x: 10px;
+                    width: parent.width - 20px;
+                    text: "Add folder";
+                    color: root.theme_text_primary;
+                    font-size: 12px;
+                    vertical-alignment: center;
+                }
+                library-menu-add-folder-ta := TouchArea {
+                    clicked => {
+                        root.show_library_folder_menu = false;
+                        root.library_add_folder();
+                    }
+                }
+            }
+
+            Rectangle {
+                height: 28px;
+                border-radius: 4px;
+                background: library-menu-configure-folders-ta.has-hover
+                    ? (root.ui_dark_mode ? #363636 : #dbe5f1)
+                    : transparent;
+                Text {
+                    x: 10px;
+                    width: parent.width - 20px;
+                    text: "Configure folders ...";
+                    color: root.theme_text_primary;
+                    font-size: 12px;
+                    vertical-alignment: center;
+                }
+                library-menu-configure-folders-ta := TouchArea {
+                    clicked => {
+                        root.show_library_folder_menu = false;
+                        root.open_settings();
+                        root.settings_dialog_tab_index = 2;
                     }
                 }
             }
@@ -2372,8 +3314,8 @@ export component AppWindow inherits Window {
         z: 150;
         x: root.import_menu_x;
         y: root.import_menu_y;
-        width: 160px;
-        height: 70px;
+        width: root.import_menu_width;
+        height: root.import_menu_height;
         border-radius: 6px;
         background: #262626;
         border-width: 1px;
@@ -2410,7 +3352,7 @@ export component AppWindow inherits Window {
                 Text {
                     x: 10px;
                     width: parent.width - 20px;
-                    text: "Add folder";
+                    text: "Add folders";
                     color: #ddd;
                     font-size: 12px;
                     vertical-alignment: center;
@@ -2419,6 +3361,26 @@ export component AppWindow inherits Window {
                     clicked => {
                         root.show_import_menu = false;
                         root.open_folder();
+                    }
+                }
+            }
+
+            Rectangle {
+                height: 28px;
+                border-radius: 4px;
+                background: create-playlist-ta.has-hover ? #363636 : transparent;
+                Text {
+                    x: 10px;
+                    width: parent.width - 20px;
+                    text: "Create new playlist";
+                    color: #ddd;
+                    font-size: 12px;
+                    vertical-alignment: center;
+                }
+                create-playlist-ta := TouchArea {
+                    clicked => {
+                        root.show_import_menu = false;
+                        root.create_playlist();
                     }
                 }
             }
@@ -2439,8 +3401,8 @@ export component AppWindow inherits Window {
         z: 152;
         x: root.playlist_track_context_menu_x;
         y: root.playlist_track_context_menu_y;
-        width: 160px;
-        height: 34px;
+        width: 170px;
+        height: 132px;
         border-radius: 6px;
         background: #262626;
         border-width: 1px;
@@ -2448,6 +3410,7 @@ export component AppWindow inherits Window {
 
         VerticalLayout {
             padding: 4px;
+            spacing: 2px;
             Rectangle {
                 height: 24px;
                 border-radius: 4px;
@@ -2469,6 +3432,86 @@ export component AppWindow inherits Window {
                     }
                 }
             }
+            Rectangle {
+                height: 24px;
+                border-radius: 4px;
+                background: playlist-cut-ta.has-hover ? #363636 : transparent;
+                Text {
+                    x: 10px;
+                    width: parent.width - 20px;
+                    text: "Cut";
+                    color: #ddd;
+                    font-size: 12px;
+                    vertical-alignment: center;
+                    overflow: elide;
+                }
+                playlist-cut-ta := TouchArea {
+                    clicked => {
+                        root.show_playlist_track_context_menu = false;
+                        root.cut_selected_tracks();
+                    }
+                }
+            }
+            Rectangle {
+                height: 24px;
+                border-radius: 4px;
+                background: playlist-copy-ta.has-hover ? #363636 : transparent;
+                Text {
+                    x: 10px;
+                    width: parent.width - 20px;
+                    text: "Copy";
+                    color: #ddd;
+                    font-size: 12px;
+                    vertical-alignment: center;
+                    overflow: elide;
+                }
+                playlist-copy-ta := TouchArea {
+                    clicked => {
+                        root.show_playlist_track_context_menu = false;
+                        root.copy_selected_tracks();
+                    }
+                }
+            }
+            Rectangle {
+                height: 24px;
+                border-radius: 4px;
+                background: playlist-paste-ta.has-hover ? #363636 : transparent;
+                Text {
+                    x: 10px;
+                    width: parent.width - 20px;
+                    text: "Paste";
+                    color: #ddd;
+                    font-size: 12px;
+                    vertical-alignment: center;
+                    overflow: elide;
+                }
+                playlist-paste-ta := TouchArea {
+                    clicked => {
+                        root.show_playlist_track_context_menu = false;
+                        root.paste_copied_tracks();
+                    }
+                }
+            }
+            Rectangle {
+                height: 24px;
+                border-radius: 4px;
+                background: playlist-delete-ta.has-hover ? #4a2a2a : transparent;
+                Text {
+                    x: 10px;
+                    width: parent.width - 20px;
+                    text: "Delete";
+                    color: #db6f6f;
+                    font-size: 12px;
+                    vertical-alignment: center;
+                    overflow: elide;
+                }
+                playlist-delete-ta := TouchArea {
+                    clicked => {
+                        root.show_playlist_track_context_menu = false;
+                        root.delete_selected_tracks();
+                    }
+                }
+            }
         }
     }
 
@@ -2486,8 +3529,8 @@ export component AppWindow inherits Window {
         z: 154;
         x: root.library_context_menu_x;
         y: root.library_context_menu_y;
-        width: 160px;
-        height: 62px;
+        width: 190px;
+        height: 132px;
         border-radius: 6px;
         background: #262626;
         border-width: 1px;
@@ -2496,6 +3539,27 @@ export component AppWindow inherits Window {
         VerticalLayout {
             padding: 4px;
             spacing: 2px;
+            Rectangle {
+                height: 24px;
+                border-radius: 4px;
+                background: library-properties-ta.has-hover && root.library_properties_enabled ? #363636 : transparent;
+                Text {
+                    x: 10px;
+                    width: parent.width - 20px;
+                    text: "Properties";
+                    color: root.library_properties_enabled ? #ddd : #777;
+                    font-size: 12px;
+                    vertical-alignment: center;
+                    overflow: elide;
+                }
+                library-properties-ta := TouchArea {
+                    enabled: root.library_properties_enabled;
+                    clicked => {
+                        root.show_library_context_menu = false;
+                        root.open_properties_for_current_selection();
+                    }
+                }
+            }
             Rectangle {
                 height: 24px;
                 border-radius: 4px;
@@ -2519,21 +3583,60 @@ export component AppWindow inherits Window {
             Rectangle {
                 height: 24px;
                 border-radius: 4px;
-                background: library-properties-ta.has-hover && root.library_properties_enabled ? #363636 : transparent;
+                background: library-cut-ta.has-hover ? #363636 : transparent;
                 Text {
                     x: 10px;
                     width: parent.width - 20px;
-                    text: "Properties";
-                    color: root.library_properties_enabled ? #ddd : #777;
+                    text: "Cut";
+                    color: #ddd;
                     font-size: 12px;
                     vertical-alignment: center;
                     overflow: elide;
                 }
-                library-properties-ta := TouchArea {
-                    enabled: root.library_properties_enabled;
+                library-cut-ta := TouchArea {
                     clicked => {
                         root.show_library_context_menu = false;
-                        root.open_properties_for_current_selection();
+                        root.cut_selected_tracks();
+                    }
+                }
+            }
+            Rectangle {
+                height: 24px;
+                border-radius: 4px;
+                background: library-copy-ta.has-hover ? #363636 : transparent;
+                Text {
+                    x: 10px;
+                    width: parent.width - 20px;
+                    text: "Copy";
+                    color: #ddd;
+                    font-size: 12px;
+                    vertical-alignment: center;
+                    overflow: elide;
+                }
+                library-copy-ta := TouchArea {
+                    clicked => {
+                        root.show_library_context_menu = false;
+                        root.copy_selected_tracks();
+                    }
+                }
+            }
+            Rectangle {
+                height: 24px;
+                border-radius: 4px;
+                background: library-delete-ta.has-hover ? #4a2a2a : transparent;
+                Text {
+                    x: 10px;
+                    width: parent.width - 20px;
+                    text: "Remove from library";
+                    color: #db6f6f;
+                    font-size: 12px;
+                    vertical-alignment: center;
+                    overflow: elide;
+                }
+                library-delete-ta := TouchArea {
+                    clicked => {
+                        root.show_library_context_menu = false;
+                        root.delete_selected_tracks();
                     }
                 }
             }
@@ -2599,7 +3702,7 @@ export component AppWindow inherits Window {
                             padding-right: 8px;
                             spacing: 8px;
                             playlist-toggle := Switch {
-                                width: 18px;
+                                width: 36px;
                                 text: "";
                                 checked: playlist-option-row.row-checked;
                                 toggled => {
@@ -2709,12 +3812,14 @@ export component AppWindow inherits Window {
                                             height: 18px;
                                             border-radius: 2px;
                                             background: delete-action-ta.has-hover ? #4a2a2a : transparent;
-                                            Text {
-                                                text: "✕";
-                                                color: #ffb4b4;
-                                                font-size: 11px;
-                                                horizontal-alignment: center;
-                                                vertical-alignment: center;
+                                            Image {
+                                                source: AppIcons.close;
+                                                width: 10px;
+                                                height: 10px;
+                                                x: (parent.width - self.width) / 2;
+                                                y: (parent.height - self.height) / 2;
+                                                image-fit: contain;
+                                                colorize: #ffb4b4;
                                             }
                                             delete-action-ta := TouchArea {
                                                 clicked => {
@@ -2758,7 +3863,8 @@ export component AppWindow inherits Window {
                             "Shuffle",
                             "Repeat",
                             "Layout Editor",
-                            "Settings"
+                            "Settings",
+                            "Cast"
                         ];
                         current-index <=> root.control_cluster_add_option_index;
                     }
@@ -2791,6 +3897,22 @@ export component AppWindow inherits Window {
         }
     }
 
+    remote_detach_overlay := ConfirmationDialog {
+        is-visible: root.show_remote_detach_confirm;
+        message: root.remote_detach_confirm_message;
+        confirm-button-text: "Detach";
+        confirmed => {
+            root.remote_detach_confirm(root.remote_detach_target_playlist_id);
+            root.show_remote_detach_confirm = false;
+            root.refocus_main();
+        }
+        cancelled => {
+            root.remote_detach_cancel(root.remote_detach_target_playlist_id);
+            root.show_remote_detach_confirm = false;
+            root.refocus_main();
+        }
+    }
+
     apply_filter_view_overlay := ConfirmationDialog {
         is-visible: root.show_apply_filter_view_confirm;
         message: root.apply_filter_view_confirm_message;
@@ -2802,6 +3924,22 @@ export component AppWindow inherits Window {
         }
         cancelled => {
             root.show_apply_filter_view_confirm = false;
+            root.refocus_main();
+        }
+    }
+
+    library_remove_overlay := ConfirmationDialog {
+        is-visible: root.show_library_remove_confirm;
+        message: "Remove from library? This will not delete any files\n\nNote: tracks may be re-added in a rescan if files remain in library folders";
+        confirm-button-text: "Remove";
+        confirmed => {
+            root.library_confirm_remove_selection();
+            root.show_library_remove_confirm = false;
+            root.refocus_main();
+        }
+        cancelled => {
+            root.library_cancel_remove_selection();
+            root.show_library_remove_confirm = false;
             root.refocus_main();
         }
     }
@@ -2824,6 +3962,7 @@ export component AppWindow inherits Window {
 
     restart_notice_overlay := InfoDialog {
         is-visible: root.show_settings_restart_notice;
+        title: "Restart Required";
         message: root.settings_restart_notice_message;
         dismissed => {
             root.show_settings_restart_notice = false;
@@ -2831,56 +3970,140 @@ export component AppWindow inherits Window {
         }
     }
 
-    if root.show_library_first_start_dialog : Rectangle {
+    subsonic_keyring_notice_overlay := InfoDialog {
+        is-visible: root.show_subsonic_keyring_notice;
+        title: "OpenSubsonic Credential Store Unavailable";
+        message: root.subsonic_keyring_notice_message;
+        dismissed => {
+            root.show_subsonic_keyring_notice = false;
+            root.refocus_main();
+        }
+    }
+
+    if root.show_subsonic_session_password_prompt : Rectangle {
         background: #00000088;
-        z: 111;
+        z: 112;
 
         TouchArea {}
 
         Rectangle {
             width: min(root.width - 40px, 520px);
-            height: 220px;
+            height: 300px;
             x: (parent.width - self.width) / 2;
             y: (parent.height - self.height) / 2;
             border-radius: 6px;
-            background: #242424;
+            background: root.ui_dark_mode ? #242424 : #f6f8fc;
             border-width: 1px;
-            border-color: #3b3b3b;
+            border-color: root.ui_dark_mode ? #3b3b3b : #c7d1dd;
 
             VerticalLayout {
                 padding: 16px;
-                spacing: 12px;
+                spacing: 10px;
 
-                Text {
-                    text: "Set Up Your Library";
-                    color: #eee;
-                    font-size: 16px;
-                    font-weight: 700;
+                HorizontalLayout {
+                    spacing: 10px;
+
+                    Rectangle {
+                        width: 36px;
+                        height: 36px;
+                        border-radius: 18px;
+                        background: root.ui_dark_mode ? #1f3248 : #e2eefb;
+                        border-width: 1px;
+                        border-color: root.ui_dark_mode ? #3f5470 : #b4cde8;
+                        Image {
+                            source: AppIcons.opensubsonic;
+                            width: 18px;
+                            height: 18px;
+                            x: (parent.width - self.width) / 2;
+                            y: (parent.height - self.height) / 2;
+                            image-fit: contain;
+                            colorize: root.ui_dark_mode ? #9fc3eb : #2d5f98;
+                        }
+                    }
+
+                    VerticalLayout {
+                        spacing: 2px;
+                        Text {
+                            text: "OpenSubsonic Session Sign-In";
+                            color: root.theme_text_primary;
+                            font-size: 16px;
+                            font-weight: 700;
+                        }
+                        Text {
+                            text: root.subsonic_session_prompt_endpoint;
+                            color: root.theme_text_secondary;
+                            font-size: 11px;
+                            wrap: word-wrap;
+                        }
+                    }
                 }
 
                 Text {
-                    text: "Add folders to enable Library mode browsing. You can skip this and keep using playlists only.";
-                    color: #bbb;
+                    text: "System keyring is unavailable. Enter your password to use OpenSubsonic for this session only.";
+                    color: root.theme_text_secondary;
                     font-size: 12px;
                     wrap: word-wrap;
                 }
 
-                Rectangle { vertical-stretch: 1; }
+                HorizontalLayout {
+                    spacing: 10px;
+                    Text {
+                        text: "Username";
+                        width: 110px;
+                        color: root.theme_text_primary;
+                        font-size: 12px;
+                        vertical-alignment: center;
+                    }
+                    Text {
+                        text: root.subsonic_session_prompt_username;
+                        color: root.theme_text_primary;
+                        font-size: 12px;
+                        vertical-alignment: center;
+                        wrap: word-wrap;
+                    }
+                }
 
                 HorizontalLayout {
                     spacing: 10px;
-                    Button {
-                        text: "Skip For Now";
-                        clicked => {
-                            root.library_skip_first_start();
+                    Text {
+                        text: "Password";
+                        width: 110px;
+                        color: root.theme_text_primary;
+                        font-size: 12px;
+                        vertical-alignment: center;
+                    }
+                    subsonic-session-password-input := LineEdit {
+                        text <=> root.subsonic_session_prompt_password;
+                        input-type: password;
+                        placeholder-text: "session only";
+                        accepted => {
+                            root.subsonic_session_password_submit(root.subsonic_session_prompt_password);
                         }
                     }
+                }
+
+                Text {
+                    text: root.subsonic_session_prompt_status;
+                    color: root.ui_dark_mode ? #f0b27a : #9a4a00;
+                    font-size: 11px;
+                    wrap: word-wrap;
+                    vertical-stretch: 1;
+                }
+
+                HorizontalLayout {
+                    spacing: 10px;
                     Rectangle { horizontal-stretch: 1; }
                     Button {
-                        text: "Add Folder";
+                        text: "Not Now";
+                        clicked => {
+                            root.subsonic_session_password_cancel();
+                        }
+                    }
+                    Button {
+                        text: "Continue";
                         primary: true;
                         clicked => {
-                            root.library_add_folder();
+                            root.subsonic_session_password_submit(root.subsonic_session_prompt_password);
                         }
                     }
                 }
@@ -3132,7 +4355,7 @@ export component AppWindow inherits Window {
     }
 
     if root.show_settings_dialog : Rectangle {
-        background: #00000088;
+        background: root.ui_dark_mode ? #00000088 : #0d1a2b33;
         z: 100;
 
         TouchArea {}
@@ -3143,9 +4366,9 @@ export component AppWindow inherits Window {
             x: (parent.width - self.width) / 2;
             y: (parent.height - self.height) / 2;
             border-radius: 6px;
-            background: #242424;
+            background: root.ui_dark_mode ? #242424 : #ffffff;
             border-width: 1px;
-            border-color: #3b3b3b;
+            border-color: root.theme_border;
             property <length> label_column_width: 230px;
             property <length> control_min_width: 170px;
             property <length> control_max_width: 270px;
@@ -3160,14 +4383,15 @@ export component AppWindow inherits Window {
                 HorizontalLayout {
                     Text {
                         text: "Settings";
-                        color: #eee;
+                        color: root.theme_text_primary;
                         font-size: 16px;
                         font-weight: 700;
                         vertical-alignment: center;
                     }
                     Rectangle { horizontal-stretch: 1; }
                     PlayerButton {
-                        icon-text: "✕";
+                        icon-source: AppIcons.close;
+                        icon-text: "";
                         font-size: 14px;
                         tooltip-text: "Close settings";
                         tooltip_hover_changed(is-hovered, tooltip, anchor-x-px, anchor-y-px) => {
@@ -3179,10 +4403,10 @@ export component AppWindow inherits Window {
                     }
                 }
 
-                Rectangle { height: 1px; background: #343434; }
+                Rectangle { height: 1px; background: root.theme_separator; }
 
                 ModeTabs {
-                    labels: ["General", "Library"];
+                    labels: ["General", "Audio", "Library", "Integrations"];
                     selected_index: root.settings_dialog_tab_index;
                     selected(tab_index) => {
                         root.settings_dialog_tab_index = tab_index;
@@ -3200,6 +4424,222 @@ export component AppWindow inherits Window {
                         VerticalLayout {
                             alignment: start;
                             spacing: 8px;
+
+                            Text {
+                                text: "Behavior";
+                                color: root.theme_text_primary;
+                                font-size: 12px;
+                                font-weight: 700;
+                            }
+
+                            Rectangle {
+                                height: 32px;
+                                background: settings-layout-intro-toggle-ta.has-hover
+                                    ? (root.ui_dark_mode ? #2d2d2d : #e9f0f8)
+                                    : transparent;
+                                border-radius: 4px;
+                                HorizontalLayout {
+                                    spacing: 10px;
+                                    Text {
+                                        text: "Show layout editing mode tutorial";
+                                        color: root.theme_text_primary;
+                                        font-size: 12px;
+                                        width: settings-dialog-panel.label_column_width + 24px;
+                                        vertical-alignment: center;
+                                        horizontal-alignment: left;
+                                    }
+                                    Rectangle {
+                                        width: settings-dialog-panel.control_max_width;
+                                        height: parent.height;
+                                        background: transparent;
+                                        settings-layout-intro-toggle := Switch {
+                                            x: parent.width - self.width - 8px;
+                                            y: (parent.height - self.height) / 2;
+                                            width: 36px;
+                                            text: "";
+                                            checked <=> root.settings_show_layout_edit_tutorial;
+                                        }
+                                    }
+                                    Rectangle { horizontal-stretch: 1; }
+                                }
+                                settings-layout-intro-toggle-ta := TouchArea {
+                                    clicked => {
+                                        settings-layout-intro-toggle.checked = !settings-layout-intro-toggle.checked;
+                                    }
+                                }
+                            }
+
+                            Rectangle {
+                                height: 32px;
+                                background: settings-tooltips-toggle-ta.has-hover
+                                    ? (root.ui_dark_mode ? #2d2d2d : #e9f0f8)
+                                    : transparent;
+                                border-radius: 4px;
+                                HorizontalLayout {
+                                    spacing: 10px;
+                                    Text {
+                                        text: "Show tooltips";
+                                        color: root.theme_text_primary;
+                                        font-size: 12px;
+                                        width: settings-dialog-panel.label_column_width + 24px;
+                                        vertical-alignment: center;
+                                        horizontal-alignment: left;
+                                    }
+                                    Rectangle {
+                                        width: settings-dialog-panel.control_max_width;
+                                        height: parent.height;
+                                        background: transparent;
+                                        settings-tooltips-toggle := Switch {
+                                            x: parent.width - self.width - 8px;
+                                            y: (parent.height - self.height) / 2;
+                                            width: 36px;
+                                            text: "";
+                                            checked <=> root.settings_show_tooltips;
+                                        }
+                                    }
+                                    Rectangle { horizontal-stretch: 1; }
+                                }
+                                settings-tooltips-toggle-ta := TouchArea {
+                                    clicked => {
+                                        settings-tooltips-toggle.checked = !settings-tooltips-toggle.checked;
+                                    }
+                                }
+                            }
+
+                            Rectangle {
+                                height: 32px;
+                                background: settings-auto-scroll-toggle-ta.has-hover
+                                    ? (root.ui_dark_mode ? #2d2d2d : #e9f0f8)
+                                    : transparent;
+                                border-radius: 4px;
+                                HorizontalLayout {
+                                    spacing: 10px;
+                                    auto-scroll-label-host := Rectangle {
+                                        width: settings-dialog-panel.label_column_width + 24px;
+                                        height: parent.height;
+                                        background: transparent;
+                                        Text {
+                                            text: "Auto scroll to playing track";
+                                            color: root.theme_text_primary;
+                                            font-size: 12px;
+                                            width: parent.width;
+                                            height: parent.height;
+                                            vertical-alignment: center;
+                                            horizontal-alignment: left;
+                                        }
+                                    }
+                                    Rectangle {
+                                        width: settings-dialog-panel.control_max_width;
+                                        height: parent.height;
+                                        background: transparent;
+                                        settings-auto-scroll-toggle := Switch {
+                                            x: parent.width - self.width - 8px;
+                                            y: (parent.height - self.height) / 2;
+                                            width: 36px;
+                                            text: "";
+                                            checked <=> root.settings_auto_scroll_to_playing_track;
+                                        }
+                                    }
+                                    Rectangle { horizontal-stretch: 1; }
+                                }
+                                settings-auto-scroll-toggle-ta := TouchArea {
+                                    changed has-hover => {
+                                        root.tooltip_hover_changed(
+                                            self.has-hover,
+                                            "When enabled, track list views auto-scroll to keep the playing track centered.",
+                                            floor((auto-scroll-label-host.absolute-position.x + auto-scroll-label-host.width / 2) / 1px),
+                                            floor((auto-scroll-label-host.absolute-position.y + auto-scroll-label-host.height) / 1px)
+                                        );
+                                    }
+                                    clicked => {
+                                        settings-auto-scroll-toggle.checked = !settings-auto-scroll-toggle.checked;
+                                    }
+                                }
+                            }
+
+                            Rectangle { height: 1px; background: root.theme_separator; }
+
+                            Text {
+                                text: "Appearance";
+                                color: root.theme_text_primary;
+                                font-size: 12px;
+                                font-weight: 700;
+                            }
+
+                            Rectangle {
+                                height: 32px;
+                                background: settings-theme-toggle-ta.has-hover
+                                    ? (root.ui_dark_mode ? #2d2d2d : #e9f0f8)
+                                    : transparent;
+                                border-radius: 4px;
+                                HorizontalLayout {
+                                    spacing: 10px;
+                                    theme-label-host := Rectangle {
+                                        width: settings-dialog-panel.label_column_width + 24px;
+                                        height: parent.height;
+                                        background: transparent;
+                                        Text {
+                                            text: "Dark mode";
+                                            color: root.theme_text_primary;
+                                            font-size: 12px;
+                                            width: parent.width;
+                                            height: parent.height;
+                                            vertical-alignment: center;
+                                            horizontal-alignment: left;
+                                        }
+                                        settings-theme-label-tooltip-ta := TooltipHoverArea {
+                                            tooltip-text: "Switches the entire app between dark and light mode.";
+                                            tooltip_hover_changed(is-hovered, tooltip, anchor-x-px, anchor-y-px) => {
+                                                root.tooltip_hover_changed(is-hovered, tooltip, anchor-x-px, anchor-y-px);
+                                            }
+                                        }
+                                    }
+                                    Rectangle {
+                                        width: settings-dialog-panel.control_max_width;
+                                        height: parent.height;
+                                        background: transparent;
+                                        settings-theme-toggle := Switch {
+                                            x: parent.width - self.width - 8px;
+                                            y: (parent.height - self.height) / 2;
+                                            width: 36px;
+                                            text: "";
+                                            checked <=> root.settings_dark_mode;
+                                        }
+                                    }
+                                    Rectangle { horizontal-stretch: 1; }
+                                }
+                                settings-theme-toggle-ta := TouchArea {
+                                    changed has-hover => {
+                                        root.tooltip_hover_changed(
+                                            self.has-hover,
+                                            "Switches the entire app between dark and light mode.",
+                                            floor((theme-label-host.absolute-position.x + theme-label-host.width / 2) / 1px),
+                                            floor((theme-label-host.absolute-position.y + theme-label-host.height) / 1px)
+                                        );
+                                    }
+                                    clicked => {
+                                        settings-theme-toggle.checked = !settings-theme-toggle.checked;
+                                    }
+                                }
+                            }
+                        }
+                    }
+
+                    if root.settings_dialog_tab_index == 1 : ScrollView {
+                        width: parent.width;
+                        height: parent.height;
+
+                        VerticalLayout {
+                            alignment: start;
+                            spacing: 8px;
+
+                            Text {
+                                width: settings-dialog-panel.settings_row_width;
+                                text: "Audio setting changes are staged during playback and only applied after playback is stopped and started again.";
+                                color: root.ui_dark_mode ? #d6b07a : #8a4f00;
+                                font-size: 11px;
+                                wrap: word-wrap;
+                            }
 
                             SettingsDropdownControl {
                                 width: settings-dialog-panel.settings_row_width;
@@ -3255,7 +4695,7 @@ export component AppWindow inherits Window {
                             Text {
                                 width: settings-dialog-panel.settings_row_width;
                                 text: root.settings_verified_sample_rates_summary;
-                                color: #b8c8d6;
+                                color: root.ui_dark_mode ? #b8c8d6 : #527090;
                                 font-size: 11px;
                                 wrap: no-wrap;
                                 overflow: elide;
@@ -3314,7 +4754,9 @@ export component AppWindow inherits Window {
 
                             Rectangle {
                                 height: 32px;
-                                background: settings-dither-toggle-ta.has-hover ? #2d2d2d : transparent;
+                                background: settings-dither-toggle-ta.has-hover
+                                    ? (root.ui_dark_mode ? #2d2d2d : #e9f0f8)
+                                    : transparent;
                                 border-radius: 4px;
                                 HorizontalLayout {
                                     spacing: 10px;
@@ -3324,19 +4766,15 @@ export component AppWindow inherits Window {
                                         background: transparent;
                                         Text {
                                             text: "Dither bit-depth conversion";
-                                            color: #ddd;
+                                            color: root.theme_text_primary;
                                             font-size: 12px;
                                             vertical-alignment: center;
                                             horizontal-alignment: left;
                                         }
-                                        settings-dither-label-tooltip-ta := TouchArea {
-                                            changed has-hover => {
-                                                root.tooltip_hover_changed(
-                                                    self.has-hover,
-                                                    "Adds low-level noise when reducing bit depth to reduce quantization distortion.",
-                                                    floor((dither-label-host.absolute-position.x + dither-label-host.width / 2) / 1px),
-                                                    floor((dither-label-host.absolute-position.y + dither-label-host.height) / 1px)
-                                                );
+                                        settings-dither-label-tooltip-ta := TooltipHoverArea {
+                                            tooltip-text: "Adds low-level noise when reducing bit depth to reduce quantization distortion.";
+                                            tooltip_hover_changed(is-hovered, tooltip, anchor-x-px, anchor-y-px) => {
+                                                root.tooltip_hover_changed(is-hovered, tooltip, anchor-x-px, anchor-y-px);
                                             }
                                         }
                                     }
@@ -3347,7 +4785,7 @@ export component AppWindow inherits Window {
                                         settings-dither-toggle := Switch {
                                             x: parent.width - self.width - 8px;
                                             y: (parent.height - self.height) / 2;
-                                            width: 18px;
+                                            width: 36px;
                                             text: "";
                                             checked <=> root.settings_dither_on_bitdepth_reduce;
                                         }
@@ -3369,89 +4807,126 @@ export component AppWindow inherits Window {
                                 }
                             }
 
-                            Rectangle { height: 1px; background: #343434; }
-
                             Rectangle {
                                 height: 32px;
-                                background: settings-layout-intro-toggle-ta.has-hover ? #2d2d2d : transparent;
+                                background: settings-downmix-toggle-ta.has-hover
+                                    ? (root.ui_dark_mode ? #2d2d2d : #e9f0f8)
+                                    : transparent;
                                 border-radius: 4px;
                                 HorizontalLayout {
                                     spacing: 10px;
-                                    Text {
-                                        text: "Show layout editing mode tutorial";
-                                        color: #ddd;
-                                        font-size: 12px;
+                                    downmix-label-host := Rectangle {
                                         width: settings-dialog-panel.label_column_width + 24px;
-                                        vertical-alignment: center;
-                                        horizontal-alignment: left;
+                                        height: parent.height;
+                                        background: transparent;
+                                        Text {
+                                            text: "Downmix tracks with higher channel counts";
+                                            color: root.theme_text_primary;
+                                            font-size: 12px;
+                                            vertical-alignment: center;
+                                            horizontal-alignment: left;
+                                        }
+                                        settings-downmix-label-tooltip-ta := TooltipHoverArea {
+                                            tooltip-text: "When source channels exceed output channels, use weighted downmixing instead of legacy channel mapping.";
+                                            tooltip_hover_changed(is-hovered, tooltip, anchor-x-px, anchor-y-px) => {
+                                                root.tooltip_hover_changed(is-hovered, tooltip, anchor-x-px, anchor-y-px);
+                                            }
+                                        }
                                     }
                                     Rectangle {
                                         width: settings-dialog-panel.control_max_width;
                                         height: parent.height;
                                         background: transparent;
-                                        settings-layout-intro-toggle := Switch {
+                                        settings-downmix-toggle := Switch {
                                             x: parent.width - self.width - 8px;
                                             y: (parent.height - self.height) / 2;
-                                            width: 18px;
+                                            width: 36px;
                                             text: "";
-                                            checked <=> root.settings_show_layout_edit_tutorial;
+                                            checked <=> root.settings_downmix_higher_channel_tracks;
                                         }
                                     }
                                     Rectangle { horizontal-stretch: 1; }
                                 }
-                                settings-layout-intro-toggle-ta := TouchArea {
+                                settings-downmix-toggle-ta := TouchArea {
+                                    changed has-hover => {
+                                        root.tooltip_hover_changed(
+                                            self.has-hover,
+                                            "When source channels exceed output channels, use weighted downmixing instead of legacy channel mapping.",
+                                            floor((downmix-label-host.absolute-position.x + downmix-label-host.width / 2) / 1px),
+                                            floor((downmix-label-host.absolute-position.y + downmix-label-host.height) / 1px)
+                                        );
+                                    }
                                     clicked => {
-                                        settings-layout-intro-toggle.checked = !settings-layout-intro-toggle.checked;
+                                        settings-downmix-toggle.checked = !settings-downmix-toggle.checked;
                                     }
                                 }
                             }
 
                             Rectangle {
                                 height: 32px;
-                                background: settings-tooltips-toggle-ta.has-hover ? #2d2d2d : transparent;
+                                background: settings-cast-fallback-toggle-ta.has-hover
+                                    ? (root.ui_dark_mode ? #2d2d2d : #e9f0f8)
+                                    : transparent;
                                 border-radius: 4px;
                                 HorizontalLayout {
                                     spacing: 10px;
-                                    Text {
-                                        text: "Show tooltips";
-                                        color: #ddd;
-                                        font-size: 12px;
+                                    cast-fallback-label-host := Rectangle {
                                         width: settings-dialog-panel.label_column_width + 24px;
-                                        vertical-alignment: center;
-                                        horizontal-alignment: left;
+                                        height: parent.height;
+                                        background: transparent;
+                                        Text {
+                                            text: "Cast transcode fallback";
+                                            color: root.theme_text_primary;
+                                            font-size: 12px;
+                                            vertical-alignment: center;
+                                            horizontal-alignment: left;
+                                        }
+                                        settings-cast-fallback-label-tooltip-ta := TooltipHoverArea {
+                                            tooltip-text: "When direct cast is unsupported by the receiver, fall back to WAV PCM transcoding. Off preserves original source or fails.";
+                                            tooltip_hover_changed(is-hovered, tooltip, anchor-x-px, anchor-y-px) => {
+                                                root.tooltip_hover_changed(is-hovered, tooltip, anchor-x-px, anchor-y-px);
+                                            }
+                                        }
                                     }
                                     Rectangle {
                                         width: settings-dialog-panel.control_max_width;
                                         height: parent.height;
                                         background: transparent;
-                                        settings-tooltips-toggle := Switch {
+                                        settings-cast-fallback-toggle := Switch {
                                             x: parent.width - self.width - 8px;
                                             y: (parent.height - self.height) / 2;
-                                            width: 18px;
+                                            width: 36px;
                                             text: "";
-                                            checked <=> root.settings_show_tooltips;
+                                            checked <=> root.settings_cast_allow_transcode_fallback;
                                         }
                                     }
                                     Rectangle { horizontal-stretch: 1; }
                                 }
-                                settings-tooltips-toggle-ta := TouchArea {
+                                settings-cast-fallback-toggle-ta := TouchArea {
+                                    changed has-hover => {
+                                        root.tooltip_hover_changed(
+                                            self.has-hover,
+                                            "When direct cast is unsupported by the receiver, fall back to WAV PCM transcoding. Off preserves original source or fails.",
+                                            floor((cast-fallback-label-host.absolute-position.x + cast-fallback-label-host.width / 2) / 1px),
+                                            floor((cast-fallback-label-host.absolute-position.y + cast-fallback-label-host.height) / 1px)
+                                        );
+                                    }
                                     clicked => {
-                                        settings-tooltips-toggle.checked = !settings-tooltips-toggle.checked;
+                                        settings-cast-fallback-toggle.checked = !settings-cast-fallback-toggle.checked;
                                     }
                                 }
                             }
                         }
                     }
 
-                    if root.settings_dialog_tab_index == 1 : VerticalLayout {
+                    if root.settings_dialog_tab_index == 2 : VerticalLayout {
                         width: parent.width;
                         height: parent.height;
-                        alignment: start;
                         spacing: 8px;
 
                         Text {
                             text: "Library Folders";
-                            color: #ddd;
+                            color: root.theme_text_primary;
                             font-size: 12px;
                             font-weight: 700;
                         }
@@ -3459,33 +4934,37 @@ export component AppWindow inherits Window {
                         Rectangle {
                             vertical-stretch: 1;
                             border-width: 1px;
-                            border-color: #3a3a3a;
+                            border-color: root.theme_border;
                             border-radius: 4px;
-                            background: #1f1f1f;
-                            ScrollView {
-                                width: parent.width;
-                                height: parent.height;
-                                VerticalLayout {
-                                    spacing: 2px;
-                                    padding: 4px;
-                                    for folder[index] in root.settings_library_folders : Rectangle {
-                                        height: 24px;
-                                        border-radius: 3px;
-                                        background: root.settings_library_selected_folder_index == index
-                                            ? #2f3f56
-                                            : settings-library-folder-ta.has-hover ? #2c2c2c : transparent;
-                                        Text {
-                                            x: 8px;
-                                            width: max(0px, parent.width - 16px);
-                                            text: folder;
-                                            color: root.settings_library_selected_folder_index == index ? #d7e6f8 : #c6c6c6;
-                                            font-size: 12px;
-                                            vertical-alignment: center;
-                                            overflow: elide;
-                                        }
-                                        settings-library-folder-ta := TouchArea {
-                                            clicked => { root.settings_select_library_folder(index); }
-                                        }
+                            background: root.ui_dark_mode ? #1f1f1f : #f8fbff;
+                            clip: true;
+                            settings-library-folder-list := ListView {
+                                x: 1px;
+                                y: 1px;
+                                width: max(0px, parent.width - 2px);
+                                height: max(0px, parent.height - 2px);
+                                for folder[index] in root.settings_library_folders : Rectangle {
+                                    horizontal-stretch: 1;
+                                    height: 26px;
+                                    border-radius: 3px;
+                                    background: root.settings_library_selected_folder_index == index
+                                        ? (root.ui_dark_mode ? #2f3f56 : #d9e8f8)
+                                        : settings-library-folder-ta.has-hover
+                                            ? (root.ui_dark_mode ? #2c2c2c : #edf3fb)
+                                            : transparent;
+                                    Text {
+                                        x: 8px;
+                                        width: max(0px, parent.width - 16px);
+                                        text: folder;
+                                        color: root.settings_library_selected_folder_index == index
+                                            ? (root.ui_dark_mode ? #d7e6f8 : #2f587f)
+                                            : root.theme_text_secondary;
+                                        font-size: 12px;
+                                        vertical-alignment: center;
+                                        overflow: elide;
+                                    }
+                                    settings-library-folder-ta := TouchArea {
+                                        clicked => { root.settings_select_library_folder(index); }
                                     }
                                 }
                             }
@@ -3516,10 +4995,257 @@ export component AppWindow inherits Window {
                                 clicked => { root.library_rescan(); }
                             }
                         }
-                    }
-            }
 
-            Rectangle { height: 1px; background: #343434; }
+                        Rectangle {
+                            height: 1px;
+                            background: root.theme_separator;
+                        }
+
+                        Text {
+                            text: "Online Metadata (Display-Only)";
+                            color: root.theme_text_primary;
+                            font-size: 12px;
+                            font-weight: 700;
+                        }
+
+                        Rectangle {
+                            height: 32px;
+                            background: settings-library-online-toggle-ta.has-hover
+                                ? (root.ui_dark_mode ? #2d2d2d : #e9f0f8)
+                                : transparent;
+                            border-radius: 4px;
+                            HorizontalLayout {
+                                spacing: 10px;
+                                metadata-label-host := Rectangle {
+                                    width: max(
+                                        settings-dialog-panel.label_column_width,
+                                        parent.width - settings-dialog-panel.control_max_width - 10px
+                                    );
+                                    height: parent.height;
+                                    background: transparent;
+                                    Text {
+                                        text: "Fetch metadata for artist/album pages from internet";
+                                        width: parent.width;
+                                        color: root.theme_text_primary;
+                                        font-size: 12px;
+                                        vertical-alignment: center;
+                                        horizontal-alignment: left;
+                                    }
+                                    metadata-label-tooltip-ta := TooltipHoverArea {
+                                        tooltip-text: "Internet metadata only affects displayed artwork/text in Library views and never edits audio file tags.";
+                                        tooltip_hover_changed(is-hovered, tooltip, anchor-x-px, anchor-y-px) => {
+                                            root.tooltip_hover_changed(is-hovered, tooltip, anchor-x-px, anchor-y-px);
+                                        }
+                                    }
+                                }
+                                Rectangle {
+                                    width: settings-dialog-panel.control_max_width;
+                                    height: parent.height;
+                                    background: transparent;
+                                    settings-library-online-toggle := Switch {
+                                        x: parent.width - self.width - 8px;
+                                        y: (parent.height - self.height) / 2;
+                                        width: 36px;
+                                        text: "";
+                                        checked <=> root.settings_library_online_metadata_enabled;
+                                    }
+                                }
+                                Rectangle { horizontal-stretch: 1; }
+                            }
+                            settings-library-online-toggle-ta := TouchArea {
+                                changed has-hover => {
+                                    root.tooltip_hover_changed(
+                                        self.has-hover,
+                                        "Internet metadata only affects displayed artwork/text in Library views and never edits audio file tags.",
+                                        floor((metadata-label-host.absolute-position.x + metadata-label-host.width / 2) / 1px),
+                                        floor((metadata-label-host.absolute-position.y + metadata-label-host.height) / 1px)
+                                    );
+                                }
+                                clicked => {
+                                    settings-library-online-toggle.checked = !settings-library-online-toggle.checked;
+                                    root.settings_set_library_online_metadata_enabled(settings-library-online-toggle.checked);
+                                }
+                            }
+                        }
+
+                        HorizontalLayout {
+                            spacing: 8px;
+                            Button {
+                                text: "Clear Internet Metadata Cache";
+                                width: 228px;
+                                height: settings-dialog-panel.button_height;
+                                clicked => { root.clear_library_enrichment_cache(); }
+                            }
+                            Rectangle { horizontal-stretch: 1; }
+                        }
+                    }
+
+                    if root.settings_dialog_tab_index == 3 : VerticalLayout {
+                        width: parent.width;
+                        height: parent.height;
+                        spacing: 10px;
+
+                        HorizontalLayout {
+                            spacing: 6px;
+                            Rectangle {
+                                width: 18px;
+                                height: 18px;
+                                border-radius: 9px;
+                                border-width: 1px;
+                                border-color: root.ui_dark_mode ? #3f5470 : #b4cde8;
+                                background: root.ui_dark_mode ? #1f3248 : #e2eefb;
+                                Image {
+                                    source: AppIcons.opensubsonic;
+                                    width: 10px;
+                                    height: 10px;
+                                    x: (parent.width - self.width) / 2;
+                                    y: (parent.height - self.height) / 2;
+                                    image-fit: contain;
+                                    colorize: root.ui_dark_mode ? #9fc3eb : #2d5f98;
+                                }
+                            }
+                            Text {
+                                text: "OpenSubsonic";
+                                color: root.theme_text_primary;
+                                font-size: 12px;
+                                font-weight: 700;
+                                vertical-alignment: center;
+                            }
+                        }
+
+                        Rectangle {
+                            width: settings-dialog-panel.settings_row_width;
+                            height: 30px;
+                            background: settings-subsonic-enabled-ta.has-hover
+                                ? (root.ui_dark_mode ? #2d2d2d : #e9f0f8)
+                                : transparent;
+                            border-radius: 4px;
+                            HorizontalLayout {
+                                spacing: 10px;
+                                Text {
+                                    text: "Enable OpenSubsonic backend";
+                                    color: root.theme_text_primary;
+                                    font-size: 12px;
+                                    width: settings-dialog-panel.label_column_width + 24px;
+                                    vertical-alignment: center;
+                                }
+                                Rectangle {
+                                    width: settings-dialog-panel.control_max_width;
+                                    height: parent.height;
+                                    settings-subsonic-enabled := Switch {
+                                        x: parent.width - self.width - 8px;
+                                        y: (parent.height - self.height) / 2;
+                                        width: 36px;
+                                        text: "";
+                                        checked <=> root.settings_subsonic_enabled;
+                                    }
+                                }
+                                Rectangle { horizontal-stretch: 1; }
+                            }
+                            settings-subsonic-enabled-ta := TouchArea {
+                                clicked => {
+                                    settings-subsonic-enabled.checked = !settings-subsonic-enabled.checked;
+                                }
+                            }
+                        }
+
+                        HorizontalLayout {
+                            width: settings-dialog-panel.settings_row_width;
+                            spacing: 10px;
+                            Text {
+                                text: "Server URL";
+                                width: settings-dialog-panel.label_column_width;
+                                color: root.theme_text_primary;
+                                font-size: 12px;
+                                vertical-alignment: center;
+                            }
+                            LineEdit {
+                                text <=> root.settings_subsonic_endpoint;
+                                placeholder-text: "https://your-server.example.com";
+                            }
+                        }
+
+                        HorizontalLayout {
+                            width: settings-dialog-panel.settings_row_width;
+                            spacing: 10px;
+                            Text {
+                                text: "Username";
+                                width: settings-dialog-panel.label_column_width;
+                                color: root.theme_text_primary;
+                                font-size: 12px;
+                                vertical-alignment: center;
+                            }
+                            LineEdit {
+                                text <=> root.settings_subsonic_username;
+                                placeholder-text: "username";
+                            }
+                        }
+
+                        HorizontalLayout {
+                            width: settings-dialog-panel.settings_row_width;
+                            spacing: 10px;
+                            Text {
+                                text: "Password";
+                                width: settings-dialog-panel.label_column_width;
+                                color: root.theme_text_primary;
+                                font-size: 12px;
+                                vertical-alignment: center;
+                            }
+                            LineEdit {
+                                text <=> root.settings_subsonic_password;
+                                input-type: password;
+                                placeholder-text: "stored in secure credential store";
+                            }
+                        }
+
+                        Text {
+                            width: settings-dialog-panel.settings_row_width;
+                            text: root.settings_subsonic_status;
+                            color: root.ui_dark_mode ? #b8c8d6 : #4a6480;
+                            font-size: 11px;
+                            wrap: word-wrap;
+                        }
+
+                        HorizontalLayout {
+                            width: settings-dialog-panel.settings_row_width;
+                            spacing: 8px;
+                            Button {
+                                text: "Save";
+                                width: settings-dialog-panel.button_width;
+                                height: settings-dialog-panel.button_height;
+                                clicked => {
+                                    root.settings_save_subsonic_profile(
+                                        root.settings_subsonic_enabled,
+                                        root.settings_subsonic_endpoint,
+                                        root.settings_subsonic_username,
+                                        root.settings_subsonic_password
+                                    );
+                                }
+                            }
+                            Button {
+                                text: "Test";
+                                width: settings-dialog-panel.button_width;
+                                height: settings-dialog-panel.button_height;
+                                clicked => { root.settings_test_subsonic_connection(); }
+                            }
+                            Button {
+                                text: "Sync Now";
+                                width: settings-dialog-panel.button_width;
+                                height: settings-dialog-panel.button_height;
+                                clicked => { root.settings_sync_subsonic_now(); }
+                            }
+                            Button {
+                                text: "Disconnect";
+                                width: settings-dialog-panel.button_width;
+                                height: settings-dialog-panel.button_height;
+                                clicked => { root.settings_disconnect_subsonic(); }
+                            }
+                            Rectangle { horizontal-stretch: 1; }
+                        }
+                    }
+                }
+
+            Rectangle { height: 1px; background: root.theme_separator; }
 
             HorizontalLayout {
                 spacing: 10px;
@@ -3549,9 +5275,13 @@ export component AppWindow inherits Window {
                             root.settings_bits_per_sample_custom_value,
                             root.settings_show_layout_edit_tutorial,
                             root.settings_show_tooltips,
+                            root.settings_auto_scroll_to_playing_track,
+                            root.settings_dark_mode,
                             root.settings_sample_rate_mode_index,
                             root.settings_resampler_quality_index,
-                            root.settings_dither_on_bitdepth_reduce
+                            root.settings_dither_on_bitdepth_reduce,
+                            root.settings_downmix_higher_channel_tracks,
+                            root.settings_cast_allow_transcode_fallback
                         );
                         root.show_settings_dialog = false;
                     }
@@ -3565,6 +5295,8 @@ export component AppWindow inherits Window {
             && root.show_tooltips_enabled
             && root.tooltip_text != ""
             && !root.show_settings_menu
+            && !root.show_cast_menu
+            && !root.show_library_folder_menu
             && !root.show_import_menu
             && !root.show_library_context_menu
             && !root.show_playlist_track_context_menu
@@ -3598,13 +5330,17 @@ export component AppWindow inherits Window {
 
     // Properties to communicate with Rust
     in-out property <[StandardListViewItem]> playlists: [];
+    in-out property <[bool]> playlist_is_remote: [];
+    in-out property <[bool]> playlist_can_sync_opensubsonic: [];
     in-out property <int> active_playlist_index: 0;
     in-out property <int> editing_playlist_index: -1;
+    in-out property <int> new_playlist_edit_index: -1;
     in-out property <[TrackRowData]> track_model: [];
     in-out property <int> playback_order_index: 0;
     in-out property <int> repeat_mode: 0; // 0: Off, 1: Playlist, 2: Track
     in-out property <int> selected_track_index: -1;
     in-out property <int> playing_track_index: -1;
+    in-out property <int> library_playing_track_index: -1;
     in-out property <bool> playlist_filter_active: false;
     in-out property <bool> playlist_filter_blocked_feedback: false;
     in-out property <bool> playlist_search_visible: false;
@@ -3643,6 +5379,18 @@ export component AppWindow inherits Window {
     in-out property <bool> show_settings_dialog: false;
     in-out property <bool> show_settings_restart_notice: false;
     in-out property <string> settings_restart_notice_message: "";
+    in-out property <bool> show_subsonic_keyring_notice: false;
+    in-out property <string> subsonic_keyring_notice_message: "";
+    in-out property <bool> show_subsonic_session_password_prompt: false;
+    in-out property <string> subsonic_session_prompt_username: "";
+    in-out property <string> subsonic_session_prompt_endpoint: "";
+    in-out property <string> subsonic_session_prompt_password: "";
+    in-out property <string> subsonic_session_prompt_status: "";
+    in-out property <bool> cast_connected: false;
+    in-out property <bool> cast_connecting: false;
+    in-out property <string> cast_connection_label: "Not Connected";
+    in-out property <[string]> cast_device_names: [];
+    in-out property <[string]> cast_device_ids: [];
     in-out property <[string]> playlist_visible_column_headers: [];
     in-out property <[int]> playlist_visible_column_kinds: [];
     in-out property <int> playlist_row_height_px: 30;
@@ -3668,7 +5416,16 @@ export component AppWindow inherits Window {
     in-out property <string> settings_verified_sample_rates_summary: "Verified rates: (none)";
     in-out property <bool> settings_show_layout_edit_tutorial: true;
     in-out property <bool> settings_show_tooltips: true;
+    in-out property <bool> settings_auto_scroll_to_playing_track: true;
+    in-out property <bool> settings_dark_mode: true;
     in-out property <bool> settings_dither_on_bitdepth_reduce: true;
+    in-out property <bool> settings_downmix_higher_channel_tracks: true;
+    in-out property <bool> settings_cast_allow_transcode_fallback: false;
+    in-out property <bool> settings_subsonic_enabled: false;
+    in-out property <string> settings_subsonic_endpoint: "";
+    in-out property <string> settings_subsonic_username: "";
+    in-out property <string> settings_subsonic_password: "";
+    in-out property <string> settings_subsonic_status: "Not configured";
     in-out property <bool> show_tooltips_enabled: true;
     in-out property <int> settings_dialog_tab_index: 0;
     in-out property <bool> show_tooltip: false;
@@ -3714,6 +5471,8 @@ export component AppWindow inherits Window {
     callback library_toggle_add_to_playlist(int);
     callback library_confirm_add_to_playlists();
     callback library_cancel_add_to_playlists();
+    callback library_confirm_remove_selection();
+    callback library_cancel_remove_selection();
     callback open_properties_for_current_selection();
     callback properties_field_edited(int, string);
     callback properties_save();
@@ -3722,7 +5481,17 @@ export component AppWindow inherits Window {
     callback library_remove_folder(int);
     callback library_rescan();
     callback settings_select_library_folder(int);
-    callback library_skip_first_start();
+    callback library_online_metadata_prompt_accept();
+    callback library_online_metadata_prompt_deny();
+    callback settings_set_library_online_metadata_enabled(bool);
+    callback settings_save_subsonic_profile(bool, string, string, string);
+    callback settings_test_subsonic_connection();
+    callback settings_sync_subsonic_now();
+    callback settings_disconnect_subsonic();
+    callback subsonic_session_password_submit(string);
+    callback subsonic_session_password_cancel();
+    callback clear_library_enrichment_cache();
+    callback library_viewport_changed(int, int);
     callback handle_track_click(int, bool, bool);
     callback on_pointer_down(int, bool, bool);
     callback on_drag_start(int);
@@ -3745,6 +5514,9 @@ export component AppWindow inherits Window {
     callback switch_playlist(int);
     callback rename_playlist(int, string);
     callback delete_playlist(int);
+    callback sync_playlist_to_opensubsonic(int);
+    callback remote_detach_confirm(string);
+    callback remote_detach_cancel(string);
     callback toggle_playlist_column(int);
     callback add_custom_playlist_column(string, string);
     callback delete_custom_playlist_column(int);
@@ -3769,8 +5541,12 @@ export component AppWindow inherits Window {
     callback apply_filter_view_to_playlist();
     callback playlist_modification_blocked();
     callback open_control_cluster_menu_for_leaf(string, int, int);
+    callback open_viewer_panel_settings_for_leaf(string, int, int, int);
     callback add_control_cluster_button(string, int);
     callback remove_control_cluster_button(string, int);
+    callback set_viewer_panel_display_priority(string, int);
+    callback set_viewer_panel_metadata_source(string, int);
+    callback set_viewer_panel_image_source(string, int);
     callback window_resized(int, int);
     callback layout_workspace_resized(int, int);
     callback open_layout_editor();
@@ -3787,6 +5563,10 @@ export component AppWindow inherits Window {
     callback layout_redo_last_action();
     callback reset_layout_default();
     callback open_settings();
+    callback cast_refresh_devices();
+    callback cast_connect_device(string);
+    callback cast_disconnect();
+    callback open_external_url(string);
     callback tooltip_hover_changed(bool, string, int, int);
-    callback apply_settings(int, int, int, int, string, string, string, string, bool, bool, int, int, bool);
+    callback apply_settings(int, int, int, int, string, string, string, string, bool, bool, bool, bool, int, int, bool, bool, bool);
 }

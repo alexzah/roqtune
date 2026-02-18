@@ -1,25 +1,205 @@
 //! SQLite-backed persistence for playlists, library index data, and playlist-scoped UI metadata.
 
 use crate::protocol::{
-    LibraryAlbum, LibraryArtist, LibraryDecade, LibraryGenre, LibrarySong,
-    PlaylistColumnWidthOverride, PlaylistInfo, RestoredTrack, TrackMetadataSummary,
+    LibraryAlbum, LibraryArtist, LibraryDecade, LibraryEnrichmentAttemptKind,
+    LibraryEnrichmentEntity, LibraryEnrichmentErrorKind, LibraryEnrichmentPayload,
+    LibraryEnrichmentStatus, LibraryGenre, LibraryTrack, PlaylistInfo, RestoredTrack,
+    TrackMetadataSummary,
 };
 use rusqlite::{params, Connection, OptionalExtension};
-use std::{collections::HashSet, path::PathBuf};
+use std::{
+    collections::{HashMap, HashSet},
+    path::{Path, PathBuf},
+};
 use uuid::Uuid;
 
-/// Database gateway for playlist and track persistence.
+/// Database gateway for app-state persistence.
 pub struct DbManager {
     conn: Connection,
 }
 
+/// Lightweight scan-side state used for change detection.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct LibraryScanState {
+    pub modified_unix_ms: i64,
+    pub file_size_bytes: i64,
+    pub metadata_ready: bool,
+}
+
+/// Phase-A scan upsert payload.
+#[derive(Debug, Clone)]
+pub struct LibraryTrackScanStub {
+    pub track_id: String,
+    pub path: String,
+    pub title: String,
+    pub artist: String,
+    pub album: String,
+    pub album_artist: String,
+    pub genre: String,
+    pub year: String,
+    pub track_number: String,
+    pub sort_title: String,
+    pub sort_artist: String,
+    pub sort_album: String,
+    pub modified_unix_ms: i64,
+    pub file_size_bytes: i64,
+    pub metadata_ready: bool,
+    pub last_scanned_unix_ms: i64,
+}
+
+/// Phase-B metadata backfill update payload.
+#[derive(Debug, Clone)]
+pub struct LibraryTrackMetadataUpdate {
+    pub path: String,
+    pub title: String,
+    pub artist: String,
+    pub album: String,
+    pub album_artist: String,
+    pub genre: String,
+    pub year: String,
+    pub track_number: String,
+    pub sort_title: String,
+    pub sort_artist: String,
+    pub sort_album: String,
+    pub modified_unix_ms: i64,
+    pub file_size_bytes: i64,
+    pub metadata_ready: bool,
+    pub last_scanned_unix_ms: i64,
+}
+
 impl DbManager {
+    const DB_FILE_NAME: &'static str = "roqtune.db";
+    const LEGACY_DB_FILE_NAME: &'static str = "playlist.db";
+
+    fn migrate_legacy_db_file(data_dir: &Path) -> Result<(), std::io::Error> {
+        let legacy_db_path = data_dir.join(Self::LEGACY_DB_FILE_NAME);
+        let db_path = data_dir.join(Self::DB_FILE_NAME);
+        if db_path.exists() || !legacy_db_path.exists() {
+            return Ok(());
+        }
+
+        std::fs::rename(&legacy_db_path, &db_path)?;
+
+        for suffix in ["-wal", "-shm"] {
+            let legacy_sidecar = data_dir.join(format!("{}{}", Self::LEGACY_DB_FILE_NAME, suffix));
+            if !legacy_sidecar.exists() {
+                continue;
+            }
+            let db_sidecar = data_dir.join(format!("{}{}", Self::DB_FILE_NAME, suffix));
+            if db_sidecar.exists() {
+                continue;
+            }
+            std::fs::rename(legacy_sidecar, db_sidecar)?;
+        }
+
+        Ok(())
+    }
+
+    fn enrichment_entity_parts(entity: &LibraryEnrichmentEntity) -> (String, String) {
+        match entity {
+            LibraryEnrichmentEntity::Artist { artist } => ("artist".to_string(), artist.clone()),
+            LibraryEnrichmentEntity::Album {
+                album,
+                album_artist,
+            } => (
+                "album".to_string(),
+                format!("{album}\u{001f}{album_artist}"),
+            ),
+        }
+    }
+
+    fn enrichment_status_to_str(status: LibraryEnrichmentStatus) -> &'static str {
+        match status {
+            LibraryEnrichmentStatus::Ready => "ready",
+            LibraryEnrichmentStatus::NotFound => "not_found",
+            LibraryEnrichmentStatus::Disabled => "disabled",
+            LibraryEnrichmentStatus::Error => "error",
+        }
+    }
+
+    fn enrichment_status_from_str(value: &str) -> LibraryEnrichmentStatus {
+        match value {
+            "ready" => LibraryEnrichmentStatus::Ready,
+            "not_found" => LibraryEnrichmentStatus::NotFound,
+            "disabled" => LibraryEnrichmentStatus::Disabled,
+            "error" => LibraryEnrichmentStatus::Error,
+            _ => LibraryEnrichmentStatus::Error,
+        }
+    }
+
+    fn enrichment_error_kind_to_str(kind: Option<LibraryEnrichmentErrorKind>) -> &'static str {
+        match kind {
+            Some(LibraryEnrichmentErrorKind::Timeout) => "timeout",
+            Some(LibraryEnrichmentErrorKind::RateLimited) => "rate_limited",
+            Some(LibraryEnrichmentErrorKind::BudgetExhausted) => "budget_exhausted",
+            Some(LibraryEnrichmentErrorKind::Hard) => "hard",
+            None => "",
+        }
+    }
+
+    fn enrichment_error_kind_from_str(value: &str) -> Option<LibraryEnrichmentErrorKind> {
+        match value {
+            "timeout" => Some(LibraryEnrichmentErrorKind::Timeout),
+            "rate_limited" => Some(LibraryEnrichmentErrorKind::RateLimited),
+            "budget_exhausted" => Some(LibraryEnrichmentErrorKind::BudgetExhausted),
+            "hard" => Some(LibraryEnrichmentErrorKind::Hard),
+            _ => None,
+        }
+    }
+
+    fn enrichment_attempt_kind_to_str(kind: LibraryEnrichmentAttemptKind) -> &'static str {
+        match kind {
+            LibraryEnrichmentAttemptKind::Detail => "detail",
+            LibraryEnrichmentAttemptKind::VisiblePrefetch => "visible_prefetch",
+            LibraryEnrichmentAttemptKind::BackgroundWarm => "background_warm",
+        }
+    }
+
+    fn enrichment_attempt_kind_from_str(value: &str) -> LibraryEnrichmentAttemptKind {
+        match value {
+            "detail" => LibraryEnrichmentAttemptKind::Detail,
+            "background_warm" => LibraryEnrichmentAttemptKind::BackgroundWarm,
+            _ => LibraryEnrichmentAttemptKind::VisiblePrefetch,
+        }
+    }
+
+    fn enrichment_entity_from_parts(
+        entity_type: &str,
+        entity_key: &str,
+    ) -> LibraryEnrichmentEntity {
+        match entity_type {
+            "artist" => LibraryEnrichmentEntity::Artist {
+                artist: entity_key.to_string(),
+            },
+            "album" => {
+                let mut parts = entity_key.splitn(2, '\u{001f}');
+                let album = parts.next().unwrap_or_default().to_string();
+                let album_artist = parts.next().unwrap_or_default().to_string();
+                LibraryEnrichmentEntity::Album {
+                    album,
+                    album_artist,
+                }
+            }
+            _ => LibraryEnrichmentEntity::Artist {
+                artist: entity_key.to_string(),
+            },
+        }
+    }
+
     fn normalize_library_sort_key(value: &str, fallback: &str) -> String {
         let trimmed = value.trim();
         if trimmed.is_empty() {
             return fallback.to_string();
         }
         trimmed.to_ascii_lowercase()
+    }
+
+    fn configure_connection_pragmas(conn: &Connection) {
+        let _ = conn.pragma_update(None, "journal_mode", "WAL");
+        let _ = conn.pragma_update(None, "synchronous", "NORMAL");
+        let _ = conn.pragma_update(None, "temp_store", "MEMORY");
+        let _ = conn.pragma_update(None, "foreign_keys", "ON");
+        let _ = conn.pragma_update(None, "busy_timeout", 5000i64);
     }
 
     /// Opens the on-disk database, initializes schema, and applies migrations.
@@ -32,8 +212,12 @@ impl DbManager {
             std::fs::create_dir_all(&data_dir).expect("Could not create data directory");
         }
 
-        let db_path = data_dir.join("playlist.db");
+        Self::migrate_legacy_db_file(&data_dir)
+            .map_err(|err| rusqlite::Error::ToSqlConversionFailure(Box::new(err)))?;
+
+        let db_path = data_dir.join(Self::DB_FILE_NAME);
         let conn = Connection::open(db_path)?;
+        Self::configure_connection_pragmas(&conn);
 
         let db_manager = Self { conn };
         db_manager.initialize_schema()?;
@@ -45,6 +229,7 @@ impl DbManager {
     /// Creates an in-memory database instance for tests.
     pub fn new_in_memory() -> Result<Self, rusqlite::Error> {
         let conn = Connection::open_in_memory()?;
+        Self::configure_connection_pragmas(&conn);
         let db_manager = Self { conn };
         db_manager.initialize_schema()?;
         db_manager.migrate()?;
@@ -80,7 +265,7 @@ impl DbManager {
 
         self.conn.execute(
             "CREATE TABLE IF NOT EXISTS library_tracks (
-                song_id TEXT PRIMARY KEY,
+                track_id TEXT PRIMARY KEY,
                 path TEXT NOT NULL UNIQUE,
                 title TEXT NOT NULL,
                 artist TEXT NOT NULL,
@@ -92,7 +277,10 @@ impl DbManager {
                 sort_title TEXT NOT NULL,
                 sort_artist TEXT NOT NULL,
                 sort_album TEXT NOT NULL,
-                modified_unix_ms INTEGER NOT NULL DEFAULT 0
+                modified_unix_ms INTEGER NOT NULL DEFAULT 0,
+                file_size_bytes INTEGER NOT NULL DEFAULT 0,
+                metadata_ready INTEGER NOT NULL DEFAULT 0,
+                last_scanned_unix_ms INTEGER NOT NULL DEFAULT 0
             )",
             [],
         )?;
@@ -106,6 +294,46 @@ impl DbManager {
         )?;
         self.conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_library_tracks_sort_album ON library_tracks(sort_album, sort_title, path)",
+            [],
+        )?;
+        self.conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_library_tracks_artist ON library_tracks(artist, sort_album, sort_title, path)",
+            [],
+        )?;
+        self.conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_library_tracks_album_artist ON library_tracks(album, album_artist, sort_title, path)",
+            [],
+        )?;
+        self.conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_library_tracks_genre ON library_tracks(genre, sort_artist, sort_album, sort_title, path)",
+            [],
+        )?;
+        self.conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_library_tracks_year ON library_tracks(year, sort_artist, sort_album, sort_title, path)",
+            [],
+        )?;
+        self.conn.execute(
+            "CREATE TABLE IF NOT EXISTS library_enrichment_cache (
+                entity_type TEXT NOT NULL,
+                entity_key TEXT NOT NULL,
+                status TEXT NOT NULL,
+                blurb TEXT NOT NULL,
+                image_path TEXT,
+                image_url TEXT,
+                source_name TEXT NOT NULL,
+                source_url TEXT NOT NULL,
+                fetched_unix_ms INTEGER NOT NULL DEFAULT 0,
+                expires_unix_ms INTEGER NOT NULL DEFAULT 0,
+                last_error TEXT NOT NULL DEFAULT '',
+                error_kind TEXT NOT NULL DEFAULT '',
+                attempt_kind TEXT NOT NULL DEFAULT '',
+                conclusive INTEGER NOT NULL DEFAULT 1,
+                PRIMARY KEY(entity_type, entity_key)
+            )",
+            [],
+        )?;
+        self.conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_library_enrichment_cache_expires ON library_enrichment_cache(expires_unix_ms)",
             [],
         )?;
         Ok(())
@@ -166,16 +394,84 @@ impl DbManager {
 
         let mut library_stmt = self.conn.prepare("PRAGMA table_info(library_tracks)")?;
         let library_columns = library_stmt.query_map([], |row| row.get::<_, String>(1))?;
+        let mut has_track_id = false;
+        let mut has_legacy_song_id = false;
         let mut has_genre = false;
+        let mut has_file_size_bytes = false;
+        let mut has_metadata_ready = false;
+        let mut has_last_scanned_unix_ms = false;
         for col in library_columns {
-            if col? == "genre" {
-                has_genre = true;
-                break;
+            match col?.as_str() {
+                "track_id" => has_track_id = true,
+                "song_id" => has_legacy_song_id = true,
+                "genre" => has_genre = true,
+                "file_size_bytes" => has_file_size_bytes = true,
+                "metadata_ready" => has_metadata_ready = true,
+                "last_scanned_unix_ms" => has_last_scanned_unix_ms = true,
+                _ => {}
             }
+        }
+        if !has_track_id && has_legacy_song_id {
+            self.conn.execute(
+                "ALTER TABLE library_tracks RENAME COLUMN song_id TO track_id",
+                [],
+            )?;
         }
         if !has_genre {
             self.conn.execute(
                 "ALTER TABLE library_tracks ADD COLUMN genre TEXT NOT NULL DEFAULT ''",
+                [],
+            )?;
+        }
+        if !has_file_size_bytes {
+            self.conn.execute(
+                "ALTER TABLE library_tracks ADD COLUMN file_size_bytes INTEGER NOT NULL DEFAULT 0",
+                [],
+            )?;
+        }
+        if !has_metadata_ready {
+            self.conn.execute(
+                "ALTER TABLE library_tracks ADD COLUMN metadata_ready INTEGER NOT NULL DEFAULT 0",
+                [],
+            )?;
+        }
+        if !has_last_scanned_unix_ms {
+            self.conn.execute(
+                "ALTER TABLE library_tracks ADD COLUMN last_scanned_unix_ms INTEGER NOT NULL DEFAULT 0",
+                [],
+            )?;
+        }
+
+        let mut enrichment_stmt = self
+            .conn
+            .prepare("PRAGMA table_info(library_enrichment_cache)")?;
+        let enrichment_columns = enrichment_stmt.query_map([], |row| row.get::<_, String>(1))?;
+        let mut has_error_kind = false;
+        let mut has_attempt_kind = false;
+        let mut has_conclusive = false;
+        for col in enrichment_columns {
+            match col?.as_str() {
+                "error_kind" => has_error_kind = true,
+                "attempt_kind" => has_attempt_kind = true,
+                "conclusive" => has_conclusive = true,
+                _ => {}
+            }
+        }
+        if !has_error_kind {
+            self.conn.execute(
+                "ALTER TABLE library_enrichment_cache ADD COLUMN error_kind TEXT NOT NULL DEFAULT ''",
+                [],
+            )?;
+        }
+        if !has_attempt_kind {
+            self.conn.execute(
+                "ALTER TABLE library_enrichment_cache ADD COLUMN attempt_kind TEXT NOT NULL DEFAULT ''",
+                [],
+            )?;
+        }
+        if !has_conclusive {
+            self.conn.execute(
+                "ALTER TABLE library_enrichment_cache ADD COLUMN conclusive INTEGER NOT NULL DEFAULT 1",
                 [],
             )?;
         }
@@ -245,6 +541,44 @@ impl DbManager {
         Ok(())
     }
 
+    /// Persists many track rows for one playlist in one transaction.
+    pub fn save_tracks_batch(
+        &self,
+        playlist_id: &str,
+        tracks: &[(String, PathBuf)],
+        base_position: usize,
+    ) -> Result<(), rusqlite::Error> {
+        if tracks.is_empty() {
+            return Ok(());
+        }
+        self.conn.execute("BEGIN IMMEDIATE TRANSACTION", [])?;
+        let mut stmt = match self
+            .conn
+            .prepare("INSERT INTO tracks (id, playlist_id, path, position) VALUES (?1, ?2, ?3, ?4)")
+        {
+            Ok(stmt) => stmt,
+            Err(err) => {
+                let _ = self.conn.execute("ROLLBACK", []);
+                return Err(err);
+            }
+        };
+        for (offset, (id, path)) in tracks.iter().enumerate() {
+            if let Err(err) = stmt.execute(params![
+                id,
+                playlist_id,
+                path.to_string_lossy().to_string(),
+                (base_position + offset) as i64
+            ]) {
+                drop(stmt);
+                let _ = self.conn.execute("ROLLBACK", []);
+                return Err(err);
+            }
+        }
+        drop(stmt);
+        self.conn.execute("COMMIT", [])?;
+        Ok(())
+    }
+
     /// Deletes one track by id.
     pub fn delete_track(&self, id: &str) -> Result<(), rusqlite::Error> {
         self.conn
@@ -286,12 +620,29 @@ impl DbManager {
 
     /// Rewrites positional ordering for the supplied track ids.
     pub fn update_positions(&self, ids: Vec<String>) -> Result<(), rusqlite::Error> {
-        let mut stmt = self
-            .conn
-            .prepare("UPDATE tracks SET position = ?1 WHERE id = ?2")?;
-        for (i, id) in ids.iter().enumerate() {
-            stmt.execute(params![i as i64, id])?;
+        if ids.is_empty() {
+            return Ok(());
         }
+        self.conn.execute("BEGIN IMMEDIATE TRANSACTION", [])?;
+        let mut stmt = match self
+            .conn
+            .prepare("UPDATE tracks SET position = ?1 WHERE id = ?2")
+        {
+            Ok(stmt) => stmt,
+            Err(err) => {
+                let _ = self.conn.execute("ROLLBACK", []);
+                return Err(err);
+            }
+        };
+        for (i, id) in ids.iter().enumerate() {
+            if let Err(err) = stmt.execute(params![i as i64, id]) {
+                drop(stmt);
+                let _ = self.conn.execute("ROLLBACK", []);
+                return Err(err);
+            }
+        }
+        drop(stmt);
+        self.conn.execute("COMMIT", [])?;
         Ok(())
     }
 
@@ -336,115 +687,23 @@ impl DbManager {
         Ok(None)
     }
 
-    /// Persists the full set of width overrides for a playlist.
-    pub fn set_playlist_column_width_overrides(
+    /// Batch upserts many scan stubs in one transaction.
+    pub fn upsert_library_track_scan_stub_batch(
         &self,
-        playlist_id: &str,
-        overrides: &[PlaylistColumnWidthOverride],
+        stubs: &[LibraryTrackScanStub],
     ) -> Result<(), rusqlite::Error> {
-        let serialized_overrides = if overrides.is_empty() {
-            None
-        } else {
-            Some(
-                serde_json::to_string(overrides)
-                    .map_err(|err| rusqlite::Error::ToSqlConversionFailure(Box::new(err)))?,
-            )
-        };
-        self.conn.execute(
-            "UPDATE playlists SET column_width_overrides = ?1 WHERE id = ?2",
-            params![serialized_overrides, playlist_id],
-        )?;
-        Ok(())
-    }
-
-    /// Loads all persisted width overrides for a playlist, if present.
-    pub fn get_playlist_column_width_overrides(
-        &self,
-        playlist_id: &str,
-    ) -> Result<Option<Vec<PlaylistColumnWidthOverride>>, rusqlite::Error> {
-        let raw: Option<String> = self
-            .conn
-            .query_row(
-                "SELECT column_width_overrides FROM playlists WHERE id = ?1",
-                params![playlist_id],
-                |row| row.get(0),
-            )
-            .optional()?
-            .flatten();
-
-        if let Some(raw) = raw {
-            if raw.trim().is_empty() {
-                return Ok(None);
-            }
-            if let Ok(parsed) = serde_json::from_str::<Vec<PlaylistColumnWidthOverride>>(&raw) {
-                return Ok(Some(parsed));
-            }
+        if stubs.is_empty() {
+            return Ok(());
         }
-        Ok(None)
-    }
-
-    /// Upserts one width override entry by column key.
-    pub fn set_playlist_column_width_override(
-        &self,
-        playlist_id: &str,
-        column_key: &str,
-        width_px: u32,
-    ) -> Result<(), rusqlite::Error> {
-        let mut overrides = self
-            .get_playlist_column_width_overrides(playlist_id)?
-            .unwrap_or_default();
-        if let Some(existing) = overrides
-            .iter_mut()
-            .find(|item| item.column_key == column_key)
-        {
-            existing.width_px = width_px;
-        } else {
-            overrides.push(PlaylistColumnWidthOverride {
-                column_key: column_key.to_string(),
-                width_px,
-            });
-        }
-        self.set_playlist_column_width_overrides(playlist_id, &overrides)
-    }
-
-    /// Deletes one width override entry by column key.
-    pub fn clear_playlist_column_width_override(
-        &self,
-        playlist_id: &str,
-        column_key: &str,
-    ) -> Result<(), rusqlite::Error> {
-        let mut overrides = self
-            .get_playlist_column_width_overrides(playlist_id)?
-            .unwrap_or_default();
-        overrides.retain(|item| item.column_key != column_key);
-        self.set_playlist_column_width_overrides(playlist_id, &overrides)
-    }
-
-    /// Inserts or updates one indexed library track entry.
-    #[allow(clippy::too_many_arguments)]
-    pub fn upsert_library_track(
-        &self,
-        song_id: &str,
-        path: &str,
-        title: &str,
-        artist: &str,
-        album: &str,
-        album_artist: &str,
-        genre: &str,
-        year: &str,
-        track_number: &str,
-        sort_title: &str,
-        sort_artist: &str,
-        sort_album: &str,
-        modified_unix_ms: i64,
-    ) -> Result<(), rusqlite::Error> {
-        self.conn.execute(
+        self.conn.execute("BEGIN IMMEDIATE TRANSACTION", [])?;
+        let mut stmt = match self.conn.prepare(
             "INSERT INTO library_tracks (
-                song_id, path, title, artist, album, album_artist, genre, year, track_number,
-                sort_title, sort_artist, sort_album, modified_unix_ms
-            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)
+                track_id, path, title, artist, album, album_artist, genre, year, track_number,
+                sort_title, sort_artist, sort_album, modified_unix_ms, file_size_bytes,
+                metadata_ready, last_scanned_unix_ms
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16)
             ON CONFLICT(path) DO UPDATE SET
-                song_id = excluded.song_id,
+                track_id = excluded.track_id,
                 title = excluded.title,
                 artist = excluded.artist,
                 album = excluded.album,
@@ -455,23 +714,129 @@ impl DbManager {
                 sort_title = excluded.sort_title,
                 sort_artist = excluded.sort_artist,
                 sort_album = excluded.sort_album,
-                modified_unix_ms = excluded.modified_unix_ms",
-            params![
-                song_id,
-                path,
-                title,
-                artist,
-                album,
-                album_artist,
-                genre,
-                year,
-                track_number,
-                sort_title,
-                sort_artist,
-                sort_album,
-                modified_unix_ms,
-            ],
+                modified_unix_ms = excluded.modified_unix_ms,
+                file_size_bytes = excluded.file_size_bytes,
+                metadata_ready = excluded.metadata_ready,
+                last_scanned_unix_ms = excluded.last_scanned_unix_ms",
+        ) {
+            Ok(stmt) => stmt,
+            Err(err) => {
+                let _ = self.conn.execute("ROLLBACK", []);
+                return Err(err);
+            }
+        };
+        for stub in stubs {
+            if let Err(err) = stmt.execute(params![
+                stub.track_id,
+                stub.path,
+                stub.title,
+                stub.artist,
+                stub.album,
+                stub.album_artist,
+                stub.genre,
+                stub.year,
+                stub.track_number,
+                stub.sort_title,
+                stub.sort_artist,
+                stub.sort_album,
+                stub.modified_unix_ms,
+                stub.file_size_bytes,
+                i64::from(stub.metadata_ready),
+                stub.last_scanned_unix_ms,
+            ]) {
+                drop(stmt);
+                let _ = self.conn.execute("ROLLBACK", []);
+                return Err(err);
+            }
+        }
+        drop(stmt);
+        self.conn.execute("COMMIT", [])?;
+        Ok(())
+    }
+
+    /// Loads lightweight scan state for all indexed library tracks.
+    pub fn get_library_scan_states_by_path(
+        &self,
+    ) -> Result<HashMap<String, LibraryScanState>, rusqlite::Error> {
+        let mut stmt = self.conn.prepare(
+            "SELECT path, modified_unix_ms, file_size_bytes, metadata_ready FROM library_tracks",
         )?;
+        let iter = stmt.query_map([], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                LibraryScanState {
+                    modified_unix_ms: row.get(1)?,
+                    file_size_bytes: row.get(2)?,
+                    metadata_ready: row.get::<_, i64>(3)? != 0,
+                },
+            ))
+        })?;
+        let mut map = HashMap::new();
+        for item in iter {
+            let (path, state) = item?;
+            map.insert(path, state);
+        }
+        Ok(map)
+    }
+
+    /// Batch-updates rich metadata for scanned tracks.
+    pub fn update_library_track_metadata_batch(
+        &self,
+        updates: &[LibraryTrackMetadataUpdate],
+    ) -> Result<(), rusqlite::Error> {
+        if updates.is_empty() {
+            return Ok(());
+        }
+        self.conn.execute("BEGIN IMMEDIATE TRANSACTION", [])?;
+        let mut stmt = match self.conn.prepare(
+            "UPDATE library_tracks
+             SET title = ?1,
+                 artist = ?2,
+                 album = ?3,
+                 album_artist = ?4,
+                 genre = ?5,
+                 year = ?6,
+                 track_number = ?7,
+                 sort_title = ?8,
+                 sort_artist = ?9,
+                 sort_album = ?10,
+                 modified_unix_ms = ?11,
+                 file_size_bytes = ?12,
+                 metadata_ready = ?13,
+                 last_scanned_unix_ms = ?14
+             WHERE path = ?15",
+        ) {
+            Ok(stmt) => stmt,
+            Err(err) => {
+                let _ = self.conn.execute("ROLLBACK", []);
+                return Err(err);
+            }
+        };
+        for update in updates {
+            if let Err(err) = stmt.execute(params![
+                update.title,
+                update.artist,
+                update.album,
+                update.album_artist,
+                update.genre,
+                update.year,
+                update.track_number,
+                update.sort_title,
+                update.sort_artist,
+                update.sort_album,
+                update.modified_unix_ms,
+                update.file_size_bytes,
+                i64::from(update.metadata_ready),
+                update.last_scanned_unix_ms,
+                update.path,
+            ]) {
+                drop(stmt);
+                let _ = self.conn.execute("ROLLBACK", []);
+                return Err(err);
+            }
+        }
+        drop(stmt);
+        self.conn.execute("COMMIT", [])?;
         Ok(())
     }
 
@@ -501,8 +866,10 @@ impl DbManager {
                  sort_title = ?8,
                  sort_artist = ?9,
                  sort_album = ?10,
-                 modified_unix_ms = ?11
-             WHERE path = ?12",
+                 modified_unix_ms = ?11,
+                 metadata_ready = 1,
+                 last_scanned_unix_ms = ?12
+             WHERE path = ?13",
             params![
                 summary.title,
                 summary.artist,
@@ -515,21 +882,11 @@ impl DbManager {
                 sort_artist,
                 sort_album,
                 modified_unix_ms,
+                modified_unix_ms,
                 path
             ],
         )?;
         Ok(updated > 0)
-    }
-
-    /// Returns all indexed library paths.
-    pub fn get_all_library_paths(&self) -> Result<Vec<String>, rusqlite::Error> {
-        let mut stmt = self.conn.prepare("SELECT path FROM library_tracks")?;
-        let iter = stmt.query_map([], |row| row.get::<_, String>(0))?;
-        let mut paths = Vec::new();
-        for item in iter {
-            paths.push(item?);
-        }
-        Ok(paths)
     }
 
     /// Deletes indexed library rows that are no longer present in scanned paths.
@@ -537,25 +894,103 @@ impl DbManager {
         &self,
         keep_paths: &HashSet<String>,
     ) -> Result<(), rusqlite::Error> {
-        let existing_paths = self.get_all_library_paths()?;
-        for path in existing_paths {
-            if !keep_paths.contains(&path) {
-                self.conn
-                    .execute("DELETE FROM library_tracks WHERE path = ?1", params![path])?;
+        self.conn.execute("BEGIN IMMEDIATE TRANSACTION", [])?;
+        if let Err(err) = self.conn.execute(
+            "CREATE TEMP TABLE IF NOT EXISTS tmp_seen_library_paths (path TEXT PRIMARY KEY)",
+            [],
+        ) {
+            let _ = self.conn.execute("ROLLBACK", []);
+            return Err(err);
+        }
+        if let Err(err) = self.conn.execute("DELETE FROM tmp_seen_library_paths", []) {
+            let _ = self.conn.execute("ROLLBACK", []);
+            return Err(err);
+        }
+        let mut insert_stmt = match self
+            .conn
+            .prepare("INSERT OR IGNORE INTO tmp_seen_library_paths (path) VALUES (?1)")
+        {
+            Ok(stmt) => stmt,
+            Err(err) => {
+                let _ = self.conn.execute("ROLLBACK", []);
+                return Err(err);
+            }
+        };
+        for path in keep_paths {
+            if let Err(err) = insert_stmt.execute(params![path]) {
+                drop(insert_stmt);
+                let _ = self.conn.execute("ROLLBACK", []);
+                return Err(err);
             }
         }
+        drop(insert_stmt);
+        if let Err(err) = self.conn.execute(
+            "DELETE FROM library_tracks
+             WHERE path NOT IN (SELECT path FROM tmp_seen_library_paths)",
+            [],
+        ) {
+            let _ = self.conn.execute("ROLLBACK", []);
+            return Err(err);
+        }
+        if let Err(err) = self.conn.execute("DROP TABLE tmp_seen_library_paths", []) {
+            let _ = self.conn.execute("ROLLBACK", []);
+            return Err(err);
+        }
+        self.conn.execute("COMMIT", [])?;
         Ok(())
     }
 
-    /// Loads all songs in library sorted alphabetically by title.
-    pub fn get_library_songs(&self) -> Result<Vec<LibrarySong>, rusqlite::Error> {
+    /// Deletes indexed library rows for the provided concrete file paths.
+    pub fn delete_library_paths(&self, paths: &[PathBuf]) -> Result<usize, rusqlite::Error> {
+        if paths.is_empty() {
+            return Ok(0);
+        }
+
+        self.conn.execute("BEGIN IMMEDIATE TRANSACTION", [])?;
+        let mut stmt = match self
+            .conn
+            .prepare("DELETE FROM library_tracks WHERE path = ?1")
+        {
+            Ok(stmt) => stmt,
+            Err(err) => {
+                let _ = self.conn.execute("ROLLBACK", []);
+                return Err(err);
+            }
+        };
+
+        let mut deleted = 0usize;
+        let mut seen_paths = HashSet::new();
+        for path in paths {
+            let key = path.to_string_lossy().to_string();
+            if !seen_paths.insert(key.clone()) {
+                continue;
+            }
+            match stmt.execute(params![key]) {
+                Ok(changed) => {
+                    deleted = deleted.saturating_add(changed);
+                }
+                Err(err) => {
+                    drop(stmt);
+                    let _ = self.conn.execute("ROLLBACK", []);
+                    return Err(err);
+                }
+            }
+        }
+
+        drop(stmt);
+        self.conn.execute("COMMIT", [])?;
+        Ok(deleted)
+    }
+
+    /// Loads all tracks in library sorted alphabetically by title.
+    pub fn get_library_tracks(&self) -> Result<Vec<LibraryTrack>, rusqlite::Error> {
         let mut stmt = self.conn.prepare(
-            "SELECT song_id, path, title, artist, album, album_artist, genre, year, track_number
+            "SELECT track_id, path, title, artist, album, album_artist, genre, year, track_number
              FROM library_tracks
              ORDER BY sort_title ASC, path ASC",
         )?;
         let iter = stmt.query_map([], |row| {
-            Ok(LibrarySong {
+            Ok(LibraryTrack {
                 id: row.get(0)?,
                 path: PathBuf::from(row.get::<_, String>(1)?),
                 title: row.get(2)?,
@@ -567,17 +1002,25 @@ impl DbManager {
                 track_number: row.get(8)?,
             })
         })?;
-        let mut songs = Vec::new();
+        let mut tracks = Vec::new();
         for item in iter {
-            songs.push(item?);
+            tracks.push(item?);
         }
-        Ok(songs)
+        Ok(tracks)
     }
 
-    /// Loads all unique artists with album/song counts.
+    /// Returns total indexed track count.
+    pub fn get_library_tracks_count(&self) -> Result<usize, rusqlite::Error> {
+        let count: i64 = self
+            .conn
+            .query_row("SELECT COUNT(*) FROM library_tracks", [], |row| row.get(0))?;
+        Ok(count.max(0) as usize)
+    }
+
+    /// Loads all unique artists with album/track counts.
     pub fn get_library_artists(&self) -> Result<Vec<LibraryArtist>, rusqlite::Error> {
         let mut stmt = self.conn.prepare(
-            "SELECT artist, COUNT(DISTINCT album || '|' || album_artist) AS album_count, COUNT(*) AS song_count
+            "SELECT artist, COUNT(DISTINCT album || '|' || album_artist) AS album_count, COUNT(*) AS track_count
              FROM library_tracks
              GROUP BY artist
              ORDER BY sort_artist ASC, artist ASC",
@@ -586,7 +1029,7 @@ impl DbManager {
             Ok(LibraryArtist {
                 artist: row.get(0)?,
                 album_count: row.get::<_, i64>(1)?.max(0) as u32,
-                song_count: row.get::<_, i64>(2)?.max(0) as u32,
+                track_count: row.get::<_, i64>(2)?.max(0) as u32,
             })
         })?;
         let mut artists = Vec::new();
@@ -596,10 +1039,48 @@ impl DbManager {
         Ok(artists)
     }
 
-    /// Loads all unique albums with song counts.
+    /// Loads one artists page and total row count.
+    pub fn get_library_artists_page(
+        &self,
+        offset: usize,
+        limit: usize,
+    ) -> Result<(Vec<LibraryArtist>, usize), rusqlite::Error> {
+        let total = self.get_library_artists_count()?;
+        let mut stmt = self.conn.prepare(
+            "SELECT artist, COUNT(DISTINCT album || '|' || album_artist) AS album_count, COUNT(*) AS track_count
+             FROM library_tracks
+             GROUP BY artist
+             ORDER BY sort_artist ASC, artist ASC
+             LIMIT ?1 OFFSET ?2",
+        )?;
+        let iter = stmt.query_map(params![limit as i64, offset as i64], |row| {
+            Ok(LibraryArtist {
+                artist: row.get(0)?,
+                album_count: row.get::<_, i64>(1)?.max(0) as u32,
+                track_count: row.get::<_, i64>(2)?.max(0) as u32,
+            })
+        })?;
+        let mut rows = Vec::new();
+        for item in iter {
+            rows.push(item?);
+        }
+        Ok((rows, total))
+    }
+
+    /// Returns total artist aggregate row count.
+    pub fn get_library_artists_count(&self) -> Result<usize, rusqlite::Error> {
+        let count: i64 = self.conn.query_row(
+            "SELECT COUNT(*) FROM (SELECT artist FROM library_tracks GROUP BY artist)",
+            [],
+            |row| row.get(0),
+        )?;
+        Ok(count.max(0) as usize)
+    }
+
+    /// Loads all unique albums with track counts.
     pub fn get_library_albums(&self) -> Result<Vec<LibraryAlbum>, rusqlite::Error> {
         let mut stmt = self.conn.prepare(
-            "SELECT album, album_artist, COUNT(*) AS song_count, MIN(path) AS representative_track_path
+            "SELECT album, album_artist, COUNT(*) AS track_count, MIN(path) AS representative_track_path
              FROM library_tracks
              GROUP BY album, album_artist
              ORDER BY sort_album ASC, album ASC, album_artist ASC",
@@ -608,7 +1089,7 @@ impl DbManager {
             Ok(LibraryAlbum {
                 album: row.get(0)?,
                 album_artist: row.get(1)?,
-                song_count: row.get::<_, i64>(2)?.max(0) as u32,
+                track_count: row.get::<_, i64>(2)?.max(0) as u32,
                 representative_track_path: row.get::<_, Option<String>>(3)?.map(PathBuf::from),
             })
         })?;
@@ -619,7 +1100,46 @@ impl DbManager {
         Ok(albums)
     }
 
-    /// Loads all unique genres with song counts.
+    /// Loads one albums page and total row count.
+    pub fn get_library_albums_page(
+        &self,
+        offset: usize,
+        limit: usize,
+    ) -> Result<(Vec<LibraryAlbum>, usize), rusqlite::Error> {
+        let total = self.get_library_albums_count()?;
+        let mut stmt = self.conn.prepare(
+            "SELECT album, album_artist, COUNT(*) AS track_count, MIN(path) AS representative_track_path
+             FROM library_tracks
+             GROUP BY album, album_artist
+             ORDER BY sort_album ASC, album ASC, album_artist ASC
+             LIMIT ?1 OFFSET ?2",
+        )?;
+        let iter = stmt.query_map(params![limit as i64, offset as i64], |row| {
+            Ok(LibraryAlbum {
+                album: row.get(0)?,
+                album_artist: row.get(1)?,
+                track_count: row.get::<_, i64>(2)?.max(0) as u32,
+                representative_track_path: row.get::<_, Option<String>>(3)?.map(PathBuf::from),
+            })
+        })?;
+        let mut rows = Vec::new();
+        for item in iter {
+            rows.push(item?);
+        }
+        Ok((rows, total))
+    }
+
+    /// Returns total album aggregate row count.
+    pub fn get_library_albums_count(&self) -> Result<usize, rusqlite::Error> {
+        let count: i64 = self.conn.query_row(
+            "SELECT COUNT(*) FROM (SELECT album, album_artist FROM library_tracks GROUP BY album, album_artist)",
+            [],
+            |row| row.get(0),
+        )?;
+        Ok(count.max(0) as usize)
+    }
+
+    /// Loads all unique genres with track counts.
     pub fn get_library_genres(&self) -> Result<Vec<LibraryGenre>, rusqlite::Error> {
         let mut stmt = self.conn.prepare(
             "SELECT
@@ -627,7 +1147,7 @@ impl DbManager {
                     WHEN TRIM(genre) = '' THEN 'Unknown Genre'
                     ELSE TRIM(genre)
                 END AS display_genre,
-                COUNT(*) AS song_count
+                COUNT(*) AS track_count
              FROM library_tracks
              GROUP BY display_genre
              ORDER BY LOWER(display_genre) ASC",
@@ -635,7 +1155,7 @@ impl DbManager {
         let iter = stmt.query_map([], |row| {
             Ok(LibraryGenre {
                 genre: row.get(0)?,
-                song_count: row.get::<_, i64>(1)?.max(0) as u32,
+                track_count: row.get::<_, i64>(1)?.max(0) as u32,
             })
         })?;
         let mut genres = Vec::new();
@@ -645,7 +1165,52 @@ impl DbManager {
         Ok(genres)
     }
 
-    /// Loads all unique decades with song counts.
+    /// Loads one genres page and total row count.
+    pub fn get_library_genres_page(
+        &self,
+        offset: usize,
+        limit: usize,
+    ) -> Result<(Vec<LibraryGenre>, usize), rusqlite::Error> {
+        let total = self.get_library_genres_count()?;
+        let mut stmt = self.conn.prepare(
+            "SELECT
+                CASE
+                    WHEN TRIM(genre) = '' THEN 'Unknown Genre'
+                    ELSE TRIM(genre)
+                END AS display_genre,
+                COUNT(*) AS track_count
+             FROM library_tracks
+             GROUP BY display_genre
+             ORDER BY LOWER(display_genre) ASC
+             LIMIT ?1 OFFSET ?2",
+        )?;
+        let iter = stmt.query_map(params![limit as i64, offset as i64], |row| {
+            Ok(LibraryGenre {
+                genre: row.get(0)?,
+                track_count: row.get::<_, i64>(1)?.max(0) as u32,
+            })
+        })?;
+        let mut rows = Vec::new();
+        for item in iter {
+            rows.push(item?);
+        }
+        Ok((rows, total))
+    }
+
+    /// Returns total genre aggregate row count.
+    pub fn get_library_genres_count(&self) -> Result<usize, rusqlite::Error> {
+        let count: i64 = self.conn.query_row(
+            "SELECT COUNT(*) FROM (
+                SELECT CASE WHEN TRIM(genre) = '' THEN 'Unknown Genre' ELSE TRIM(genre) END AS display_genre
+                FROM library_tracks GROUP BY display_genre
+            )",
+            [],
+            |row| row.get(0),
+        )?;
+        Ok(count.max(0) as usize)
+    }
+
+    /// Loads all unique decades with track counts.
     pub fn get_library_decades(&self) -> Result<Vec<LibraryDecade>, rusqlite::Error> {
         let mut stmt = self.conn.prepare(
             "SELECT
@@ -654,7 +1219,7 @@ impl DbManager {
                         THEN SUBSTR(TRIM(year), 1, 3) || '0s'
                     ELSE 'Unknown Decade'
                 END AS display_decade,
-                COUNT(*) AS song_count
+                COUNT(*) AS track_count
              FROM library_tracks
              GROUP BY display_decade
              ORDER BY display_decade ASC",
@@ -662,7 +1227,7 @@ impl DbManager {
         let iter = stmt.query_map([], |row| {
             Ok(LibraryDecade {
                 decade: row.get(0)?,
-                song_count: row.get::<_, i64>(1)?.max(0) as u32,
+                track_count: row.get::<_, i64>(1)?.max(0) as u32,
             })
         })?;
         let mut decades = Vec::new();
@@ -672,20 +1237,70 @@ impl DbManager {
         Ok(decades)
     }
 
-    /// Loads songs for one album+album-artist pair sorted by track number then title.
-    pub fn get_library_album_songs(
+    /// Loads one decades page and total row count.
+    pub fn get_library_decades_page(
+        &self,
+        offset: usize,
+        limit: usize,
+    ) -> Result<(Vec<LibraryDecade>, usize), rusqlite::Error> {
+        let total = self.get_library_decades_count()?;
+        let mut stmt = self.conn.prepare(
+            "SELECT
+                CASE
+                    WHEN SUBSTR(TRIM(year), 1, 3) GLOB '[0-9][0-9][0-9]'
+                        THEN SUBSTR(TRIM(year), 1, 3) || '0s'
+                    ELSE 'Unknown Decade'
+                END AS display_decade,
+                COUNT(*) AS track_count
+             FROM library_tracks
+             GROUP BY display_decade
+             ORDER BY display_decade ASC
+             LIMIT ?1 OFFSET ?2",
+        )?;
+        let iter = stmt.query_map(params![limit as i64, offset as i64], |row| {
+            Ok(LibraryDecade {
+                decade: row.get(0)?,
+                track_count: row.get::<_, i64>(1)?.max(0) as u32,
+            })
+        })?;
+        let mut rows = Vec::new();
+        for item in iter {
+            rows.push(item?);
+        }
+        Ok((rows, total))
+    }
+
+    /// Returns total decade aggregate row count.
+    pub fn get_library_decades_count(&self) -> Result<usize, rusqlite::Error> {
+        let count: i64 = self.conn.query_row(
+            "SELECT COUNT(*) FROM (
+                SELECT CASE
+                    WHEN SUBSTR(TRIM(year), 1, 3) GLOB '[0-9][0-9][0-9]'
+                        THEN SUBSTR(TRIM(year), 1, 3) || '0s'
+                    ELSE 'Unknown Decade'
+                END AS display_decade
+                FROM library_tracks GROUP BY display_decade
+            )",
+            [],
+            |row| row.get(0),
+        )?;
+        Ok(count.max(0) as usize)
+    }
+
+    /// Loads tracks for one album+album-artist pair sorted by track number then title.
+    pub fn get_library_album_tracks(
         &self,
         album: &str,
         album_artist: &str,
-    ) -> Result<Vec<LibrarySong>, rusqlite::Error> {
+    ) -> Result<Vec<LibraryTrack>, rusqlite::Error> {
         let mut stmt = self.conn.prepare(
-            "SELECT song_id, path, title, artist, album, album_artist, genre, year, track_number
+            "SELECT track_id, path, title, artist, album, album_artist, genre, year, track_number
              FROM library_tracks
              WHERE album = ?1 AND album_artist = ?2
              ORDER BY CAST(track_number AS INTEGER) ASC, sort_title ASC, path ASC",
         )?;
         let iter = stmt.query_map(params![album, album_artist], |row| {
-            Ok(LibrarySong {
+            Ok(LibraryTrack {
                 id: row.get(0)?,
                 path: PathBuf::from(row.get::<_, String>(1)?),
                 title: row.get(2)?,
@@ -697,20 +1312,20 @@ impl DbManager {
                 track_number: row.get(8)?,
             })
         })?;
-        let mut songs = Vec::new();
+        let mut tracks = Vec::new();
         for item in iter {
-            songs.push(item?);
+            tracks.push(item?);
         }
-        Ok(songs)
+        Ok(tracks)
     }
 
-    /// Loads artist detail (albums and songs) for one artist.
+    /// Loads artist detail (albums and tracks) for one artist.
     pub fn get_library_artist_detail(
         &self,
         artist: &str,
-    ) -> Result<(Vec<LibraryAlbum>, Vec<LibrarySong>), rusqlite::Error> {
+    ) -> Result<(Vec<LibraryAlbum>, Vec<LibraryTrack>), rusqlite::Error> {
         let mut album_stmt = self.conn.prepare(
-            "SELECT album, album_artist, COUNT(*) AS song_count, MIN(path) AS representative_track_path
+            "SELECT album, album_artist, COUNT(*) AS track_count, MIN(path) AS representative_track_path
              FROM library_tracks
              WHERE artist = ?1 OR album_artist = ?1
              GROUP BY album, album_artist
@@ -720,7 +1335,7 @@ impl DbManager {
             Ok(LibraryAlbum {
                 album: row.get(0)?,
                 album_artist: row.get(1)?,
-                song_count: row.get::<_, i64>(2)?.max(0) as u32,
+                track_count: row.get::<_, i64>(2)?.max(0) as u32,
                 representative_track_path: row.get::<_, Option<String>>(3)?.map(PathBuf::from),
             })
         })?;
@@ -729,14 +1344,14 @@ impl DbManager {
             albums.push(item?);
         }
 
-        let mut song_stmt = self.conn.prepare(
-            "SELECT song_id, path, title, artist, album, album_artist, genre, year, track_number
+        let mut track_stmt = self.conn.prepare(
+            "SELECT track_id, path, title, artist, album, album_artist, genre, year, track_number
              FROM library_tracks
              WHERE artist = ?1 OR album_artist = ?1
              ORDER BY sort_album ASC, CAST(track_number AS INTEGER) ASC, sort_title ASC, path ASC",
         )?;
-        let song_iter = song_stmt.query_map(params![artist], |row| {
-            Ok(LibrarySong {
+        let track_iter = track_stmt.query_map(params![artist], |row| {
+            Ok(LibraryTrack {
                 id: row.get(0)?,
                 path: PathBuf::from(row.get::<_, String>(1)?),
                 title: row.get(2)?,
@@ -748,20 +1363,20 @@ impl DbManager {
                 track_number: row.get(8)?,
             })
         })?;
-        let mut songs = Vec::new();
-        for item in song_iter {
-            songs.push(item?);
+        let mut tracks = Vec::new();
+        for item in track_iter {
+            tracks.push(item?);
         }
-        Ok((albums, songs))
+        Ok((albums, tracks))
     }
 
-    /// Loads songs for one normalized genre label.
-    pub fn get_library_genre_songs(
+    /// Loads tracks for one normalized genre label.
+    pub fn get_library_genre_tracks(
         &self,
         genre: &str,
-    ) -> Result<Vec<LibrarySong>, rusqlite::Error> {
+    ) -> Result<Vec<LibraryTrack>, rusqlite::Error> {
         let mut stmt = self.conn.prepare(
-            "SELECT song_id, path, title, artist, album, album_artist, genre, year, track_number
+            "SELECT track_id, path, title, artist, album, album_artist, genre, year, track_number
              FROM library_tracks
              WHERE CASE
                  WHEN TRIM(genre) = '' THEN 'Unknown Genre'
@@ -770,7 +1385,7 @@ impl DbManager {
              ORDER BY sort_artist ASC, sort_album ASC, CAST(track_number AS INTEGER) ASC, sort_title ASC, path ASC",
         )?;
         let iter = stmt.query_map(params![genre], |row| {
-            Ok(LibrarySong {
+            Ok(LibraryTrack {
                 id: row.get(0)?,
                 path: PathBuf::from(row.get::<_, String>(1)?),
                 title: row.get(2)?,
@@ -782,20 +1397,20 @@ impl DbManager {
                 track_number: row.get(8)?,
             })
         })?;
-        let mut songs = Vec::new();
+        let mut tracks = Vec::new();
         for item in iter {
-            songs.push(item?);
+            tracks.push(item?);
         }
-        Ok(songs)
+        Ok(tracks)
     }
 
-    /// Loads songs for one normalized decade label.
-    pub fn get_library_decade_songs(
+    /// Loads tracks for one normalized decade label.
+    pub fn get_library_decade_tracks(
         &self,
         decade: &str,
-    ) -> Result<Vec<LibrarySong>, rusqlite::Error> {
+    ) -> Result<Vec<LibraryTrack>, rusqlite::Error> {
         let mut stmt = self.conn.prepare(
-            "SELECT song_id, path, title, artist, album, album_artist, genre, year, track_number
+            "SELECT track_id, path, title, artist, album, album_artist, genre, year, track_number
              FROM library_tracks
              WHERE CASE
                  WHEN SUBSTR(TRIM(year), 1, 3) GLOB '[0-9][0-9][0-9]'
@@ -805,7 +1420,7 @@ impl DbManager {
              ORDER BY year ASC, sort_artist ASC, sort_album ASC, CAST(track_number AS INTEGER) ASC, sort_title ASC, path ASC",
         )?;
         let iter = stmt.query_map(params![decade], |row| {
-            Ok(LibrarySong {
+            Ok(LibraryTrack {
                 id: row.get(0)?,
                 path: PathBuf::from(row.get::<_, String>(1)?),
                 title: row.get(2)?,
@@ -817,18 +1432,185 @@ impl DbManager {
                 track_number: row.get(8)?,
             })
         })?;
-        let mut songs = Vec::new();
+        let mut tracks = Vec::new();
         for item in iter {
-            songs.push(item?);
+            tracks.push(item?);
         }
-        Ok(songs)
+        Ok(tracks)
+    }
+
+    /// Returns a fresh enrichment cache entry for the supplied entity when present.
+    pub fn get_library_enrichment_cache(
+        &self,
+        entity: &LibraryEnrichmentEntity,
+        now_unix_ms: i64,
+    ) -> Result<Option<LibraryEnrichmentPayload>, rusqlite::Error> {
+        let (entity_type, entity_key) = Self::enrichment_entity_parts(entity);
+        let result = self
+            .conn
+            .query_row(
+                "SELECT entity_type, entity_key, status, blurb, image_path, source_name, source_url,
+                        expires_unix_ms, error_kind, attempt_kind
+                 FROM library_enrichment_cache
+                 WHERE entity_type = ?1 AND entity_key = ?2",
+                params![entity_type, entity_key],
+                |row| {
+                    let row_entity_type: String = row.get(0)?;
+                    let row_entity_key: String = row.get(1)?;
+                    let status: String = row.get(2)?;
+                    let blurb: String = row.get(3)?;
+                    let image_path: Option<String> = row.get(4)?;
+                    let source_name: String = row.get(5)?;
+                    let source_url: String = row.get(6)?;
+                    let expires_unix_ms: i64 = row.get(7)?;
+                    let error_kind: String = row.get(8)?;
+                    let attempt_kind: String = row.get(9)?;
+                    Ok((
+                        row_entity_type,
+                        row_entity_key,
+                        status,
+                        blurb,
+                        image_path,
+                        source_name,
+                        source_url,
+                        expires_unix_ms,
+                        error_kind,
+                        attempt_kind,
+                    ))
+                },
+            )
+            .optional()?;
+
+        let Some((
+            row_entity_type,
+            row_entity_key,
+            status,
+            blurb,
+            image_path,
+            source_name,
+            source_url,
+            expires_unix_ms,
+            error_kind,
+            attempt_kind,
+        )) = result
+        else {
+            return Ok(None);
+        };
+
+        if expires_unix_ms <= now_unix_ms {
+            return Ok(None);
+        }
+
+        Ok(Some(LibraryEnrichmentPayload {
+            entity: Self::enrichment_entity_from_parts(&row_entity_type, &row_entity_key),
+            status: Self::enrichment_status_from_str(&status),
+            blurb,
+            image_path: image_path.map(PathBuf::from),
+            source_name,
+            source_url,
+            error_kind: Self::enrichment_error_kind_from_str(&error_kind),
+            attempt_kind: Self::enrichment_attempt_kind_from_str(&attempt_kind),
+        }))
+    }
+
+    /// Inserts or updates one enrichment cache row.
+    pub fn upsert_library_enrichment_cache(
+        &self,
+        payload: &LibraryEnrichmentPayload,
+        image_url: Option<&str>,
+        fetched_unix_ms: i64,
+        expires_unix_ms: i64,
+        last_error: Option<&str>,
+        conclusive: bool,
+    ) -> Result<(), rusqlite::Error> {
+        let (entity_type, entity_key) = Self::enrichment_entity_parts(&payload.entity);
+        self.conn.execute(
+            "INSERT INTO library_enrichment_cache (
+                entity_type, entity_key, status, blurb, image_path, image_url,
+                source_name, source_url, fetched_unix_ms, expires_unix_ms, last_error,
+                error_kind, attempt_kind, conclusive
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)
+            ON CONFLICT(entity_type, entity_key) DO UPDATE SET
+                status = excluded.status,
+                blurb = excluded.blurb,
+                image_path = excluded.image_path,
+                image_url = excluded.image_url,
+                source_name = excluded.source_name,
+                source_url = excluded.source_url,
+                fetched_unix_ms = excluded.fetched_unix_ms,
+                expires_unix_ms = excluded.expires_unix_ms,
+                last_error = excluded.last_error,
+                error_kind = excluded.error_kind,
+                attempt_kind = excluded.attempt_kind,
+                conclusive = excluded.conclusive",
+            params![
+                entity_type,
+                entity_key,
+                Self::enrichment_status_to_str(payload.status),
+                payload.blurb,
+                payload
+                    .image_path
+                    .as_ref()
+                    .map(|path| path.to_string_lossy().to_string()),
+                image_url,
+                payload.source_name,
+                payload.source_url,
+                fetched_unix_ms,
+                expires_unix_ms,
+                last_error.unwrap_or_default(),
+                Self::enrichment_error_kind_to_str(payload.error_kind),
+                Self::enrichment_attempt_kind_to_str(payload.attempt_kind),
+                i64::from(conclusive),
+            ],
+        )?;
+        Ok(())
+    }
+
+    /// Removes all expired enrichment cache rows.
+    pub fn prune_expired_library_enrichment_cache(
+        &self,
+        now_unix_ms: i64,
+    ) -> Result<(), rusqlite::Error> {
+        self.conn.execute(
+            "DELETE FROM library_enrichment_cache WHERE expires_unix_ms <= ?1",
+            params![now_unix_ms],
+        )?;
+        Ok(())
+    }
+
+    /// Clears cached image path references matching one on-disk path.
+    pub fn clear_library_enrichment_image_path(
+        &self,
+        image_path: &str,
+    ) -> Result<(), rusqlite::Error> {
+        self.conn.execute(
+            "UPDATE library_enrichment_cache SET image_path = NULL WHERE image_path = ?1",
+            params![image_path],
+        )?;
+        Ok(())
+    }
+
+    /// Deletes all enrichment cache rows and returns number of deleted records.
+    pub fn clear_library_enrichment_cache(&self) -> Result<usize, rusqlite::Error> {
+        let deleted_rows = self
+            .conn
+            .execute("DELETE FROM library_enrichment_cache", [])?;
+        Ok(deleted_rows)
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::DbManager;
-    use crate::protocol::PlaylistColumnWidthOverride;
+    use rusqlite::Connection;
+    use std::{fs, path::PathBuf};
+    use uuid::Uuid;
+
+    fn unique_temp_test_dir(prefix: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("{prefix}_{}", Uuid::new_v4()));
+        fs::create_dir_all(&dir).expect("should create test temp directory");
+        dir
+    }
 
     #[test]
     fn test_set_and_get_playlist_column_order_round_trip() {
@@ -855,67 +1637,140 @@ mod tests {
     }
 
     #[test]
-    fn test_set_and_get_playlist_column_width_overrides_round_trip() {
-        let db = DbManager::new_in_memory().expect("in-memory db should initialize");
-        let playlists = db
-            .get_all_playlists()
-            .expect("playlists should be queryable after init");
-        let playlist = playlists
-            .first()
-            .expect("default playlist should exist after init");
+    fn test_migrate_renames_legacy_library_song_id_column_to_track_id() {
+        let conn = Connection::open_in_memory().expect("in-memory db should initialize");
+        DbManager::configure_connection_pragmas(&conn);
+        conn.execute(
+            "CREATE TABLE playlists (
+                id TEXT PRIMARY KEY,
+                name TEXT NOT NULL
+            )",
+            [],
+        )
+        .expect("should create playlists table");
+        conn.execute(
+            "CREATE TABLE tracks (
+                id TEXT PRIMARY KEY,
+                path TEXT NOT NULL,
+                position INTEGER NOT NULL,
+                title TEXT,
+                artist TEXT,
+                album TEXT,
+                date TEXT,
+                genre TEXT
+            )",
+            [],
+        )
+        .expect("should create legacy tracks table");
+        conn.execute(
+            "CREATE TABLE library_tracks (
+                song_id TEXT PRIMARY KEY,
+                path TEXT NOT NULL UNIQUE,
+                title TEXT NOT NULL,
+                artist TEXT NOT NULL,
+                album TEXT NOT NULL,
+                album_artist TEXT NOT NULL,
+                year TEXT NOT NULL,
+                track_number TEXT NOT NULL,
+                sort_title TEXT NOT NULL,
+                sort_artist TEXT NOT NULL,
+                sort_album TEXT NOT NULL
+            )",
+            [],
+        )
+        .expect("should create legacy library_tracks table");
+        conn.execute(
+            "INSERT INTO library_tracks (
+                song_id, path, title, artist, album, album_artist, year, track_number,
+                sort_title, sort_artist, sort_album
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
+            rusqlite::params![
+                "legacy-track",
+                "/tmp/legacy.flac",
+                "Legacy",
+                "Artist",
+                "Album",
+                "Artist",
+                "2001",
+                "1",
+                "legacy",
+                "artist",
+                "album",
+            ],
+        )
+        .expect("should seed legacy library row");
+        conn.execute(
+            "CREATE TABLE library_enrichment_cache (
+                entity_type TEXT NOT NULL,
+                entity_key TEXT NOT NULL,
+                status TEXT NOT NULL,
+                blurb TEXT NOT NULL,
+                image_path TEXT,
+                image_url TEXT,
+                source_name TEXT NOT NULL,
+                source_url TEXT NOT NULL,
+                fetched_unix_ms INTEGER NOT NULL DEFAULT 0,
+                expires_unix_ms INTEGER NOT NULL DEFAULT 0,
+                last_error TEXT NOT NULL DEFAULT '',
+                PRIMARY KEY(entity_type, entity_key)
+            )",
+            [],
+        )
+        .expect("should create legacy enrichment cache table");
 
-        let saved = vec![
-            PlaylistColumnWidthOverride {
-                column_key: "{title}".to_string(),
-                width_px: 210,
-            },
-            PlaylistColumnWidthOverride {
-                column_key: "{artist}".to_string(),
-                width_px: 180,
-            },
-        ];
-        db.set_playlist_column_width_overrides(&playlist.id, &saved)
-            .expect("column width overrides should persist");
+        let db = DbManager { conn };
+        db.migrate().expect("migration should succeed");
 
-        let loaded = db
-            .get_playlist_column_width_overrides(&playlist.id)
-            .expect("column width overrides query should succeed");
-        assert_eq!(loaded, Some(saved));
+        let mut stmt = db
+            .conn
+            .prepare("PRAGMA table_info(library_tracks)")
+            .expect("table_info query should succeed");
+        let columns = stmt
+            .query_map([], |row| row.get::<_, String>(1))
+            .expect("table_info rows should be readable");
+        let mut column_names = Vec::new();
+        for column in columns {
+            column_names.push(column.expect("column name should be readable"));
+        }
+        assert!(
+            column_names.iter().any(|name| name == "track_id"),
+            "legacy library schema should migrate to track_id"
+        );
+        assert!(
+            !column_names.iter().any(|name| name == "song_id"),
+            "legacy song_id column should be removed after migration"
+        );
+
+        let tracks = db
+            .get_library_tracks()
+            .expect("track query should work after migration");
+        assert_eq!(tracks.len(), 1);
+        assert_eq!(tracks[0].id, "legacy-track");
     }
 
     #[test]
-    fn test_upsert_and_clear_playlist_column_width_override() {
-        let db = DbManager::new_in_memory().expect("in-memory db should initialize");
-        let playlists = db
-            .get_all_playlists()
-            .expect("playlists should be queryable after init");
-        let playlist = playlists
-            .first()
-            .expect("default playlist should exist after init");
+    fn test_migrate_legacy_db_file_renames_playlist_db_and_sidecars() {
+        let temp_dir = unique_temp_test_dir("roqtune_legacy_db_migration");
+        let legacy_db_path = temp_dir.join(DbManager::LEGACY_DB_FILE_NAME);
+        let legacy_wal_path = temp_dir.join(format!("{}-wal", DbManager::LEGACY_DB_FILE_NAME));
+        let legacy_shm_path = temp_dir.join(format!("{}-shm", DbManager::LEGACY_DB_FILE_NAME));
+        fs::write(&legacy_db_path, b"legacy-db").expect("should create legacy db file");
+        fs::write(&legacy_wal_path, b"legacy-wal").expect("should create legacy wal file");
+        fs::write(&legacy_shm_path, b"legacy-shm").expect("should create legacy shm file");
 
-        db.set_playlist_column_width_override(&playlist.id, "{title}", 190)
-            .expect("title width override should be saved");
-        db.set_playlist_column_width_override(&playlist.id, "{artist}", 170)
-            .expect("artist width override should be saved");
-        db.set_playlist_column_width_override(&playlist.id, "{title}", 200)
-            .expect("title width override should update");
+        DbManager::migrate_legacy_db_file(&temp_dir).expect("legacy db migration should succeed");
 
-        let loaded = db
-            .get_playlist_column_width_overrides(&playlist.id)
-            .expect("column width overrides query should succeed")
-            .expect("overrides should exist");
-        assert_eq!(loaded.len(), 2);
-        assert!(loaded
-            .iter()
-            .any(|item| item.column_key == "{title}" && item.width_px == 200));
+        let next_db_path = temp_dir.join(DbManager::DB_FILE_NAME);
+        let next_wal_path = temp_dir.join(format!("{}-wal", DbManager::DB_FILE_NAME));
+        let next_shm_path = temp_dir.join(format!("{}-shm", DbManager::DB_FILE_NAME));
 
-        db.clear_playlist_column_width_override(&playlist.id, "{artist}")
-            .expect("artist override should be removed");
-        let loaded_after_clear = db
-            .get_playlist_column_width_overrides(&playlist.id)
-            .expect("column width overrides query should succeed")
-            .expect("title override should remain");
-        assert_eq!(loaded_after_clear.len(), 1);
-        assert_eq!(loaded_after_clear[0].column_key, "{title}");
+        assert!(next_db_path.exists());
+        assert!(next_wal_path.exists());
+        assert!(next_shm_path.exists());
+        assert!(!legacy_db_path.exists());
+        assert!(!legacy_wal_path.exists());
+        assert!(!legacy_shm_path.exists());
+
+        fs::remove_dir_all(&temp_dir).expect("should clean up test temp directory");
     }
 }

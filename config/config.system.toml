@@ -35,20 +35,27 @@ resampler_quality = "high"
 # Apply TPDF dither when converting float output to lower bit-depth integer formats.
 dither_on_bitdepth_reduce = true
 
+# When source channels exceed output channels, use a weighted downmix matrix.
+# If false, channels are mapped/truncated using the legacy channel-map path.
+downmix_higher_channel_tracks = true
+
+[cast]
+# Enable sender-side fallback transcoding during casting.
+# Disabled by default to preserve source-path integrity (direct stream).
+allow_transcode_fallback = false
+
 [ui]
 # Show the layout editor intro dialog the next time it is opened.
 show_layout_edit_intro = true
 # Show hover tooltips for icon-driven controls.
 show_tooltips = true
-# Layout tree data is persisted separately in `layout.toml`.
-
-# Built-in Album Art playlist-column width defaults.
-# Runtime sanitization clamps to:
-# min: 12..512
-# max: 24..1024
-# If min > max, values are swapped.
-playlist_album_art_column_min_width_px = 16
-playlist_album_art_column_max_width_px = 480
+# Automatically scroll track-list views to keep the playing track centered.
+auto_scroll_to_playing_track = true
+# Controls Fluent widget theme palette.
+# true = dark mode, false = light mode
+dark_mode = true
+# Layout-owned settings are persisted separately in `layout.toml`:
+# split tree, panel instances, per-leaf button cluster actions, and playlist columns.
 
 # Main window size on startup.
 window_width = 900
@@ -57,69 +64,32 @@ window_height = 650
 # Playback volume (0.0 .. 1.0).
 volume = 1.0
 
-# Per-leaf button cluster action order overrides.
-# Keep empty to use built-in defaults.
-button_cluster_instances = []
+# Playback order startup preference.
+# Options: "default", "shuffle", "random"
+playback_order = "default"
 
-# Playlist columns are ordered and rendered in this sequence.
-# Built-in columns should keep `custom = false`.
-# Custom user columns use `custom = true`.
-[[ui.playlist_columns]]
-name = "Title"
-format = "{title}"
-enabled = true
-custom = false
-
-[[ui.playlist_columns]]
-name = "Artist"
-format = "{artist}"
-enabled = true
-custom = false
-
-[[ui.playlist_columns]]
-name = "Album"
-format = "{album}"
-enabled = true
-custom = false
-
-[[ui.playlist_columns]]
-name = "Album Artist"
-format = "{album_artist}"
-enabled = false
-custom = false
-
-[[ui.playlist_columns]]
-name = "Genre"
-format = "{genre}"
-enabled = false
-custom = false
-
-[[ui.playlist_columns]]
-name = "Year"
-format = "{year}"
-enabled = false
-custom = false
-
-[[ui.playlist_columns]]
-name = "Track #"
-format = "{track_number}"
-enabled = false
-custom = false
-
-[[ui.playlist_columns]]
-name = "Album Art"
-format = "{album_art}"
-enabled = false
-custom = false
+# Repeat startup preference.
+# Options: "off", "playlist", "track"
+repeat_mode = "off"
 
 [library]
 # Folders recursively scanned into Library mode.
 # Leave empty if you only use playlists.
 folders = []
 
-# Show the one-time first-start library setup prompt.
-# This is set to false once you skip or add folders.
-show_first_start_prompt = true
+# Enable internet lookups for artist/album detail blurbs and artist images.
+# Display-only: this does not modify your track metadata files.
+online_metadata_enabled = false
+
+# One-time non-blocking prompt gate for online metadata in Library mode.
+# Set this to true to re-test the prompt flow.
+online_metadata_prompt_pending = true
+
+# Artist image cache retention window in days.
+artist_image_cache_ttl_days = 30
+
+# Maximum on-disk artist-image cache size in MB before oldest files are pruned.
+artist_image_cache_max_size_mb = 256
 
 # ---------------------------------------------------------------------
 # ADVANCED USERS ONLY
@@ -137,3 +107,8 @@ player_low_watermark_ms = 12000
 player_target_buffer_ms = 24000
 player_request_interval_ms = 120
 decoder_request_chunk_ms = 1500
+
+[integrations]
+# Configured remote backend profiles (non-secret fields only).
+# Passwords are stored in the system keyring keyed by profile_id.
+backends = []

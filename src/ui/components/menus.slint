@@ -1,28 +1,32 @@
-import { Button, Switch } from "std-widgets.slint";
+import { Button, Switch, Palette } from "std-widgets.slint";
+import { AppIcons } from "../icons.slint";
 
 export component ContextMenu inherits PopupWindow {
     callback rename();
     callback delete();
+    callback sync-opensubsonic();
     in property <bool> is-playlist: false;
-    width: 120px;
-    height: is-playlist ? 56px : 32px;
+    in property <bool> show-sync-item: false;
+    private property <bool> dark: Palette.color-scheme == ColorScheme.dark;
+    width: is-playlist && show-sync-item ? 190px : 120px;
+    height: is-playlist ? (show-sync-item ? 84px : 56px) : 32px;
 
     Rectangle {
-        background: #333;
+        background: root.dark ? #333 : #f0f4fa;
         border-width: 1px;
-        border-color: #444;
+        border-color: root.dark ? #444 : #c7d1dd;
 
         VerticalLayout {
             padding: 4px;
             spacing: 4px;
             Rectangle {
                 height: 24px;
-                background: item-ta-rename.has-hover ? #444 : transparent;
+                background: item-ta-rename.has-hover ? (root.dark ? #444 : #e1e9f2) : transparent;
                 border-radius: 2px;
                 Text {
                     x: 8px;
                     text: "Rename";
-                    color: #eee;
+                    color: root.dark ? #eee : #253444;
                     font-size: 13px;
                     vertical-alignment: center;
                 }
@@ -32,9 +36,26 @@ export component ContextMenu inherits PopupWindow {
                     }
                 }
             }
+            if is-playlist && show-sync-item : Rectangle {
+                height: 24px;
+                background: item-ta-sync.has-hover ? (root.dark ? #444 : #e4ecf6) : transparent;
+                border-radius: 2px;
+                Text {
+                    x: 8px;
+                    text: "Sync with OpenSubsonic";
+                    color: root.dark ? #b9d7f7 : #2d5f98;
+                    font-size: 13px;
+                    vertical-alignment: center;
+                }
+                item-ta-sync := TouchArea {
+                    clicked => {
+                        root.sync-opensubsonic();
+                    }
+                }
+            }
             if is-playlist : Rectangle {
                 height: 24px;
-                background: item-ta-delete.has-hover ? #444 : transparent;
+                background: item-ta-delete.has-hover ? (root.dark ? #444 : #f3e3e3) : transparent;
                 border-radius: 2px;
                 Text {
                     x: 8px;
@@ -60,14 +81,15 @@ export component ColumnHeaderMenu inherits PopupWindow {
     callback toggle-column(int);
     callback delete-column(int);
     callback add-custom();
+    private property <bool> dark: Palette.color-scheme == ColorScheme.dark;
 
     width: 220px;
     height: 16px + labels.length * 24px + 32px;
 
     Rectangle {
-        background: #2f2f2f;
+        background: root.dark ? #2f2f2f : #f3f6fb;
         border-width: 1px;
-        border-color: #454545;
+        border-color: root.dark ? #454545 : #c7d1dd;
         border-radius: 4px;
 
         VerticalLayout {
@@ -78,11 +100,11 @@ export component ColumnHeaderMenu inherits PopupWindow {
                 property <bool> is-custom: i < root.custom.length && root.custom[i];
                 height: 22px;
                 border-radius: 2px;
-                background: column-item-ta.has-hover ? #3d3d3d : transparent;
+                background: column-item-ta.has-hover ? (root.dark ? #3d3d3d : #e2eaf4) : transparent;
                 column-toggle := Switch {
                     x: 6px;
                     y: (parent.height - self.height) / 2;
-                    width: 18px;
+                    width: 36px;
                     text: "";
                     checked: i < root.checked.length ? root.checked[i] : false;
                     toggled => {
@@ -91,17 +113,17 @@ export component ColumnHeaderMenu inherits PopupWindow {
                 }
                 Text {
                     text: label;
-                    color: #ddd;
+                    color: root.dark ? #ddd : #253444;
                     font-size: 12px;
                     vertical-alignment: center;
                     horizontal-alignment: left;
-                    x: 30px;
-                    width: parent.width - (parent.is-custom ? 58px : 36px);
+                    x: 48px;
+                    width: parent.width - (parent.is-custom ? 76px : 54px);
                     overflow: elide;
                 }
                 column-item-ta := TouchArea {
-                    x: 30px;
-                    width: parent.width - (parent.is-custom ? 54px : 30px);
+                    x: 48px;
+                    width: parent.width - (parent.is-custom ? 72px : 48px);
                     clicked => {
                         root.toggle-column(i);
                     }
@@ -112,12 +134,14 @@ export component ColumnHeaderMenu inherits PopupWindow {
                     x: parent.width - self.width - 6px;
                     y: (parent.height - self.height) / 2;
                     background: transparent;
-                    Text {
-                        text: "X";
-                        color: delete-column-ta.has-hover ? #ff5c5c : #db3f3f;
-                        font-size: 12px;
-                        horizontal-alignment: center;
-                        vertical-alignment: center;
+                    Image {
+                        source: AppIcons.close;
+                        width: 10px;
+                        height: 10px;
+                        x: (parent.width - self.width) / 2;
+                        y: (parent.height - self.height) / 2;
+                        image-fit: contain;
+                        colorize: delete-column-ta.has-hover ? #ff5c5c : #db3f3f;
                     }
                     delete-column-ta := TouchArea {
                         clicked => {
@@ -129,16 +153,16 @@ export component ColumnHeaderMenu inherits PopupWindow {
 
             Rectangle {
                 height: 1px;
-                background: #3c3c3c;
+                background: root.dark ? #3c3c3c : #d4dce7;
             }
 
             Rectangle {
                 height: 22px;
                 border-radius: 2px;
-                background: custom-item-ta.has-hover ? #3d3d3d : transparent;
+                background: custom-item-ta.has-hover ? (root.dark ? #3d3d3d : #e2eaf4) : transparent;
                 Text {
                     text: "Custom...";
-                    color: #ddd;
+                    color: root.dark ? #ddd : #253444;
                     font-size: 12px;
                     vertical-alignment: center;
                     horizontal-alignment: left;
@@ -160,6 +184,7 @@ export component ConfirmationDialog inherits Rectangle {
     in property <string> message: "Are you sure?";
     in property <bool> is-visible: false;
     in property <string> confirm-button-text: "Delete";
+    private property <bool> dark: Palette.color-scheme == ColorScheme.dark;
 
     visible: is-visible;
     background: #00000080;
@@ -168,23 +193,26 @@ export component ConfirmationDialog inherits Rectangle {
     TouchArea {}
 
     Rectangle {
-        width: 350px;
-        height: 150px;
-        background: #282828;
+        width: min(460px, max(280px, root.width - 24px));
+        height: min(240px, max(140px, root.height - 24px));
+        x: max(0px, (parent.width - self.width) / 2);
+        y: max(0px, (parent.height - self.height) / 2);
+        background: root.dark ? #282828 : #f6f8fc;
         border-width: 1px;
-        border-color: #444;
+        border-color: root.dark ? #444 : #c7d1dd;
         border-radius: 4px;
 
         VerticalLayout {
-            padding: 20px;
-            spacing: 20px;
+            padding: 16px;
+            spacing: 12px;
 
             Text {
                 text: root.message;
-                color: #eee;
+                color: root.dark ? #eee : #253444;
                 font-size: 14px;
                 horizontal-alignment: center;
                 wrap: word-wrap;
+                vertical-stretch: 1;
             }
 
             HorizontalLayout {
@@ -208,8 +236,10 @@ export component ConfirmationDialog inherits Rectangle {
 
 export component InfoDialog inherits Rectangle {
     callback dismissed();
+    in property <string> title: "Restart Required";
     in property <string> message: "";
     in property <bool> is-visible: false;
+    private property <bool> dark: Palette.color-scheme == ColorScheme.dark;
 
     visible: is-visible;
     background: #00000080;
@@ -219,9 +249,9 @@ export component InfoDialog inherits Rectangle {
     Rectangle {
         width: 430px;
         height: 180px;
-        background: #282828;
+        background: root.dark ? #282828 : #f6f8fc;
         border-width: 1px;
-        border-color: #444;
+        border-color: root.dark ? #444 : #c7d1dd;
         border-radius: 4px;
 
         VerticalLayout {
@@ -229,8 +259,8 @@ export component InfoDialog inherits Rectangle {
             spacing: 14px;
 
             Text {
-                text: "Restart Required";
-                color: #eee;
+                text: root.title;
+                color: root.dark ? #eee : #253444;
                 font-size: 16px;
                 font-weight: 700;
                 horizontal-alignment: left;
@@ -238,7 +268,7 @@ export component InfoDialog inherits Rectangle {
 
             Text {
                 text: root.message;
-                color: #ddd;
+                color: root.dark ? #ddd : #425365;
                 font-size: 13px;
                 wrap: word-wrap;
                 vertical-stretch: 1;

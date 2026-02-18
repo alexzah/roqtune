@@ -1,11 +1,25 @@
+import { Palette } from "std-widgets.slint";
 import { LibraryRowData } from "../types.slint";
+import { AppIcons } from "../icons.slint";
 
 export component LibraryRow inherits Rectangle {
     in property <LibraryRowData> data;
     in property <bool> is-hover;
+    private property <bool> dark: Palette.color-scheme == ColorScheme.dark;
 
     height: 34px;
-    background: root.data.selected ? #2f3f56 : is-hover ? #333 : transparent;
+    property <brush> idle-background: root.data.selected
+        ? (root.dark ? #2f3f56 : #d8e6f8)
+        : root.data.is_playing
+            ? (root.dark ? #203345 : #d1e2f7)
+        : transparent;
+    background: is-hover
+        ? root.data.selected
+            ? (root.dark ? #394c67 : #cbddf2)
+            : root.data.is_playing
+                ? (root.dark ? #2a4258 : #c4d9f1)
+                : (root.dark ? #333 : #e5edf7)
+        : root.idle-background;
     border-radius: 2px;
 
     HorizontalLayout {
@@ -13,35 +27,24 @@ export component LibraryRow inherits Rectangle {
         padding-right: 8px;
         spacing: 8px;
 
-        if root.data.item_kind == 1 : Rectangle {
-            width: 16px;
-            Text {
-                text: "◎";
-                color: #8fa7c6;
-                font-size: 11px;
-                horizontal-alignment: center;
-                vertical-alignment: center;
-            }
-        }
-
-        if root.data.item_kind != 1 && root.data.leading != "" : Rectangle {
+        if root.data.leading != "" : Rectangle {
             width: 28px;
             Text {
                 text: root.data.leading;
-                color: #8fa7c6;
+                color: root.dark ? #8fa7c6 : #42658d;
                 font-size: 11px;
                 horizontal-alignment: right;
                 vertical-alignment: center;
             }
         }
 
-        if root.data.item_kind != 1 && root.data.leading == "" : Rectangle {
+        if root.data.leading == "" : Rectangle {
             width: 24px;
             height: 24px;
             border-radius: 2px;
             border-width: 1px;
-            border-color: #3a3a3a;
-            background: #1f1f1f;
+            border-color: root.dark ? #3a3a3a : #c8d1dc;
+            background: root.dark ? #1f1f1f : #f4f7fb;
 
             if root.data.has_album_art : Image {
                 width: parent.width;
@@ -50,15 +53,19 @@ export component LibraryRow inherits Rectangle {
                 image-fit: contain;
             }
 
-            if !root.data.has_album_art : Text {
-                text: root.data.item_kind == 0 ? "♪"
-                    : root.data.item_kind == 3 ? "♬"
-                    : root.data.item_kind == 4 ? "◷"
-                    : "▦";
-                color: #8fa7c6;
-                font-size: 11px;
-                horizontal-alignment: center;
-                vertical-alignment: center;
+            if !root.data.has_album_art : Image {
+                source: root.data.item_kind == 0 ? AppIcons.music
+                    : root.data.item_kind == 1 ? AppIcons.user
+                    : root.data.item_kind == 2 ? AppIcons.disc
+                    : root.data.item_kind == 3 ? AppIcons.category
+                    : root.data.item_kind == 4 ? AppIcons.calendar-time
+                    : AppIcons.folder;
+                width: 12px;
+                height: 12px;
+                x: (parent.width - self.width) / 2;
+                y: (parent.height - self.height) / 2;
+                image-fit: contain;
+                colorize: root.dark ? #8fa7c6 : #42658d;
             }
         }
 
@@ -68,16 +75,22 @@ export component LibraryRow inherits Rectangle {
             HorizontalLayout {
                 spacing: 4px;
 
-                if root.data.item_kind == 0 && root.data.is_playing : Text {
-                    text: "▶";
-                    color: #8fb8ff;
-                    font-size: 10px;
-                    vertical-alignment: center;
+                if root.data.item_kind == 0 && root.data.is_playing : Image {
+                    source: AppIcons.player-play;
+                    width: 10px;
+                    height: 10px;
+                    y: (parent.height - self.height) / 2;
+                    image-fit: contain;
+                    colorize: root.dark ? #8fb8ff : #2d5f98;
                 }
 
                 Text {
                     text: root.data.primary;
-                    color: #ddd;
+                    color: root.data.selected
+                        ? (root.dark ? #ececec : #203142)
+                        : root.data.is_playing
+                            ? (root.dark ? #d7e9ff : #245077)
+                            : (root.dark ? #ddd : #243444);
                     font-size: 12px;
                     overflow: elide;
                     horizontal-alignment: left;
@@ -87,11 +100,35 @@ export component LibraryRow inherits Rectangle {
             }
             Text {
                 text: root.data.secondary;
-                color: #888;
+                color: root.data.selected
+                    ? (root.dark ? #bcc7d8 : #4f667f)
+                    : root.data.is_playing
+                        ? (root.dark ? #9eb6d3 : #436588)
+                        : (root.dark ? #888 : #647385);
                 font-size: 11px;
                 overflow: elide;
                 horizontal-alignment: left;
                 vertical-alignment: center;
+            }
+        }
+
+        if root.data.source_badge != "" : Rectangle {
+            width: 26px;
+            height: 18px;
+            border-radius: 9px;
+            border-width: 1px;
+            border-color: root.dark ? #3f5470 : #b4cde8;
+            background: root.dark ? #1f3248 : #e2eefb;
+            y: (parent.height - self.height) / 2;
+
+            Image {
+                source: AppIcons.opensubsonic;
+                width: 12px;
+                height: 12px;
+                x: (parent.width - self.width) / 2;
+                y: (parent.height - self.height) / 2;
+                image-fit: contain;
+                colorize: root.dark ? #9fc3eb : #2d5f98;
             }
         }
     }

@@ -24,6 +24,8 @@ pub enum Message {
     Playback(PlaybackMessage),
     Metadata(MetadataMessage),
     Config(ConfigMessage),
+    Cast(CastMessage),
+    Integration(IntegrationMessage),
 }
 
 /// Track traversal strategy for next/previous operations.
@@ -46,7 +48,14 @@ pub struct TrackStarted {
 /// Playlist-domain commands and notifications.
 #[derive(Debug, Clone)]
 pub enum PlaylistMessage {
+    #[allow(dead_code)]
     LoadTrack(PathBuf),
+    DrainBulkImportQueue,
+    #[allow(dead_code)]
+    LoadTracksBatch {
+        paths: Vec<PathBuf>,
+        source: ImportSource,
+    },
     DeleteTracks(Vec<usize>),
     DeleteSelected,
     /// UI requested playback for a currently rendered track row.
@@ -83,13 +92,20 @@ pub enum PlaylistMessage {
         playlist_ids: Vec<String>,
         paths: Vec<PathBuf>,
     },
-    PlayLibraryQueue {
-        tracks: Vec<RestoredTrack>,
-        start_index: usize,
-    },
     TracksInserted {
         tracks: Vec<RestoredTrack>,
         insert_at: usize,
+    },
+    TracksInsertedBatch {
+        tracks: Vec<RestoredTrack>,
+        insert_at: usize,
+    },
+    TrackMetadataBatchUpdated {
+        updates: Vec<TrackMetadataPatch>,
+    },
+    TrackUnavailable {
+        id: String,
+        reason: String,
     },
     OpenPlaylistSearch,
     ClosePlaylistSearch,
@@ -121,26 +137,25 @@ pub enum PlaylistMessage {
         id: String,
     },
     DeletePlaylistByIndex(usize),
+    SyncPlaylistToOpenSubsonicByIndex(usize),
+    SyncPlaylistToOpenSubsonic {
+        id: String,
+    },
     SwitchPlaylist {
         id: String,
     },
     SwitchPlaylistByIndex(usize),
+    RequestPlaylistState,
     PlaylistsRestored(Vec<PlaylistInfo>),
+    OpenSubsonicSyncEligiblePlaylists(Vec<String>),
     ActivePlaylistChanged(String),
     ActivePlaylistColumnOrder(Option<Vec<String>>),
     SetActivePlaylistColumnOrder(Vec<String>),
     RequestActivePlaylistColumnOrder,
-    ActivePlaylistColumnWidthOverrides(Option<Vec<PlaylistColumnWidthOverride>>),
     SetActivePlaylistColumnWidthOverride {
         column_key: String,
         width_px: u32,
-        persist: bool,
     },
-    ClearActivePlaylistColumnWidthOverride {
-        column_key: String,
-        persist: bool,
-    },
-    RequestActivePlaylistColumnWidthOverrides,
     TrackFinished,
     TrackStarted {
         index: usize,
@@ -159,6 +174,21 @@ pub enum PlaylistMessage {
     ChangePlaybackOrder(PlaybackOrder),
     ToggleRepeat,
     RepeatModeChanged(RepeatMode),
+    RemoteDetachConfirmationRequested {
+        playlist_id: String,
+        playlist_name: String,
+    },
+    ConfirmDetachRemotePlaylist {
+        playlist_id: String,
+    },
+    CancelDetachRemotePlaylist {
+        playlist_id: String,
+    },
+    RemotePlaylistWritebackState {
+        playlist_id: String,
+        success: bool,
+        error: Option<String>,
+    },
 }
 
 /// Library-domain commands and notifications.
@@ -186,67 +216,202 @@ pub enum LibraryMessage {
         selections: Vec<LibrarySelectionSpec>,
         playlist_ids: Vec<String>,
     },
+    /// Paste copied library selections into the current active playlist.
+    /// This follows playlist paste insertion semantics (after the current
+    /// selection anchor, or append to end when no selection exists).
+    PasteSelectionToActivePlaylist {
+        selections: Vec<LibrarySelectionSpec>,
+    },
+    CopySelected,
+    CutSelected,
+    DeleteSelected,
+    ConfirmRemoveSelection,
+    CancelRemoveSelection,
+    RemoveSelectionFromLibrary {
+        selections: Vec<LibrarySelectionSpec>,
+    },
     RequestScan,
-    RequestSongs,
+    RequestRootCounts,
+    #[allow(dead_code)]
+    RequestTracks,
+    #[allow(dead_code)]
     RequestArtists,
+    #[allow(dead_code)]
     RequestAlbums,
+    #[allow(dead_code)]
     RequestGenres,
+    #[allow(dead_code)]
     RequestDecades,
+    #[allow(dead_code)]
     RequestGlobalSearchData,
+    #[allow(dead_code)]
     RequestArtistDetail {
         artist: String,
     },
-    RequestAlbumSongs {
+    #[allow(dead_code)]
+    RequestAlbumTracks {
         album: String,
         album_artist: String,
     },
-    RequestGenreSongs {
+    #[allow(dead_code)]
+    RequestGenreTracks {
         genre: String,
     },
-    RequestDecadeSongs {
+    #[allow(dead_code)]
+    RequestDecadeTracks {
         decade: String,
     },
+    DrainScanProgressQueue,
+    RequestLibraryPage {
+        request_id: u64,
+        view: LibraryViewQuery,
+        offset: usize,
+        limit: usize,
+        query: String,
+    },
+    RequestEnrichment {
+        entity: LibraryEnrichmentEntity,
+        priority: LibraryEnrichmentPriority,
+    },
+    ReplaceEnrichmentPrefetchQueue {
+        entities: Vec<LibraryEnrichmentEntity>,
+    },
+    ReplaceEnrichmentBackgroundQueue {
+        entities: Vec<LibraryEnrichmentEntity>,
+    },
+    EnrichmentPrefetchTick,
+    ClearEnrichmentCache,
+    LibraryViewportChanged {
+        first_row: usize,
+        row_count: usize,
+    },
     ScanStarted,
+    ScanProgress {
+        discovered: usize,
+        indexed: usize,
+        metadata_pending: usize,
+    },
     ScanCompleted {
         indexed_tracks: usize,
     },
+    MetadataBackfillProgress {
+        updated: usize,
+        remaining: usize,
+    },
     ScanFailed(String),
-    SongsResult(Vec<LibrarySong>),
+    RootCountsResult {
+        tracks: usize,
+        artists: usize,
+        albums: usize,
+        genres: usize,
+        decades: usize,
+    },
+    TracksResult(Vec<LibraryTrack>),
     ArtistsResult(Vec<LibraryArtist>),
     AlbumsResult(Vec<LibraryAlbum>),
     GenresResult(Vec<LibraryGenre>),
     DecadesResult(Vec<LibraryDecade>),
     GlobalSearchDataResult {
-        songs: Vec<LibrarySong>,
+        tracks: Vec<LibraryTrack>,
         artists: Vec<LibraryArtist>,
         albums: Vec<LibraryAlbum>,
     },
     ArtistDetailResult {
         artist: String,
         albums: Vec<LibraryAlbum>,
-        songs: Vec<LibrarySong>,
+        tracks: Vec<LibraryTrack>,
     },
-    AlbumSongsResult {
+    AlbumTracksResult {
         album: String,
         album_artist: String,
-        songs: Vec<LibrarySong>,
+        tracks: Vec<LibraryTrack>,
     },
-    GenreSongsResult {
+    GenreTracksResult {
         genre: String,
-        songs: Vec<LibrarySong>,
+        tracks: Vec<LibraryTrack>,
     },
-    DecadeSongsResult {
+    DecadeTracksResult {
         decade: String,
-        songs: Vec<LibrarySong>,
+        tracks: Vec<LibraryTrack>,
+    },
+    LibraryPageResult {
+        request_id: u64,
+        total: usize,
+        entries: Vec<LibraryEntryPayload>,
+    },
+    EnrichmentResult(LibraryEnrichmentPayload),
+    EnrichmentCacheCleared {
+        cleared_rows: usize,
+        deleted_images: usize,
     },
     AddToPlaylistsCompleted {
         playlist_count: usize,
         track_count: usize,
     },
     AddToPlaylistsFailed(String),
+    RemoveSelectionCompleted {
+        removed_tracks: usize,
+    },
+    RemoveSelectionFailed(String),
     ToastTimeout {
         generation: u64,
     },
+}
+
+/// Stable identity for one enrichable library entity.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Deserialize, serde::Serialize)]
+pub enum LibraryEnrichmentEntity {
+    Artist { artist: String },
+    Album { album: String, album_artist: String },
+}
+
+/// Scheduling intent for enrichment requests.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+pub enum LibraryEnrichmentPriority {
+    Interactive,
+    Prefetch,
+}
+
+/// Classification of enrichment failures for retry/backoff behavior.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+pub enum LibraryEnrichmentErrorKind {
+    Timeout,
+    RateLimited,
+    BudgetExhausted,
+    Hard,
+}
+
+/// Scheduler lane used for one enrichment attempt/result.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Deserialize, serde::Serialize)]
+pub enum LibraryEnrichmentAttemptKind {
+    Detail,
+    #[default]
+    VisiblePrefetch,
+    BackgroundWarm,
+}
+
+/// Result state for one enrichment lookup.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+pub enum LibraryEnrichmentStatus {
+    Ready,
+    NotFound,
+    Disabled,
+    Error,
+}
+
+/// Display-only metadata fetched for library artist/album views.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+pub struct LibraryEnrichmentPayload {
+    pub entity: LibraryEnrichmentEntity,
+    pub status: LibraryEnrichmentStatus,
+    pub blurb: String,
+    pub image_path: Option<PathBuf>,
+    pub source_name: String,
+    pub source_url: String,
+    #[serde(default)]
+    pub error_kind: Option<LibraryEnrichmentErrorKind>,
+    #[serde(default)]
+    pub attempt_kind: LibraryEnrichmentAttemptKind,
 }
 
 /// Metadata editor commands and notifications.
@@ -295,20 +460,25 @@ pub enum MetadataMessage {
 /// Selection item used to resolve library items to concrete track paths.
 #[derive(Debug, Clone, serde::Deserialize, serde::Serialize)]
 pub enum LibrarySelectionSpec {
-    Song { path: PathBuf },
+    Track { path: PathBuf },
     Artist { artist: String },
     Album { album: String, album_artist: String },
     Genre { genre: String },
     Decade { decade: String },
 }
 
-/// Persisted per-column width override for one playlist.
-#[derive(Debug, Clone, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
-pub struct PlaylistColumnWidthOverride {
-    /// Stable column key (`{title}` or `custom:Name|Format`).
-    pub column_key: String,
-    /// Width override in logical pixels.
-    pub width_px: u32,
+/// Source hint for track ingest operations.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ImportSource {
+    AddFilesDialog,
+    AddFolderDialog,
+}
+
+/// Metadata patch keyed by stable track id.
+#[derive(Debug, Clone)]
+pub struct TrackMetadataPatch {
+    pub track_id: String,
+    pub summary: TrackMetadataSummary,
 }
 
 /// Minimal track row restored from storage.
@@ -320,6 +490,35 @@ pub struct RestoredTrack {
     pub path: PathBuf,
 }
 
+/// Playback queue source used for UI synchronization and routing semantics.
+#[derive(Debug, Clone)]
+pub enum PlaybackQueueSource {
+    Playlist { playlist_id: String },
+    Library,
+}
+
+/// Active playback route selection.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PlaybackRoute {
+    Local,
+    Cast,
+}
+
+/// Immutable playback queue snapshot used to bootstrap playback state.
+#[derive(Debug, Clone)]
+pub struct PlaybackQueueRequest {
+    pub source: PlaybackQueueSource,
+    pub tracks: Vec<RestoredTrack>,
+    pub start_index: usize,
+}
+
+/// Dedicated high-volume payload for playlist bulk-import queues.
+#[derive(Debug, Clone)]
+pub struct PlaylistBulkImportRequest {
+    pub paths: Vec<PathBuf>,
+    pub source: ImportSource,
+}
+
 /// Minimal playlist metadata restored from storage.
 #[derive(Debug, Clone, serde::Deserialize, serde::Serialize)]
 pub struct PlaylistInfo {
@@ -329,9 +528,9 @@ pub struct PlaylistInfo {
     pub name: String,
 }
 
-/// One indexed song entry in the music library.
+/// One indexed track entry in the music library.
 #[derive(Debug, Clone, serde::Deserialize, serde::Serialize)]
-pub struct LibrarySong {
+pub struct LibraryTrack {
     pub id: String,
     pub path: PathBuf,
     pub title: String,
@@ -343,12 +542,27 @@ pub struct LibrarySong {
     pub track_number: String,
 }
 
+/// Paged library query selector.
+#[derive(Debug, Clone)]
+pub enum LibraryViewQuery {
+    Tracks,
+    Artists,
+    Albums,
+    Genres,
+    Decades,
+    GlobalSearch,
+    ArtistDetail { artist: String },
+    AlbumDetail { album: String, album_artist: String },
+    GenreDetail { genre: String },
+    DecadeDetail { decade: String },
+}
+
 /// One album aggregate entry in the indexed music library.
 #[derive(Debug, Clone, serde::Deserialize, serde::Serialize)]
 pub struct LibraryAlbum {
     pub album: String,
     pub album_artist: String,
-    pub song_count: u32,
+    pub track_count: u32,
     pub representative_track_path: Option<PathBuf>,
 }
 
@@ -357,21 +571,31 @@ pub struct LibraryAlbum {
 pub struct LibraryArtist {
     pub artist: String,
     pub album_count: u32,
-    pub song_count: u32,
+    pub track_count: u32,
 }
 
 /// One genre aggregate entry in the indexed music library.
 #[derive(Debug, Clone, serde::Deserialize, serde::Serialize)]
 pub struct LibraryGenre {
     pub genre: String,
-    pub song_count: u32,
+    pub track_count: u32,
 }
 
 /// One decade aggregate entry in the indexed music library.
 #[derive(Debug, Clone, serde::Deserialize, serde::Serialize)]
 pub struct LibraryDecade {
     pub decade: String,
-    pub song_count: u32,
+    pub track_count: u32,
+}
+
+/// Generic paged-entry payload for library pagination requests.
+#[derive(Debug, Clone)]
+pub enum LibraryEntryPayload {
+    Track(LibraryTrack),
+    Artist(LibraryArtist),
+    Album(LibraryAlbum),
+    Genre(LibraryGenre),
+    Decade(LibraryDecade),
 }
 
 /// Technical metadata emitted for the currently active track.
@@ -387,6 +611,8 @@ pub struct TechnicalMetadata {
     pub channel_count: u16,
     /// Estimated duration in milliseconds.
     pub duration_ms: u64,
+    /// Source bit depth (e.g., 16, 24, 32).
+    pub bits_per_sample: u16,
 }
 
 /// Concrete output stream sample type selected by the audio backend.
@@ -415,8 +641,15 @@ pub struct OutputPathInfo {
     pub source_channel_count: u16,
     pub output_stream: OutputStreamInfo,
     pub resampled: bool,
-    pub remixed_channels: bool,
+    pub channel_transform: Option<ChannelTransformKind>,
     pub dithered: bool,
+}
+
+/// Channel-transform strategy used when source/output channel counts differ.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ChannelTransformKind {
+    Downmix,
+    ChannelMap,
 }
 
 /// Audio payload delivered from decoder to player.
@@ -464,9 +697,10 @@ pub enum AudioMessage {
 #[derive(Debug, Clone)]
 pub enum PlaybackMessage {
     ReadyForPlayback(String),
-    Play,                    // play the currently selected track
-    PlayTrackByIndex(usize), // play a specific track by index
-    PlayTrackById(String),   // play a specific track by identifier
+    Play, // resume the active playback queue
+    PlayActiveCollection,
+    StartQueue(PlaybackQueueRequest),
+    PlayTrackById(String), // play a specific track by identifier
     Stop,
     Pause,
     Next,
@@ -482,6 +716,76 @@ pub enum PlaybackMessage {
     PlaybackProgress { elapsed_ms: u64, total_ms: u64 },
     CoverArtChanged(Option<PathBuf>),
     MetadataDisplayChanged(Option<DetailedMetadata>),
+}
+
+/// One discoverable Google Cast target.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CastDeviceInfo {
+    /// Stable cast target id (UUID string from mDNS `id=` txt record when available).
+    pub id: String,
+    /// User-facing receiver name.
+    pub name: String,
+    /// Receiver model as reported by mDNS (`md=`), when available.
+    pub model: String,
+    /// Receiver host name.
+    pub host: String,
+    /// Receiver IPv4/IPv6 address.
+    pub address: String,
+    /// Cast control port (typically 8009).
+    pub port: u16,
+}
+
+/// High-level cast connection state.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CastConnectionState {
+    Disconnected,
+    Discovering,
+    Connecting,
+    Connected,
+}
+
+/// Cast media path used for the current track.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CastPlaybackPathKind {
+    Direct,
+    TranscodeWavPcm,
+}
+
+/// Cast subsystem commands and notifications.
+#[derive(Debug, Clone)]
+pub enum CastMessage {
+    DiscoverDevices,
+    DevicesUpdated(Vec<CastDeviceInfo>),
+    Connect {
+        device_id: String,
+    },
+    Disconnect,
+    ConnectionStateChanged {
+        state: CastConnectionState,
+        device: Option<CastDeviceInfo>,
+        reason: Option<String>,
+    },
+    LoadTrack {
+        track_id: String,
+        path: PathBuf,
+        start_offset_ms: u64,
+        metadata_summary: Option<TrackMetadataSummary>,
+    },
+    Play,
+    Pause,
+    Stop,
+    SeekMs(u64),
+    SetVolume(f32),
+    PlaybackPathChanged {
+        kind: CastPlaybackPathKind,
+        description: String,
+        transcode_output_metadata: Option<TechnicalMetadata>,
+    },
+    PlaybackError {
+        track_id: Option<String>,
+        message: String,
+        can_retry_with_transcode: bool,
+    },
 }
 
 /// Rich metadata used for UI display panels.
@@ -534,4 +838,130 @@ pub enum ConfigMessage {
     SetRuntimeOutputRate { sample_rate_hz: u32, reason: String },
     ClearRuntimeOutputRateOverride,
     OutputDeviceCapabilitiesChanged { verified_sample_rates: Vec<u32> },
+}
+
+/// Registered backend kind used by integration profiles and track sources.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum BackendKind {
+    LocalFs,
+    OpenSubsonic,
+}
+
+/// High-level runtime connectivity state for one backend profile.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum BackendConnectionState {
+    Disconnected,
+    Connecting,
+    Connected,
+    Error,
+}
+
+/// Immutable snapshot for one configured backend profile.
+#[derive(Debug, Clone, serde::Deserialize, serde::Serialize)]
+pub struct BackendProfileSnapshot {
+    pub profile_id: String,
+    pub backend_kind: BackendKind,
+    pub display_name: String,
+    pub endpoint: String,
+    pub username: String,
+    pub configured: bool,
+    pub connection_state: BackendConnectionState,
+    pub status_text: Option<String>,
+}
+
+/// Immutable integration snapshot distributed on the event bus.
+#[derive(Debug, Clone, serde::Deserialize, serde::Serialize)]
+pub struct BackendSnapshot {
+    pub version: u64,
+    pub profiles: Vec<BackendProfileSnapshot>,
+}
+
+/// Integration-domain commands and notifications.
+#[derive(Debug, Clone)]
+pub enum IntegrationMessage {
+    RequestSnapshot,
+    UpsertBackendProfile {
+        profile: BackendProfileSnapshot,
+        password: Option<String>,
+        connect_now: bool,
+    },
+    #[allow(dead_code)]
+    RemoveBackendProfile {
+        profile_id: String,
+    },
+    #[allow(dead_code)]
+    ConnectBackendProfile {
+        profile_id: String,
+    },
+    TestBackendConnection {
+        profile_id: String,
+    },
+    DisconnectBackendProfile {
+        profile_id: String,
+    },
+    SyncBackendProfile {
+        profile_id: String,
+    },
+    #[allow(dead_code)]
+    SetBackendConnectionState {
+        profile_id: String,
+        state: BackendConnectionState,
+        status_text: Option<String>,
+    },
+    BackendSnapshotUpdated(BackendSnapshot),
+    OpenSubsonicLibraryTracksUpdated {
+        profile_id: String,
+        tracks: Vec<LibraryTrack>,
+    },
+    OpenSubsonicPlaylistsUpdated {
+        profile_id: String,
+        playlists: Vec<RemotePlaylistSnapshot>,
+    },
+    PushOpenSubsonicPlaylistUpdate {
+        profile_id: String,
+        remote_playlist_id: String,
+        local_playlist_id: String,
+        track_song_ids: Vec<String>,
+    },
+    CreateOpenSubsonicPlaylistFromLocal {
+        profile_id: String,
+        local_playlist_id: String,
+        name: String,
+        track_song_ids: Vec<String>,
+    },
+    OpenSubsonicPlaylistWritebackResult {
+        local_playlist_id: String,
+        success: bool,
+        error: Option<String>,
+    },
+    OpenSubsonicPlaylistCreateResult {
+        profile_id: String,
+        local_playlist_id: String,
+        remote_playlist_id: Option<String>,
+        success: bool,
+        error: Option<String>,
+    },
+    BackendOperationFailed {
+        profile_id: Option<String>,
+        action: String,
+        error: String,
+    },
+}
+
+/// Remote playlist snapshot emitted by integration sync events.
+#[derive(Debug, Clone)]
+pub struct RemotePlaylistSnapshot {
+    pub remote_playlist_id: String,
+    pub name: String,
+    pub tracks: Vec<RemotePlaylistTrackSnapshot>,
+}
+
+/// One remote playlist track snapshot with display metadata.
+#[derive(Debug, Clone)]
+pub struct RemotePlaylistTrackSnapshot {
+    pub item_id: String,
+    pub path: PathBuf,
+    pub summary: TrackMetadataSummary,
 }

@@ -1,19 +1,71 @@
+import { Palette } from "std-widgets.slint";
+import { AppIcons } from "../icons.slint";
+
+export component TooltipHoverArea inherits TouchArea {
+    in property <string> tooltip-text: "";
+    in property <bool> tooltip-enabled: true;
+    callback tooltip_hover_changed(bool, string, int, int);
+
+    changed has-hover => {
+        if (root.tooltip-enabled && root.tooltip-text != "") {
+            root.tooltip_hover_changed(
+                self.has-hover,
+                root.tooltip-text,
+                floor((root.absolute-position.x + root.width / 2) / 1px),
+                floor((root.absolute-position.y + root.height) / 1px)
+            );
+        }
+    }
+
+    changed tooltip-enabled => {
+        if (!root.tooltip-enabled && root.has-hover) {
+            root.tooltip_hover_changed(false, "", 0, 0);
+        }
+    }
+
+    changed tooltip-text => {
+        if (root.tooltip-text == "" && root.has-hover) {
+            root.tooltip_hover_changed(false, "", 0, 0);
+        }
+    }
+}
+
 export component PlayerButton inherits Rectangle {
     width: 32px;
     height: 32px;
-    background: touch-area.pressed ? #444 : touch-area.has-hover ? #666 : transparent;
+    private property <bool> dark: Palette.color-scheme == ColorScheme.dark;
+    background: touch-area.pressed
+        ? (root.dark ? #444 : #d4dde8)
+        : touch-area.has-hover
+            ? (root.dark ? #666 : #e2e9f1)
+            : transparent;
     animate background { duration: 150ms; }
+    private property <brush> icon-color: root.is-primary ? #2a6def : (root.dark ? #eee : #263443);
+    private property <bool> has-icon: root.icon-source.width > 0 && root.icon-source.height > 0;
     in property <string> icon-text;
+    in property <image> icon-source;
     in property <string> tooltip-text: "";
     in property <bool> enabled: true;
     in property <bool> is-primary: false;
     in property <length> font-size: 16px;
     callback clicked;
     callback tooltip_hover_changed(bool, string, int, int);
-    Text {
+
+    if root.has-icon : Image {
+        source: root.icon-source;
+        width: root.font-size;
+        height: root.font-size;
+        x: (parent.width - self.width) / 2;
+        y: (parent.height - self.height) / 2;
+        image-fit: contain;
+        colorize: root.icon-color;
+        opacity: root.enabled ? 1.0 : 0.5;
+    }
+
+    if !root.has-icon : Text {
         text: root.icon-text;
         font-size: root.font-size;
-        color: root.is-primary ? #2a6def : #eee;
+        color: root.icon-color;
         horizontal-alignment: center;
         vertical-alignment: center;
         opacity: root.enabled ? 1.0 : 0.5;
@@ -52,32 +104,18 @@ export component ControlActionButton inherits Rectangle {
     in property <string> cluster-leaf-id: "";
     in property <int> playback-order-index: 0;
     in property <int> repeat-mode: 0;
+    in property <bool> cast-connected: false;
+    in property <bool> cast-connecting: false;
+    in property <int> collection-mode: 0;
     in property <bool> layout-edit-mode: false;
     callback invoked(int);
     callback open-add-menu(string);
     callback tooltip_hover_changed(bool, string, int, int);
 
-    pure function icon-for-action(action: int) -> string {
-        if action == 1 { return "+"; }
-        if action == 2 { return "⏮"; }
-        if action == 3 { return "▶"; }
-        if action == 4 { return "⏸"; }
-        if action == 5 { return "⏹"; }
-        if action == 6 { return "⏭"; }
-        if action == 7 { return "⇄"; }
-        if action == 8 { return "⟳"; }
-        if action == 9 { return "◫"; }
-        if action == 10 { return "⚙"; }
-        return "•";
-    }
-
     pure function font-size-for-action(action: int) -> length {
-        if action == 1 { return 20px; }
-        if action == 3 { return 20px; }
-        if action == 10 { return 21px; }
-        if action == 7 { return 20px; }
-        if action == 8 { return 19px; }
-        return 18px;
+        if action == 1 { return 18px; }
+        if action == 10 { return 18px; }
+        return 17px;
     }
 
     pure function primary-for-action(action: int) -> bool {
@@ -85,6 +123,7 @@ export component ControlActionButton inherits Rectangle {
         if action == 7 { return root.playback-order-index != 0; }
         if action == 8 { return root.repeat-mode != 0; }
         if action == 9 { return root.layout-edit-mode; }
+        if action == 11 { return root.cast-connected || root.cast-connecting; }
         return false;
     }
 
@@ -111,15 +150,42 @@ export component ControlActionButton inherits Rectangle {
         }
         if action == 9 { return "Layout editor"; }
         if action == 10 { return "Settings menu"; }
+        if action == 11 {
+            return root.cast-connected
+                ? "Cast connected (click to manage)"
+                : root.cast-connecting
+                    ? "Connecting to cast device..."
+                    : "Cast to a device on your network";
+        }
         return "";
+    }
+
+    pure function enabled-for-action(action: int) -> bool {
+        if action == 1 {
+            return root.collection-mode == 0;
+        }
+        return true;
     }
 
     width: 32px;
     height: 32px;
 
     PlayerButton {
-        icon-text: root.icon-for-action(root.action-id);
+        icon-source: root.action-id == 1 ? AppIcons.plus
+            : root.action-id == 2 ? AppIcons.player-prev
+            : root.action-id == 3 ? AppIcons.player-play
+            : root.action-id == 4 ? AppIcons.player-pause
+            : root.action-id == 5 ? AppIcons.player-stop
+            : root.action-id == 6 ? AppIcons.player-next
+            : root.action-id == 7 ? AppIcons.shuffle
+            : root.action-id == 8 ? AppIcons.repeat
+            : root.action-id == 9 ? AppIcons.layout
+            : root.action-id == 10 ? AppIcons.settings
+            : root.action-id == 11 ? AppIcons.cast
+            : AppIcons.music;
+        icon-text: "";
         tooltip-text: root.tooltip-for-action(root.action-id);
+        enabled: root.enabled-for-action(root.action-id);
         font-size: root.font-size-for-action(root.action-id);
         is-primary: root.primary-for-action(root.action-id);
         clicked => { root.invoked(root.action-id); }
@@ -173,10 +239,14 @@ export component ButtonCluster inherits Rectangle {
     in property <[int]> button-actions: [];
     in property <int> playback-order-index: 0;
     in property <int> repeat-mode: 0;
+    in property <bool> cast-connected: false;
+    in property <bool> cast-connecting: false;
+    in property <int> collection-mode: 0;
     in property <bool> layout-edit-mode: false;
     callback action-invoked(int);
     callback request-add-menu(string);
     callback tooltip_hover_changed(bool, string, int, int);
+    private property <bool> dark: Palette.color-scheme == ColorScheme.dark;
 
     width: max(32px, button-actions.length * 32px + max(0, button-actions.length - 1) * 8px);
     height: 32px;
@@ -186,11 +256,13 @@ export component ButtonCluster inherits Rectangle {
         height: 32px;
         border-radius: 3px;
         border-width: 1px;
-        border-color: #3d3d3d;
-        background: empty-cluster-ta.has-hover ? #333 : #2a2a2a;
+        border-color: root.dark ? #3d3d3d : #c3cdd9;
+        background: empty-cluster-ta.has-hover
+            ? (root.dark ? #333 : #dde5ef)
+            : (root.dark ? #2a2a2a : #eef3f9);
         Text {
-            text: "…";
-            color: #999;
+            text: "...";
+            color: root.dark ? #999 : #5e6d7d;
             font-size: 16px;
             horizontal-alignment: center;
             vertical-alignment: center;
@@ -213,6 +285,9 @@ export component ButtonCluster inherits Rectangle {
             cluster-leaf-id: root.cluster-leaf-id;
             playback-order-index: root.playback-order-index;
             repeat-mode: root.repeat-mode;
+            cast-connected: root.cast-connected;
+            cast-connecting: root.cast-connecting;
+            collection-mode: root.collection-mode;
             layout-edit-mode: root.layout-edit-mode;
             invoked(action-id) => { root.action-invoked(action-id); }
             open-add-menu(cluster-leaf-id) => { root.request-add-menu(cluster-leaf-id); }

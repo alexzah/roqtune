@@ -5,17 +5,23 @@
 //! and packet emission.
 
 use crate::config::{BufferingConfig, Config, ResamplerQuality};
-use crate::protocol::{self, AudioMessage, AudioPacket, ConfigMessage, Message, TrackIdentifier};
+use crate::integration_uri::{parse_opensubsonic_track_uri, OpenSubsonicTrackLocator};
+use crate::protocol::{
+    self, AudioMessage, AudioPacket, ConfigMessage, IntegrationMessage, Message, TrackIdentifier,
+};
+use audio_mixer::{Channel as MixChannel, Mixer};
 use log::{debug, error, warn};
 use rubato::{
     Resampler, SincFixedIn, SincInterpolationParameters, SincInterpolationType, WindowFunction,
 };
 use std::cmp::min;
-use std::collections::VecDeque;
+use std::collections::{HashMap, VecDeque};
+use std::io::{Cursor, Read};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::thread;
+use std::time::Duration;
 use symphonia::core::audio::SampleBuffer;
 use symphonia::core::codecs::{CodecParameters, Decoder, DecoderOptions};
 use symphonia::core::errors::Error;
@@ -26,6 +32,9 @@ use symphonia::core::probe::Hint;
 use tokio::sync::broadcast::{Receiver, Sender};
 use tokio::sync::mpsc::error::TrySendError;
 use tokio::sync::mpsc::{self, Receiver as MpscReceiver, Sender as MpscSender};
+
+const OPENSUBSONIC_API_VERSION: &str = "1.16.1";
+const OPENSUBSONIC_CLIENT_ID: &str = "roqtune";
 
 /// Work items consumed by the decode worker thread.
 #[derive(Debug, Clone)]
@@ -45,6 +54,13 @@ enum DecodeWorkItem {
     ConfigChanged(Config),
     AudioDeviceOpened {
         stream_info: protocol::OutputStreamInfo,
+    },
+    UpsertOpenSubsonicPassword {
+        profile_id: String,
+        password: String,
+    },
+    RemoveOpenSubsonicPassword {
+        profile_id: String,
     },
 }
 
@@ -72,13 +88,16 @@ struct DecodeWorker {
     resampler: Option<SincFixedIn<f32>>,
     resampler_flushed: bool,
     resample_buffer: VecDeque<f32>,
+    downmix_mixers: HashMap<(usize, usize), Mixer<f32>>,
     target_sample_rate: u32,
     target_channels: u16,
     target_bits_per_sample: u16,
     resampler_quality: ResamplerQuality,
     dither_on_bitdepth_reduce: bool,
+    downmix_higher_channel_tracks: bool,
     decoder_request_chunk_ms: u32,
     decode_generation: u64,
+    opensubsonic_passwords: HashMap<String, String>,
 }
 
 impl DecodeWorker {
@@ -98,18 +117,150 @@ impl DecodeWorker {
             resampler: None,
             resampler_flushed: false,
             resample_buffer: VecDeque::new(),
+            downmix_mixers: HashMap::new(),
             target_sample_rate: 44100,
             target_channels: 2,
             target_bits_per_sample: 16,
             resampler_quality: ResamplerQuality::High,
             dither_on_bitdepth_reduce: true,
+            downmix_higher_channel_tracks: true,
             decoder_request_chunk_ms: BufferingConfig::default().decoder_request_chunk_ms,
             decode_generation: 0,
+            opensubsonic_passwords: HashMap::new(),
         }
     }
 
     fn should_bootstrap_decode(tracks: &[TrackIdentifier]) -> bool {
         tracks.iter().any(|track| track.play_immediately)
+    }
+
+    fn make_opensubsonic_salt() -> String {
+        let mut bytes = [0u8; 8];
+        let _ = getrandom::fill(&mut bytes);
+        bytes.iter().map(|value| format!("{value:02x}")).collect()
+    }
+
+    fn opensubsonic_download_url(locator: &OpenSubsonicTrackLocator, password: &str) -> String {
+        let salt = Self::make_opensubsonic_salt();
+        let token = format!("{:x}", md5::compute(format!("{}{}", password, salt)));
+        format!(
+            "{}/rest/download.view?u={}&t={}&s={}&v={}&c={}&id={}",
+            locator.endpoint.trim().trim_end_matches('/'),
+            urlencoding::encode(locator.username.trim()),
+            token,
+            salt,
+            OPENSUBSONIC_API_VERSION,
+            OPENSUBSONIC_CLIENT_ID,
+            urlencoding::encode(locator.song_id.as_str()),
+        )
+    }
+
+    fn extension_from_content_type(content_type: &str) -> Option<&'static str> {
+        let mime = content_type
+            .split(';')
+            .next()
+            .map(str::trim)
+            .unwrap_or_default()
+            .to_ascii_lowercase();
+        match mime.as_str() {
+            "audio/mpeg" | "audio/mp3" => Some("mp3"),
+            "audio/flac" | "audio/x-flac" => Some("flac"),
+            "audio/ogg" | "audio/vorbis" | "audio/opus" => Some("ogg"),
+            "audio/aac" | "audio/x-aac" => Some("aac"),
+            "audio/mp4" | "audio/x-m4a" => Some("m4a"),
+            "audio/wav" | "audio/x-wav" => Some("wav"),
+            _ => None,
+        }
+    }
+
+    fn fetch_opensubsonic_stream_bytes_with_hint(
+        locator: &OpenSubsonicTrackLocator,
+        password: &str,
+    ) -> Result<(Vec<u8>, Option<String>), String> {
+        let url = Self::opensubsonic_download_url(locator, password);
+        let client = ureq::AgentBuilder::new()
+            .timeout_connect(Duration::from_secs(5))
+            .timeout_read(Duration::from_secs(45))
+            .timeout_write(Duration::from_secs(45))
+            .build();
+        let response = client
+            .get(url.as_str())
+            .call()
+            .map_err(|error| format!("OpenSubsonic stream request failed: {error}"))?;
+        let hint_extension = response
+            .header("Content-Type")
+            .and_then(Self::extension_from_content_type)
+            .map(ToOwned::to_owned);
+        let mut body = Vec::new();
+        response
+            .into_reader()
+            .read_to_end(&mut body)
+            .map_err(|error| format!("OpenSubsonic stream body read failed: {error}"))?;
+        if body.is_empty() {
+            return Err("OpenSubsonic stream response was empty".to_string());
+        }
+        let preview = String::from_utf8_lossy(&body[..body.len().min(512)]).to_ascii_lowercase();
+        if preview.contains("subsonic-response")
+            || preview.contains("<error")
+            || preview.contains("\"error\"")
+        {
+            return Err("OpenSubsonic stream request returned an error payload".to_string());
+        }
+        Ok((body, hint_extension))
+    }
+
+    fn open_media_source_stream(
+        &self,
+        track: &TrackIdentifier,
+        hint: &mut Hint,
+    ) -> Result<MediaSourceStream, String> {
+        if let Some(locator) = parse_opensubsonic_track_uri(track.path.as_path()) {
+            if locator.endpoint.trim().is_empty() {
+                return Err(format!(
+                    "OpenSubsonic track URI missing endpoint for profile '{}'. \
+Re-sync the track from the server and try again.",
+                    locator.profile_id
+                ));
+            }
+            if locator.username.trim().is_empty() {
+                return Err(format!(
+                    "OpenSubsonic track URI missing username for profile '{}'. \
+Re-sync the track from the server and try again.",
+                    locator.profile_id
+                ));
+            }
+            let Some(password) = self.opensubsonic_passwords.get(&locator.profile_id) else {
+                return Err(format!(
+                    "OpenSubsonic credential not cached for profile '{}'. \
+Check Settings -> OpenSubsonic status and re-save credentials if needed.",
+                    locator.profile_id
+                ));
+            };
+            let (body, hint_extension) =
+                Self::fetch_opensubsonic_stream_bytes_with_hint(&locator, password.as_str())?;
+            if let Some(extension) = locator
+                .format_hint
+                .as_deref()
+                .map(str::trim)
+                .filter(|hint| !hint.is_empty())
+            {
+                hint.with_extension(extension);
+            }
+            if let Some(extension) = hint_extension {
+                hint.with_extension(extension.as_str());
+            }
+            return Ok(MediaSourceStream::new(
+                Box::new(Cursor::new(body)),
+                Default::default(),
+            ));
+        }
+
+        if let Some(extension) = track.path.extension().and_then(|ext| ext.to_str()) {
+            hint.with_extension(extension);
+        }
+        let file = std::fs::File::open(track.path.clone())
+            .map_err(|error| format!("Failed to open file: {error}"))?;
+        Ok(MediaSourceStream::new(Box::new(file), Default::default()))
     }
 
     /// Runs the decode worker loop, draining queued work items forever.
@@ -179,15 +330,35 @@ impl DecodeWorker {
                 self.decode_requested_samples(requested_samples);
             }
             DecodeWorkItem::ConfigChanged(config) => {
-                self.target_sample_rate = config.output.sample_rate_khz;
-                self.target_channels = config.output.channel_count;
-                self.target_bits_per_sample = config.output.bits_per_sample;
-                self.resampler_quality = config.output.resampler_quality;
-                self.dither_on_bitdepth_reduce = config.output.dither_on_bitdepth_reduce;
-                self.decoder_request_chunk_ms = config.buffering.decoder_request_chunk_ms;
-                self.resampler = None;
-                self.resampler_flushed = false;
-                self.resample_buffer.clear();
+                let next_target_sample_rate = config.output.sample_rate_khz;
+                let next_target_channels = config.output.channel_count;
+                let next_target_bits_per_sample = config.output.bits_per_sample;
+                let next_resampler_quality = config.output.resampler_quality;
+                let next_dither_on_bitdepth_reduce = config.output.dither_on_bitdepth_reduce;
+                let next_downmix_higher_channel_tracks =
+                    config.output.downmix_higher_channel_tracks;
+                let next_decoder_request_chunk_ms = config.buffering.decoder_request_chunk_ms;
+
+                let audio_processing_changed = self.target_sample_rate != next_target_sample_rate
+                    || self.target_channels != next_target_channels
+                    || self.target_bits_per_sample != next_target_bits_per_sample
+                    || self.resampler_quality != next_resampler_quality
+                    || self.dither_on_bitdepth_reduce != next_dither_on_bitdepth_reduce
+                    || self.downmix_higher_channel_tracks != next_downmix_higher_channel_tracks;
+
+                self.target_sample_rate = next_target_sample_rate;
+                self.target_channels = next_target_channels;
+                self.target_bits_per_sample = next_target_bits_per_sample;
+                self.resampler_quality = next_resampler_quality;
+                self.dither_on_bitdepth_reduce = next_dither_on_bitdepth_reduce;
+                self.downmix_higher_channel_tracks = next_downmix_higher_channel_tracks;
+                self.decoder_request_chunk_ms = next_decoder_request_chunk_ms;
+
+                if audio_processing_changed {
+                    self.resampler = None;
+                    self.resampler_flushed = false;
+                    self.resample_buffer.clear();
+                }
             }
             DecodeWorkItem::AudioDeviceOpened { stream_info } => {
                 self.target_sample_rate = stream_info.sample_rate_hz;
@@ -196,6 +367,15 @@ impl DecodeWorker {
                 self.resampler = None;
                 self.resampler_flushed = false;
                 self.resample_buffer.clear();
+            }
+            DecodeWorkItem::UpsertOpenSubsonicPassword {
+                profile_id,
+                password,
+            } => {
+                self.opensubsonic_passwords.insert(profile_id, password);
+            }
+            DecodeWorkItem::RemoveOpenSubsonicPassword { profile_id } => {
+                self.opensubsonic_passwords.remove(profile_id.as_str());
             }
         }
     }
@@ -459,7 +639,11 @@ impl DecodeWorker {
         }
     }
 
-    fn remap_channels(samples: &[f32], source_channels: usize, target_channels: usize) -> Vec<f32> {
+    fn channel_map_channels(
+        samples: &[f32],
+        source_channels: usize,
+        target_channels: usize,
+    ) -> Vec<f32> {
         if source_channels == 0 || target_channels == 0 {
             return Vec::new();
         }
@@ -492,8 +676,115 @@ impl DecodeWorker {
         remapped
     }
 
+    fn channel_layout_for_count(channel_count: usize) -> Vec<MixChannel> {
+        match channel_count {
+            0 => Vec::new(),
+            1 => vec![MixChannel::FrontCenter],
+            2 => vec![MixChannel::FrontLeft, MixChannel::FrontRight],
+            3 => vec![
+                MixChannel::FrontLeft,
+                MixChannel::FrontRight,
+                MixChannel::FrontCenter,
+            ],
+            4 => vec![
+                MixChannel::FrontLeft,
+                MixChannel::FrontRight,
+                MixChannel::BackLeft,
+                MixChannel::BackRight,
+            ],
+            5 => vec![
+                MixChannel::FrontLeft,
+                MixChannel::FrontRight,
+                MixChannel::FrontCenter,
+                MixChannel::BackLeft,
+                MixChannel::BackRight,
+            ],
+            6 => vec![
+                MixChannel::FrontLeft,
+                MixChannel::FrontRight,
+                MixChannel::FrontCenter,
+                MixChannel::LowFrequency,
+                MixChannel::BackLeft,
+                MixChannel::BackRight,
+            ],
+            7 => vec![
+                MixChannel::FrontLeft,
+                MixChannel::FrontRight,
+                MixChannel::FrontCenter,
+                MixChannel::LowFrequency,
+                MixChannel::BackLeft,
+                MixChannel::BackRight,
+                MixChannel::BackCenter,
+            ],
+            8 => vec![
+                MixChannel::FrontLeft,
+                MixChannel::FrontRight,
+                MixChannel::FrontCenter,
+                MixChannel::LowFrequency,
+                MixChannel::BackLeft,
+                MixChannel::BackRight,
+                MixChannel::SideLeft,
+                MixChannel::SideRight,
+            ],
+            _ => {
+                let mut layout = Self::channel_layout_for_count(8);
+                layout.resize(channel_count, MixChannel::Discrete);
+                layout
+            }
+        }
+    }
+
+    fn downmix_mixer_for(&mut self, source_channels: usize, target_channels: usize) -> &Mixer<f32> {
+        self.downmix_mixers
+            .entry((source_channels, target_channels))
+            .or_insert_with(|| {
+                let input_layout = Self::channel_layout_for_count(source_channels);
+                let output_layout = Self::channel_layout_for_count(target_channels);
+                Mixer::<f32>::new(&input_layout, &output_layout)
+            })
+    }
+
+    fn downmix_channels(
+        &mut self,
+        samples: &[f32],
+        source_channels: usize,
+        target_channels: usize,
+    ) -> Vec<f32> {
+        if source_channels == 0 || target_channels == 0 {
+            return Vec::new();
+        }
+        if source_channels <= target_channels {
+            return Self::channel_map_channels(samples, source_channels, target_channels);
+        }
+
+        let frame_count = samples.len() / source_channels;
+        let mut downmixed = Vec::with_capacity(frame_count * target_channels);
+        let mixer = self.downmix_mixer_for(source_channels, target_channels);
+        let mut output_frame = vec![0.0f32; target_channels];
+
+        for input_frame in samples.chunks_exact(source_channels) {
+            mixer.mix(input_frame, &mut output_frame);
+            downmixed.extend_from_slice(&output_frame);
+        }
+
+        downmixed
+    }
+
+    fn transform_channels(
+        &mut self,
+        samples: &[f32],
+        source_channels: usize,
+        target_channels: usize,
+    ) -> Vec<f32> {
+        if source_channels > target_channels && self.downmix_higher_channel_tracks {
+            self.downmix_channels(samples, source_channels, target_channels)
+        } else {
+            Self::channel_map_channels(samples, source_channels, target_channels)
+        }
+    }
+
     fn decode_one_packet_into_buffer(&mut self) -> bool {
-        let mut decoded_samples: Option<Vec<f32>> = None;
+        let mut decoded_samples: Option<(Vec<f32>, usize)> = None;
         let mut exhausted_input = false;
         let target_channels = self.target_channels.max(1) as usize;
 
@@ -516,12 +807,10 @@ impl DecodeWorker {
                             let duration = decoded.capacity() as u64;
                             let mut sample_buffer = SampleBuffer::<f32>::new(duration, *spec);
                             sample_buffer.copy_interleaved_ref(decoded);
-                            let mapped = Self::remap_channels(
-                                sample_buffer.samples(),
+                            decoded_samples = Some((
+                                sample_buffer.samples().to_vec(),
                                 active.source_channels.max(1) as usize,
-                                target_channels,
-                            );
-                            decoded_samples = Some(mapped);
+                            ));
                         }
                         Err(Error::DecodeError(msg)) => {
                             warn!("Decode error (skipping frame): {}", msg);
@@ -569,8 +858,9 @@ impl DecodeWorker {
             }
         }
 
-        if let Some(samples) = decoded_samples {
-            self.resample_buffer.extend(samples);
+        if let Some((samples, source_channels)) = decoded_samples {
+            let transformed = self.transform_channels(&samples, source_channels, target_channels);
+            self.resample_buffer.extend(transformed);
             true
         } else {
             !exhausted_input
@@ -639,17 +929,28 @@ impl DecodeWorker {
         false
     }
 
+    fn emit_track_unavailable_if_remote(&self, track: &TrackIdentifier, reason: &str) {
+        if parse_opensubsonic_track_uri(track.path.as_path()).is_none() {
+            return;
+        }
+        let _ = self.bus_sender.send(Message::Playlist(
+            protocol::PlaylistMessage::TrackUnavailable {
+                id: track.id.clone(),
+                reason: reason.to_string(),
+            },
+        ));
+    }
+
     fn open_track(&mut self, input_track: TrackIdentifier) -> Option<ActiveDecodeTrack> {
-        let file = match std::fs::File::open(input_track.path.clone()) {
-            Ok(file) => file,
-            Err(e) => {
-                error!("Failed to open file: {}", e);
+        let mut hint = Hint::new();
+        let media_source = match self.open_media_source_stream(&input_track, &mut hint) {
+            Ok(source) => source,
+            Err(error_text) => {
+                error!("{error_text}");
+                self.emit_track_unavailable_if_remote(&input_track, error_text.as_str());
                 return None;
             }
         };
-
-        let media_source = MediaSourceStream::new(Box::new(file), Default::default());
-        let hint = Hint::new();
         let mut format_reader = match symphonia::default::get_probe().format(
             &hint,
             media_source,
@@ -659,6 +960,10 @@ impl DecodeWorker {
             Ok(probed) => probed.format,
             Err(e) => {
                 error!("Failed to probe media source: {}", e);
+                self.emit_track_unavailable_if_remote(
+                    &input_track,
+                    format!("Failed to probe media source: {e}").as_str(),
+                );
                 return None;
             }
         };
@@ -668,6 +973,10 @@ impl DecodeWorker {
                 Some(track) => track,
                 None => {
                     error!("No default track found");
+                    self.emit_track_unavailable_if_remote(
+                        &input_track,
+                        "No default track found in remote stream payload",
+                    );
                     return None;
                 }
             };
@@ -678,6 +987,10 @@ impl DecodeWorker {
         let source_channels = codec_params.channels.map(|c| c.count() as u16).unwrap_or(2);
         if source_channels == 0 {
             error!("Unsupported channel count 0 in {:?}", input_track.path);
+            self.emit_track_unavailable_if_remote(
+                &input_track,
+                "Unsupported channel count in remote stream payload",
+            );
             return None;
         }
 
@@ -702,6 +1015,10 @@ impl DecodeWorker {
             Ok(decoder) => decoder,
             Err(e) => {
                 error!("Failed to create decoder: {}", e);
+                self.emit_track_unavailable_if_remote(
+                    &input_track,
+                    format!("Failed to create decoder for remote stream: {e}").as_str(),
+                );
                 return None;
             }
         };
@@ -742,11 +1059,14 @@ impl DecodeWorker {
         codec_params: &CodecParameters,
     ) -> protocol::TechnicalMetadata {
         let sample_rate = codec_params.sample_rate.unwrap_or(44100);
-        let format_name = path
-            .extension()
-            .and_then(|ext| ext.to_str())
-            .unwrap_or("AUDIO")
-            .to_uppercase();
+        let format_name = parse_opensubsonic_track_uri(path.as_path())
+            .and_then(|locator| locator.format_hint.map(|hint| hint.to_ascii_uppercase()))
+            .or_else(|| {
+                path.extension()
+                    .and_then(|ext| ext.to_str())
+                    .map(|ext| ext.to_uppercase())
+            })
+            .unwrap_or_else(|| "AUDIO".to_string());
 
         let n_frames = codec_params.n_frames.unwrap_or(0);
         let duration_ms = if n_frames > 0 {
@@ -779,6 +1099,7 @@ impl DecodeWorker {
                 .map(|channels| channels.count() as u16)
                 .unwrap_or(2),
             duration_ms: duration_ms as u64,
+            bits_per_sample: codec_params.bits_per_sample.unwrap_or(16) as u16,
         }
     }
 }
@@ -887,9 +1208,38 @@ impl AudioDecoder {
                             .blocking_send(DecodeWorkItem::AudioDeviceOpened { stream_info })
                             .unwrap();
                     }
+                    Message::Integration(IntegrationMessage::UpsertBackendProfile {
+                        profile,
+                        password,
+                        ..
+                    }) => {
+                        if profile.backend_kind != protocol::BackendKind::OpenSubsonic {
+                            continue;
+                        }
+                        if let Some(password) = password {
+                            let _ = self.worker_sender.blocking_send(
+                                DecodeWorkItem::UpsertOpenSubsonicPassword {
+                                    profile_id: profile.profile_id,
+                                    password,
+                                },
+                            );
+                        }
+                    }
+                    Message::Integration(IntegrationMessage::RemoveBackendProfile {
+                        profile_id,
+                    }) => {
+                        let _ = self.worker_sender.blocking_send(
+                            DecodeWorkItem::RemoveOpenSubsonicPassword { profile_id },
+                        );
+                    }
                     _ => {}
                 },
-                Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {}
+                Err(tokio::sync::broadcast::error::RecvError::Lagged(skipped)) => {
+                    log::warn!(
+                        "AudioDecoder lagged on control bus, skipped {} message(s)",
+                        skipped
+                    );
+                }
                 Err(tokio::sync::broadcast::error::RecvError::Closed) => {
                     error!("AudioDecoder: bus closed");
                     break;
@@ -942,6 +1292,7 @@ impl AudioDecoder {
 #[cfg(test)]
 mod tests {
     use super::{AudioDecoder, DecodeWorkItem, DecodeWorker};
+    use crate::integration_uri::OpenSubsonicTrackLocator;
     use crate::protocol::TrackIdentifier;
     use std::path::PathBuf;
     use std::sync::atomic::{AtomicBool, Ordering};
@@ -1144,5 +1495,50 @@ mod tests {
             !inflight.load(Ordering::Relaxed),
             "worker should clear inflight even for stale requests"
         );
+    }
+
+    #[test]
+    fn test_transform_channels_downmixes_when_enabled_for_higher_channel_source() {
+        let samples = vec![0.3, 0.2, 0.1, 0.0, 0.2, 0.1];
+        let (bus_sender, _) = broadcast::channel(8);
+        let (_worker_tx, worker_rx) = mpsc::channel(8);
+        let mut worker = DecodeWorker::new(bus_sender, worker_rx, Arc::new(AtomicBool::new(false)));
+        worker.downmix_higher_channel_tracks = true;
+        let transformed = worker.transform_channels(&samples, 6, 2);
+
+        assert_eq!(transformed.len(), 2);
+        assert_ne!(transformed, vec![0.3, 0.2]);
+        assert!(transformed.iter().all(|sample| sample.is_finite()));
+    }
+
+    #[test]
+    fn test_transform_channels_uses_channel_map_when_downmix_disabled() {
+        let samples = vec![0.3, 0.2, 0.1, 0.0, 0.2, 0.1];
+        let (bus_sender, _) = broadcast::channel(8);
+        let (_worker_tx, worker_rx) = mpsc::channel(8);
+        let mut worker = DecodeWorker::new(bus_sender, worker_rx, Arc::new(AtomicBool::new(false)));
+        worker.downmix_higher_channel_tracks = false;
+        let transformed = worker.transform_channels(&samples, 6, 2);
+
+        assert_eq!(transformed, vec![0.3, 0.2]);
+    }
+
+    #[test]
+    fn test_opensubsonic_download_url_contains_required_query_parts() {
+        let locator = OpenSubsonicTrackLocator {
+            profile_id: "home".to_string(),
+            song_id: "song-42".to_string(),
+            endpoint: "https://music.example.com/".to_string(),
+            username: "alice@example.com".to_string(),
+            format_hint: None,
+        };
+        let url = DecodeWorker::opensubsonic_download_url(&locator, "secret");
+        assert!(url.starts_with("https://music.example.com/rest/download.view?"));
+        assert!(url.contains("u=alice%40example.com"));
+        assert!(url.contains("id=song-42"));
+        assert!(url.contains("t="));
+        assert!(url.contains("s="));
+        assert!(url.contains("v=1.16.1"));
+        assert!(url.contains("c=roqtune"));
     }
 }

@@ -5,7 +5,6 @@ edition = "2021"
 build = "build.rs"
 
 [dependencies]
-slint = "1.15.0" # UI framework
 rfd = "0.17.2"   # For file dialogs
 log = "0.4.29" # logs
 colog = "1.4.0" # logs
@@ -15,7 +14,7 @@ symphonia = {version = "0.5.5", features = [
     "all"
 ] } # For audio decoding
 cpal = "0.15.3" # For audio playback
-tokio = { version = "1.49.0", features = ["sync"] }
+tokio = { version = "1.49.0", features = ["sync", "rt", "net", "time"] }
 rubato = "0.16.2" # For audio resampling
 dirs = "6.0.0" # For getting user's home directory
 toml = "0.9.12" # For reading and writing toml files
@@ -26,6 +25,20 @@ rusqlite = { version = "0.38.0", features = ["bundled"] }
 governor = "0.10.4" # Rate limiting for UI updates
 souvlaki = "0.8.3" # Cross-platform media controls (MPRIS/SMTC/Now Playing)
 lofty = "0.23.1" # Reading / writing metadata tags
+ureq = { version = "2.12.1", features = ["json"] }
+urlencoding = "2.1.3"
+webbrowser = "1.0.6"
+native-tls = "0.2.14"
+mdns-sd = "0.17.0"
+audio-mixer = "0.2.0"
+keyring = "2.3.3"
+md5 = "0.8.0"
+
+[target.'cfg(target_os = "windows")'.dependencies]
+slint = { version = "1.15.1", default-features = false, features = ["std", "unstable-winit-030", "renderer-femtovg", "renderer-software", "compat-1-2"] } # UI framework (Qt-free via explicit winit backend), accessibility disabled on Windows due ComboBox/Wine crash
+
+[target.'cfg(not(target_os = "windows"))'.dependencies]
+slint = { version = "1.15.1", default-features = false, features = ["std", "unstable-winit-030", "renderer-femtovg", "renderer-software", "accessibility", "compat-1-2"] } # UI framework (Qt-free via explicit winit backend)
 
 [build-dependencies]
 slint-build = "1.15.0"

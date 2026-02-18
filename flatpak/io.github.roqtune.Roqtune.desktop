@@ -1,0 +1,10 @@
+[Desktop Entry]
+Type=Application
+Name=roqtune
+Comment=Configurable desktop music player
+Exec=roqtune
+Icon=io.github.roqtune.Roqtune
+Terminal=false
+Categories=AudioVideo;Audio;Player;
+Keywords=music;audio;player;tracks;playlist;library;
+StartupNotify=true

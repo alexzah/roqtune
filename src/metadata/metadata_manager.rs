@@ -483,7 +483,12 @@ impl MetadataManager {
                     }
                 }
                 Ok(_) => {}
-                Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {}
+                Err(tokio::sync::broadcast::error::RecvError::Lagged(skipped)) => {
+                    log::warn!(
+                        "MetadataManager lagged on control bus, skipped {} message(s)",
+                        skipped
+                    );
+                }
                 Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
             }
         }

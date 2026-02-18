@@ -115,13 +115,13 @@ impl MediaControlsManager {
 
     fn map_control_event(event: MediaControlEvent, state: ControlState) -> Option<PlaybackMessage> {
         match event {
-            MediaControlEvent::Play => Some(PlaybackMessage::Play),
+            MediaControlEvent::Play => Some(PlaybackMessage::PlayActiveCollection),
             MediaControlEvent::Pause => Some(PlaybackMessage::Pause),
             MediaControlEvent::Toggle => {
                 if state.is_playing {
                     Some(PlaybackMessage::Pause)
                 } else {
-                    Some(PlaybackMessage::Play)
+                    Some(PlaybackMessage::PlayActiveCollection)
                 }
             }
             MediaControlEvent::Next => Some(PlaybackMessage::Next),
@@ -371,7 +371,10 @@ mod tests {
             total_ms: 0,
         };
         let message = MediaControlsManager::map_control_event(MediaControlEvent::Toggle, state);
-        assert!(matches!(message, Some(PlaybackMessage::Play)));
+        assert!(matches!(
+            message,
+            Some(PlaybackMessage::PlayActiveCollection)
+        ));
     }
 
     #[test]

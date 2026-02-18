@@ -4,8 +4,8 @@
 //! stream, and emits playback progress/track lifecycle notifications.
 
 use crate::protocol::{
-    AudioMessage, AudioPacket, ConfigMessage, Message, OutputPathInfo, OutputSampleFormat,
-    OutputStreamInfo, PlaybackMessage, TrackStarted,
+    AudioMessage, AudioPacket, ChannelTransformKind, ConfigMessage, Message, OutputPathInfo,
+    OutputSampleFormat, OutputStreamInfo, PlaybackMessage, TrackStarted,
 };
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use log::{debug, error, warn};
@@ -46,6 +46,15 @@ struct TrackIndex {
     technical_metadata: crate::protocol::TechnicalMetadata,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct OutputConfigSignature {
+    device_name: Option<String>,
+    sample_rate_hz: u32,
+    channel_count: u16,
+    bits_per_sample: u16,
+    dither_on_bitdepth_reduce: bool,
+}
+
 /// Runtime audio output controller and packet queue owner.
 pub struct AudioPlayer {
     bus_receiver: Receiver<Message>,
@@ -55,6 +64,7 @@ pub struct AudioPlayer {
     target_channels: Arc<AtomicUsize>,
     target_bits_per_sample: u16,
     dither_on_bitdepth_reduce: bool,
+    downmix_higher_channel_tracks: bool,
     target_output_device_name: Arc<Mutex<Option<String>>>,
     output_stream_info: Arc<Mutex<Option<OutputStreamInfo>>>,
     sample_queue: Arc<Mutex<VecDeque<AudioQueueEntry>>>,
@@ -79,9 +89,47 @@ pub struct AudioPlayer {
     sample_format: Option<cpal::SampleFormat>,
     device: Option<cpal::Device>,
     stream: Option<cpal::Stream>,
+    last_output_signature: Option<OutputConfigSignature>,
 }
 
 impl AudioPlayer {
+    fn canonicalize_requested_device_name(device_name: &str) -> Option<String> {
+        let trimmed = device_name.trim();
+        if trimmed.is_empty() {
+            return None;
+        }
+        let normalized = trimmed.to_ascii_lowercase();
+        if normalized == "default"
+            || normalized == "sysdefault"
+            || normalized.starts_with("sysdefault:")
+        {
+            return None;
+        }
+        Some(trimmed.to_string())
+    }
+
+    fn output_signature_from_config(config: &crate::config::Config) -> OutputConfigSignature {
+        OutputConfigSignature {
+            device_name: Self::canonicalize_requested_device_name(
+                &config.output.output_device_name,
+            ),
+            sample_rate_hz: config.output.sample_rate_khz.max(8_000),
+            channel_count: config.output.channel_count.max(1),
+            bits_per_sample: config.output.bits_per_sample.max(8),
+            dither_on_bitdepth_reduce: config.output.dither_on_bitdepth_reduce,
+        }
+    }
+
+    fn current_output_signature(&self) -> OutputConfigSignature {
+        OutputConfigSignature {
+            device_name: self.target_output_device_name.lock().unwrap().clone(),
+            sample_rate_hz: self.target_sample_rate.load(Ordering::Relaxed) as u32,
+            channel_count: self.target_channels.load(Ordering::Relaxed) as u16,
+            bits_per_sample: self.target_bits_per_sample.max(8),
+            dither_on_bitdepth_reduce: self.dither_on_bitdepth_reduce,
+        }
+    }
+
     fn output_sample_format_from_cpal(sample_format: cpal::SampleFormat) -> OutputSampleFormat {
         match sample_format {
             cpal::SampleFormat::F32 => OutputSampleFormat::F32,
@@ -140,14 +188,24 @@ impl AudioPlayer {
         metadata: &crate::protocol::TechnicalMetadata,
         stream_info: &OutputStreamInfo,
         dither_enabled: bool,
+        downmix_higher_channel_tracks: bool,
     ) -> OutputPathInfo {
         let output_float = matches!(stream_info.sample_format, OutputSampleFormat::F32);
+        let channel_transform = if metadata.channel_count != stream_info.channel_count {
+            if metadata.channel_count > stream_info.channel_count && downmix_higher_channel_tracks {
+                Some(ChannelTransformKind::Downmix)
+            } else {
+                Some(ChannelTransformKind::ChannelMap)
+            }
+        } else {
+            None
+        };
         OutputPathInfo {
             source_sample_rate_hz: metadata.sample_rate_hz,
             source_channel_count: metadata.channel_count,
             output_stream: stream_info.clone(),
             resampled: metadata.sample_rate_hz != stream_info.sample_rate_hz,
-            remixed_channels: metadata.channel_count != stream_info.channel_count,
+            channel_transform,
             dithered: dither_enabled && !output_float,
         }
     }
@@ -293,6 +351,7 @@ impl AudioPlayer {
             target_channels: target_channels.clone(),
             target_bits_per_sample: 24,
             dither_on_bitdepth_reduce: true,
+            downmix_higher_channel_tracks: true,
             target_output_device_name,
             output_stream_info: Arc::new(Mutex::new(None)),
             current_track_id: current_track_id.clone(),
@@ -304,9 +363,12 @@ impl AudioPlayer {
             buffer_low_watermark_ms: buffer_low_watermark_ms.clone(),
             buffer_target_ms: buffer_target_ms.clone(),
             buffer_request_interval_ms: buffer_request_interval_ms.clone(),
+            last_output_signature: None,
         };
 
-        player.setup_audio_device();
+        if player.setup_audio_device() {
+            player.last_output_signature = Some(player.current_output_signature());
+        }
 
         // Spawn progress reporter thread
         let bus_sender_clone = bus_sender.clone();
@@ -587,7 +649,7 @@ impl AudioPlayer {
         }
     }
 
-    fn setup_audio_device(&mut self) {
+    fn setup_audio_device(&mut self) -> bool {
         let host = cpal::default_host();
         let requested_device_name = self
             .target_output_device_name
@@ -616,7 +678,7 @@ impl AudioPlayer {
             Some(device) => device,
             None => {
                 error!("No output device available");
-                return;
+                return false;
             }
         };
 
@@ -628,13 +690,13 @@ impl AudioPlayer {
             Ok(configs) => configs.collect::<Vec<_>>(),
             Err(e) => {
                 error!("Error getting device configs: {}", e);
-                return;
+                return false;
             }
         };
 
         if configs.is_empty() {
             error!("No output configs reported for selected device");
-            return;
+            return false;
         }
 
         let mut best: Option<(u64, cpal::SupportedStreamConfig)> = None;
@@ -661,7 +723,7 @@ impl AudioPlayer {
 
         let Some((_, selected_config)) = best else {
             error!("No matching device config found");
-            return;
+            return false;
         };
 
         self.target_channels
@@ -691,6 +753,7 @@ impl AudioPlayer {
             .send(Message::Config(ConfigMessage::AudioDeviceOpened {
                 stream_info,
             }));
+        true
     }
 
     fn create_stream(&mut self) {
@@ -820,6 +883,7 @@ impl AudioPlayer {
             metadata,
             &stream_info,
             self.dither_on_bitdepth_reduce,
+            self.downmix_higher_channel_tracks,
         );
         let _ = self
             .bus_sender
@@ -1025,18 +1089,6 @@ impl AudioPlayer {
                         debug!("AudioPlayer: Cache cleared");
                     }
                     Message::Config(ConfigMessage::ConfigChanged(config)) => {
-                        self.target_sample_rate
-                            .store(config.output.sample_rate_khz as usize, Ordering::Relaxed);
-                        self.target_channels
-                            .store(config.output.channel_count as usize, Ordering::Relaxed);
-                        self.target_bits_per_sample = config.output.bits_per_sample;
-                        self.dither_on_bitdepth_reduce = config.output.dither_on_bitdepth_reduce;
-                        *self.target_output_device_name.lock().unwrap() =
-                            if config.output.output_device_name.trim().is_empty() {
-                                None
-                            } else {
-                                Some(config.output.output_device_name.trim().to_string())
-                            };
                         let low_watermark_ms = config.buffering.player_low_watermark_ms as usize;
                         let target_buffer_ms = (config.buffering.player_target_buffer_ms as usize)
                             .max(low_watermark_ms.saturating_add(500));
@@ -1048,13 +1100,57 @@ impl AudioPlayer {
                             config.buffering.player_request_interval_ms.max(20) as usize,
                             Ordering::Relaxed,
                         );
-                        self.setup_audio_device();
-                        if self.stream.is_some() {
-                            self.stream = None;
-                            self.create_stream();
-                        }
-                        if let Some(metadata) = self.current_metadata.lock().unwrap().clone() {
-                            self.emit_output_path_for_metadata(&metadata);
+                        self.downmix_higher_channel_tracks =
+                            config.output.downmix_higher_channel_tracks;
+                        let next_output_signature = Self::output_signature_from_config(&config);
+                        if self.last_output_signature.as_ref() != Some(&next_output_signature) {
+                            let previous_sample_rate =
+                                self.target_sample_rate.load(Ordering::Relaxed);
+                            let previous_channels = self.target_channels.load(Ordering::Relaxed);
+                            let previous_bits_per_sample = self.target_bits_per_sample;
+                            let previous_dither = self.dither_on_bitdepth_reduce;
+                            let previous_device_name =
+                                self.target_output_device_name.lock().unwrap().clone();
+
+                            self.target_sample_rate.store(
+                                next_output_signature.sample_rate_hz as usize,
+                                Ordering::Relaxed,
+                            );
+                            self.target_channels.store(
+                                next_output_signature.channel_count as usize,
+                                Ordering::Relaxed,
+                            );
+                            self.target_bits_per_sample = next_output_signature.bits_per_sample;
+                            self.dither_on_bitdepth_reduce =
+                                next_output_signature.dither_on_bitdepth_reduce;
+                            *self.target_output_device_name.lock().unwrap() =
+                                next_output_signature.device_name.clone();
+
+                            if self.setup_audio_device() {
+                                if self.stream.is_some() {
+                                    self.stream = None;
+                                    self.create_stream();
+                                }
+                                self.last_output_signature = Some(next_output_signature);
+                                if let Some(metadata) =
+                                    self.current_metadata.lock().unwrap().clone()
+                                {
+                                    self.emit_output_path_for_metadata(&metadata);
+                                }
+                            } else {
+                                self.target_sample_rate
+                                    .store(previous_sample_rate, Ordering::Relaxed);
+                                self.target_channels
+                                    .store(previous_channels, Ordering::Relaxed);
+                                self.target_bits_per_sample = previous_bits_per_sample;
+                                self.dither_on_bitdepth_reduce = previous_dither;
+                                *self.target_output_device_name.lock().unwrap() =
+                                    previous_device_name;
+                            }
+                        } else {
+                            debug!(
+                                "AudioPlayer: Skipping audio device reinit because output signature is unchanged"
+                            );
                         }
                     }
                     Message::Audio(AudioMessage::StopDecoding) => {
@@ -1108,6 +1204,7 @@ impl AudioPlayer {
 #[cfg(test)]
 mod tests {
     use super::AudioPlayer;
+    use crate::config::Config;
 
     #[test]
     fn test_milliseconds_to_samples_stereo() {
@@ -1154,5 +1251,38 @@ mod tests {
             false, true, 10_000, 20_000, 40_000,
         );
         assert_eq!(request, 30_000);
+    }
+
+    #[test]
+    fn test_output_signature_normalizes_empty_device_name() {
+        let mut config = Config::default();
+        config.output.output_device_name = "   ".to_string();
+
+        let signature = AudioPlayer::output_signature_from_config(&config);
+        assert_eq!(signature.device_name, None);
+    }
+
+    #[test]
+    fn test_output_signature_clamps_output_values() {
+        let mut config = Config::default();
+        config.output.output_device_name = "Speakers".to_string();
+        config.output.sample_rate_khz = 2_000;
+        config.output.channel_count = 0;
+        config.output.bits_per_sample = 4;
+
+        let signature = AudioPlayer::output_signature_from_config(&config);
+        assert_eq!(signature.device_name.as_deref(), Some("Speakers"));
+        assert_eq!(signature.sample_rate_hz, 8_000);
+        assert_eq!(signature.channel_count, 1);
+        assert_eq!(signature.bits_per_sample, 8);
+    }
+
+    #[test]
+    fn test_output_signature_treats_default_alias_as_system_default() {
+        let mut config = Config::default();
+        config.output.output_device_name = "default".to_string();
+
+        let signature = AudioPlayer::output_signature_from_config(&config);
+        assert_eq!(signature.device_name, None);
     }
 }

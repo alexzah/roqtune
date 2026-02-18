@@ -1,45 +1,40 @@
+import { Palette } from "std-widgets.slint";
+
 export component StatusBar inherits Rectangle {
     in property <string> status-text: "";
     in property <string> technical-info: "";
-    in property <string> time-range: "0:00 / 0:00";
+    in property <string> selection-summary: "";
+    private property <string> left-status-text: root.status-text == ""
+        ? root.selection-summary
+        : (
+            root.selection-summary == ""
+                ? "Now Playing: " + root.status-text
+                : "Now Playing: " + root.status-text + " | " + root.selection-summary
+        );
+    private property <bool> dark: Palette.color-scheme == ColorScheme.dark;
 
-    background: #1a1a1a;
+    background: root.dark ? #1a1a1a : #e9eef5;
 
     HorizontalLayout {
         padding-left: 12px;
         padding-right: 12px;
-        spacing: 15px;
+        spacing: 8px;
 
         Text {
-            text: root.status-text == "" ? "" : "Now Playing: " + root.status-text;
-            color: #aaa;
+            text: root.left-status-text;
+            color: root.dark ? #aaa : #516170;
             font-size: 12px;
             vertical-alignment: center;
             overflow: elide;
             horizontal-stretch: 1;
         }
 
-        Rectangle { horizontal-stretch: 1; }
-
         Text {
             text: root.technical-info;
-            color: #777;
+            color: root.dark ? #777 : #6a7784;
             font-size: 11px;
             vertical-alignment: center;
             overflow: elide;
-        }
-
-        VerticalLayout {
-            alignment: center;
-            Rectangle { width: 1px; background: #333; height: 12px; }
-        }
-
-        Text {
-            text: root.time-range;
-            color: #999;
-            font-size: 12px;
-            vertical-alignment: center;
-            width: 100px;
             horizontal-alignment: right;
         }
     }

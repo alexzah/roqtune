@@ -1,0 +1,48 @@
+{
+  "app-id": "io.github.roqtune.Roqtune",
+  "branch": "stable",
+  "runtime": "org.freedesktop.Platform",
+  "runtime-version": "24.08",
+  "sdk": "org.freedesktop.Sdk",
+  "command": "roqtune",
+  "finish-args": [
+    "--share=ipc",
+    "--share=network",
+    "--socket=wayland",
+    "--socket=fallback-x11",
+    "--socket=pulseaudio",
+    "--device=dri",
+    "--talk-name=org.freedesktop.secrets",
+    "--filesystem=xdg-music:rw"
+  ],
+  "modules": [
+    {
+      "name": "roqtune-binary",
+      "buildsystem": "simple",
+      "build-commands": [
+        "install -Dm755 roqtune /app/bin/roqtune",
+        "install -Dm644 io.github.roqtune.Roqtune.desktop /app/share/applications/io.github.roqtune.Roqtune.desktop",
+        "install -Dm644 io.github.roqtune.Roqtune.metainfo.xml /app/share/metainfo/io.github.roqtune.Roqtune.metainfo.xml",
+        "install -Dm644 io.github.roqtune.Roqtune.png /app/share/icons/hicolor/512x512/apps/io.github.roqtune.Roqtune.png"
+      ],
+      "sources": [
+        {
+          "type": "file",
+          "path": "../target/release/roqtune"
+        },
+        {
+          "type": "file",
+          "path": "io.github.roqtune.Roqtune.desktop"
+        },
+        {
+          "type": "file",
+          "path": "io.github.roqtune.Roqtune.metainfo.xml"
+        },
+        {
+          "type": "file",
+          "path": "io.github.roqtune.Roqtune.png"
+        }
+      ]
+    }
+  ]
+}

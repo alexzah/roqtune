@@ -1,6 +1,10 @@
-//! Split-tree layout data model, migration, actions, and geometry.
+//! Split-tree layout data model, actions, and geometry.
 
-use std::collections::HashSet;
+use crate::config::{
+    default_playlist_album_art_column_max_width_px, default_playlist_album_art_column_min_width_px,
+    default_playlist_columns, ButtonClusterInstanceConfig, PlaylistColumnConfig,
+};
+use std::collections::{HashMap, HashSet};
 
 /// Current persisted layout schema version.
 pub const LAYOUT_VERSION: u32 = 1;
@@ -154,15 +158,93 @@ pub enum LayoutNode {
     },
 }
 
+/// Display-target resolution strategy for metadata/album-art viewer panels.
+#[derive(Debug, Clone, Copy, serde::Deserialize, serde::Serialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum ViewerPanelDisplayPriority {
+    /// Follow the latest event source (selection or now playing).
+    #[default]
+    Default,
+    /// Prefer current selection, then fallback to now playing.
+    PreferSelection,
+    /// Prefer now playing, then fallback to current selection.
+    PreferNowPlaying,
+    /// Only render selection context.
+    SelectionOnly,
+    /// Only render now-playing context.
+    NowPlayingOnly,
+}
+
+/// Metadata payload source for metadata viewer panels.
+#[derive(Debug, Clone, Copy, serde::Deserialize, serde::Serialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum ViewerPanelMetadataSource {
+    /// Render track metadata (title, artist, album, and tags).
+    #[default]
+    Track,
+    /// Render album internet description from enrichment payloads.
+    AlbumDescription,
+    /// Render artist internet biography from enrichment payloads.
+    ArtistBio,
+}
+
+/// Image payload source for image-metadata viewer panels.
+#[derive(Debug, Clone, Copy, serde::Deserialize, serde::Serialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum ViewerPanelImageSource {
+    /// Render track album art.
+    #[default]
+    AlbumArt,
+    /// Render artist image from enrichment payloads.
+    ArtistImage,
+}
+
+/// Per-leaf metadata/album-art viewer configuration persisted with layout preferences.
+#[derive(Debug, Clone, serde::Deserialize, serde::Serialize, PartialEq, Eq)]
+pub struct ViewerPanelInstanceConfig {
+    /// Layout leaf identifier that owns this viewer.
+    pub leaf_id: String,
+    /// Display-target resolution strategy.
+    #[serde(default)]
+    pub display_priority: ViewerPanelDisplayPriority,
+    /// Metadata source strategy for metadata viewers.
+    #[serde(default)]
+    pub metadata_source: ViewerPanelMetadataSource,
+    /// Image source strategy for image metadata viewers.
+    #[serde(default)]
+    pub image_source: ViewerPanelImageSource,
+}
+
+/// Persistent per-column width override shared across playlists.
+#[derive(Debug, Clone, serde::Deserialize, serde::Serialize, PartialEq, Eq)]
+pub struct PlaylistColumnWidthOverrideConfig {
+    /// Stable column key (`{title}` or `custom:Name|Format`).
+    pub column_key: String,
+    /// Width override in logical pixels.
+    pub width_px: u32,
+}
+
 /// Persistent layout preferences.
-#[derive(Debug, Clone, PartialEq, serde::Serialize)]
+/// This is the only persisted home for layout-owned settings (`layout.toml`).
+#[derive(Debug, Clone, PartialEq)]
 pub struct LayoutConfig {
     /// Layout schema version.
     pub version: u32,
+    /// Built-in Album Art playlist-column width minimum.
+    pub playlist_album_art_column_min_width_px: u32,
+    /// Built-in Album Art playlist-column width maximum.
+    pub playlist_album_art_column_max_width_px: u32,
+    /// Ordered playlist column list (built-ins + custom columns).
+    pub playlist_columns: Vec<PlaylistColumnConfig>,
+    /// Global playlist column width overrides.
+    pub playlist_column_width_overrides: Vec<PlaylistColumnWidthOverrideConfig>,
+    /// Per-leaf button-cluster settings.
+    pub button_cluster_instances: Vec<ButtonClusterInstanceConfig>,
+    /// Per-leaf metadata/album-art viewer panel settings.
+    pub viewer_panel_instances: Vec<ViewerPanelInstanceConfig>,
     /// Root node of the split-tree.
     pub root: LayoutNode,
     /// Runtime-only leaf selection used in edit mode.
-    #[serde(skip)]
     pub selected_leaf_id: Option<String>,
 }
 
@@ -170,39 +252,59 @@ impl Default for LayoutConfig {
     fn default() -> Self {
         Self {
             version: LAYOUT_VERSION,
+            playlist_album_art_column_min_width_px: default_playlist_album_art_column_min_width_px(
+            ),
+            playlist_album_art_column_max_width_px: default_playlist_album_art_column_max_width_px(
+            ),
+            playlist_columns: default_playlist_columns(),
+            playlist_column_width_overrides: Vec::new(),
+            button_cluster_instances: Vec::new(),
+            viewer_panel_instances: Vec::new(),
             root: build_default_layout_root(),
             selected_leaf_id: None,
         }
     }
 }
 
-#[derive(Debug, serde::Deserialize)]
-#[serde(untagged)]
-enum LayoutConfigWire {
-    V2(LayoutConfigV2Wire),
-    Legacy(LegacyLayoutConfig),
+#[derive(Debug, Clone, serde::Deserialize, serde::Serialize)]
+struct LayoutPlaylistColumnWire {
+    #[serde(flatten)]
+    column: PlaylistColumnConfig,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    width_px: Option<u32>,
 }
 
-#[derive(Debug, serde::Deserialize)]
-struct LayoutConfigV2Wire {
+fn default_playlist_columns_wire() -> Vec<LayoutPlaylistColumnWire> {
+    default_playlist_columns()
+        .into_iter()
+        .map(|column| LayoutPlaylistColumnWire {
+            column,
+            width_px: None,
+        })
+        .collect()
+}
+
+#[derive(Debug, serde::Deserialize, serde::Serialize)]
+struct LayoutConfigWire {
     #[serde(default = "default_layout_version", rename = "version")]
     _version: u32,
+    #[serde(default = "default_playlist_album_art_column_min_width_px")]
+    playlist_album_art_column_min_width_px: u32,
+    #[serde(default = "default_playlist_album_art_column_max_width_px")]
+    playlist_album_art_column_max_width_px: u32,
+    #[serde(default = "default_playlist_columns_wire")]
+    playlist_columns: Vec<LayoutPlaylistColumnWire>,
+    // Legacy top-level key kept for backwards-compatibility while migrating to
+    // per-column `width_px` values in `[[playlist_columns]]`.
+    #[serde(default)]
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    playlist_column_width_overrides: Vec<PlaylistColumnWidthOverrideConfig>,
+    #[serde(default)]
+    button_cluster_instances: Vec<ButtonClusterInstanceConfig>,
+    #[serde(default)]
+    viewer_panel_instances: Vec<ViewerPanelInstanceConfig>,
     #[serde(default = "default_layout_root_for_wire")]
     root: LayoutNode,
-}
-
-#[derive(Debug, Clone, serde::Deserialize)]
-struct LegacyLayoutConfig {
-    #[serde(default = "default_region_panels")]
-    region_panels: [LayoutPanelKind; 5],
-    #[serde(default = "legacy_default_top_size_px")]
-    top_size_px: u32,
-    #[serde(default = "legacy_default_left_size_px")]
-    left_size_px: u32,
-    #[serde(default = "legacy_default_right_size_px")]
-    right_size_px: u32,
-    #[serde(default = "legacy_default_bottom_size_px")]
-    bottom_size_px: u32,
 }
 
 impl<'de> serde::Deserialize<'de> for LayoutConfig {
@@ -210,16 +312,82 @@ impl<'de> serde::Deserialize<'de> for LayoutConfig {
     where
         D: serde::Deserializer<'de>,
     {
-        let wire = LayoutConfigWire::deserialize(deserializer)?;
-        let config = match wire {
-            LayoutConfigWire::V2(v2) => LayoutConfig {
-                version: LAYOUT_VERSION,
-                root: v2.root,
-                selected_leaf_id: None,
-            },
-            LayoutConfigWire::Legacy(legacy) => migrate_legacy_layout(&legacy),
-        };
-        Ok(config)
+        let v2 = LayoutConfigWire::deserialize(deserializer)?;
+        let mut playlist_columns = Vec::with_capacity(v2.playlist_columns.len());
+        let mut playlist_column_width_overrides = Vec::new();
+        let mut seen_override_keys = HashSet::new();
+        for wire in v2.playlist_columns {
+            let key = playlist_column_key(&wire.column);
+            if let Some(width_px) = wire.width_px {
+                if seen_override_keys.insert(key.clone()) {
+                    playlist_column_width_overrides.push(PlaylistColumnWidthOverrideConfig {
+                        column_key: key,
+                        width_px,
+                    });
+                }
+            }
+            playlist_columns.push(wire.column);
+        }
+        for legacy_override in v2.playlist_column_width_overrides {
+            let key = legacy_override.column_key.trim();
+            if key.is_empty() || !seen_override_keys.insert(key.to_string()) {
+                continue;
+            }
+            playlist_column_width_overrides.push(PlaylistColumnWidthOverrideConfig {
+                column_key: key.to_string(),
+                width_px: legacy_override.width_px,
+            });
+        }
+        Ok(LayoutConfig {
+            version: LAYOUT_VERSION,
+            playlist_album_art_column_min_width_px: v2.playlist_album_art_column_min_width_px,
+            playlist_album_art_column_max_width_px: v2.playlist_album_art_column_max_width_px,
+            playlist_columns,
+            playlist_column_width_overrides,
+            button_cluster_instances: v2.button_cluster_instances,
+            viewer_panel_instances: v2.viewer_panel_instances,
+            root: v2.root,
+            selected_leaf_id: None,
+        })
+    }
+}
+
+impl serde::Serialize for LayoutConfig {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        let mut override_widths_by_key: HashMap<String, u32> = HashMap::new();
+        for override_item in &self.playlist_column_width_overrides {
+            let key = override_item.column_key.trim();
+            if key.is_empty() || override_widths_by_key.contains_key(key) {
+                continue;
+            }
+            override_widths_by_key.insert(key.to_string(), override_item.width_px);
+        }
+
+        let playlist_columns = self
+            .playlist_columns
+            .iter()
+            .cloned()
+            .map(|column| {
+                let key = playlist_column_key(&column);
+                let width_px = override_widths_by_key.get(&key).copied();
+                LayoutPlaylistColumnWire { column, width_px }
+            })
+            .collect();
+
+        LayoutConfigWire {
+            _version: LAYOUT_VERSION,
+            playlist_album_art_column_min_width_px: self.playlist_album_art_column_min_width_px,
+            playlist_album_art_column_max_width_px: self.playlist_album_art_column_max_width_px,
+            playlist_columns,
+            playlist_column_width_overrides: Vec::new(),
+            button_cluster_instances: self.button_cluster_instances.clone(),
+            viewer_panel_instances: self.viewer_panel_instances.clone(),
+            root: self.root.clone(),
+        }
+        .serialize(serializer)
     }
 }
 
@@ -265,30 +433,12 @@ fn default_layout_root_for_wire() -> LayoutNode {
     build_default_layout_root()
 }
 
-fn legacy_default_top_size_px() -> u32 {
-    74
-}
-
-fn legacy_default_left_size_px() -> u32 {
-    220
-}
-
-fn legacy_default_right_size_px() -> u32 {
-    230
-}
-
-fn legacy_default_bottom_size_px() -> u32 {
-    24
-}
-
-fn default_region_panels() -> [LayoutPanelKind; 5] {
-    [
-        LayoutPanelKind::ControlBar,
-        LayoutPanelKind::PlaylistSwitcher,
-        LayoutPanelKind::TrackList,
-        LayoutPanelKind::AlbumArtPane,
-        LayoutPanelKind::StatusBar,
-    ]
+fn playlist_column_key(column: &PlaylistColumnConfig) -> String {
+    if column.custom {
+        format!("custom:{}|{}", column.name.trim(), column.format.trim())
+    } else {
+        column.format.trim().to_ascii_lowercase()
+    }
 }
 
 fn default_control_stack_subtree(next: &mut dyn FnMut() -> String) -> LayoutNode {
@@ -424,111 +574,6 @@ fn build_default_layout_root() -> LayoutNode {
                 panel: LayoutPanelKind::StatusBar,
             }),
         }),
-    }
-}
-
-fn migrate_legacy_layout(legacy: &LegacyLayoutConfig) -> LayoutConfig {
-    let mut id_counter: u32 = 1;
-    let mut next_id = || {
-        let id = format!("m{}", id_counter);
-        id_counter = id_counter.saturating_add(1);
-        id
-    };
-    let leaf = |panel: LayoutPanelKind, next_id: &mut dyn FnMut() -> String| -> LayoutNode {
-        if panel == LayoutPanelKind::None {
-            LayoutNode::Empty
-        } else {
-            LayoutNode::Leaf {
-                id: next_id(),
-                panel,
-            }
-        }
-    };
-    let combine = |axis: SplitAxis,
-                   ratio: f32,
-                   first: LayoutNode,
-                   second: LayoutNode,
-                   next_id: &mut dyn FnMut() -> String| {
-        match (&first, &second) {
-            (LayoutNode::Empty, LayoutNode::Empty) => LayoutNode::Empty,
-            (LayoutNode::Empty, _) => second,
-            (_, LayoutNode::Empty) => first,
-            _ => LayoutNode::Split {
-                id: next_id(),
-                axis,
-                ratio: ratio.clamp(0.05, 0.95),
-                min_first_px: 24,
-                min_second_px: 24,
-                first: Box::new(first),
-                second: Box::new(second),
-            },
-        }
-    };
-
-    let top = leaf(legacy.region_panels[0], &mut next_id);
-    let left = leaf(legacy.region_panels[1], &mut next_id);
-    let center = leaf(legacy.region_panels[2], &mut next_id);
-    let right = leaf(legacy.region_panels[3], &mut next_id);
-    let bottom = leaf(legacy.region_panels[4], &mut next_id);
-
-    let middle_right_total = ((900u32
-        .saturating_sub(legacy.left_size_px)
-        .saturating_sub(SPLITTER_THICKNESS_PX as u32))
-    .max(200)) as f32;
-    let center_width = middle_right_total - legacy.right_size_px as f32;
-    let center_ratio = if middle_right_total > 0.0 {
-        (center_width / middle_right_total).clamp(0.05, 0.95)
-    } else {
-        0.67
-    };
-    let center_right = combine(
-        SplitAxis::Vertical,
-        center_ratio,
-        center,
-        right,
-        &mut next_id,
-    );
-
-    let middle_total = (900u32.saturating_sub(SPLITTER_THICKNESS_PX as u32)).max(200) as f32;
-    let left_ratio = if middle_total > 0.0 {
-        (legacy.left_size_px as f32 / middle_total).clamp(0.05, 0.95)
-    } else {
-        0.28
-    };
-    let middle = combine(
-        SplitAxis::Vertical,
-        left_ratio,
-        left,
-        center_right,
-        &mut next_id,
-    );
-
-    let upper_total = ((650u32
-        .saturating_sub(legacy.bottom_size_px)
-        .saturating_sub(SPLITTER_THICKNESS_PX as u32))
-    .max(120)) as f32;
-    let top_ratio = if upper_total > 0.0 {
-        (legacy.top_size_px as f32 / upper_total).clamp(0.05, 0.95)
-    } else {
-        0.12
-    };
-    let top_middle = combine(SplitAxis::Horizontal, top_ratio, top, middle, &mut next_id);
-
-    let bottom_total = 650f32.max(120.0);
-    let upper_ratio =
-        ((bottom_total - legacy.bottom_size_px as f32) / bottom_total).clamp(0.05, 0.95);
-    let root = combine(
-        SplitAxis::Horizontal,
-        upper_ratio,
-        top_middle,
-        bottom,
-        &mut next_id,
-    );
-
-    LayoutConfig {
-        version: LAYOUT_VERSION,
-        root,
-        selected_leaf_id: None,
     }
 }
 
@@ -723,6 +768,12 @@ pub fn sanitize_layout_config(
         .and_then(|candidate| find_leaf_id(&root, candidate).map(|_| candidate.clone()));
     LayoutConfig {
         version: LAYOUT_VERSION,
+        playlist_album_art_column_min_width_px: config.playlist_album_art_column_min_width_px,
+        playlist_album_art_column_max_width_px: config.playlist_album_art_column_max_width_px,
+        playlist_columns: config.playlist_columns.clone(),
+        playlist_column_width_overrides: config.playlist_column_width_overrides.clone(),
+        button_cluster_instances: config.button_cluster_instances.clone(),
+        viewer_panel_instances: config.viewer_panel_instances.clone(),
         root,
         selected_leaf_id: selected,
     }
@@ -924,6 +975,12 @@ pub fn add_root_leaf_if_empty(layout: &LayoutConfig, panel: LayoutPanelKind) -> 
     sanitize_layout_config(
         &LayoutConfig {
             version: LAYOUT_VERSION,
+            playlist_album_art_column_min_width_px: layout.playlist_album_art_column_min_width_px,
+            playlist_album_art_column_max_width_px: layout.playlist_album_art_column_max_width_px,
+            playlist_columns: layout.playlist_columns.clone(),
+            playlist_column_width_overrides: layout.playlist_column_width_overrides.clone(),
+            button_cluster_instances: layout.button_cluster_instances.clone(),
+            viewer_panel_instances: layout.viewer_panel_instances.clone(),
             root,
             selected_leaf_id: None,
         },
@@ -1146,7 +1203,8 @@ mod tests {
     use super::{
         compute_tree_layout_metrics, delete_leaf, first_leaf_id, replace_leaf_panel,
         sanitize_layout_config, set_split_ratio, split_leaf, LayoutConfig, LayoutNode,
-        LayoutPanelKind, LayoutSplitterItem, SplitAxis, LAYOUT_VERSION, SPLITTER_THICKNESS_PX,
+        LayoutPanelKind, LayoutSplitterItem, PlaylistColumnWidthOverrideConfig, SplitAxis,
+        LAYOUT_VERSION, SPLITTER_THICKNESS_PX,
     };
 
     fn splitter_by_id<'a>(splitters: &'a [LayoutSplitterItem], id: &str) -> &'a LayoutSplitterItem {
@@ -1239,6 +1297,14 @@ mod tests {
     fn sanitize_layout_config_preserves_duplicate_panels() {
         let config = LayoutConfig {
             version: LAYOUT_VERSION,
+            playlist_album_art_column_min_width_px:
+                crate::config::default_playlist_album_art_column_min_width_px(),
+            playlist_album_art_column_max_width_px:
+                crate::config::default_playlist_album_art_column_max_width_px(),
+            playlist_columns: crate::config::default_playlist_columns(),
+            playlist_column_width_overrides: Vec::new(),
+            button_cluster_instances: Vec::new(),
+            viewer_panel_instances: Vec::new(),
             root: LayoutNode::Split {
                 id: "split-root".to_string(),
                 axis: SplitAxis::Vertical,
@@ -1271,5 +1337,40 @@ mod tests {
     fn test_layout_system_template_parses() {
         let _parsed: LayoutConfig = toml::from_str(include_str!("../config/layout.system.toml"))
             .expect("layout system template should parse");
+    }
+
+    #[test]
+    fn test_layout_serializes_column_width_overrides_inline_with_columns() {
+        let mut layout = LayoutConfig::default();
+        layout
+            .playlist_column_width_overrides
+            .push(PlaylistColumnWidthOverrideConfig {
+                column_key: "{title}".to_string(),
+                width_px: 321,
+            });
+
+        let serialized = toml::to_string(&layout).expect("layout should serialize");
+        assert!(serialized.contains("width_px = 321"));
+        assert!(
+            !serialized.contains("playlist_column_width_overrides"),
+            "legacy top-level width override key should not be emitted"
+        );
+    }
+
+    #[test]
+    fn test_layout_deserializes_legacy_top_level_width_overrides() {
+        let mut legacy_layout = include_str!("../config/layout.system.toml").to_string();
+        legacy_layout.push_str(
+            "\n[[playlist_column_width_overrides]]\ncolumn_key = \"{title}\"\nwidth_px = 222\n",
+        );
+
+        let parsed: LayoutConfig =
+            toml::from_str(&legacy_layout).expect("legacy layout should parse");
+        let title_width = parsed
+            .playlist_column_width_overrides
+            .iter()
+            .find(|entry| entry.column_key == "{title}")
+            .map(|entry| entry.width_px);
+        assert_eq!(title_width, Some(222));
     }
 }

@@ -116,6 +116,9 @@ Adhere strictly to the following conventions to maintain codebase consistency.
   - `playlist_manager.rs`: Logic for manipulating the playlist.
   - `ui_manager.rs`: UI state handling and updates.
   - `protocol.rs`: Message definitions for the event bus.
+- **Persistence boundary**:
+  - Persist layout-owned settings only in `layout.toml` (`LayoutConfig`), never in `config.toml`.
+  - `config.toml` is for non-layout runtime preferences (audio output, playback defaults, library, buffering, window/session flags).
 
 ### Documentation
 - **Public API**: Use doc comments (`///`) for public structs, enums, and functions.
