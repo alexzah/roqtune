@@ -116,6 +116,14 @@ pub enum PlaylistMessage {
     ApplyFilterViewSnapshot(Vec<usize>),
     PlaylistViewportWidthChanged(u32),
     DeselectAll,
+    SelectAll,
+    /// Arrow key navigation.  `direction` is -1 (up) or +1 (down).
+    /// When `shift` is true the selection extends from the current anchor;
+    /// otherwise the selection collapses to the single navigated row.
+    ArrowKeyNavigate {
+        direction: i32,
+        shift: bool,
+    },
     ReorderTracks {
         indices: Vec<usize>,
         to: usize,

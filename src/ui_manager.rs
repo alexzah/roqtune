@@ -6966,6 +6966,181 @@ impl UiManager {
         changed
     }
 
+    /// Selects all visible tracks in the active collection.
+    ///
+    /// In playlist mode, selects all tracks visible in the current view
+    /// (which may be a filtered/sorted subset).  In library mode, selects
+    /// all visible library entries.
+    fn handle_select_all(&mut self) {
+        if self.collection_mode == COLLECTION_MODE_LIBRARY {
+            // Library: select all visible entries by source index.
+            self.library_selected_indices = if self.library_view_indices.is_empty() {
+                (0..self.library_entries.len()).collect()
+            } else {
+                self.library_view_indices.clone()
+            };
+            self.library_selected_indices.sort_unstable();
+            self.library_selected_indices.dedup();
+            self.display_target_priority = DisplayTargetPriority::Selection;
+            self.update_display_for_active_collection();
+            self.sync_library_selection_to_ui();
+            self.sync_library_add_to_playlist_ui();
+            self.sync_properties_action_state();
+        } else {
+            // Playlist: select all visible tracks (view-order source indices).
+            let all_source_indices: Vec<usize> = if self.view_indices.is_empty() {
+                (0..self.track_metadata.len()).collect()
+            } else {
+                self.view_indices.clone()
+            };
+            if all_source_indices.is_empty() {
+                return;
+            }
+            let _ = self.bus_sender.send(protocol::Message::Playlist(
+                protocol::PlaylistMessage::SelectionChanged(all_source_indices),
+            ));
+        }
+    }
+
+    /// Handles Up/Down arrow key navigation in the active collection.
+    ///
+    /// `direction` is -1 (up) or +1 (down).  When `shift` is true the
+    /// selection extends from the current anchor; otherwise the selection
+    /// collapses to the single navigated row.  Works correctly in both
+    /// filtered/sorted views and unfiltered views.
+    fn handle_arrow_key_navigate(&mut self, direction: i32, shift: bool) {
+        if self.collection_mode == COLLECTION_MODE_LIBRARY {
+            self.arrow_navigate_library(direction, shift);
+        } else {
+            self.arrow_navigate_playlist(direction, shift);
+        }
+    }
+
+    fn arrow_navigate_playlist(&mut self, direction: i32, shift: bool) {
+        let view_len = if self.view_indices.is_empty() {
+            self.track_metadata.len()
+        } else {
+            self.view_indices.len()
+        };
+        if view_len == 0 {
+            return;
+        }
+
+        // Determine the current view row to navigate from.  Use the last
+        // selected index (mapped to view coordinates) as the starting point,
+        // or default to the first/last row depending on direction.
+        let current_view_row = self
+            .selected_indices
+            .last()
+            .and_then(|&source_index| self.map_source_to_view_index(source_index));
+
+        let next_view_row = match current_view_row {
+            Some(row) => {
+                let next = row as i32 + direction;
+                next.clamp(0, view_len as i32 - 1) as usize
+            }
+            None => {
+                if direction > 0 {
+                    0
+                } else {
+                    view_len - 1
+                }
+            }
+        };
+
+        let Some(target_source_index) = self.map_view_to_source_index(next_view_row) else {
+            return;
+        };
+
+        if shift {
+            let selected = Self::build_shift_selection_from_view_order(
+                &self.view_indices,
+                self.selection_anchor_source_index(),
+                target_source_index,
+            );
+            let _ = self.bus_sender.send(protocol::Message::Playlist(
+                protocol::PlaylistMessage::SelectionChanged(selected),
+            ));
+        } else {
+            self.set_selection_anchor_from_source_index(target_source_index);
+            let _ = self.bus_sender.send(protocol::Message::Playlist(
+                protocol::PlaylistMessage::SelectionChanged(vec![target_source_index]),
+            ));
+        }
+
+        // Scroll to ensure the navigated row is visible.
+        self.playlist_scroll_center_token = self.playlist_scroll_center_token.wrapping_add(1);
+        let token = self.playlist_scroll_center_token;
+        let row = next_view_row as i32;
+        let _ = self.ui.upgrade_in_event_loop(move |ui| {
+            ui.set_playlist_scroll_target_row(row);
+            ui.set_playlist_scroll_center_token(token);
+        });
+    }
+
+    fn arrow_navigate_library(&mut self, direction: i32, shift: bool) {
+        let view_len = if self.library_view_indices.is_empty() {
+            self.library_entries.len()
+        } else {
+            self.library_view_indices.len()
+        };
+        if view_len == 0 {
+            return;
+        }
+
+        let current_view_row = self
+            .library_selected_indices
+            .last()
+            .and_then(|&source_index| self.map_library_source_to_view_index(source_index));
+
+        let next_view_row = match current_view_row {
+            Some(row) => {
+                let next = row as i32 + direction;
+                next.clamp(0, view_len as i32 - 1) as usize
+            }
+            None => {
+                if direction > 0 {
+                    0
+                } else {
+                    view_len - 1
+                }
+            }
+        };
+
+        let Some(target_source_index) = self.map_library_view_to_source_index(next_view_row) else {
+            return;
+        };
+
+        if shift {
+            let selected = Self::build_shift_selection_from_view_order(
+                &self.library_view_indices,
+                self.library_selection_anchor,
+                target_source_index,
+            );
+            self.library_selected_indices = selected;
+        } else {
+            self.library_selected_indices = vec![target_source_index];
+            self.library_selection_anchor = Some(target_source_index);
+        }
+        self.library_selected_indices.sort_unstable();
+        self.library_selected_indices.dedup();
+
+        self.display_target_priority = DisplayTargetPriority::Selection;
+        self.update_display_for_active_collection();
+        self.sync_library_selection_to_ui();
+        self.sync_library_add_to_playlist_ui();
+        self.sync_properties_action_state();
+
+        // Scroll to ensure the navigated row is visible.
+        self.library_scroll_center_token = self.library_scroll_center_token.wrapping_add(1);
+        let token = self.library_scroll_center_token;
+        let row = next_view_row as i32;
+        let _ = self.ui.upgrade_in_event_loop(move |ui| {
+            ui.set_library_scroll_target_row(row);
+            ui.set_library_scroll_center_token(token);
+        });
+    }
+
     /// Handles selection gesture start from the UI overlay.
     pub fn on_pointer_down(&mut self, pressed_index: usize, ctrl: bool, shift: bool) {
         trace!(
@@ -7017,9 +7192,11 @@ impl UiManager {
     /// Starts drag state for track row reordering.
     pub fn on_drag_start(&mut self, pressed_index: usize) {
         if self.is_filter_view_active() {
+            // Drag-reorder is blocked in filter/sort views.  Do NOT clear
+            // pending_single_select_on_click here — it must survive until
+            // on_drag_end so that click-to-collapse-multiselect still works.
             self.drag_indices.clear();
             self.is_dragging = false;
-            self.pending_single_select_on_click = None;
             return;
         }
         self.pending_single_select_on_click = None;
@@ -7065,10 +7242,16 @@ impl UiManager {
     /// Finalizes drag state and emits track reorder command when applicable.
     pub fn on_drag_end(&mut self, drop_gap: usize) {
         if self.is_filter_view_active() {
+            // Drag-reorder is blocked in filter/sort views, but deferred
+            // single-select (click-to-collapse-multiselect) must still fire.
+            if let Some(source_index) = self.pending_single_select_on_click.take() {
+                let _ = self.bus_sender.send(protocol::Message::Playlist(
+                    protocol::PlaylistMessage::SelectionChanged(vec![source_index]),
+                ));
+            }
             self.drag_indices.clear();
             self.is_dragging = false;
             self.pressed_index = None;
-            self.pending_single_select_on_click = None;
             let _ = self.ui.upgrade_in_event_loop(move |ui| {
                 ui.set_is_dragging(false);
                 ui.set_drop_index(-1);
@@ -7892,6 +8075,14 @@ impl UiManager {
                             self.start_queue_if_possible(
                                 self.build_playlist_queue_request(Some(view_index)),
                             );
+                        }
+                        protocol::Message::Playlist(protocol::PlaylistMessage::SelectAll) => {
+                            self.handle_select_all();
+                        }
+                        protocol::Message::Playlist(
+                            protocol::PlaylistMessage::ArrowKeyNavigate { direction, shift },
+                        ) => {
+                            self.handle_arrow_key_navigate(direction, shift);
                         }
                         protocol::Message::Playlist(
                             protocol::PlaylistMessage::OpenPlaylistSearch,

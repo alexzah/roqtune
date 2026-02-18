@@ -84,6 +84,18 @@ export component AppWindow inherits Window {
                 root.paste_copied_tracks();
                 return accept;
             }
+            if ((event.text == "a" || event.text == "A") && event.modifiers.control) {
+                root.select_all();
+                return accept;
+            }
+            if (event.text == Key.UpArrow) {
+                root.arrow_key_navigate(-1, event.modifiers.shift);
+                return accept;
+            }
+            if (event.text == Key.DownArrow) {
+                root.arrow_key_navigate(1, event.modifiers.shift);
+                return accept;
+            }
             if (event.text == Key.Escape && root.show_import_menu) {
                 root.show_import_menu = false;
                 return accept;
@@ -1535,7 +1547,12 @@ export component AppWindow inherits Window {
                                         key-handler.focus();
                                         root.on_pointer_down(self.hovered-row, event.modifiers.control, event.modifiers.shift);
                                     } else if (event.kind == PointerEventKind.up) {
-                                        if (root.pressed-index != -1 && !root.playlist_filter_active) {
+                                        // Always notify the backend on pointer-up so that
+                                        // deferred single-select (cancel multiselect on click)
+                                        // works even when a filter/sort view is active.
+                                        // The backend blocks drag-reorder in filter mode but
+                                        // still needs to process the pending click-to-select.
+                                        if (root.pressed-index != -1) {
                                             root.on_drag_end(self.drop-gap);
                                         }
                                         root.hover-index = -1;
@@ -5510,6 +5527,8 @@ export component AppWindow inherits Window {
     callback undo_last_action();
     callback redo_last_action();
     callback deselect_all();
+    callback select_all();
+    callback arrow_key_navigate(/* direction: */ int, /* shift: */ bool);
     callback create_playlist();
     callback switch_playlist(int);
     callback rename_playlist(int, string);

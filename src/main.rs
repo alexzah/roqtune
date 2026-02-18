@@ -4175,6 +4175,19 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     });
 
     let bus_sender_clone = bus_sender.clone();
+    ui.on_select_all(move || {
+        let _ = bus_sender_clone.send(Message::Playlist(PlaylistMessage::SelectAll));
+    });
+
+    let bus_sender_clone = bus_sender.clone();
+    ui.on_arrow_key_navigate(move |direction, shift| {
+        let _ = bus_sender_clone.send(Message::Playlist(PlaylistMessage::ArrowKeyNavigate {
+            direction,
+            shift,
+        }));
+    });
+
+    let bus_sender_clone = bus_sender.clone();
     ui.on_playlist_item_double_click(move |index| {
         debug!("Playlist item double-clicked: {}", index);
         let _ = bus_sender_clone.send(Message::Playlist(PlaylistMessage::PlayTrackByViewIndex(
