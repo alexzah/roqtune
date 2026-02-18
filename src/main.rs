@@ -2988,6 +2988,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         info!("SLINT_BACKEND not set. Defaulting to winit-software");
         "winit-software".to_string()
     });
+    #[cfg(target_os = "windows")]
+    info!("Windows build: Slint accessibility feature is disabled");
     let backend_selector = slint::BackendSelector::new().backend_name(configured_backend.clone());
     backend_selector
         .select()

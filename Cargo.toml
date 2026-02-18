@@ -5,7 +5,6 @@ edition = "2021"
 build = "build.rs"
 
 [dependencies]
-slint = { version = "1.15.1", default-features = false, features = ["std", "unstable-winit-030", "renderer-femtovg", "renderer-software", "accessibility", "compat-1-2"] } # UI framework (Qt-free via explicit winit backend)
 rfd = "0.17.2"   # For file dialogs
 log = "0.4.29" # logs
 colog = "1.4.0" # logs
@@ -34,6 +33,12 @@ mdns-sd = "0.17.0"
 audio-mixer = "0.2.0"
 keyring = "2.3.3"
 md5 = "0.8.0"
+
+[target.'cfg(target_os = "windows")'.dependencies]
+slint = { version = "1.15.1", default-features = false, features = ["std", "unstable-winit-030", "renderer-femtovg", "renderer-software", "compat-1-2"] } # UI framework (Qt-free via explicit winit backend), accessibility disabled on Windows due ComboBox/Wine crash
+
+[target.'cfg(not(target_os = "windows"))'.dependencies]
+slint = { version = "1.15.1", default-features = false, features = ["std", "unstable-winit-030", "renderer-femtovg", "renderer-software", "accessibility", "compat-1-2"] } # UI framework (Qt-free via explicit winit backend)
 
 [build-dependencies]
 slint-build = "1.15.0"
