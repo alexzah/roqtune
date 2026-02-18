@@ -2974,8 +2974,15 @@ fn apply_config_to_ui(
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let mut clog = colog::default_builder();
-    clog.filter(Some("roqtune"), log::LevelFilter::Debug);
+    let mut clog = colog::basic_builder();
+    if let Ok(rust_log) = std::env::var("RUST_LOG") {
+        // Respect explicit user overrides completely when RUST_LOG is set.
+        clog.parse_filters(&rust_log);
+    } else {
+        // Default policy: full roqtune diagnostics, warnings/errors from dependencies.
+        clog.filter(None, log::LevelFilter::Warn);
+        clog.filter(Some("roqtune"), log::LevelFilter::Debug);
+    }
     clog.init();
 
     std::panic::set_hook(Box::new(|panic_info| {
