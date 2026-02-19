@@ -4,8 +4,6 @@
 
 `roqtune` is a desktop music player that aims to bring back the fun of curating and enjoying your personal music library. It is designed to be highly customizable, feature rich, and performant. It is written in Rust and uses the cross platform Slint UI framework.
 
-See [ATTRIBUTIONS.md](ATTRIBUTIONS.md) for third-party license information.
-
 <div style="display:flex; gap:12px; align-items:flex-start;">
   <img src="images/screenshot_playlist_mode.png" width="48%" />
   <img src="images/screenshot_library_mode.png" width="48%" />
@@ -17,6 +15,8 @@ See [ATTRIBUTIONS.md](ATTRIBUTIONS.md) for third-party license information.
 - Beautiful library mode that scans and sorts your collection for easy browsing and listening
 - Custom column support in the track list, based on metadata format strings
 - Fully user customizable UI with layout editor based on modular panels
+- Casting support for playback on local network devices
+- OpenSubsonic integration for playing your self hosted music library
 - Broad audio format support with [symphonia](https://crates.io/crates/symphonia) and [lofty](https://crates.io/crates/lofty)
 
 ## Project Status
@@ -100,3 +100,6 @@ System templates in this repo:
 ## AI Disclosure
 - The core event bus architecture, technology choices, and initial implementation were created by hand with minimal AI input
 - AI agents were heavily used for feature implementations, resulting in enormous time / effort savings over what I could do by hand
+
+## Attributions
+See [ATTRIBUTIONS.md](ATTRIBUTIONS.md) for third-party license information.
