@@ -4350,13 +4350,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Wire up drag end handler
     let bus_sender_clone = bus_sender.clone();
-    let ui_handle_clone = ui.as_weak().clone();
     ui.on_on_drag_end(move |drop_gap| {
-        if let Some(ui) = ui_handle_clone.upgrade() {
-            if ui.get_playlist_filter_active() {
-                return;
-            }
-        }
         trace!("Drag end at gap {:?}", drop_gap);
         let _ = bus_sender_clone.send(Message::Playlist(PlaylistMessage::OnDragEnd {
             drop_gap: drop_gap as usize,
