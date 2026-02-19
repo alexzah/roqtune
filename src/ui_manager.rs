@@ -4103,6 +4103,48 @@ impl UiManager {
         selected_indices.last().copied()
     }
 
+    fn selection_lead_source_index(&self, anchor_source_index: Option<usize>) -> Option<usize> {
+        if self.selected_indices.is_empty() {
+            return None;
+        }
+        let Some(anchor) = anchor_source_index else {
+            return self.selected_indices.last().copied();
+        };
+        let anchor_view = self.map_source_to_view_index(anchor);
+        let first_view = self
+            .map_source_to_view_index(*self.selected_indices.first()?)
+            .unwrap_or(0);
+        let last_view = self
+            .map_source_to_view_index(*self.selected_indices.last()?)
+            .unwrap_or(0);
+        match anchor_view {
+            Some(av) if av == first_view => self.selected_indices.last().copied(),
+            Some(av) if av == last_view => self.selected_indices.first().copied(),
+            _ => self.selected_indices.last().copied(),
+        }
+    }
+
+    fn library_selection_lead_source_index(&self, anchor: Option<usize>) -> Option<usize> {
+        if self.library_selected_indices.is_empty() {
+            return None;
+        }
+        let Some(anchor) = anchor else {
+            return self.library_selected_indices.last().copied();
+        };
+        let anchor_view = self.map_library_source_to_view_index(anchor);
+        let first_view = self
+            .map_library_source_to_view_index(*self.library_selected_indices.first()?)
+            .unwrap_or(0);
+        let last_view = self
+            .map_library_source_to_view_index(*self.library_selected_indices.last()?)
+            .unwrap_or(0);
+        match anchor_view {
+            Some(av) if av == first_view => self.library_selected_indices.last().copied(),
+            Some(av) if av == last_view => self.library_selected_indices.first().copied(),
+            _ => self.library_selected_indices.last().copied(),
+        }
+    }
+
     fn active_sort_column_state(&self) -> Option<(usize, String)> {
         let sort_key = self.filter_sort_column_key.as_ref()?;
         self.visible_playlist_columns()
@@ -7026,13 +7068,15 @@ impl UiManager {
             return;
         }
 
-        // Determine the current view row to navigate from.  Use the last
-        // selected index (mapped to view coordinates) as the starting point,
-        // or default to the first/last row depending on direction.
-        let current_view_row = self
-            .selected_indices
-            .last()
-            .and_then(|&source_index| self.map_source_to_view_index(source_index));
+        let anchor_source_index = self.selection_anchor_source_index();
+        let current_view_row = if shift {
+            self.selection_lead_source_index(anchor_source_index)
+                .and_then(|lead| self.map_source_to_view_index(lead))
+        } else {
+            self.selected_indices
+                .last()
+                .and_then(|&source_index| self.map_source_to_view_index(source_index))
+        };
 
         let next_view_row = match current_view_row {
             Some(row) => {
@@ -7055,7 +7099,7 @@ impl UiManager {
         if shift {
             let selected = Self::build_shift_selection_from_view_order(
                 &self.view_indices,
-                self.selection_anchor_source_index(),
+                anchor_source_index,
                 target_source_index,
             );
             let _ = self.bus_sender.send(protocol::Message::Playlist(
@@ -7088,10 +7132,14 @@ impl UiManager {
             return;
         }
 
-        let current_view_row = self
-            .library_selected_indices
-            .last()
-            .and_then(|&source_index| self.map_library_source_to_view_index(source_index));
+        let current_view_row = if shift {
+            self.library_selection_lead_source_index(self.library_selection_anchor)
+                .and_then(|lead| self.map_library_source_to_view_index(lead))
+        } else {
+            self.library_selected_indices
+                .last()
+                .and_then(|&source_index| self.map_library_source_to_view_index(source_index))
+        };
 
         let next_view_row = match current_view_row {
             Some(row) => {
