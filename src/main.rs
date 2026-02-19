@@ -4350,10 +4350,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Wire up drag end handler
     let bus_sender_clone = bus_sender.clone();
-    ui.on_on_drag_end(move |drop_gap| {
-        trace!("Drag end at gap {:?}", drop_gap);
+    ui.on_on_drag_end(move |drop_gap, drag_blocked| {
+        trace!(
+            "Drag end at gap {:?}, blocked: {:?}",
+            drop_gap,
+            drag_blocked
+        );
         let _ = bus_sender_clone.send(Message::Playlist(PlaylistMessage::OnDragEnd {
             drop_gap: drop_gap as usize,
+            drag_blocked,
         }));
     });
 

@@ -7288,14 +7288,16 @@ impl UiManager {
     }
 
     /// Finalizes drag state and emits track reorder command when applicable.
-    pub fn on_drag_end(&mut self, drop_gap: usize) {
+    pub fn on_drag_end(&mut self, drop_gap: usize, drag_blocked: bool) {
         if self.is_filter_view_active() {
-            // Drag-reorder is blocked in filter/sort views, but deferred
-            // single-select (click-to-collapse-multiselect) must still fire.
-            if let Some(source_index) = self.pending_single_select_on_click.take() {
-                let _ = self.bus_sender.send(protocol::Message::Playlist(
-                    protocol::PlaylistMessage::SelectionChanged(vec![source_index]),
-                ));
+            // Drag-reorder is blocked in filter/sort views. Only collapse
+            // selection if this was a simple click, not a blocked drag attempt.
+            if !drag_blocked {
+                if let Some(source_index) = self.pending_single_select_on_click.take() {
+                    let _ = self.bus_sender.send(protocol::Message::Playlist(
+                        protocol::PlaylistMessage::SelectionChanged(vec![source_index]),
+                    ));
+                }
             }
             self.drag_indices.clear();
             self.is_dragging = false;
@@ -8471,8 +8473,9 @@ impl UiManager {
                         }
                         protocol::Message::Playlist(protocol::PlaylistMessage::OnDragEnd {
                             drop_gap,
+                            drag_blocked,
                         }) => {
-                            self.on_drag_end(drop_gap);
+                            self.on_drag_end(drop_gap, drag_blocked);
                         }
                         protocol::Message::Playlist(protocol::PlaylistMessage::ReorderTracks {
                             indices,

@@ -1553,8 +1553,10 @@ export component AppWindow inherits Window {
                                         // works even when a filter/sort view is active.
                                         // The backend blocks drag-reorder in filter mode but
                                         // still needs to process the pending click-to-select.
+                                        // Pass filter-blocked-shown to prevent collapse when
+                                        // a drag was attempted.
                                         if (root.pressed-index != -1) {
-                                            root.on_drag_end(self.drop-gap);
+                                            root.on_drag_end(self.drop-gap, root.filter-blocked-shown);
                                         }
                                         root.hover-index = -1;
                                     }
@@ -5514,7 +5516,7 @@ export component AppWindow inherits Window {
     callback on_pointer_down(int, bool, bool);
     callback on_drag_start(int);
     callback on_drag_move(int);
-    callback on_drag_end(int);
+    callback on_drag_end(int, bool);
     callback playlist_item_double_click(int);
     callback playback_order_changed(int);
     callback toggle_repeat();

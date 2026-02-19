@@ -81,6 +81,7 @@ pub enum PlaylistMessage {
     },
     OnDragEnd {
         drop_gap: usize,
+        drag_blocked: bool,
     },
     CopySelectedTracks,
     CutSelectedTracks,
