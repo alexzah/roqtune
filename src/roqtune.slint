@@ -1985,8 +1985,10 @@ export component AppWindow inherits Window {
                                                 event.modifiers.shift,
                                                 true
                                             );
-                                            let click-x = root.layout-region-x(i) + parent.x + self.x + self.mouse-x;
-                                            let click-y = root.layout-region-y(i) + parent.y + self.y + self.mouse-y + library-list-view.viewport-y;
+                                            let row-height = library-list-view.row-height-px * 1px;
+                                            let row-y = row * row-height + library-list-view.viewport-y;
+                                            let click-x = root.layout-region-x(i) + library-list-container.x + self.mouse-x;
+                                            let click-y = root.layout-region-y(i) + library-list-container.y + row-y + self.mouse-y;
                                             root.library_context_menu_x = min(root.width - 190px, max(root.context-menu-margin, click-x));
                                             root.library_context_menu_y = min(root.height - root.context-menu-height - root.context-menu-margin, max(root.context-menu-margin, click-y));
                                             root.show_library_context_menu = true;
