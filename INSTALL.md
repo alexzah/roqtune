@@ -36,8 +36,8 @@ Use this command from the repo root:
 What it does:
 
 1. Builds the latest local `roqtune` source in release mode.
-2. Builds a Flatpak repo from `flatpak/io.github.roqtune.Roqtune.json`.
-3. Produces a local bundle at `flatpak/dist/io.github.roqtune.Roqtune.flatpak`.
+2. Builds a Flatpak repo from `flatpak/io.github.alexzah.roqtune.json`.
+3. Produces a local bundle at `flatpak/dist/io.github.alexzah.roqtune.flatpak`.
 4. Installs (or reinstalls) that local bundle for your user.
 
 The script does not add or use a specific remote automatically. It only uses
@@ -47,7 +47,7 @@ failing.
 Run the installed Flatpak:
 
 ```bash
-flatpak run io.github.roqtune.Roqtune
+flatpak run io.github.alexzah.roqtune
 ```
 
 ### Bundle Only (Skip Install)
@@ -59,5 +59,5 @@ flatpak run io.github.roqtune.Roqtune
 Install manually later:
 
 ```bash
-flatpak install --user flatpak/dist/io.github.roqtune.Roqtune.flatpak
+flatpak install --user flatpak/dist/io.github.alexzah.roqtune.flatpak
 ```

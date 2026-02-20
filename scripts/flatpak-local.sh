@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-APP_ID="io.github.roqtune.Roqtune"
+APP_ID="io.github.alexzah.roqtune"
 APP_BRANCH="stable"
 RUNTIME="org.freedesktop.Platform//24.08"
 SDK="org.freedesktop.Sdk//24.08"
