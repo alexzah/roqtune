@@ -3480,6 +3480,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     });
 
     let bus_sender_clone = bus_sender.clone();
+    ui.on_open_file_location(move || {
+        let _ = bus_sender_clone.send(Message::Library(protocol::LibraryMessage::OpenFileLocation));
+    });
+
+    let bus_sender_clone = bus_sender.clone();
     ui.on_properties_field_edited(move |index, value| {
         if index < 0 {
             return;

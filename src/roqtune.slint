@@ -381,6 +381,13 @@ export component AppWindow inherits Window {
     in-out property <bool> show_playlist_track_context_menu: false;
     property <length> playlist_track_context_menu_x: 0px;
     property <length> playlist_track_context_menu_y: 0px;
+    // Context menu sizing constants
+    property <length> context-menu-item-height: 24px;
+    property <int> context-menu-item-count: 6;
+    property <length> context-menu-padding: 8px;
+    property <length> context-menu-spacing-total: 10px;
+    property <length> context-menu-margin: 8px;
+    property <length> context-menu-height: context-menu-item-height * context-menu-item-count + context-menu-spacing-total + context-menu-padding;
     in-out property <bool> playlist_properties_enabled: false;
     in-out property <bool> library_properties_enabled: false;
     in-out property <bool> library_add_to_dialog_visible: false;
@@ -1607,8 +1614,8 @@ export component AppWindow inherits Window {
 
                                     let click-x = root.layout-region-x(i) + parent.x + self.x + self.mouse-x;
                                     let click-y = root.layout-region-y(i) + parent.y + self.y + self.mouse-y;
-                                    root.playlist_track_context_menu_x = min(root.width - 170px, max(8px, click-x));
-                                    root.playlist_track_context_menu_y = min(root.height - 160px, max(8px, click-y));
+                                    root.playlist_track_context_menu_x = min(root.width - 170px, max(root.context-menu-margin, click-x));
+                                    root.playlist_track_context_menu_y = min(root.height - root.context-menu-height - root.context-menu-margin, max(root.context-menu-margin, click-y));
                                     root.show_playlist_track_context_menu = true;
                                 }
                             }
@@ -1980,8 +1987,8 @@ export component AppWindow inherits Window {
                                             );
                                             let click-x = root.layout-region-x(i) + parent.x + self.x + self.mouse-x;
                                             let click-y = root.layout-region-y(i) + parent.y + self.y + self.mouse-y;
-                                            root.library_context_menu_x = min(root.width - 170px, max(8px, click-x));
-                                            root.library_context_menu_y = min(root.height - 184px, max(8px, click-y));
+                                            root.library_context_menu_x = min(root.width - 190px, max(root.context-menu-margin, click-x));
+                                            root.library_context_menu_y = min(root.height - root.context-menu-height - root.context-menu-margin, max(root.context-menu-margin, click-y));
                                             root.show_library_context_menu = true;
                                         }
                                     }
@@ -3449,7 +3456,7 @@ export component AppWindow inherits Window {
         x: root.playlist_track_context_menu_x;
         y: root.playlist_track_context_menu_y;
         width: 170px;
-        height: 132px;
+        height: root.context-menu-height;
         border-radius: 6px;
         background: #262626;
         border-width: 1px;
@@ -3476,6 +3483,27 @@ export component AppWindow inherits Window {
                     clicked => {
                         root.show_playlist_track_context_menu = false;
                         root.open_properties_for_current_selection();
+                    }
+                }
+            }
+            Rectangle {
+                height: 24px;
+                border-radius: 4px;
+                background: playlist-open-location-ta.has-hover && root.playlist_properties_enabled ? #363636 : transparent;
+                Text {
+                    x: 10px;
+                    width: parent.width - 20px;
+                    text: "Open File Location";
+                    color: root.playlist_properties_enabled ? #ddd : #777;
+                    font-size: 12px;
+                    vertical-alignment: center;
+                    overflow: elide;
+                }
+                playlist-open-location-ta := TouchArea {
+                    enabled: root.playlist_properties_enabled;
+                    clicked => {
+                        root.show_playlist_track_context_menu = false;
+                        root.open_file_location();
                     }
                 }
             }
@@ -3577,7 +3605,7 @@ export component AppWindow inherits Window {
         x: root.library_context_menu_x;
         y: root.library_context_menu_y;
         width: 190px;
-        height: 132px;
+        height: root.context-menu-height;
         border-radius: 6px;
         background: #262626;
         border-width: 1px;
@@ -3604,6 +3632,27 @@ export component AppWindow inherits Window {
                     clicked => {
                         root.show_library_context_menu = false;
                         root.open_properties_for_current_selection();
+                    }
+                }
+            }
+            Rectangle {
+                height: 24px;
+                border-radius: 4px;
+                background: library-open-location-ta.has-hover && root.library_properties_enabled ? #363636 : transparent;
+                Text {
+                    x: 10px;
+                    width: parent.width - 20px;
+                    text: "Open File Location";
+                    color: root.library_properties_enabled ? #ddd : #777;
+                    font-size: 12px;
+                    vertical-alignment: center;
+                    overflow: elide;
+                }
+                library-open-location-ta := TouchArea {
+                    enabled: root.library_properties_enabled;
+                    clicked => {
+                        root.show_library_context_menu = false;
+                        root.open_file_location();
                     }
                 }
             }
@@ -5551,6 +5600,7 @@ export component AppWindow inherits Window {
     callback seek-to(float); // Position between 0.0 and 1.0
     callback volume-changed(float); // Volume between 0.0 and 1.0
     callback delete_selected_tracks();
+    callback open_file_location();
     callback reorder_tracks([int], int); // indices, to
     callback copy_selected_tracks();
     callback cut_selected_tracks();

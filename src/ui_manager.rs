@@ -3569,12 +3569,12 @@ impl UiManager {
     }
 
     fn open_properties_for_current_selection(&mut self) {
-        let Some((path, target_title)) = self.active_properties_target() else {
+        let Some((path, _target_title)) = self.active_properties_target() else {
             return;
         };
 
         self.properties_target_path = Some(path.clone());
-        self.properties_target_title = target_title;
+        self.properties_target_title = _target_title;
         self.properties_original_fields.clear();
         self.properties_fields.clear();
         self.properties_error_text.clear();
@@ -3589,6 +3589,13 @@ impl UiManager {
             protocol::MetadataMessage::RequestTrackProperties { request_id, path },
         ));
         self.sync_properties_dialog_ui();
+    }
+
+    fn open_file_location(&self) {
+        let Some((path, _)) = self.active_properties_target() else {
+            return;
+        };
+        showfile::show_path_in_file_manager(&path);
     }
 
     fn edit_properties_field(&mut self, index: usize, value: String) {
@@ -7581,6 +7588,9 @@ impl UiManager {
                             }
                             protocol::LibraryMessage::DeleteSelected => {
                                 self.request_library_remove_selection_confirmation();
+                            }
+                            protocol::LibraryMessage::OpenFileLocation => {
+                                self.open_file_location();
                             }
                             protocol::LibraryMessage::ConfirmRemoveSelection => {
                                 self.confirm_library_remove_selection();

@@ -261,6 +261,7 @@ pub enum LibraryMessage {
     CopySelected,
     CutSelected,
     DeleteSelected,
+    OpenFileLocation,
     ConfirmRemoveSelection,
     CancelRemoveSelection,
     RemoveSelectionFromLibrary {
