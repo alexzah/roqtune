@@ -36,6 +36,15 @@ pub enum PlaybackOrder {
     Random,
 }
 
+/// Page navigation action for Home, End, PageUp, PageDown.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum PageNavigationAction {
+    Home,
+    End,
+    PageUp,
+    PageDown,
+}
+
 /// Playback start notification payload.
 #[derive(Debug, Clone)]
 pub struct TrackStarted {
@@ -124,6 +133,14 @@ pub enum PlaylistMessage {
     ArrowKeyNavigate {
         direction: i32,
         shift: bool,
+    },
+    /// Page navigation: Home, End, PageUp, PageDown.
+    /// When `shift` is true the selection extends from the current anchor.
+    /// `visible_row_count` is used for PageUp/PageDown to determine how far to move.
+    PageNavigate {
+        action: PageNavigationAction,
+        shift: bool,
+        visible_row_count: usize,
     },
     ReorderTracks {
         indices: Vec<usize>,

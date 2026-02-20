@@ -4188,6 +4188,24 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     });
 
     let bus_sender_clone = bus_sender.clone();
+    ui.on_page_navigate(move |action, shift, visible_row_count| {
+        use protocol::PageNavigationAction;
+        use PlaylistMessage::PageNavigate;
+        let nav_action = match action {
+            0 => PageNavigationAction::Home,
+            1 => PageNavigationAction::End,
+            2 => PageNavigationAction::PageUp,
+            3 => PageNavigationAction::PageDown,
+            _ => return,
+        };
+        let _ = bus_sender_clone.send(Message::Playlist(PageNavigate {
+            action: nav_action,
+            shift,
+            visible_row_count: visible_row_count as usize,
+        }));
+    });
+
+    let bus_sender_clone = bus_sender.clone();
     ui.on_playlist_item_double_click(move |index| {
         debug!("Playlist item double-clicked: {}", index);
         let _ = bus_sender_clone.send(Message::Playlist(PlaylistMessage::PlayTrackByViewIndex(

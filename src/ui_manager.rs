@@ -7189,6 +7189,165 @@ impl UiManager {
         });
     }
 
+    fn handle_page_navigate(
+        &mut self,
+        action: protocol::PageNavigationAction,
+        shift: bool,
+        visible_row_count: usize,
+    ) {
+        if self.collection_mode == COLLECTION_MODE_LIBRARY {
+            self.page_navigate_library(action, shift, visible_row_count);
+        } else {
+            self.page_navigate_playlist(action, shift, visible_row_count);
+        }
+    }
+
+    fn page_navigate_playlist(
+        &mut self,
+        action: protocol::PageNavigationAction,
+        shift: bool,
+        visible_row_count: usize,
+    ) {
+        let view_len = if self.view_indices.is_empty() {
+            self.track_metadata.len()
+        } else {
+            self.view_indices.len()
+        };
+        if view_len == 0 {
+            return;
+        }
+
+        let anchor_source_index = self.selection_anchor_source_index();
+        let current_view_row = if shift {
+            self.selection_lead_source_index(anchor_source_index)
+                .and_then(|lead| self.map_source_to_view_index(lead))
+        } else {
+            self.selected_indices
+                .last()
+                .and_then(|&source_index| self.map_source_to_view_index(source_index))
+        };
+
+        let target_view_row = match action {
+            protocol::PageNavigationAction::Home => 0,
+            protocol::PageNavigationAction::End => view_len.saturating_sub(1),
+            protocol::PageNavigationAction::PageUp => {
+                let page_size = visible_row_count.max(1);
+                current_view_row
+                    .map(|row| row.saturating_sub(page_size))
+                    .unwrap_or(0)
+            }
+            protocol::PageNavigationAction::PageDown => {
+                let page_size = visible_row_count.max(1);
+                current_view_row
+                    .map(|row| (row + page_size).min(view_len.saturating_sub(1)))
+                    .unwrap_or(0)
+            }
+        };
+
+        let Some(target_source_index) = self.map_view_to_source_index(target_view_row) else {
+            return;
+        };
+
+        if shift {
+            let selected = Self::build_shift_selection_from_view_order(
+                &self.view_indices,
+                anchor_source_index,
+                target_source_index,
+            );
+            let _ = self.bus_sender.send(protocol::Message::Playlist(
+                protocol::PlaylistMessage::SelectionChanged(selected),
+            ));
+        } else {
+            self.set_selection_anchor_from_source_index(target_source_index);
+            let _ = self.bus_sender.send(protocol::Message::Playlist(
+                protocol::PlaylistMessage::SelectionChanged(vec![target_source_index]),
+            ));
+        }
+
+        self.playlist_scroll_center_token = self.playlist_scroll_center_token.wrapping_add(1);
+        let token = self.playlist_scroll_center_token;
+        let row = target_view_row as i32;
+        let _ = self.ui.upgrade_in_event_loop(move |ui| {
+            ui.set_playlist_scroll_target_row(row);
+            ui.set_playlist_scroll_center_token(token);
+        });
+    }
+
+    fn page_navigate_library(
+        &mut self,
+        action: protocol::PageNavigationAction,
+        shift: bool,
+        visible_row_count: usize,
+    ) {
+        let view_len = if self.library_view_indices.is_empty() {
+            self.library_entries.len()
+        } else {
+            self.library_view_indices.len()
+        };
+        if view_len == 0 {
+            return;
+        }
+
+        let current_view_row = if shift {
+            self.library_selection_lead_source_index(self.library_selection_anchor)
+                .and_then(|lead| self.map_library_source_to_view_index(lead))
+        } else {
+            self.library_selected_indices
+                .last()
+                .and_then(|&source_index| self.map_library_source_to_view_index(source_index))
+        };
+
+        let target_view_row = match action {
+            protocol::PageNavigationAction::Home => 0,
+            protocol::PageNavigationAction::End => view_len.saturating_sub(1),
+            protocol::PageNavigationAction::PageUp => {
+                let page_size = visible_row_count.max(1);
+                current_view_row
+                    .map(|row| row.saturating_sub(page_size))
+                    .unwrap_or(0)
+            }
+            protocol::PageNavigationAction::PageDown => {
+                let page_size = visible_row_count.max(1);
+                current_view_row
+                    .map(|row| (row + page_size).min(view_len.saturating_sub(1)))
+                    .unwrap_or(0)
+            }
+        };
+
+        let Some(target_source_index) = self.map_library_view_to_source_index(target_view_row)
+        else {
+            return;
+        };
+
+        if shift {
+            let selected = Self::build_shift_selection_from_view_order(
+                &self.library_view_indices,
+                self.library_selection_anchor,
+                target_source_index,
+            );
+            self.library_selected_indices = selected;
+        } else {
+            self.library_selected_indices = vec![target_source_index];
+            self.library_selection_anchor = Some(target_source_index);
+        }
+        self.library_selected_indices.sort_unstable();
+        self.library_selected_indices.dedup();
+
+        self.display_target_priority = DisplayTargetPriority::Selection;
+        self.update_display_for_active_collection();
+        self.sync_library_selection_to_ui();
+        self.sync_library_add_to_playlist_ui();
+        self.sync_properties_action_state();
+
+        self.library_scroll_center_token = self.library_scroll_center_token.wrapping_add(1);
+        let token = self.library_scroll_center_token;
+        let row = target_view_row as i32;
+        let _ = self.ui.upgrade_in_event_loop(move |ui| {
+            ui.set_library_scroll_target_row(row);
+            ui.set_library_scroll_center_token(token);
+        });
+    }
+
     /// Handles selection gesture start from the UI overlay.
     pub fn on_pointer_down(&mut self, pressed_index: usize, ctrl: bool, shift: bool) {
         trace!(
@@ -8133,6 +8292,13 @@ impl UiManager {
                             protocol::PlaylistMessage::ArrowKeyNavigate { direction, shift },
                         ) => {
                             self.handle_arrow_key_navigate(direction, shift);
+                        }
+                        protocol::Message::Playlist(protocol::PlaylistMessage::PageNavigate {
+                            action,
+                            shift,
+                            visible_row_count,
+                        }) => {
+                            self.handle_page_navigate(action, shift, visible_row_count);
                         }
                         protocol::Message::Playlist(
                             protocol::PlaylistMessage::OpenPlaylistSearch,

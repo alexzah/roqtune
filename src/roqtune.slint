@@ -96,6 +96,26 @@ export component AppWindow inherits Window {
                 root.arrow_key_navigate(1, event.modifiers.shift);
                 return accept;
             }
+            if (event.text == Key.Home) {
+                let visible-rows = root.collection_mode == 1 ? root.library-visible-row-count : root.playlist-visible-row-count;
+                root.page_navigate(0, event.modifiers.shift, visible-rows);
+                return accept;
+            }
+            if (event.text == Key.End) {
+                let visible-rows = root.collection_mode == 1 ? root.library-visible-row-count : root.playlist-visible-row-count;
+                root.page_navigate(1, event.modifiers.shift, visible-rows);
+                return accept;
+            }
+            if (event.text == Key.PageUp) {
+                let visible-rows = root.collection_mode == 1 ? root.library-visible-row-count : root.playlist-visible-row-count;
+                root.page_navigate(2, event.modifiers.shift, visible-rows);
+                return accept;
+            }
+            if (event.text == Key.PageDown) {
+                let visible-rows = root.collection_mode == 1 ? root.library-visible-row-count : root.playlist-visible-row-count;
+                root.page_navigate(3, event.modifiers.shift, visible-rows);
+                return accept;
+            }
             if (event.text == Key.Escape && root.show_import_menu) {
                 root.show_import_menu = false;
                 return accept;
@@ -328,6 +348,8 @@ export component AppWindow inherits Window {
     ];
     in-out property <int> sidebar_width_px: 220;
     in-out property <int> collection_mode: 0; // 0: Playlist, 1: Library
+    property <int> playlist-visible-row-count: 1;
+    property <int> library-visible-row-count: 1;
     in-out property <int> library_root_index: 0; // 0: Tracks, 1: Artists, 2: Albums, 3: Genres, 4: Decades
     in-out property <[int]> library_root_counts: [0, 0, 0, 0, 0];
     in-out property <bool> library_can_go_back: false;
@@ -1296,6 +1318,9 @@ export component AppWindow inherits Window {
                         property <length> scroll-toast-y: self.stack-base-y
                             + (root.playlist_filter_active ? (26px + self.stack-gap-y) : 0px)
                             + (root.playlist_search_visible ? (30px + self.stack-gap-y) : 0px);
+                        changed visible-row-count => {
+                            root.playlist-visible-row-count = self.visible-row-count;
+                        }
 
                         if root.playlist_filter_active : Rectangle {
                             x: max(8px, parent.width - self.width - 8px);
@@ -1860,6 +1885,9 @@ export component AppWindow inherits Window {
                             || self.playing-below-viewport;
                         property <length> stack-base-y: 6px;
                         property <length> stack-gap-y: 6px;
+                        changed visible-row-count => {
+                            root.library-visible-row-count = self.visible-row-count;
+                        }
                         property <length> online-prompt-y: self.stack-base-y;
                         property <length> scroll-toast-y: self.stack-base-y
                             + (root.library_online_prompt_visible ? (34px + self.stack-gap-y) : 0px);
@@ -5532,6 +5560,7 @@ export component AppWindow inherits Window {
     callback deselect_all();
     callback select_all();
     callback arrow_key_navigate(/* direction: */ int, /* shift: */ bool);
+    callback page_navigate(/* action: 0=Home, 1=End, 2=PageUp, 3=PageDown */ int, /* shift: */ bool, /* visible_row_count: */ int);
     callback create_playlist();
     callback switch_playlist(int);
     callback rename_playlist(int, string);
