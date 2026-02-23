@@ -28,6 +28,8 @@ mod media_file_discovery;
 mod metadata_manager;
 #[path = "metadata/metadata_tags.rs"]
 mod metadata_tags;
+#[path = "integration/opensubsonic_controller.rs"]
+mod opensubsonic_controller;
 #[path = "playlist/playlist.rs"]
 mod playlist;
 #[path = "playlist/playlist_manager.rs"]
@@ -56,7 +58,7 @@ use audio_probe::get_or_probe_output_device;
 use cast_manager::CastManager;
 use config::{
     BackendProfileConfig, BufferingConfig, ButtonClusterInstanceConfig, CastConfig, Config,
-    IntegrationBackendKind, IntegrationsConfig, LibraryConfig, OutputConfig, PlaylistColumnConfig,
+    IntegrationsConfig, LibraryConfig, OutputConfig, PlaylistColumnConfig,
     ResamplerQuality, UiConfig, UiPlaybackOrder, UiRepeatMode,
 };
 use config_persistence::{
@@ -69,7 +71,7 @@ use config_persistence::{
 };
 use cpal::traits::{DeviceTrait, HostTrait};
 use db_manager::DbManager;
-use integration_keyring::{get_opensubsonic_password, set_opensubsonic_password};
+use integration_keyring::set_opensubsonic_password;
 use integration_manager::IntegrationManager;
 use layout::{
     add_root_leaf_if_empty, compute_tree_layout_metrics, delete_leaf, first_leaf_id,
@@ -88,6 +90,11 @@ use media_file_discovery::{
     SUPPORTED_AUDIO_EXTENSIONS,
 };
 use metadata_manager::MetadataManager;
+use opensubsonic_controller::{
+    find_opensubsonic_backend, keyring_unavailable_error, opensubsonic_profile_snapshot,
+    resolve_opensubsonic_password, upsert_opensubsonic_backend_config,
+    OpenSubsonicPasswordResolution, OPENSUBSONIC_PROFILE_ID, OPENSUBSONIC_SESSION_KEYRING_NOTICE,
+};
 use playlist::Playlist;
 use playlist_manager::PlaylistManager;
 use protocol::{
@@ -216,119 +223,6 @@ const PLAYLIST_IMPORT_CHUNK_SIZE: usize = 512;
 const DROP_IMPORT_BATCH_DELAY_MS: u64 = 80;
 const COLLECTION_MODE_PLAYLIST: i32 = 0;
 const COLLECTION_MODE_LIBRARY: i32 = 1;
-const OPENSUBSONIC_PROFILE_ID: &str = "opensubsonic-default";
-const OPENSUBSONIC_SESSION_KEYRING_NOTICE: &str = "System keyring is not available. roqtune will keep your OpenSubsonic password only for this session and ask again after restart.";
-
-enum OpenSubsonicPasswordResolution {
-    Saved(String),
-    SessionOnly(String),
-    Missing,
-    KeyringError(String),
-}
-
-fn keyring_unavailable_error(error: &str) -> bool {
-    error.contains("Platform secure storage failure")
-        || error.contains("org.freedesktop.DBus.Error.ServiceUnknown")
-        || error.contains("failed to create keyring entry")
-}
-
-fn session_cached_opensubsonic_password(
-    session_passwords: &Arc<Mutex<HashMap<String, String>>>,
-    profile_id: &str,
-) -> Option<String> {
-    let cache = session_passwords
-        .lock()
-        .expect("session password cache lock poisoned");
-    cache.get(profile_id).cloned()
-}
-
-fn resolve_opensubsonic_password(
-    profile_id: &str,
-    session_passwords: &Arc<Mutex<HashMap<String, String>>>,
-) -> OpenSubsonicPasswordResolution {
-    match get_opensubsonic_password(profile_id) {
-        Ok(Some(password)) => OpenSubsonicPasswordResolution::Saved(password),
-        Ok(None) => {
-            if let Some(password) =
-                session_cached_opensubsonic_password(session_passwords, profile_id)
-            {
-                OpenSubsonicPasswordResolution::SessionOnly(password)
-            } else {
-                OpenSubsonicPasswordResolution::Missing
-            }
-        }
-        Err(error) => {
-            if let Some(password) =
-                session_cached_opensubsonic_password(session_passwords, profile_id)
-            {
-                warn!(
-                    "Falling back to session-only OpenSubsonic credential for profile '{}': {}",
-                    profile_id, error
-                );
-                OpenSubsonicPasswordResolution::SessionOnly(password)
-            } else {
-                OpenSubsonicPasswordResolution::KeyringError(error)
-            }
-        }
-    }
-}
-
-fn find_opensubsonic_backend(config: &Config) -> Option<&BackendProfileConfig> {
-    config
-        .integrations
-        .backends
-        .iter()
-        .find(|backend| backend.profile_id == OPENSUBSONIC_PROFILE_ID)
-}
-
-fn upsert_opensubsonic_backend_config(
-    config: &mut Config,
-    endpoint: &str,
-    username: &str,
-    enabled: bool,
-) {
-    let endpoint = endpoint.trim().trim_end_matches('/').to_string();
-    let username = username.trim().to_string();
-    if let Some(existing) = config
-        .integrations
-        .backends
-        .iter_mut()
-        .find(|backend| backend.profile_id == OPENSUBSONIC_PROFILE_ID)
-    {
-        existing.backend_kind = IntegrationBackendKind::OpenSubsonic;
-        existing.display_name = "OpenSubsonic".to_string();
-        existing.endpoint = endpoint;
-        existing.username = username;
-        existing.enabled = enabled;
-        return;
-    }
-    config.integrations.backends.push(BackendProfileConfig {
-        profile_id: OPENSUBSONIC_PROFILE_ID.to_string(),
-        backend_kind: IntegrationBackendKind::OpenSubsonic,
-        display_name: "OpenSubsonic".to_string(),
-        endpoint,
-        username,
-        enabled,
-    });
-}
-
-fn opensubsonic_profile_snapshot(
-    config_backend: &BackendProfileConfig,
-    status_text: Option<String>,
-) -> protocol::BackendProfileSnapshot {
-    protocol::BackendProfileSnapshot {
-        profile_id: config_backend.profile_id.clone(),
-        backend_kind: protocol::BackendKind::OpenSubsonic,
-        display_name: config_backend.display_name.clone(),
-        endpoint: config_backend.endpoint.clone(),
-        username: config_backend.username.clone(),
-        configured: !config_backend.endpoint.trim().is_empty()
-            && !config_backend.username.trim().is_empty(),
-        connection_state: protocol::BackendConnectionState::Disconnected,
-        status_text,
-    }
-}
-
 fn enqueue_playlist_bulk_import(
     playlist_bulk_import_tx: &mpsc::SyncSender<protocol::PlaylistBulkImportRequest>,
     bus_sender: &broadcast::Sender<Message>,
