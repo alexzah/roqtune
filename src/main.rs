@@ -6812,6 +6812,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let runtime_audio_state_clone = Arc::clone(&runtime_audio_state);
     let staged_audio_settings_clone = Arc::clone(&staged_audio_settings);
     let last_runtime_signature_clone = Arc::clone(&last_runtime_signature);
+    let playback_session_active_clone = Arc::clone(&playback_session_active);
     thread::spawn(move || loop {
         match device_event_receiver.blocking_recv() {
             Ok(Message::Config(ConfigMessage::SetRuntimeOutputRate {
@@ -6901,11 +6902,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     &runtime_audio_state_clone,
                 );
                 let runtime_signature = OutputRuntimeSignature::from_output(&runtime.output);
+                let playback_active = playback_session_active_clone.load(Ordering::Relaxed);
                 let should_broadcast_runtime = {
                     let mut last_signature = last_runtime_signature_clone
                         .lock()
                         .expect("runtime signature lock poisoned");
-                    if *last_signature == runtime_signature {
+                    if !playback_active && !force_broadcast_runtime {
+                        // Keep runtime metadata in sync without forcing an idle-time audio-device reopen.
+                        *last_signature = runtime_signature;
+                        false
+                    } else if *last_signature == runtime_signature {
                         force_broadcast_runtime
                     } else {
                         *last_signature = runtime_signature;

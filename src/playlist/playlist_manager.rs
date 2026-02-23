@@ -1696,7 +1696,6 @@ impl PlaylistManager {
                             self.clear_cached_tracks();
                         } else {
                             self.clear_cached_tracks();
-                            self.cache_tracks(false);
                         }
                         let _ = self.bus_producer.send(protocol::Message::Config(
                             protocol::ConfigMessage::ClearRuntimeOutputRateOverride,
@@ -3813,6 +3812,49 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn test_stop_does_not_queue_decode_work_when_not_playing() {
+        let mut harness = PlaylistManagerHarness::new();
+        let (id0, _) = harness.add_track("pm_stop_no_decode_0");
+        let (id1, _) = harness.add_track("pm_stop_no_decode_1");
+        harness.drain_messages();
+
+        harness.start_playlist_queue_from_ids(&[id0, id1], 0);
+        let _ = wait_for_message(&mut harness.receiver, Duration::from_secs(1), |message| {
+            matches!(
+                message,
+                protocol::Message::Playlist(protocol::PlaylistMessage::PlaylistIndicesChanged {
+                    is_playing: true,
+                    playing_index: Some(0),
+                    ..
+                })
+            )
+        });
+        harness.drain_messages();
+
+        harness.send(protocol::Message::Playback(protocol::PlaybackMessage::Stop));
+        let _ = wait_for_message(&mut harness.receiver, Duration::from_secs(1), |message| {
+            matches!(
+                message,
+                protocol::Message::Playlist(protocol::PlaylistMessage::PlaylistIndicesChanged {
+                    is_playing: false,
+                    playing_index: None,
+                    ..
+                })
+            )
+        });
+        assert_no_message(
+            &mut harness.receiver,
+            Duration::from_millis(250),
+            |message| {
+                matches!(
+                    message,
+                    protocol::Message::Audio(protocol::AudioMessage::DecodeTracks(_))
+                )
+            },
+        );
     }
 
     #[test]
