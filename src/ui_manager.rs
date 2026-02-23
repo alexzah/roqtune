@@ -180,6 +180,7 @@ pub struct UiManager {
     library_online_metadata_prompt_pending: bool,
     list_image_max_edge_px: u32,
     cover_art_cache_max_size_mb: u32,
+    artist_image_cache_max_size_mb: u32,
     cover_art_memory_cache_max_size_mb: u32,
     artist_image_memory_cache_max_size_mb: u32,
     pending_list_image_requests:
@@ -1574,6 +1575,7 @@ impl UiManager {
             library_online_metadata_prompt_pending: initial_online_metadata_prompt_pending,
             list_image_max_edge_px: image_pipeline::runtime_list_image_max_edge_px(),
             cover_art_cache_max_size_mb: 512,
+            artist_image_cache_max_size_mb: 256,
             cover_art_memory_cache_max_size_mb: 50,
             artist_image_memory_cache_max_size_mb: 50,
             pending_list_image_requests: HashSet::new(),
@@ -4827,6 +4829,62 @@ impl UiManager {
         self.sync_properties_action_state();
     }
 
+    fn sync_playlist_playback_state_to_ui(&self) {
+        let view_indices = self.view_indices.clone();
+        let track_count = self.track_paths.len();
+        let track_ids = self.track_ids.clone();
+        let unavailable_track_ids = self.unavailable_track_ids.clone();
+        let active_playing_index = self.active_playing_index;
+        let playback_active = self.playback_active;
+        let playing_view_index = active_playing_index
+            .and_then(|source_index| self.map_source_to_view_index(source_index))
+            .map(|index| index as i32)
+            .unwrap_or(-1);
+        let _ = self.ui.upgrade_in_event_loop(move |ui| {
+            let current_model = ui.get_track_model();
+            let Some(vec_model) = current_model
+                .as_any()
+                .downcast_ref::<VecModel<TrackRowData>>()
+            else {
+                return;
+            };
+            let source_indices: Vec<usize> = if view_indices.is_empty() {
+                (0..track_count).collect()
+            } else {
+                view_indices.clone()
+            };
+            if vec_model.row_count() != source_indices.len() {
+                return;
+            }
+            for (row_index, source_index) in source_indices.into_iter().enumerate() {
+                let Some(mut row_data) = vec_model.row_data(row_index) else {
+                    continue;
+                };
+                let track_unavailable = track_ids
+                    .get(source_index)
+                    .map(|track_id| unavailable_track_ids.contains(track_id))
+                    .unwrap_or(false);
+                let status = if track_unavailable {
+                    ""
+                } else if Some(source_index) == active_playing_index {
+                    if playback_active {
+                        "▶️"
+                    } else {
+                        "⏸️"
+                    }
+                } else {
+                    ""
+                };
+                if row_data.status.as_str() == status {
+                    continue;
+                }
+                row_data.status = status.into();
+                vec_model.set_row_data(row_index, row_data);
+            }
+            ui.set_playing_track_index(playing_view_index);
+        });
+    }
+
     fn prefetch_playlist_cover_art_window(&mut self, first_row: usize, row_count: usize) {
         if !self.is_album_art_column_visible() {
             return;
@@ -6177,6 +6235,44 @@ impl UiManager {
                     continue;
                 }
                 row_data.selected = selected;
+                vec_model.set_row_data(row_index, row_data);
+            }
+        });
+    }
+
+    fn sync_library_playing_state_to_ui(&self) {
+        let view_indices = self.library_view_indices.clone();
+        let library_playing_index = self.library_playing_index;
+        let library_playing_view_index = library_playing_index
+            .and_then(|playing_source_index| {
+                view_indices
+                    .iter()
+                    .position(|source_index| *source_index == playing_source_index)
+            })
+            .map(|index| index as i32)
+            .unwrap_or(-1);
+        let _ = self.ui.upgrade_in_event_loop(move |ui| {
+            ui.set_library_playing_track_index(library_playing_view_index);
+            let current_model = ui.get_library_model();
+            let Some(vec_model) = current_model
+                .as_any()
+                .downcast_ref::<VecModel<LibraryRowData>>()
+            else {
+                return;
+            };
+            if vec_model.row_count() != view_indices.len() {
+                return;
+            }
+
+            for (row_index, source_index) in view_indices.iter().enumerate() {
+                let Some(mut row_data) = vec_model.row_data(row_index) else {
+                    continue;
+                };
+                let is_playing = library_playing_index == Some(*source_index);
+                if row_data.is_playing == is_playing {
+                    continue;
+                }
+                row_data.is_playing = is_playing;
                 vec_model.set_row_data(row_index, row_data);
             }
         });
@@ -9047,10 +9143,10 @@ impl UiManager {
                                 ui.set_elapsed_ms(0);
                                 ui.set_total_ms(0);
                             });
+                            self.sync_playlist_playback_state_to_ui();
                             if had_playing_track {
-                                self.sync_library_ui();
+                                self.sync_library_playing_state_to_ui();
                             }
-                            self.rebuild_track_model();
                         }
                         protocol::Message::Playlist(protocol::PlaylistMessage::TrackStarted {
                             index: _index,
@@ -9343,6 +9439,23 @@ impl UiManager {
                             config,
                         )) => {
                             let previous_list_image_max_edge_px = self.list_image_max_edge_px;
+                            let previous_cover_art_cache_max_size_mb =
+                                self.cover_art_cache_max_size_mb;
+                            let previous_artist_image_cache_max_size_mb =
+                                self.artist_image_cache_max_size_mb;
+                            let previous_cover_art_memory_cache_max_size_mb =
+                                self.cover_art_memory_cache_max_size_mb;
+                            let previous_artist_image_memory_cache_max_size_mb =
+                                self.artist_image_memory_cache_max_size_mb;
+                            let previous_library_online_metadata_enabled =
+                                self.library_online_metadata_enabled;
+                            let previous_library_online_metadata_prompt_pending =
+                                self.library_online_metadata_prompt_pending;
+                            let previous_playlist_columns = self.playlist_columns.clone();
+                            let previous_album_art_column_min_width_px =
+                                self.album_art_column_min_width_px;
+                            let previous_album_art_column_max_width_px =
+                                self.album_art_column_max_width_px;
                             self.auto_scroll_to_playing_track =
                                 config.ui.auto_scroll_to_playing_track;
                             self.library_online_metadata_enabled =
@@ -9352,28 +9465,60 @@ impl UiManager {
                             self.list_image_max_edge_px = config.library.list_image_max_edge_px;
                             self.cover_art_cache_max_size_mb =
                                 config.library.cover_art_cache_max_size_mb;
+                            self.artist_image_cache_max_size_mb =
+                                config.library.artist_image_cache_max_size_mb;
                             self.cover_art_memory_cache_max_size_mb =
                                 config.library.cover_art_memory_cache_max_size_mb;
                             self.artist_image_memory_cache_max_size_mb =
                                 config.library.artist_image_memory_cache_max_size_mb;
-                            image_pipeline::configure_runtime_limits(
-                                self.list_image_max_edge_px,
-                                self.cover_art_cache_max_size_mb,
-                                config.library.artist_image_cache_max_size_mb,
-                            );
-                            COVER_ART_MEMORY_CACHE_BUDGET_BYTES.store(
-                                image_pipeline::mb_to_bytes(
-                                    self.cover_art_memory_cache_max_size_mb,
-                                ),
-                                Ordering::Relaxed,
-                            );
-                            ARTIST_IMAGE_MEMORY_CACHE_BUDGET_BYTES.store(
-                                image_pipeline::mb_to_bytes(
-                                    self.artist_image_memory_cache_max_size_mb,
-                                ),
-                                Ordering::Relaxed,
-                            );
-                            if previous_list_image_max_edge_px != self.list_image_max_edge_px {
+                            let list_image_max_edge_changed =
+                                previous_list_image_max_edge_px != self.list_image_max_edge_px;
+                            let cover_art_cache_budget_changed =
+                                previous_cover_art_cache_max_size_mb
+                                    != self.cover_art_cache_max_size_mb;
+                            let artist_image_cache_budget_changed =
+                                previous_artist_image_cache_max_size_mb
+                                    != self.artist_image_cache_max_size_mb;
+                            let cover_art_memory_budget_changed =
+                                previous_cover_art_memory_cache_max_size_mb
+                                    != self.cover_art_memory_cache_max_size_mb;
+                            let artist_image_memory_budget_changed =
+                                previous_artist_image_memory_cache_max_size_mb
+                                    != self.artist_image_memory_cache_max_size_mb;
+                            let online_metadata_enabled_changed =
+                                previous_library_online_metadata_enabled
+                                    != self.library_online_metadata_enabled;
+                            let online_metadata_prompt_changed =
+                                previous_library_online_metadata_prompt_pending
+                                    != self.library_online_metadata_prompt_pending;
+
+                            if list_image_max_edge_changed
+                                || cover_art_cache_budget_changed
+                                || artist_image_cache_budget_changed
+                            {
+                                image_pipeline::configure_runtime_limits(
+                                    self.list_image_max_edge_px,
+                                    self.cover_art_cache_max_size_mb,
+                                    self.artist_image_cache_max_size_mb,
+                                );
+                            }
+                            if cover_art_memory_budget_changed {
+                                COVER_ART_MEMORY_CACHE_BUDGET_BYTES.store(
+                                    image_pipeline::mb_to_bytes(
+                                        self.cover_art_memory_cache_max_size_mb,
+                                    ),
+                                    Ordering::Relaxed,
+                                );
+                            }
+                            if artist_image_memory_budget_changed {
+                                ARTIST_IMAGE_MEMORY_CACHE_BUDGET_BYTES.store(
+                                    image_pipeline::mb_to_bytes(
+                                        self.artist_image_memory_cache_max_size_mb,
+                                    ),
+                                    Ordering::Relaxed,
+                                );
+                            }
+                            if list_image_max_edge_changed {
                                 TRACK_ROW_COVER_ART_IMAGE_CACHE.with(|cache| {
                                     cache.borrow_mut().clear();
                                 });
@@ -9382,17 +9527,24 @@ impl UiManager {
                                 });
                                 self.pending_list_image_requests.clear();
                             }
-                            let _ = image_pipeline::prune_kind_disk_cache(
-                                ManagedImageKind::CoverArt,
-                                image_pipeline::mb_to_bytes(self.cover_art_cache_max_size_mb),
-                            );
-                            let _ = image_pipeline::prune_kind_disk_cache(
-                                ManagedImageKind::ArtistImage,
-                                image_pipeline::mb_to_bytes(
-                                    config.library.artist_image_cache_max_size_mb,
-                                ),
-                            );
-                            if !self.library_online_metadata_enabled {
+                            if list_image_max_edge_changed
+                                || cover_art_cache_budget_changed
+                                || artist_image_cache_budget_changed
+                            {
+                                let _ = image_pipeline::prune_kind_disk_cache(
+                                    ManagedImageKind::CoverArt,
+                                    image_pipeline::mb_to_bytes(self.cover_art_cache_max_size_mb),
+                                );
+                                let _ = image_pipeline::prune_kind_disk_cache(
+                                    ManagedImageKind::ArtistImage,
+                                    image_pipeline::mb_to_bytes(
+                                        self.artist_image_cache_max_size_mb,
+                                    ),
+                                );
+                            }
+                            if online_metadata_enabled_changed
+                                && !self.library_online_metadata_enabled
+                            {
                                 self.library_enrichment_pending.clear();
                                 self.library_enrichment_last_request_at.clear();
                                 self.library_enrichment_retry_counts.clear();
@@ -9458,9 +9610,30 @@ impl UiManager {
                                     VecModel::from(menu_is_custom),
                                 )));
                             });
-                            self.sync_library_ui();
-                            self.rebuild_track_model();
-                            self.update_display_for_active_collection();
+                            let playlist_columns_changed =
+                                previous_playlist_columns != self.playlist_columns;
+                            let album_art_column_width_limits_changed =
+                                previous_album_art_column_min_width_px
+                                    != self.album_art_column_min_width_px
+                                    || previous_album_art_column_max_width_px
+                                        != self.album_art_column_max_width_px;
+                            let refresh_library_ui = list_image_max_edge_changed
+                                || online_metadata_enabled_changed
+                                || online_metadata_prompt_changed;
+                            let rebuild_playlist_rows =
+                                list_image_max_edge_changed || playlist_columns_changed;
+                            let refresh_display_target = refresh_library_ui
+                                || playlist_columns_changed
+                                || album_art_column_width_limits_changed;
+                            if refresh_library_ui {
+                                self.sync_library_ui();
+                            }
+                            if rebuild_playlist_rows {
+                                self.rebuild_track_model();
+                            }
+                            if refresh_display_target {
+                                self.update_display_for_active_collection();
+                            }
                         }
                         protocol::Message::Playlist(
                             protocol::PlaylistMessage::PlaylistViewportChanged {
