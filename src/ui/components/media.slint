@@ -122,6 +122,15 @@ export component SeekBarControl inherits Rectangle {
     in property <string> total-text: "0:00";
     callback seek-requested(float);
     private property <bool> dark: Palette.color-scheme == ColorScheme.dark;
+    private property <bool> scrub-active: false;
+    private property <float> scrub-position: max(0, min(1, root.position-percentage));
+    private property <float> display-position: root.scrub-active ? root.scrub-position : root.position-percentage;
+
+    changed position-percentage => {
+        if (!root.scrub-active) {
+            root.scrub-position = max(0, min(1, root.position-percentage));
+        }
+    }
 
     height: 32px;
     background: root.dark ? #242424 : #f3f6fb;
@@ -149,7 +158,7 @@ export component SeekBarControl inherits Rectangle {
             Rectangle {
                 x: 0;
                 y: 0;
-                width: seekbar.width * root.position-percentage;
+                width: seekbar.width * root.display-position;
                 height: parent.height;
                 background: #2a6def;
                 border-radius: 3px;
@@ -158,7 +167,7 @@ export component SeekBarControl inherits Rectangle {
             handle := Rectangle {
                 width: 12px;
                 height: 12px;
-                x: (seekbar.width * root.position-percentage) - self.width / 2;
+                x: (seekbar.width * root.display-position) - self.width / 2;
                 y: (parent.height - self.height) / 2;
                 background: white;
                 border-radius: 6px;
@@ -180,10 +189,25 @@ export component SeekBarControl inherits Rectangle {
                 width: parent.width;
                 height: 20px;
                 mouse-cursor: pointer;
-                clicked => { root.seek-requested(max(0, min(1, self.mouse-x / seekbar.width))); }
-                moved => {
+                changed pressed => {
+                    if (seekbar.width <= 0px) {
+                        if (!self.pressed) {
+                            root.scrub-active = false;
+                        }
+                        return;
+                    }
+
                     if (self.pressed) {
-                        root.seek-requested(max(0, min(1, self.mouse-x / seekbar.width)));
+                        root.scrub-active = true;
+                        root.scrub-position = max(0, min(1, self.mouse-x / seekbar.width));
+                    } else if (root.scrub-active) {
+                        root.scrub-active = false;
+                        root.seek-requested(root.scrub-position);
+                    }
+                }
+                moved => {
+                    if (self.pressed && seekbar.width > 0px) {
+                        root.scrub-position = max(0, min(1, self.mouse-x / seekbar.width));
                     }
                 }
             }
