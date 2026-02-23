@@ -1505,6 +1505,28 @@ export component AppWindow inherits Window {
                             property <length> row-height: max(30px, root.playlist_row_height_px * 1px);
                             property <length> header-height: 28px;
                             property <int> center-token: root.playlist_scroll_center_token;
+                            changed viewport-y => {
+                                let scroll-offset-y = max(0px, -self.viewport-y);
+                                let first-row = max(0, floor(scroll-offset-y / self.row-height));
+                                let visible-rows = max(1, floor(self.height / self.row-height) + 6);
+                                root.playlist_viewport_changed(first-row, visible-rows);
+                            }
+                            changed height => {
+                                let scroll-offset-y = max(0px, -self.viewport-y);
+                                let first-row = max(0, floor(scroll-offset-y / self.row-height));
+                                let visible-rows = max(1, floor(self.height / self.row-height) + 6);
+                                root.playlist_viewport_changed(first-row, visible-rows);
+                            }
+                            changed row-height => {
+                                let scroll-offset-y = max(0px, -self.viewport-y);
+                                let first-row = max(0, floor(scroll-offset-y / self.row-height));
+                                let visible-rows = max(1, floor(self.height / self.row-height) + 6);
+                                root.playlist_viewport_changed(first-row, visible-rows);
+                            }
+                            init => {
+                                let visible-rows = max(1, floor(self.height / self.row-height) + 6);
+                                root.playlist_viewport_changed(0, visible-rows);
+                            }
                             changed center-token => {
                                 let row-height = self.row-height;
                                 let first-visible-row = track-list-container.first-visible-row;
@@ -5591,6 +5613,7 @@ export component AppWindow inherits Window {
     callback subsonic_session_password_cancel();
     callback clear_library_enrichment_cache();
     callback library_viewport_changed(int, int);
+    callback playlist_viewport_changed(int, int);
     callback handle_track_click(int, bool, bool);
     callback on_pointer_down(int, bool, bool);
     callback on_drag_start(int);

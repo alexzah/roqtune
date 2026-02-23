@@ -34,6 +34,7 @@ audio-mixer = "0.2.0"
 keyring = "2.3.3"
 md5 = "0.8.0"
 showfile = "0.1.1"
+image = "0.25.9"
 
 [target.'cfg(target_os = "windows")'.dependencies]
 slint = { version = "1.15.1", default-features = false, features = ["std", "unstable-winit-030", "renderer-femtovg", "renderer-software", "compat-1-2"] } # UI framework (Qt-free via explicit winit backend), accessibility disabled on Windows due ComboBox/Wine crash

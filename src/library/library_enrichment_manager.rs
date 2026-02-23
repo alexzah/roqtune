@@ -3,10 +3,8 @@
 //! This manager fetches display-only artist/album blurbs (and artist images)
 //! from online metadata sources, then stores short-lived cache records for the UI.
 
-use std::collections::hash_map::DefaultHasher;
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::fs;
-use std::hash::{Hash, Hasher};
 use std::io::Read;
 use std::num::NonZeroU32;
 use std::path::{Path, PathBuf};
@@ -22,6 +20,7 @@ use tokio::sync::broadcast::{
 };
 
 use crate::db_manager::DbManager;
+use crate::image_pipeline::{self, ManagedImageKind};
 use crate::protocol::{
     LibraryEnrichmentAttemptKind, LibraryEnrichmentEntity, LibraryEnrichmentErrorKind,
     LibraryEnrichmentPayload, LibraryEnrichmentPriority, LibraryEnrichmentStatus, LibraryMessage,
@@ -33,7 +32,6 @@ const WIKIPEDIA_REST_BASE_URL: &str = "https://en.wikipedia.org/w/rest.php/v1";
 const THEAUDIODB_BASE_URL: &str = "https://www.theaudiodb.com/api/v1/json/2";
 const WIKIPEDIA_SOURCE_NAME: &str = "Wikipedia";
 const THEAUDIODB_SOURCE_NAME: &str = "TheAudioDB";
-const IMAGE_CACHE_DIR_NAME: &str = "library_enrichment/images";
 const READY_METADATA_TTL_DAYS: u32 = 30;
 const CONCLUSIVE_NOT_FOUND_TTL: Duration = Duration::from_secs(7 * 24 * 60 * 60);
 const HARD_ERROR_TTL: Duration = Duration::from_secs(30 * 60);
@@ -3052,9 +3050,7 @@ impl LibraryEnrichmentManager {
     }
 
     fn image_cache_dir() -> Option<PathBuf> {
-        let cache_dir = dirs::cache_dir()?
-            .join("roqtune")
-            .join(IMAGE_CACHE_DIR_NAME);
+        let cache_dir = image_pipeline::artist_originals_dir()?;
         if !cache_dir.exists() {
             fs::create_dir_all(&cache_dir).ok()?;
         }
@@ -3112,7 +3108,7 @@ impl LibraryEnrichmentManager {
         default_attempt: LibraryEnrichmentAttemptKind,
         verbose_log: bool,
     ) -> Option<PathBuf> {
-        let cache_dir = Self::image_cache_dir()?;
+        let _ = Self::image_cache_dir()?;
         let effective_attempt = self.effective_attempt_for_entity(entity, default_attempt);
         let priority = Self::priority_for_attempt(effective_attempt);
         let timeout = Self::request_timeout_for_attempt(effective_attempt);
@@ -3166,31 +3162,13 @@ impl LibraryEnrichmentManager {
             }
         };
 
-        let extension = Self::detect_image_extension(&bytes)?;
-        let mut hasher = DefaultHasher::new();
-        Self::source_entity_label(entity).hash(&mut hasher);
-        image_url.hash(&mut hasher);
-        let hash = hasher.finish();
-        let image_path = cache_dir.join(format!("{hash:x}.{extension}"));
-        if image_path.exists() {
-            if Self::file_looks_like_supported_image(&image_path) {
-                return Some(image_path);
-            }
-            let _ = fs::remove_file(&image_path);
-        }
-
-        let temp_path = cache_dir.join(format!("{hash:x}.{extension}.tmp"));
-        if fs::write(&temp_path, &bytes).is_err() {
-            return None;
-        }
-        if !Self::file_looks_like_supported_image(&temp_path) {
-            let _ = fs::remove_file(&temp_path);
-            return None;
-        }
-        if fs::rename(&temp_path, &image_path).is_err() {
-            let _ = fs::remove_file(&temp_path);
-            return None;
-        }
+        Self::detect_image_extension(&bytes)?;
+        let source_key = format!("{}|{}", Self::source_entity_label(entity), image_url);
+        let image_path = image_pipeline::normalize_and_cache_original_bytes(
+            ManagedImageKind::ArtistImage,
+            source_key.as_str(),
+            &bytes,
+        )?;
         Some(image_path)
     }
 
@@ -3239,56 +3217,15 @@ impl LibraryEnrichmentManager {
     }
 
     fn prune_artist_image_cache_by_size(&self) {
-        let Some(cache_dir) = Self::image_cache_dir() else {
-            return;
-        };
-
-        let mut files = Vec::new();
-        let mut total_size_bytes: u64 = 0;
-        let read_dir = match fs::read_dir(&cache_dir) {
-            Ok(read_dir) => read_dir,
-            Err(error) => {
-                warn!(
-                    "Failed to read enrichment image cache directory {}: {}",
-                    cache_dir.display(),
-                    error
-                );
-                return;
-            }
-        };
-
-        for entry in read_dir.flatten() {
-            let path = entry.path();
-            let Ok(metadata) = entry.metadata() else {
-                continue;
-            };
-            if !metadata.is_file() {
-                continue;
-            }
-            let size = metadata.len();
-            total_size_bytes = total_size_bytes.saturating_add(size);
-            let modified = metadata
-                .modified()
-                .unwrap_or(UNIX_EPOCH)
-                .duration_since(UNIX_EPOCH)
-                .map(|duration| duration.as_millis() as u64)
-                .unwrap_or(0);
-            files.push((path, size, modified));
-        }
-
-        let max_size_bytes =
-            u64::from(self.artist_image_cache_max_size_mb.max(1)) * 1024u64 * 1024u64;
-        if total_size_bytes <= max_size_bytes {
-            return;
-        }
-
-        files.sort_by_key(|(_, _, modified)| *modified);
-        for (path, size, _) in files {
-            if total_size_bytes <= max_size_bytes {
-                break;
-            }
-            if fs::remove_file(&path).is_ok() {
-                total_size_bytes = total_size_bytes.saturating_sub(size);
+        let max_size_bytes = image_pipeline::mb_to_bytes(self.artist_image_cache_max_size_mb);
+        let removed =
+            image_pipeline::prune_kind_disk_cache(ManagedImageKind::ArtistImage, max_size_bytes);
+        let original_dir = Self::image_cache_dir();
+        for path in removed {
+            if original_dir
+                .as_ref()
+                .is_some_and(|dir| path.starts_with(dir))
+            {
                 if let Err(error) = self
                     .db_manager
                     .clear_library_enrichment_image_path(path.to_string_lossy().as_ref())
@@ -3304,20 +3241,7 @@ impl LibraryEnrichmentManager {
     }
 
     fn clear_artist_image_cache_files(&self) -> usize {
-        let Some(cache_dir) = Self::image_cache_dir() else {
-            return 0;
-        };
-        let mut deleted = 0usize;
-        let Ok(entries) = fs::read_dir(&cache_dir) else {
-            return 0;
-        };
-        for entry in entries.flatten() {
-            let path = entry.path();
-            if path.is_file() && fs::remove_file(&path).is_ok() {
-                deleted = deleted.saturating_add(1);
-            }
-        }
-        deleted
+        image_pipeline::clear_kind_disk_cache(ManagedImageKind::ArtistImage)
     }
 
     fn clear_enrichment_cache(&mut self) {
@@ -3584,6 +3508,11 @@ impl LibraryEnrichmentManager {
                 self.online_metadata_enabled = config.library.online_metadata_enabled;
                 self.artist_image_cache_ttl_days = config.library.artist_image_cache_ttl_days;
                 self.artist_image_cache_max_size_mb = config.library.artist_image_cache_max_size_mb;
+                image_pipeline::configure_runtime_limits(
+                    config.library.list_image_max_edge_px,
+                    config.library.cover_art_cache_max_size_mb,
+                    config.library.artist_image_cache_max_size_mb,
+                );
                 if !self.online_metadata_enabled {
                     self.queued_attempts.clear();
                     self.detail_queue.clear();

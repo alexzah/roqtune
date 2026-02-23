@@ -36,6 +36,20 @@ pub enum PlaybackOrder {
     Random,
 }
 
+/// Image category used for async list-thumbnail preparation updates.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Deserialize, serde::Serialize)]
+pub enum UiImageKind {
+    CoverArt,
+    ArtistImage,
+}
+
+/// Image variant used by the UI image pipeline.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Deserialize, serde::Serialize)]
+pub enum UiImageVariant {
+    ListThumb,
+    DetailOriginal,
+}
+
 /// Page navigation action for Home, End, PageUp, PageDown.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum PageNavigationAction {
@@ -124,6 +138,10 @@ pub enum PlaylistMessage {
     CyclePlaylistSortByColumn(usize),
     RequestApplyFilterView,
     ApplyFilterViewSnapshot(Vec<usize>),
+    PlaylistViewportChanged {
+        first_row: usize,
+        row_count: usize,
+    },
     PlaylistViewportWidthChanged(u32),
     DeselectAll,
     SelectAll,
@@ -750,8 +768,16 @@ pub enum PlaybackMessage {
     SetVolume(f32),
     TechnicalMetadataChanged(TechnicalMetadata),
     OutputPathChanged(OutputPathInfo),
-    PlaybackProgress { elapsed_ms: u64, total_ms: u64 },
+    PlaybackProgress {
+        elapsed_ms: u64,
+        total_ms: u64,
+    },
     CoverArtChanged(Option<PathBuf>),
+    ListImageReady {
+        source_path: PathBuf,
+        kind: UiImageKind,
+        variant: UiImageVariant,
+    },
     MetadataDisplayChanged(Option<DetailedMetadata>),
 }
 

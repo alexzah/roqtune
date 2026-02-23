@@ -85,10 +85,23 @@ online_metadata_enabled = false
 # Set this to true to re-test the prompt flow.
 online_metadata_prompt_pending = true
 
+# Maximum long edge for list thumbnails. Aspect ratio is preserved.
+# Used for playlist inline art and Library tracks/artists/albums rows.
+list_image_max_edge_px = 320
+
+# Maximum on-disk cover-art cache size (originals + thumbnails) in MB.
+cover_art_cache_max_size_mb = 512
+
+# Maximum in-memory cover-art cache size in MB.
+cover_art_memory_cache_max_size_mb = 50
+
+# Maximum in-memory artist-image cache size in MB.
+artist_image_memory_cache_max_size_mb = 50
+
 # Artist image cache retention window in days.
 artist_image_cache_ttl_days = 30
 
-# Maximum on-disk artist-image cache size in MB before oldest files are pruned.
+# Maximum on-disk artist-image cache size (originals + thumbnails) in MB.
 artist_image_cache_max_size_mb = 256
 
 # ---------------------------------------------------------------------

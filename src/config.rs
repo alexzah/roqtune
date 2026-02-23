@@ -133,6 +133,14 @@ pub struct LibraryConfig {
     pub online_metadata_enabled: bool,
     #[serde(default = "default_true")]
     pub online_metadata_prompt_pending: bool,
+    #[serde(default = "default_list_image_max_edge_px")]
+    pub list_image_max_edge_px: u32,
+    #[serde(default = "default_cover_art_cache_max_size_mb")]
+    pub cover_art_cache_max_size_mb: u32,
+    #[serde(default = "default_cover_art_memory_cache_max_size_mb")]
+    pub cover_art_memory_cache_max_size_mb: u32,
+    #[serde(default = "default_artist_image_memory_cache_max_size_mb")]
+    pub artist_image_memory_cache_max_size_mb: u32,
     #[serde(default = "default_artist_image_cache_ttl_days")]
     pub artist_image_cache_ttl_days: u32,
     #[serde(default = "default_artist_image_cache_max_size_mb")]
@@ -263,6 +271,10 @@ impl Default for LibraryConfig {
             folders: Vec::new(),
             online_metadata_enabled: false,
             online_metadata_prompt_pending: true,
+            list_image_max_edge_px: default_list_image_max_edge_px(),
+            cover_art_cache_max_size_mb: default_cover_art_cache_max_size_mb(),
+            cover_art_memory_cache_max_size_mb: default_cover_art_memory_cache_max_size_mb(),
+            artist_image_memory_cache_max_size_mb: default_artist_image_memory_cache_max_size_mb(),
             artist_image_cache_ttl_days: default_artist_image_cache_ttl_days(),
             artist_image_cache_max_size_mb: default_artist_image_cache_max_size_mb(),
         }
@@ -303,6 +315,22 @@ fn default_volume() -> f32 {
 
 fn default_artist_image_cache_ttl_days() -> u32 {
     30
+}
+
+fn default_list_image_max_edge_px() -> u32 {
+    320
+}
+
+fn default_cover_art_cache_max_size_mb() -> u32 {
+    512
+}
+
+fn default_cover_art_memory_cache_max_size_mb() -> u32 {
+    50
+}
+
+fn default_artist_image_memory_cache_max_size_mb() -> u32 {
+    50
 }
 
 fn default_artist_image_cache_max_size_mb() -> u32 {
@@ -411,6 +439,10 @@ mod tests {
         assert!(config.library.folders.is_empty());
         assert!(!config.library.online_metadata_enabled);
         assert!(config.library.online_metadata_prompt_pending);
+        assert_eq!(config.library.list_image_max_edge_px, 320);
+        assert_eq!(config.library.cover_art_cache_max_size_mb, 512);
+        assert_eq!(config.library.cover_art_memory_cache_max_size_mb, 50);
+        assert_eq!(config.library.artist_image_memory_cache_max_size_mb, 50);
         assert_eq!(config.library.artist_image_cache_ttl_days, 30);
         assert_eq!(config.library.artist_image_cache_max_size_mb, 256);
         assert_eq!(config.buffering.player_low_watermark_ms, 12_000);
@@ -461,6 +493,10 @@ decoder_request_chunk_ms = 1500
         assert!(parsed.library.folders.is_empty());
         assert!(!parsed.library.online_metadata_enabled);
         assert!(parsed.library.online_metadata_prompt_pending);
+        assert_eq!(parsed.library.list_image_max_edge_px, 320);
+        assert_eq!(parsed.library.cover_art_cache_max_size_mb, 512);
+        assert_eq!(parsed.library.cover_art_memory_cache_max_size_mb, 50);
+        assert_eq!(parsed.library.artist_image_memory_cache_max_size_mb, 50);
         assert_eq!(parsed.library.artist_image_cache_ttl_days, 30);
         assert_eq!(parsed.library.artist_image_cache_max_size_mb, 256);
         assert_eq!(
@@ -579,6 +615,22 @@ decoder_request_chunk_ms = 1500
         assert_eq!(
             parsed.library.online_metadata_prompt_pending,
             defaults.library.online_metadata_prompt_pending
+        );
+        assert_eq!(
+            parsed.library.list_image_max_edge_px,
+            defaults.library.list_image_max_edge_px
+        );
+        assert_eq!(
+            parsed.library.cover_art_cache_max_size_mb,
+            defaults.library.cover_art_cache_max_size_mb
+        );
+        assert_eq!(
+            parsed.library.cover_art_memory_cache_max_size_mb,
+            defaults.library.cover_art_memory_cache_max_size_mb
+        );
+        assert_eq!(
+            parsed.library.artist_image_memory_cache_max_size_mb,
+            defaults.library.artist_image_memory_cache_max_size_mb
         );
         assert_eq!(
             parsed.library.artist_image_cache_ttl_days,

@@ -12,7 +12,10 @@ use std::{
     collections::{HashMap, HashSet, VecDeque},
     path::{Path, PathBuf},
     rc::Rc,
-    sync::mpsc::{self, Receiver as StdReceiver, Sender as StdSender},
+    sync::{
+        atomic::{AtomicU64, Ordering},
+        mpsc::{self, Receiver as StdReceiver, Sender as StdSender},
+    },
     thread,
 };
 
@@ -23,6 +26,7 @@ use tokio::sync::broadcast::{Receiver, Sender};
 
 use crate::{
     config::{self, PlaylistColumnConfig},
+    image_pipeline::{self, ManagedImageKind},
     integration_keyring::get_opensubsonic_password,
     integration_uri::{is_remote_track_path, parse_opensubsonic_track_uri},
     layout::PlaylistColumnWidthOverrideConfig,
@@ -48,6 +52,7 @@ pub struct UiManager {
     bus_sender: Sender<protocol::Message>,
     library_scan_progress_rx: StdReceiver<protocol::LibraryMessage>,
     cover_art_lookup_tx: StdSender<CoverArtLookupRequest>,
+    list_image_prepare_tx: StdSender<ListImagePrepareRequest>,
     metadata_lookup_tx: StdSender<MetadataLookupRequest>,
     last_cover_art_lookup_path: Option<PathBuf>,
     active_playlist_id: String,
@@ -137,6 +142,8 @@ pub struct UiManager {
     filter_search_query: String,
     filter_search_visible: bool,
     auto_scroll_to_playing_track: bool,
+    playlist_prefetch_first_row: usize,
+    playlist_prefetch_row_count: usize,
     playlist_scroll_center_token: i32,
     playback_active: bool,
     processed_message_count: u64,
@@ -169,6 +176,12 @@ pub struct UiManager {
     library_last_detail_enrichment_entity: Option<protocol::LibraryEnrichmentEntity>,
     library_online_metadata_enabled: bool,
     library_online_metadata_prompt_pending: bool,
+    list_image_max_edge_px: u32,
+    cover_art_cache_max_size_mb: u32,
+    cover_art_memory_cache_max_size_mb: u32,
+    artist_image_memory_cache_max_size_mb: u32,
+    pending_list_image_requests:
+        HashSet<(PathBuf, protocol::UiImageKind, protocol::UiImageVariant)>,
     library_artist_prefetch_first_row: usize,
     library_artist_prefetch_row_count: usize,
     library_scroll_positions: HashMap<LibraryScrollViewKey, usize>,
@@ -267,6 +280,15 @@ struct DeterministicColumnLayoutSpec {
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct CoverArtLookupRequest {
     track_path: Option<PathBuf>,
+}
+
+/// Deferred list-thumbnail preparation payload used by an internal worker thread.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ListImagePrepareRequest {
+    source_path: PathBuf,
+    kind: protocol::UiImageKind,
+    variant: protocol::UiImageVariant,
+    max_edge_px: u32,
 }
 
 /// Deferred metadata-lookup request payload used by the internal worker thread.
@@ -384,21 +406,26 @@ const LIBRARY_PREFETCH_FALLBACK_VISIBLE_ROWS: usize = 24;
 const LIBRARY_PREFETCH_TOP_OVERSCAN_ROWS: usize = 2;
 const LIBRARY_PREFETCH_BOTTOM_OVERSCAN_ROWS: usize = 10;
 const LIBRARY_BACKGROUND_WARM_QUEUE_SIZE: usize = 6;
-const COVER_ART_IMAGE_CACHE_MAX_BYTES: u64 = 128 * 1024 * 1024;
-const COVER_ART_IMAGE_CACHE_MAX_ENTRIES: usize = 4096;
+const IMAGE_CACHE_MAX_ENTRIES: usize = 4096;
 const COVER_ART_FAILED_PATHS_MAX_ENTRIES: usize = 4096;
 const LIBRARY_PAGE_FETCH_LIMIT: usize = 512;
 const REMOTE_TRACK_UNAVAILABLE_TITLE: &str = "Remote track unavailable";
 const PLAYLIST_COLUMN_SPACING_PX: u32 = 10;
+const DEFAULT_IMAGE_MEMORY_CACHE_MAX_BYTES: u64 = 50 * 1024 * 1024;
+
+static COVER_ART_MEMORY_CACHE_BUDGET_BYTES: AtomicU64 =
+    AtomicU64::new(DEFAULT_IMAGE_MEMORY_CACHE_MAX_BYTES);
+static ARTIST_IMAGE_MEMORY_CACHE_BUDGET_BYTES: AtomicU64 =
+    AtomicU64::new(DEFAULT_IMAGE_MEMORY_CACHE_MAX_BYTES);
 
 #[derive(Default)]
-struct CoverArtImageCache {
+struct PathImageCache {
     entries: HashMap<PathBuf, (Image, u64)>,
     lru: VecDeque<PathBuf>,
     total_bytes: u64,
 }
 
-impl CoverArtImageCache {
+impl PathImageCache {
     fn touch_lru(&mut self, path: &PathBuf) {
         if let Some(position) = self.lru.iter().position(|candidate| candidate == path) {
             let _ = self.lru.remove(position);
@@ -412,7 +439,7 @@ impl CoverArtImageCache {
         Some(cached)
     }
 
-    fn insert(&mut self, path: PathBuf, image: Image, approx_bytes: u64) {
+    fn insert(&mut self, path: PathBuf, image: Image, approx_bytes: u64, max_bytes: u64) {
         if let Some((_, existing_bytes)) = self.entries.remove(&path) {
             self.total_bytes = self.total_bytes.saturating_sub(existing_bytes);
         }
@@ -420,9 +447,7 @@ impl CoverArtImageCache {
         self.total_bytes = self.total_bytes.saturating_add(approx_bytes);
         self.entries.insert(path, (image, approx_bytes));
 
-        while self.total_bytes > COVER_ART_IMAGE_CACHE_MAX_BYTES
-            || self.entries.len() > COVER_ART_IMAGE_CACHE_MAX_ENTRIES
-        {
+        while self.total_bytes > max_bytes || self.entries.len() > IMAGE_CACHE_MAX_ENTRIES {
             let Some(evicted_path) = self.lru.pop_front() else {
                 break;
             };
@@ -469,8 +494,10 @@ impl FailedCoverPathCache {
 }
 
 thread_local! {
-    static TRACK_ROW_COVER_ART_IMAGE_CACHE: RefCell<CoverArtImageCache> =
-        RefCell::new(CoverArtImageCache::default());
+    static TRACK_ROW_COVER_ART_IMAGE_CACHE: RefCell<PathImageCache> =
+        RefCell::new(PathImageCache::default());
+    static TRACK_ROW_ARTIST_IMAGE_CACHE: RefCell<PathImageCache> =
+        RefCell::new(PathImageCache::default());
     static TRACK_ROW_COVER_ART_FAILED_PATHS: RefCell<FailedCoverPathCache> =
         RefCell::new(FailedCoverPathCache::default());
 }
@@ -756,23 +783,15 @@ fn fit_column_widths_deterministic(
 }
 
 impl UiManager {
-    fn roqtune_cache_root() -> Option<PathBuf> {
-        dirs::cache_dir().map(|path| path.join("roqtune"))
-    }
-
     fn covers_cache_dir() -> Option<PathBuf> {
-        Self::roqtune_cache_root().map(|path| path.join("covers"))
-    }
-
-    fn enrichment_images_cache_dir() -> Option<PathBuf> {
-        Self::roqtune_cache_root().map(|path| path.join("library_enrichment").join("images"))
+        image_pipeline::cover_originals_dir()
     }
 
     fn is_managed_cached_image_path(path: &Path) -> bool {
-        let in_cover_cache = Self::covers_cache_dir()
+        let in_cover_cache = image_pipeline::kind_cache_root(ManagedImageKind::CoverArt)
             .map(|cache_dir| path.starts_with(cache_dir))
             .unwrap_or(false);
-        let in_enrichment_cache = Self::enrichment_images_cache_dir()
+        let in_enrichment_cache = image_pipeline::kind_cache_root(ManagedImageKind::ArtistImage)
             .map(|cache_dir| path.starts_with(cache_dir))
             .unwrap_or(false);
         in_cover_cache || in_enrichment_cache
@@ -906,14 +925,16 @@ impl UiManager {
     }
 
     fn embedded_art_cache_candidates(track_path: &Path) -> Option<Vec<PathBuf>> {
-        let cache_dir = Self::covers_cache_dir()?;
+        let mut candidates = Vec::new();
+        if let Some(normalized) = image_pipeline::cover_original_path_for_track(track_path) {
+            candidates.push(normalized);
+        }
+        let cache_dir = image_pipeline::kind_cache_root(ManagedImageKind::CoverArt)?;
         let stem = Self::embedded_art_cache_stem(track_path)?;
-        Some(
-            ["png", "jpg", "jpeg", "webp", "gif", "bmp"]
-                .iter()
-                .map(|ext| cache_dir.join(format!("{stem}.{ext}")))
-                .collect(),
-        )
+        for ext in ["png", "jpg", "jpeg", "webp", "gif", "bmp"] {
+            candidates.push(cache_dir.join(format!("{stem}.{ext}")));
+        }
+        Some(candidates)
     }
 
     fn embedded_art_cache_path_if_present(track_path: &Path) -> Option<PathBuf> {
@@ -959,29 +980,20 @@ impl UiManager {
     }
 
     fn cache_cover_art_bytes(track_path: &Path, cover_bytes: &[u8]) -> Option<PathBuf> {
-        let cache_dir = Self::covers_cache_dir()?;
-        if !cache_dir.exists() {
-            std::fs::create_dir_all(&cache_dir).ok()?;
-        }
-
-        let extension = Self::detect_image_extension(cover_bytes)?;
-        let stem = Self::embedded_art_cache_stem(track_path)?;
-        let cache_path = cache_dir.join(format!("{stem}.{extension}"));
-        let temp_path = cache_dir.join(format!("{stem}.{extension}.tmp"));
+        Self::detect_image_extension(cover_bytes)?;
+        let source_key = track_path.to_string_lossy().to_string();
+        let cache_path = image_pipeline::normalize_and_cache_original_bytes(
+            ManagedImageKind::CoverArt,
+            source_key.as_str(),
+            cover_bytes,
+        )?;
         if Self::failed_cover_path(&cache_path) {
             return None;
         }
-        if std::fs::write(&temp_path, cover_bytes).is_err() {
-            return None;
-        }
-        if !Self::is_valid_image_file(&temp_path) {
-            let _ = std::fs::remove_file(&temp_path);
-            return None;
-        }
-        if std::fs::rename(&temp_path, &cache_path).is_err() {
-            let _ = std::fs::remove_file(&temp_path);
-            return None;
-        }
+        let _ = image_pipeline::prune_kind_disk_cache(
+            ManagedImageKind::CoverArt,
+            image_pipeline::runtime_cover_disk_budget_bytes(),
+        );
         Some(cache_path)
     }
 
@@ -1241,6 +1253,20 @@ impl UiManager {
         pending
     }
 
+    fn drain_list_image_prepare_requests(
+        first: ListImagePrepareRequest,
+        request_rx: &StdReceiver<ListImagePrepareRequest>,
+    ) -> Vec<ListImagePrepareRequest> {
+        let mut pending = vec![first];
+        while let Ok(next) = request_rx.try_recv() {
+            pending.push(next);
+            if pending.len() >= 256 {
+                break;
+            }
+        }
+        pending
+    }
+
     /// Creates a UI manager and starts an internal cover-art lookup worker thread.
     pub fn new(
         ui: slint::Weak<AppWindow>,
@@ -1263,6 +1289,58 @@ impl UiManager {
                 let _ = cover_art_bus_sender.send(protocol::Message::Playback(
                     protocol::PlaybackMessage::CoverArtChanged(cover_art_path),
                 ));
+            }
+        });
+        let (list_image_prepare_tx, list_image_prepare_rx) =
+            mpsc::channel::<ListImagePrepareRequest>();
+        let list_image_bus_sender = bus_sender.clone();
+        thread::spawn(move || {
+            while let Ok(request) = list_image_prepare_rx.recv() {
+                let pending =
+                    UiManager::drain_list_image_prepare_requests(request, &list_image_prepare_rx);
+                let mut deduped: HashSet<(
+                    PathBuf,
+                    protocol::UiImageKind,
+                    protocol::UiImageVariant,
+                    u32,
+                )> = HashSet::new();
+                for item in pending {
+                    deduped.insert((item.source_path, item.kind, item.variant, item.max_edge_px));
+                }
+                for (source_path, kind, variant, max_edge_px) in deduped {
+                    if variant != protocol::UiImageVariant::ListThumb {
+                        continue;
+                    }
+                    let managed_kind = match kind {
+                        protocol::UiImageKind::CoverArt => ManagedImageKind::CoverArt,
+                        protocol::UiImageKind::ArtistImage => ManagedImageKind::ArtistImage,
+                    };
+                    if image_pipeline::ensure_list_thumbnail(
+                        managed_kind,
+                        &source_path,
+                        max_edge_px,
+                    )
+                    .is_none()
+                    {
+                        continue;
+                    }
+                    let max_disk_bytes = match managed_kind {
+                        ManagedImageKind::CoverArt => {
+                            image_pipeline::runtime_cover_disk_budget_bytes()
+                        }
+                        ManagedImageKind::ArtistImage => {
+                            image_pipeline::runtime_artist_disk_budget_bytes()
+                        }
+                    };
+                    let _ = image_pipeline::prune_kind_disk_cache(managed_kind, max_disk_bytes);
+                    let _ = list_image_bus_sender.send(protocol::Message::Playback(
+                        protocol::PlaybackMessage::ListImageReady {
+                            source_path: source_path.clone(),
+                            kind,
+                            variant,
+                        },
+                    ));
+                }
             }
         });
         let (metadata_lookup_tx, metadata_lookup_rx) = mpsc::channel::<MetadataLookupRequest>();
@@ -1310,6 +1388,7 @@ impl UiManager {
             bus_sender,
             library_scan_progress_rx,
             cover_art_lookup_tx,
+            list_image_prepare_tx,
             metadata_lookup_tx,
             last_cover_art_lookup_path: None,
             active_playlist_id: String::new(),
@@ -1364,6 +1443,8 @@ impl UiManager {
             filter_search_query: String::new(),
             filter_search_visible: false,
             auto_scroll_to_playing_track: true,
+            playlist_prefetch_first_row: 0,
+            playlist_prefetch_row_count: 0,
             playlist_scroll_center_token: 0,
             playback_active: false,
             processed_message_count: 0,
@@ -1390,6 +1471,11 @@ impl UiManager {
             library_last_detail_enrichment_entity: None,
             library_online_metadata_enabled: initial_online_metadata_enabled,
             library_online_metadata_prompt_pending: initial_online_metadata_prompt_pending,
+            list_image_max_edge_px: image_pipeline::runtime_list_image_max_edge_px(),
+            cover_art_cache_max_size_mb: 512,
+            cover_art_memory_cache_max_size_mb: 50,
+            artist_image_memory_cache_max_size_mb: 50,
+            pending_list_image_requests: HashSet::new(),
             library_artist_prefetch_first_row: 0,
             library_artist_prefetch_row_count: 0,
             library_scroll_positions: HashMap::new(),
@@ -1746,32 +1832,147 @@ impl UiManager {
         self.resolve_track_cover_art_path(source_index)
     }
 
-    fn approximate_cover_art_size_bytes(path: &Path) -> u64 {
-        std::fs::metadata(path)
-            .map(|meta| meta.len().max(1))
-            .unwrap_or(256 * 1024)
+    fn playlist_cover_decode_window(&self, total_rows: usize) -> (usize, usize) {
+        if total_rows == 0 {
+            return (0, 0);
+        }
+        let default_rows = 24usize;
+        let lookahead_rows = 24usize;
+        let row_count = if self.playlist_prefetch_row_count == 0 {
+            default_rows
+        } else {
+            self.playlist_prefetch_row_count.min(128)
+        };
+        let start = self
+            .playlist_prefetch_first_row
+            .saturating_sub(6)
+            .min(total_rows);
+        let end = start
+            .saturating_add(row_count)
+            .saturating_add(lookahead_rows)
+            .min(total_rows);
+        (start, end)
     }
 
-    fn try_load_cover_art_image(path: &Path) -> Option<Image> {
+    fn managed_kind_for_ui_kind(kind: protocol::UiImageKind) -> ManagedImageKind {
+        match kind {
+            protocol::UiImageKind::CoverArt => ManagedImageKind::CoverArt,
+            protocol::UiImageKind::ArtistImage => ManagedImageKind::ArtistImage,
+        }
+    }
+
+    fn queue_list_thumbnail_prepare(
+        &mut self,
+        source_path: &Path,
+        kind: protocol::UiImageKind,
+        variant: protocol::UiImageVariant,
+    ) {
+        let request_key = (source_path.to_path_buf(), kind, variant);
+        if self.pending_list_image_requests.contains(&request_key) {
+            return;
+        }
+        self.pending_list_image_requests.insert(request_key.clone());
+        let _ = self.list_image_prepare_tx.send(ListImagePrepareRequest {
+            source_path: request_key.0,
+            kind,
+            variant,
+            max_edge_px: self.list_image_max_edge_px,
+        });
+    }
+
+    fn list_thumbnail_path_if_ready(
+        &mut self,
+        source_path: &Path,
+        kind: protocol::UiImageKind,
+    ) -> Option<PathBuf> {
+        let managed_kind = Self::managed_kind_for_ui_kind(kind);
+        let thumb_path = image_pipeline::list_thumbnail_path_if_present(
+            managed_kind,
+            source_path,
+            self.list_image_max_edge_px,
+        );
+        if thumb_path.is_some() {
+            return thumb_path;
+        }
+        self.queue_list_thumbnail_prepare(source_path, kind, protocol::UiImageVariant::ListThumb);
+        None
+    }
+
+    fn list_thumbnail_for_library_presentation(
+        &mut self,
+        presentation: &LibraryRowPresentation,
+    ) -> Option<PathBuf> {
+        let source_path = presentation.cover_art_path.as_ref()?;
+        let kind = if presentation.item_kind == LIBRARY_ITEM_KIND_ARTIST {
+            protocol::UiImageKind::ArtistImage
+        } else {
+            protocol::UiImageKind::CoverArt
+        };
+        self.list_thumbnail_path_if_ready(source_path.as_path(), kind)
+    }
+
+    fn approximate_cover_art_size_bytes(path: &Path) -> u64 {
+        image_pipeline::decoded_rgba_bytes(path).unwrap_or(256 * 1024)
+    }
+
+    fn image_cache_budget_bytes(kind: protocol::UiImageKind) -> u64 {
+        match kind {
+            protocol::UiImageKind::CoverArt => {
+                COVER_ART_MEMORY_CACHE_BUDGET_BYTES.load(Ordering::Relaxed)
+            }
+            protocol::UiImageKind::ArtistImage => {
+                ARTIST_IMAGE_MEMORY_CACHE_BUDGET_BYTES.load(Ordering::Relaxed)
+            }
+        }
+    }
+
+    fn try_load_cover_art_image_with_kind(
+        path: &Path,
+        kind: protocol::UiImageKind,
+    ) -> Option<Image> {
         if Self::failed_cover_path(path) {
             return None;
         }
 
         let image_path = path.to_path_buf();
-        if let Some(cached) =
-            TRACK_ROW_COVER_ART_IMAGE_CACHE.with(|cache| cache.borrow_mut().get(&image_path))
-        {
+        let cached = match kind {
+            protocol::UiImageKind::CoverArt => {
+                TRACK_ROW_COVER_ART_IMAGE_CACHE.with(|cache| cache.borrow_mut().get(&image_path))
+            }
+            protocol::UiImageKind::ArtistImage => {
+                TRACK_ROW_ARTIST_IMAGE_CACHE.with(|cache| cache.borrow_mut().get(&image_path))
+            }
+        };
+        if let Some(cached) = cached {
             return Some(cached);
         }
 
         match Image::load_from_path(path) {
             Ok(image) => {
                 let approx_bytes = Self::approximate_cover_art_size_bytes(path);
-                TRACK_ROW_COVER_ART_IMAGE_CACHE.with(|cache| {
-                    cache
-                        .borrow_mut()
-                        .insert(image_path.clone(), image.clone(), approx_bytes);
-                });
+                let cache_budget = Self::image_cache_budget_bytes(kind);
+                match kind {
+                    protocol::UiImageKind::CoverArt => {
+                        TRACK_ROW_COVER_ART_IMAGE_CACHE.with(|cache| {
+                            cache.borrow_mut().insert(
+                                image_path.clone(),
+                                image.clone(),
+                                approx_bytes,
+                                cache_budget,
+                            );
+                        });
+                    }
+                    protocol::UiImageKind::ArtistImage => {
+                        TRACK_ROW_ARTIST_IMAGE_CACHE.with(|cache| {
+                            cache.borrow_mut().insert(
+                                image_path.clone(),
+                                image.clone(),
+                                approx_bytes,
+                                cache_budget,
+                            );
+                        });
+                    }
+                }
                 Some(image)
             }
             Err(error) => {
@@ -1789,9 +1990,15 @@ impl UiManager {
         }
     }
 
+    fn try_load_cover_art_image(path: &Path) -> Option<Image> {
+        Self::try_load_cover_art_image_with_kind(path, protocol::UiImageKind::CoverArt)
+    }
+
     fn load_track_row_cover_art_image(path: Option<&PathBuf>) -> Image {
-        path.and_then(|path| Self::try_load_cover_art_image(path))
-            .unwrap_or_default()
+        path.and_then(|path| {
+            Self::try_load_cover_art_image_with_kind(path, protocol::UiImageKind::CoverArt)
+        })
+        .unwrap_or_default()
     }
 
     fn to_detailed_metadata(track_metadata: &TrackMetadata) -> protocol::DetailedMetadata {
@@ -3216,9 +3423,16 @@ impl UiManager {
                     }
                     .cloned()
                     .unwrap_or(None);
+                    let image_kind = if image_source_index == 1 {
+                        protocol::UiImageKind::ArtistImage
+                    } else {
+                        protocol::UiImageKind::CoverArt
+                    };
                     let art_source = art_path
                         .as_ref()
-                        .and_then(|path| UiManager::try_load_cover_art_image(path))
+                        .and_then(|path| {
+                            UiManager::try_load_cover_art_image_with_kind(path, image_kind)
+                        })
                         .unwrap_or_default();
                     let has_art = art_path.is_some();
                     row_data.art_source = art_source;
@@ -4363,10 +4577,12 @@ impl UiManager {
             .and_then(|source_index| self.map_source_to_view_index(source_index))
             .map(|index| index as i32)
             .unwrap_or(-1);
+        let (cover_decode_start, cover_decode_end) = self.playlist_cover_decode_window(rows.len());
         type TrackRowPayload = (Vec<String>, Option<PathBuf>, String, bool, String, bool);
         let row_data: Vec<TrackRowPayload> = rows
             .into_iter()
-            .map(|row| {
+            .enumerate()
+            .map(|(row_index, row)| {
                 let track_unavailable = self
                     .track_ids
                     .get(row.source_index)
@@ -4383,9 +4599,20 @@ impl UiManager {
                 } else {
                     ""
                 };
-                let album_art_path = album_art_column_visible
-                    .then(|| self.row_cover_art_path(row.source_index))
-                    .flatten();
+                let resolve_album_art = album_art_column_visible
+                    && row_index >= cover_decode_start
+                    && row_index < cover_decode_end;
+                let album_art_path = if resolve_album_art {
+                    self.row_cover_art_path(row.source_index)
+                        .and_then(|source_path| {
+                            self.list_thumbnail_path_if_ready(
+                                source_path.as_path(),
+                                protocol::UiImageKind::CoverArt,
+                            )
+                        })
+                } else {
+                    None
+                };
                 let source_badge = self
                     .track_paths
                     .get(row.source_index)
@@ -4425,6 +4652,95 @@ impl UiManager {
 
         self.sync_filter_state_to_ui();
         self.sync_properties_action_state();
+    }
+
+    fn prefetch_playlist_cover_art_window(&mut self, first_row: usize, row_count: usize) {
+        if !self.is_album_art_column_visible() {
+            return;
+        }
+        let total_rows = if self.view_indices.is_empty() {
+            self.track_paths.len()
+        } else {
+            self.view_indices.len()
+        };
+        if total_rows == 0 {
+            return;
+        }
+        self.playlist_prefetch_first_row = first_row.min(total_rows.saturating_sub(1));
+        if row_count > 0 {
+            self.playlist_prefetch_row_count = row_count;
+        }
+        let (start, end) = self.playlist_cover_decode_window(total_rows);
+        for view_row in start..end {
+            let Some(source_index) = self.map_view_to_source_index(view_row) else {
+                continue;
+            };
+            let Some(cover_path) = self.row_cover_art_path(source_index) else {
+                continue;
+            };
+            let _ = self.list_thumbnail_path_if_ready(
+                cover_path.as_path(),
+                protocol::UiImageKind::CoverArt,
+            );
+        }
+    }
+
+    fn refresh_visible_playlist_cover_art_rows(&mut self) -> bool {
+        if !self.is_album_art_column_visible() {
+            return false;
+        }
+        let total_rows = if self.view_indices.is_empty() {
+            self.track_paths.len()
+        } else {
+            self.view_indices.len()
+        };
+        let (start, end) = self.playlist_cover_decode_window(total_rows);
+        if start >= end {
+            return false;
+        }
+        let mut updates: Vec<(usize, PathBuf)> = Vec::new();
+        for view_row in start..end {
+            let Some(source_index) = self.map_view_to_source_index(view_row) else {
+                continue;
+            };
+            let Some(cover_path) = self.row_cover_art_path(source_index) else {
+                continue;
+            };
+            let Some(thumbnail_path) = self.list_thumbnail_path_if_ready(
+                cover_path.as_path(),
+                protocol::UiImageKind::CoverArt,
+            ) else {
+                continue;
+            };
+            updates.push((view_row, thumbnail_path));
+        }
+        if updates.is_empty() {
+            return false;
+        }
+        let _ = self.ui.upgrade_in_event_loop(move |ui| {
+            let current_model = ui.get_track_model();
+            let Some(vec_model) = current_model
+                .as_any()
+                .downcast_ref::<VecModel<TrackRowData>>()
+            else {
+                return;
+            };
+            for (view_row, thumbnail_path) in updates {
+                if view_row >= vec_model.row_count() {
+                    continue;
+                }
+                let Some(mut row_data) = vec_model.row_data(view_row) else {
+                    continue;
+                };
+                row_data.album_art = UiManager::try_load_cover_art_image_with_kind(
+                    thumbnail_path.as_path(),
+                    protocol::UiImageKind::CoverArt,
+                )
+                .unwrap_or_default();
+                vec_model.set_row_data(view_row, row_data);
+            }
+        });
+        true
     }
 
     fn open_playlist_search(&mut self) {
@@ -5444,12 +5760,14 @@ impl UiManager {
             let Some(LibraryEntry::Artist(artist)) = self.library_entries.get(source_index) else {
                 continue;
             };
-            let presentation = self.library_row_presentation_from_entry(
+            let mut presentation = self.library_row_presentation_from_entry(
                 &LibraryEntry::Artist(artist.clone()),
                 &view,
                 selected_set.contains(&source_index),
                 true,
             );
+            presentation.cover_art_path =
+                self.list_thumbnail_for_library_presentation(&presentation);
             updates.push((row_index, presentation));
         }
 
@@ -5514,12 +5832,14 @@ impl UiManager {
                 continue;
             }
 
-            let presentation = self.library_row_presentation_from_entry(
+            let mut presentation = self.library_row_presentation_from_entry(
                 &entry,
                 &view,
                 selected_set.contains(&source_index),
                 true,
             );
+            presentation.cover_art_path =
+                self.list_thumbnail_for_library_presentation(&presentation);
             if presentation.cover_art_path.is_none() {
                 continue;
             }
@@ -5627,10 +5947,15 @@ impl UiManager {
     }
 
     fn library_row_data_from_presentation(entry: LibraryRowPresentation) -> LibraryRowData {
+        let image_kind = if entry.item_kind == LIBRARY_ITEM_KIND_ARTIST {
+            protocol::UiImageKind::ArtistImage
+        } else {
+            protocol::UiImageKind::CoverArt
+        };
         let album_art = entry
             .cover_art_path
             .as_deref()
-            .and_then(UiManager::try_load_cover_art_image);
+            .and_then(|path| UiManager::try_load_cover_art_image_with_kind(path, image_kind));
         let has_album_art = album_art.is_some();
         LibraryRowData {
             leading: entry.leading.into(),
@@ -6234,6 +6559,12 @@ impl UiManager {
                         selected_set.contains(source_index),
                         resolve_cover_art,
                     );
+                    if resolve_cover_art {
+                        presentation.cover_art_path =
+                            self.list_thumbnail_for_library_presentation(&presentation);
+                    } else {
+                        presentation.cover_art_path = None;
+                    }
                     if let Some(playing_idx) = self.library_playing_index {
                         if *source_index == playing_idx {
                             presentation.is_playing = true;
@@ -6270,6 +6601,11 @@ impl UiManager {
         let online_prompt_visible = self.collection_mode == COLLECTION_MODE_LIBRARY
             && fetch_capable_view
             && self.library_online_metadata_prompt_pending;
+        let detail_header_image_kind = if matches!(view, LibraryViewState::ArtistDetail { .. }) {
+            protocol::UiImageKind::ArtistImage
+        } else {
+            protocol::UiImageKind::CoverArt
+        };
 
         let _ = self.ui.upgrade_in_event_loop(move |ui| {
             let rows: Vec<LibraryRowData> = rows
@@ -6284,9 +6620,9 @@ impl UiManager {
             ui.set_library_can_go_back(can_go_back);
             ui.set_library_scan_in_progress(scan_in_progress);
             ui.set_library_status_text(status_text.into());
-            let album_header_art = detail_header_art_path
-                .as_deref()
-                .and_then(UiManager::try_load_cover_art_image);
+            let album_header_art = detail_header_art_path.as_deref().and_then(|path| {
+                UiManager::try_load_cover_art_image_with_kind(path, detail_header_image_kind)
+            });
             ui.set_library_album_header_has_art(album_header_art.is_some());
             ui.set_library_album_header_art(album_header_art.unwrap_or_default());
             ui.set_library_album_header_meta(detail_header_meta.into());
@@ -7844,9 +8180,13 @@ impl UiManager {
                                 TRACK_ROW_COVER_ART_IMAGE_CACHE.with(|cache| {
                                     cache.borrow_mut().clear();
                                 });
+                                TRACK_ROW_ARTIST_IMAGE_CACHE.with(|cache| {
+                                    cache.borrow_mut().clear();
+                                });
                                 TRACK_ROW_COVER_ART_FAILED_PATHS.with(|failed| {
                                     failed.borrow_mut().clear();
                                 });
+                                self.pending_list_image_requests.clear();
                                 let toast_text = format!(
                                     "Cleared internet metadata cache ({} entries, {} images)",
                                     cleared_rows, deleted_images
@@ -8738,7 +9078,7 @@ impl UiManager {
                             if path.is_some() {
                                 self.refresh_visible_library_cover_art_rows();
                                 if self.is_album_art_column_visible() {
-                                    self.rebuild_track_model();
+                                    self.refresh_visible_playlist_cover_art_rows();
                                 }
                             }
                             let _ = self.ui.upgrade_in_event_loop(move |ui| {
@@ -8755,6 +9095,27 @@ impl UiManager {
                                     ui.set_current_cover_art_available(false);
                                 }
                             });
+                        }
+                        protocol::Message::Playback(
+                            protocol::PlaybackMessage::ListImageReady {
+                                source_path,
+                                kind,
+                                variant,
+                            },
+                        ) => {
+                            self.pending_list_image_requests
+                                .remove(&(source_path, kind, variant));
+                            if variant == protocol::UiImageVariant::ListThumb {
+                                match kind {
+                                    protocol::UiImageKind::CoverArt => {
+                                        self.refresh_visible_playlist_cover_art_rows();
+                                        self.refresh_visible_library_cover_art_rows();
+                                    }
+                                    protocol::UiImageKind::ArtistImage => {
+                                        self.refresh_visible_library_cover_art_rows();
+                                    }
+                                }
+                            }
                         }
                         protocol::Message::Playback(
                             protocol::PlaybackMessage::MetadataDisplayChanged(meta),
@@ -8778,12 +9139,56 @@ impl UiManager {
                         protocol::Message::Config(protocol::ConfigMessage::ConfigChanged(
                             config,
                         )) => {
+                            let previous_list_image_max_edge_px = self.list_image_max_edge_px;
                             self.auto_scroll_to_playing_track =
                                 config.ui.auto_scroll_to_playing_track;
                             self.library_online_metadata_enabled =
                                 config.library.online_metadata_enabled;
                             self.library_online_metadata_prompt_pending =
                                 config.library.online_metadata_prompt_pending;
+                            self.list_image_max_edge_px = config.library.list_image_max_edge_px;
+                            self.cover_art_cache_max_size_mb =
+                                config.library.cover_art_cache_max_size_mb;
+                            self.cover_art_memory_cache_max_size_mb =
+                                config.library.cover_art_memory_cache_max_size_mb;
+                            self.artist_image_memory_cache_max_size_mb =
+                                config.library.artist_image_memory_cache_max_size_mb;
+                            image_pipeline::configure_runtime_limits(
+                                self.list_image_max_edge_px,
+                                self.cover_art_cache_max_size_mb,
+                                config.library.artist_image_cache_max_size_mb,
+                            );
+                            COVER_ART_MEMORY_CACHE_BUDGET_BYTES.store(
+                                image_pipeline::mb_to_bytes(
+                                    self.cover_art_memory_cache_max_size_mb,
+                                ),
+                                Ordering::Relaxed,
+                            );
+                            ARTIST_IMAGE_MEMORY_CACHE_BUDGET_BYTES.store(
+                                image_pipeline::mb_to_bytes(
+                                    self.artist_image_memory_cache_max_size_mb,
+                                ),
+                                Ordering::Relaxed,
+                            );
+                            if previous_list_image_max_edge_px != self.list_image_max_edge_px {
+                                TRACK_ROW_COVER_ART_IMAGE_CACHE.with(|cache| {
+                                    cache.borrow_mut().clear();
+                                });
+                                TRACK_ROW_ARTIST_IMAGE_CACHE.with(|cache| {
+                                    cache.borrow_mut().clear();
+                                });
+                                self.pending_list_image_requests.clear();
+                            }
+                            let _ = image_pipeline::prune_kind_disk_cache(
+                                ManagedImageKind::CoverArt,
+                                image_pipeline::mb_to_bytes(self.cover_art_cache_max_size_mb),
+                            );
+                            let _ = image_pipeline::prune_kind_disk_cache(
+                                ManagedImageKind::ArtistImage,
+                                image_pipeline::mb_to_bytes(
+                                    config.library.artist_image_cache_max_size_mb,
+                                ),
+                            );
                             if !self.library_online_metadata_enabled {
                                 self.library_enrichment_pending.clear();
                                 self.library_enrichment_last_request_at.clear();
@@ -8853,6 +9258,15 @@ impl UiManager {
                             self.sync_library_ui();
                             self.rebuild_track_model();
                             self.update_display_for_active_collection();
+                        }
+                        protocol::Message::Playlist(
+                            protocol::PlaylistMessage::PlaylistViewportChanged {
+                                first_row,
+                                row_count,
+                            },
+                        ) => {
+                            self.prefetch_playlist_cover_art_window(first_row, row_count);
+                            self.refresh_visible_playlist_cover_art_rows();
                         }
                         protocol::Message::Playlist(
                             protocol::PlaylistMessage::PlaylistViewportWidthChanged(width_px),

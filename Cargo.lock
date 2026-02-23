@@ -4977,6 +4977,7 @@ dependencies = [
  "dirs",
  "getrandom 0.4.1",
  "governor",
+ "image",
  "keyring",
  "lofty",
  "log",

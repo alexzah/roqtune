@@ -9,6 +9,7 @@ mod backends;
 mod cast_manager;
 mod config;
 mod db_manager;
+mod image_pipeline;
 #[path = "integration/integration_keyring.rs"]
 mod integration_keyring;
 #[path = "integration/integration_manager.rs"]
@@ -1009,6 +1010,17 @@ fn sanitize_config(config: Config) -> Config {
     }
     let clamped_artist_image_cache_ttl_days =
         config.library.artist_image_cache_ttl_days.clamp(1, 3650);
+    let clamped_list_image_max_edge_px = config.library.list_image_max_edge_px.clamp(64, 500);
+    let clamped_cover_art_cache_max_size_mb =
+        config.library.cover_art_cache_max_size_mb.clamp(64, 16_384);
+    let clamped_cover_art_memory_cache_max_size_mb = config
+        .library
+        .cover_art_memory_cache_max_size_mb
+        .clamp(8, 2048);
+    let clamped_artist_image_memory_cache_max_size_mb = config
+        .library
+        .artist_image_memory_cache_max_size_mb
+        .clamp(8, 2048);
     let clamped_artist_image_cache_max_size_mb = config
         .library
         .artist_image_cache_max_size_mb
@@ -1067,6 +1079,10 @@ fn sanitize_config(config: Config) -> Config {
             folders: sanitized_library_folders,
             online_metadata_enabled: config.library.online_metadata_enabled,
             online_metadata_prompt_pending: config.library.online_metadata_prompt_pending,
+            list_image_max_edge_px: clamped_list_image_max_edge_px,
+            cover_art_cache_max_size_mb: clamped_cover_art_cache_max_size_mb,
+            cover_art_memory_cache_max_size_mb: clamped_cover_art_memory_cache_max_size_mb,
+            artist_image_memory_cache_max_size_mb: clamped_artist_image_memory_cache_max_size_mb,
             artist_image_cache_ttl_days: clamped_artist_image_cache_ttl_days,
             artist_image_cache_max_size_mb: clamped_artist_image_cache_max_size_mb,
         },
@@ -2345,6 +2361,34 @@ fn write_config_to_document(document: &mut DocumentMut, previous: &Config, confi
         );
         set_table_scalar_if_changed(
             library,
+            "list_image_max_edge_px",
+            i64::from(previous.library.list_image_max_edge_px),
+            i64::from(config.library.list_image_max_edge_px),
+            value,
+        );
+        set_table_scalar_if_changed(
+            library,
+            "cover_art_cache_max_size_mb",
+            i64::from(previous.library.cover_art_cache_max_size_mb),
+            i64::from(config.library.cover_art_cache_max_size_mb),
+            value,
+        );
+        set_table_scalar_if_changed(
+            library,
+            "cover_art_memory_cache_max_size_mb",
+            i64::from(previous.library.cover_art_memory_cache_max_size_mb),
+            i64::from(config.library.cover_art_memory_cache_max_size_mb),
+            value,
+        );
+        set_table_scalar_if_changed(
+            library,
+            "artist_image_memory_cache_max_size_mb",
+            i64::from(previous.library.artist_image_memory_cache_max_size_mb),
+            i64::from(config.library.artist_image_memory_cache_max_size_mb),
+            value,
+        );
+        set_table_scalar_if_changed(
+            library,
             "artist_image_cache_ttl_days",
             i64::from(previous.library.artist_image_cache_ttl_days),
             i64::from(config.library.artist_image_cache_ttl_days),
@@ -3138,6 +3182,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         &config,
         &initial_output_options,
         Some(&runtime_override_snapshot),
+    );
+    image_pipeline::configure_runtime_limits(
+        runtime_config.library.list_image_max_edge_px,
+        runtime_config.library.cover_art_cache_max_size_mb,
+        runtime_config.library.artist_image_cache_max_size_mb,
     );
     let runtime_audio_state = Arc::new(Mutex::new(RuntimeAudioState {
         output: config.output.clone(),
@@ -4434,6 +4483,19 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
         let _ = bus_sender_clone.send(Message::Library(
             protocol::LibraryMessage::LibraryViewportChanged {
+                first_row: first_row as usize,
+                row_count: row_count.max(0) as usize,
+            },
+        ));
+    });
+
+    let bus_sender_clone = bus_sender.clone();
+    ui.on_playlist_viewport_changed(move |first_row, row_count| {
+        if first_row < 0 {
+            return;
+        }
+        let _ = bus_sender_clone.send(Message::Playlist(
+            PlaylistMessage::PlaylistViewportChanged {
                 first_row: first_row as usize,
                 row_count: row_count.max(0) as usize,
             },
