@@ -5,6 +5,7 @@ APP_ID="io.github.alexzah.roqtune"
 APP_BRANCH="stable"
 RUNTIME="org.freedesktop.Platform//24.08"
 SDK="org.freedesktop.Sdk//24.08"
+RUST_SDK_EXT="org.freedesktop.Sdk.Extension.rust-stable//24.08"
 
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 ROOT_DIR="$(cd -- "${SCRIPT_DIR}/.." && pwd)"
@@ -45,7 +46,7 @@ for arg in "$@"; do
     esac
 done
 
-for cmd in cargo flatpak flatpak-builder; do
+for cmd in flatpak flatpak-builder; do
     if ! command -v "${cmd}" >/dev/null 2>&1; then
         echo "Missing required command: ${cmd}" >&2
         exit 1
@@ -73,8 +74,7 @@ ensure_flatpak_ref_installed() {
 
 ensure_flatpak_ref_installed "${RUNTIME}" "runtime"
 ensure_flatpak_ref_installed "${SDK}" "SDK"
-
-cargo build --release --manifest-path "${ROOT_DIR}/Cargo.toml"
+ensure_flatpak_ref_installed "${RUST_SDK_EXT}" "Rust SDK extension"
 
 mkdir -p "${DIST_DIR}"
 

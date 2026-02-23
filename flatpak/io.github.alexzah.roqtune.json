@@ -4,6 +4,9 @@
   "runtime": "org.freedesktop.Platform",
   "runtime-version": "24.08",
   "sdk": "org.freedesktop.Sdk",
+  "sdk-extensions": [
+    "org.freedesktop.Sdk.Extension.rust-stable"
+  ],
   "command": "roqtune",
   "finish-args": [
     "--share=ipc",
@@ -13,34 +16,45 @@
     "--socket=pulseaudio",
     "--device=dri",
     "--talk-name=org.freedesktop.secrets",
+    "--talk-name=org.freedesktop.FileManager1",
+    "--own-name=org.mpris.MediaPlayer2.roqtune",
     "--filesystem=xdg-music:rw"
   ],
   "modules": [
     {
-      "name": "roqtune-binary",
+      "name": "roqtune",
       "buildsystem": "simple",
+      "build-options": {
+        "append-path": "/usr/lib/sdk/rust-stable/bin",
+        "build-args": [
+          "--share=network"
+        ],
+        "env": {
+          "CARGO_HOME": "/run/build/roqtune/cargo",
+          "RUSTUP_HOME": "/run/build/roqtune/rustup",
+          "RUSTUP_TOOLCHAIN": "stable"
+        }
+      },
       "build-commands": [
-        "install -Dm755 roqtune /app/bin/roqtune",
-        "install -Dm644 io.github.alexzah.roqtune.desktop /app/share/applications/io.github.alexzah.roqtune.desktop",
-        "install -Dm644 io.github.alexzah.roqtune.metainfo.xml /app/share/metainfo/io.github.alexzah.roqtune.metainfo.xml",
-        "install -Dm644 io.github.alexzah.roqtune.png /app/share/icons/hicolor/512x512/apps/io.github.alexzah.roqtune.png"
+        ". /usr/lib/sdk/rust-stable/enable.sh",
+        "cargo build --release --locked",
+        "install -Dm755 target/release/roqtune /app/bin/roqtune",
+        "install -Dm644 flatpak/io.github.alexzah.roqtune.desktop /app/share/applications/io.github.alexzah.roqtune.desktop",
+        "install -Dm644 flatpak/io.github.alexzah.roqtune.metainfo.xml /app/share/metainfo/io.github.alexzah.roqtune.metainfo.xml",
+        "install -Dm644 flatpak/io.github.alexzah.roqtune.png /app/share/icons/hicolor/512x512/apps/io.github.alexzah.roqtune.png"
       ],
       "sources": [
         {
-          "type": "file",
-          "path": "../target/release/roqtune"
-        },
-        {
-          "type": "file",
-          "path": "io.github.alexzah.roqtune.desktop"
-        },
-        {
-          "type": "file",
-          "path": "io.github.alexzah.roqtune.metainfo.xml"
-        },
-        {
-          "type": "file",
-          "path": "io.github.alexzah.roqtune.png"
+          "type": "dir",
+          "path": "..",
+          "skip": [
+            ".git",
+            ".flatpak-builder",
+            "target",
+            "flatpak/.build",
+            "flatpak/.repo",
+            "flatpak/dist"
+          ]
         }
       ]
     }

@@ -11,6 +11,7 @@ use std::{
     collections::hash_map::DefaultHasher,
     collections::{HashMap, HashSet, VecDeque},
     path::{Path, PathBuf},
+    process::Command,
     rc::Rc,
     sync::{
         atomic::{AtomicU64, Ordering},
@@ -3962,7 +3963,24 @@ impl UiManager {
         let Some((path, _)) = self.active_properties_target() else {
             return;
         };
+        if Self::is_running_in_flatpak() {
+            let reveal_target = path.parent().unwrap_or(path.as_path());
+            match Command::new("xdg-open").arg(reveal_target).spawn() {
+                Ok(_) => return,
+                Err(err) => {
+                    warn!(
+                        "UiManager: flatpak xdg-open fallback failed for {}: {}",
+                        reveal_target.display(),
+                        err
+                    );
+                }
+            }
+        }
         showfile::show_path_in_file_manager(&path);
+    }
+
+    fn is_running_in_flatpak() -> bool {
+        std::env::var_os("FLATPAK_ID").is_some() || Path::new("/.flatpak-info").exists()
     }
 
     fn edit_properties_field(&mut self, index: usize, value: String) {

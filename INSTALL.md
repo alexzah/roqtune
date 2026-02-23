@@ -17,6 +17,7 @@ For Flatpak packaging:
 - Required installed runtime/SDK:
   - `org.freedesktop.Platform//24.08`
   - `org.freedesktop.Sdk//24.08`
+  - `org.freedesktop.Sdk.Extension.rust-stable//24.08`
 
 ## Native Build / Run
 
@@ -35,7 +36,7 @@ Use this command from the repo root:
 
 What it does:
 
-1. Builds the latest local `roqtune` source in release mode.
+1. Builds the latest local `roqtune` source in release mode inside the Flatpak SDK runtime.
 2. Builds a Flatpak repo from `flatpak/io.github.alexzah.roqtune.json`.
 3. Produces a local bundle at `flatpak/dist/io.github.alexzah.roqtune.flatpak`.
 4. Installs (or reinstalls) that local bundle for your user.
