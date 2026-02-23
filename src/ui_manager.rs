@@ -53,6 +53,7 @@ pub struct UiManager {
     library_scan_progress_rx: StdReceiver<protocol::LibraryMessage>,
     cover_art_lookup_tx: StdSender<CoverArtLookupRequest>,
     list_image_prepare_tx: StdSender<ListImagePrepareRequest>,
+    embedded_cover_art_prepare_tx: StdSender<EmbeddedCoverArtPrepareRequest>,
     metadata_lookup_tx: StdSender<MetadataLookupRequest>,
     last_cover_art_lookup_path: Option<PathBuf>,
     active_playlist_id: String,
@@ -288,6 +289,13 @@ struct ListImagePrepareRequest {
     source_path: PathBuf,
     kind: protocol::UiImageKind,
     variant: protocol::UiImageVariant,
+    max_edge_px: u32,
+}
+
+/// Deferred embedded cover-art extraction payload used by an internal worker thread.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct EmbeddedCoverArtPrepareRequest {
+    track_path: PathBuf,
     max_edge_px: u32,
 }
 
@@ -1299,6 +1307,20 @@ impl UiManager {
         pending
     }
 
+    fn drain_embedded_cover_art_prepare_requests(
+        first: EmbeddedCoverArtPrepareRequest,
+        request_rx: &StdReceiver<EmbeddedCoverArtPrepareRequest>,
+    ) -> Vec<EmbeddedCoverArtPrepareRequest> {
+        let mut pending = vec![first];
+        while let Ok(next) = request_rx.try_recv() {
+            pending.push(next);
+            if pending.len() >= 256 {
+                break;
+            }
+        }
+        pending
+    }
+
     /// Creates a UI manager and starts an internal cover-art lookup worker thread.
     pub fn new(
         ui: slint::Weak<AppWindow>,
@@ -1375,6 +1397,51 @@ impl UiManager {
                 }
             }
         });
+        let (embedded_cover_art_prepare_tx, embedded_cover_art_prepare_rx) =
+            mpsc::channel::<EmbeddedCoverArtPrepareRequest>();
+        let embedded_cover_art_bus_sender = bus_sender.clone();
+        thread::spawn(move || {
+            while let Ok(request) = embedded_cover_art_prepare_rx.recv() {
+                let pending = UiManager::drain_embedded_cover_art_prepare_requests(
+                    request,
+                    &embedded_cover_art_prepare_rx,
+                );
+                let mut deduped: HashSet<(PathBuf, u32)> = HashSet::new();
+                for item in pending {
+                    deduped.insert((item.track_path, item.max_edge_px));
+                }
+                for (track_path, max_edge_px) in deduped {
+                    if is_remote_track_path(track_path.as_path()) {
+                        continue;
+                    }
+                    let Some(cover_art_path) =
+                        UiManager::extract_embedded_art(track_path.as_path())
+                    else {
+                        continue;
+                    };
+                    if image_pipeline::ensure_list_thumbnail(
+                        ManagedImageKind::CoverArt,
+                        cover_art_path.as_path(),
+                        max_edge_px,
+                    )
+                    .is_none()
+                    {
+                        continue;
+                    }
+                    let _ = image_pipeline::prune_kind_disk_cache(
+                        ManagedImageKind::CoverArt,
+                        image_pipeline::runtime_cover_disk_budget_bytes(),
+                    );
+                    let _ = embedded_cover_art_bus_sender.send(protocol::Message::Playback(
+                        protocol::PlaybackMessage::ListImageReady {
+                            source_path: cover_art_path,
+                            kind: protocol::UiImageKind::CoverArt,
+                            variant: protocol::UiImageVariant::ListThumb,
+                        },
+                    ));
+                }
+            }
+        });
         let (metadata_lookup_tx, metadata_lookup_rx) = mpsc::channel::<MetadataLookupRequest>();
         let metadata_bus_sender = bus_sender.clone();
         thread::spawn(move || {
@@ -1421,6 +1488,7 @@ impl UiManager {
             library_scan_progress_rx,
             cover_art_lookup_tx,
             list_image_prepare_tx,
+            embedded_cover_art_prepare_tx,
             metadata_lookup_tx,
             last_cover_art_lookup_path: None,
             active_playlist_id: String::new(),
@@ -1851,6 +1919,10 @@ impl UiManager {
             self.find_external_cover_art_cached(&track_path)
                 .or_else(|| Self::embedded_art_cache_path_if_present(&track_path))
         };
+        if resolved_path.is_none() && !is_remote {
+            // Cover-file lookup already failed; proactively process embedded art in background.
+            self.queue_embedded_cover_art_prepare(track_path.as_path());
+        }
         if let Some(cache_slot) = self.track_cover_art_paths.get_mut(source_index) {
             *cache_slot = resolved_path.clone();
         }
@@ -1910,6 +1982,18 @@ impl UiManager {
             variant,
             max_edge_px: self.list_image_max_edge_px,
         });
+    }
+
+    fn queue_embedded_cover_art_prepare(&mut self, track_path: &Path) {
+        if is_remote_track_path(track_path) {
+            return;
+        }
+        let _ = self
+            .embedded_cover_art_prepare_tx
+            .send(EmbeddedCoverArtPrepareRequest {
+                track_path: track_path.to_path_buf(),
+                max_edge_px: self.list_image_max_edge_px,
+            });
     }
 
     fn list_thumbnail_path_if_ready(
@@ -5969,6 +6053,10 @@ impl UiManager {
             self.find_external_cover_art_cached(track_path)
                 .or_else(|| Self::embedded_art_cache_path_if_present(track_path))
         };
+        if resolved.is_none() && !is_remote_track_path(track_path.as_path()) {
+            // Cover-file lookup already failed; proactively process embedded art in background.
+            self.queue_embedded_cover_art_prepare(track_path.as_path());
+        }
         self.library_cover_art_paths
             .insert(track_path.clone(), resolved.clone());
         if resolved.is_none() {
