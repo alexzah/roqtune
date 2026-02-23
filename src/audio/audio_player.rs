@@ -83,6 +83,7 @@ pub struct AudioPlayer {
 
     // Setup cache
     cached_track_indices: Arc<Mutex<HashMap<String, TrackIndex>>>,
+    pending_immediate_start_track_id: Option<String>,
 
     // Audio stream
     config: Option<cpal::StreamConfig>,
@@ -374,6 +375,7 @@ impl AudioPlayer {
             queue_start_position: queue_start_position.clone(),
             queue_end_position: queue_end_position.clone(),
             cached_track_indices: cached_track_indices.clone(),
+            pending_immediate_start_track_id: None,
             is_playing: is_playing.clone(),
             device: None,
             config: None,
@@ -837,8 +839,14 @@ impl AudioPlayer {
             return;
         }
 
-        let device = self.device.as_ref().unwrap();
-        let config = self.config.as_ref().unwrap();
+        let Some(device) = self.device.as_ref() else {
+            warn!("AudioPlayer: cannot create stream without an initialized output device");
+            return;
+        };
+        let Some(config) = self.config.as_ref() else {
+            warn!("AudioPlayer: cannot create stream without an initialized stream config");
+            return;
+        };
         let sample_format = self.sample_format.unwrap_or(cpal::SampleFormat::F32);
 
         let sample_queue = self.sample_queue.clone();
@@ -986,6 +994,19 @@ impl AudioPlayer {
                 drop(queue);
                 self.queue_end_position
                     .fetch_add(sample_count, Ordering::Relaxed);
+                if let Some(pending_track_id) = self.pending_immediate_start_track_id.clone() {
+                    let current_track_id = self.current_track_id.lock().unwrap().clone();
+                    if current_track_id == pending_track_id {
+                        self.is_playing.store(true, Ordering::Relaxed);
+                        self.pending_immediate_start_track_id = None;
+                        debug!(
+                            "AudioPlayer: Playback started after first samples buffered for {}",
+                            current_track_id
+                        );
+                    } else {
+                        self.pending_immediate_start_track_id = None;
+                    }
+                }
             }
             AudioPacket::TrackHeader {
                 id,
@@ -1023,7 +1044,8 @@ impl AudioPlayer {
                         .store(start_offset_ms as usize, Ordering::Relaxed);
                     self.current_track_position
                         .store(start_index, Ordering::Relaxed);
-                    self.is_playing.store(true, Ordering::Relaxed);
+                    self.pending_immediate_start_track_id = Some(id.clone());
+                    self.is_playing.store(false, Ordering::Relaxed);
                     let _ = self.bus_sender.send(Message::Playback(
                         PlaybackMessage::TechnicalMetadataChanged(technical_metadata),
                     ));
@@ -1058,6 +1080,9 @@ impl AudioPlayer {
                     .unwrap();
 
                 let is_current = *self.current_track_id.lock().unwrap() == id;
+                if self.pending_immediate_start_track_id.as_deref() == Some(id.as_str()) {
+                    self.pending_immediate_start_track_id = None;
+                }
                 if !is_current || !self.is_playing.load(Ordering::Relaxed) {
                     self.bus_sender
                         .send(Message::Playback(PlaybackMessage::ReadyForPlayback(id)))
@@ -1081,6 +1106,7 @@ impl AudioPlayer {
                         self.load_samples(buffer);
                     }
                     Message::Playback(PlaybackMessage::Play) => {
+                        self.pending_immediate_start_track_id = None;
                         self.is_playing.store(true, Ordering::Relaxed);
                         debug!("AudioPlayer: Playback resumed");
                     }
@@ -1089,12 +1115,14 @@ impl AudioPlayer {
                         debug!("AudioPlayer: Playback paused");
                     }
                     Message::Playback(PlaybackMessage::Stop) => {
+                        self.pending_immediate_start_track_id = None;
                         self.is_playing.store(false, Ordering::Relaxed);
                         self.decode_bootstrap_pending
                             .store(false, Ordering::Relaxed);
                         debug!("AudioPlayer: Playback stopped");
                     }
                     Message::Playback(PlaybackMessage::PlayTrackById(id)) => {
+                        self.pending_immediate_start_track_id = None;
                         let queue_start = self.queue_start_position.load(Ordering::Relaxed);
                         let mut indices = self.cached_track_indices.lock().unwrap();
                         let track_info = indices.get(&id).cloned();
@@ -1153,6 +1181,7 @@ impl AudioPlayer {
                         }
                     }
                     Message::Playback(PlaybackMessage::ClearPlayerCache) => {
+                        self.pending_immediate_start_track_id = None;
                         self.is_playing.store(false, Ordering::Relaxed);
                         self.decode_bootstrap_pending
                             .store(false, Ordering::Relaxed);
@@ -1373,7 +1402,7 @@ impl AudioPlayer {
 mod tests {
     use super::{AudioPlayer, AudioQueueEntry, TrackHeader};
     use crate::config::Config;
-    use crate::protocol::{Message, PlaybackMessage};
+    use crate::protocol::{AudioPacket, Message, PlaybackMessage, TechnicalMetadata};
     use std::collections::{HashMap, VecDeque};
     use std::sync::{
         atomic::{AtomicBool, AtomicU32, AtomicUsize, Ordering},
@@ -1541,5 +1570,71 @@ mod tests {
         assert!(saw_started_t1);
         assert!(saw_finished_t1);
         assert!(!saw_started_t2);
+    }
+
+    #[test]
+    fn test_play_immediately_waits_for_first_samples_before_starting() {
+        let (bus_sender, bus_receiver) = broadcast::channel(32);
+        let mut player = AudioPlayer::new(bus_receiver, bus_sender);
+        let metadata = TechnicalMetadata {
+            format: "FLAC".to_string(),
+            bitrate_kbps: 900,
+            sample_rate_hz: 44_100,
+            channel_count: 2,
+            duration_ms: 100_000,
+            bits_per_sample: 16,
+        };
+
+        player.load_samples(AudioPacket::TrackHeader {
+            id: "cold_start_track".to_string(),
+            play_immediately: true,
+            technical_metadata: metadata,
+            start_offset_ms: 0,
+        });
+
+        assert_eq!(
+            player.pending_immediate_start_track_id.as_deref(),
+            Some("cold_start_track")
+        );
+        assert!(!player.is_playing.load(Ordering::Relaxed));
+
+        player.load_samples(AudioPacket::Samples {
+            samples: vec![0.5, 0.25, -0.25, -0.5],
+        });
+
+        assert_eq!(player.pending_immediate_start_track_id, None);
+        assert!(player.is_playing.load(Ordering::Relaxed));
+    }
+
+    #[test]
+    fn test_footer_clears_pending_immediate_start_without_samples() {
+        let (bus_sender, bus_receiver) = broadcast::channel(32);
+        let mut player = AudioPlayer::new(bus_receiver, bus_sender);
+        let metadata = TechnicalMetadata {
+            format: "MP3".to_string(),
+            bitrate_kbps: 320,
+            sample_rate_hz: 44_100,
+            channel_count: 2,
+            duration_ms: 25_000,
+            bits_per_sample: 16,
+        };
+
+        player.load_samples(AudioPacket::TrackHeader {
+            id: "empty_track".to_string(),
+            play_immediately: true,
+            technical_metadata: metadata,
+            start_offset_ms: 0,
+        });
+        assert_eq!(
+            player.pending_immediate_start_track_id.as_deref(),
+            Some("empty_track")
+        );
+
+        player.load_samples(AudioPacket::TrackFooter {
+            id: "empty_track".to_string(),
+        });
+
+        assert_eq!(player.pending_immediate_start_track_id, None);
+        assert!(!player.is_playing.load(Ordering::Relaxed));
     }
 }
