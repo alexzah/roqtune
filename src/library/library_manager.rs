@@ -1214,8 +1214,15 @@ impl LibraryManager {
         loop {
             match self.bus_consumer.blocking_recv() {
                 Ok(message) => match message {
-                    Message::Config(protocol::ConfigMessage::ConfigChanged(config)) => {
+                    Message::Config(protocol::ConfigMessage::ConfigLoaded(config)) => {
                         self.library_folders = config.library.folders;
+                    }
+                    Message::Config(protocol::ConfigMessage::ConfigChanged(changes)) => {
+                        for change in changes {
+                            if let protocol::ConfigDeltaEntry::Library(library) = change {
+                                self.library_folders = library.folders;
+                            }
+                        }
                     }
                     Message::Playlist(protocol::PlaylistMessage::PlaylistIndicesChanged {
                         is_playing,

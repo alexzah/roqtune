@@ -3,7 +3,7 @@
 use crate::layout::LayoutConfig;
 
 /// Root configuration persisted to `config.toml`.
-#[derive(Debug, Clone, Default, serde::Deserialize, serde::Serialize)]
+#[derive(Debug, Clone, Default, PartialEq, serde::Deserialize, serde::Serialize)]
 pub struct Config {
     /// Audio output and device preferences.
     pub output: OutputConfig,
@@ -25,7 +25,7 @@ pub struct Config {
 }
 
 /// Output device and format preferences.
-#[derive(Debug, Clone, serde::Deserialize, serde::Serialize)]
+#[derive(Debug, Clone, PartialEq, serde::Deserialize, serde::Serialize)]
 pub struct OutputConfig {
     #[serde(default)]
     pub output_device_name: String,
@@ -49,7 +49,7 @@ pub struct OutputConfig {
 }
 
 /// Cast playback preferences persisted between sessions.
-#[derive(Debug, Clone, serde::Deserialize, serde::Serialize, Default)]
+#[derive(Debug, Clone, PartialEq, serde::Deserialize, serde::Serialize, Default)]
 pub struct CastConfig {
     /// Enable sender-side transcoding fallback for receivers that reject direct source streams.
     #[serde(default)]
@@ -70,7 +70,7 @@ pub enum ResamplerQuality {
 
 /// UI preferences persisted between sessions.
 /// Layout-owned settings must live in `LayoutConfig` and be persisted in `layout.toml`.
-#[derive(Debug, Clone, serde::Deserialize, serde::Serialize)]
+#[derive(Debug, Clone, PartialEq, serde::Deserialize, serde::Serialize)]
 pub struct UiConfig {
     #[serde(default = "default_true")]
     pub show_layout_edit_intro: bool,
@@ -125,7 +125,7 @@ pub enum UiRepeatMode {
 }
 
 /// Library indexing preferences persisted between sessions.
-#[derive(Debug, Clone, serde::Deserialize, serde::Serialize)]
+#[derive(Debug, Clone, PartialEq, serde::Deserialize, serde::Serialize)]
 pub struct LibraryConfig {
     #[serde(default)]
     pub folders: Vec<String>,
@@ -171,7 +171,7 @@ pub struct ButtonClusterInstanceConfig {
 }
 
 /// Tuning knobs for decode/playback buffering.
-#[derive(Debug, Clone, serde::Deserialize, serde::Serialize)]
+#[derive(Debug, Clone, PartialEq, serde::Deserialize, serde::Serialize)]
 pub struct BufferingConfig {
     #[serde(default = "default_player_low_watermark_ms")]
     pub player_low_watermark_ms: u32,
@@ -184,7 +184,7 @@ pub struct BufferingConfig {
 }
 
 /// Integration profile configuration persisted between sessions.
-#[derive(Debug, Clone, serde::Deserialize, serde::Serialize, Default)]
+#[derive(Debug, Clone, PartialEq, serde::Deserialize, serde::Serialize, Default)]
 pub struct IntegrationsConfig {
     #[serde(default)]
     pub backends: Vec<BackendProfileConfig>,

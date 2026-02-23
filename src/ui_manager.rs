@@ -8138,6 +8138,193 @@ impl UiManager {
         });
     }
 
+    fn apply_ui_library_config_updates(
+        &mut self,
+        ui_update: Option<config::UiConfig>,
+        library_update: Option<config::LibraryConfig>,
+    ) {
+        if ui_update.is_none() && library_update.is_none() {
+            return;
+        }
+
+        let previous_list_image_max_edge_px = self.list_image_max_edge_px;
+        let previous_cover_art_cache_max_size_mb = self.cover_art_cache_max_size_mb;
+        let previous_artist_image_cache_max_size_mb = self.artist_image_cache_max_size_mb;
+        let previous_cover_art_memory_cache_max_size_mb = self.cover_art_memory_cache_max_size_mb;
+        let previous_artist_image_memory_cache_max_size_mb =
+            self.artist_image_memory_cache_max_size_mb;
+        let previous_library_online_metadata_enabled = self.library_online_metadata_enabled;
+        let previous_library_online_metadata_prompt_pending =
+            self.library_online_metadata_prompt_pending;
+        let previous_playlist_columns = self.playlist_columns.clone();
+        let previous_album_art_column_min_width_px = self.album_art_column_min_width_px;
+        let previous_album_art_column_max_width_px = self.album_art_column_max_width_px;
+
+        let mut list_image_max_edge_changed = false;
+        let mut online_metadata_enabled_changed = false;
+        let mut online_metadata_prompt_changed = false;
+
+        if let Some(library) = library_update {
+            self.library_online_metadata_enabled = library.online_metadata_enabled;
+            self.library_online_metadata_prompt_pending = library.online_metadata_prompt_pending;
+            self.list_image_max_edge_px = library.list_image_max_edge_px;
+            self.cover_art_cache_max_size_mb = library.cover_art_cache_max_size_mb;
+            self.artist_image_cache_max_size_mb = library.artist_image_cache_max_size_mb;
+            self.cover_art_memory_cache_max_size_mb = library.cover_art_memory_cache_max_size_mb;
+            self.artist_image_memory_cache_max_size_mb =
+                library.artist_image_memory_cache_max_size_mb;
+
+            list_image_max_edge_changed =
+                previous_list_image_max_edge_px != self.list_image_max_edge_px;
+            let cover_art_cache_budget_changed =
+                previous_cover_art_cache_max_size_mb != self.cover_art_cache_max_size_mb;
+            let artist_image_cache_budget_changed =
+                previous_artist_image_cache_max_size_mb != self.artist_image_cache_max_size_mb;
+            let cover_art_memory_budget_changed = previous_cover_art_memory_cache_max_size_mb
+                != self.cover_art_memory_cache_max_size_mb;
+            let artist_image_memory_budget_changed = previous_artist_image_memory_cache_max_size_mb
+                != self.artist_image_memory_cache_max_size_mb;
+            online_metadata_enabled_changed =
+                previous_library_online_metadata_enabled != self.library_online_metadata_enabled;
+            online_metadata_prompt_changed = previous_library_online_metadata_prompt_pending
+                != self.library_online_metadata_prompt_pending;
+
+            if list_image_max_edge_changed
+                || cover_art_cache_budget_changed
+                || artist_image_cache_budget_changed
+            {
+                image_pipeline::configure_runtime_limits(
+                    self.list_image_max_edge_px,
+                    self.cover_art_cache_max_size_mb,
+                    self.artist_image_cache_max_size_mb,
+                );
+            }
+            if cover_art_memory_budget_changed {
+                COVER_ART_MEMORY_CACHE_BUDGET_BYTES.store(
+                    image_pipeline::mb_to_bytes(self.cover_art_memory_cache_max_size_mb),
+                    Ordering::Relaxed,
+                );
+            }
+            if artist_image_memory_budget_changed {
+                ARTIST_IMAGE_MEMORY_CACHE_BUDGET_BYTES.store(
+                    image_pipeline::mb_to_bytes(self.artist_image_memory_cache_max_size_mb),
+                    Ordering::Relaxed,
+                );
+            }
+            if list_image_max_edge_changed {
+                TRACK_ROW_COVER_ART_IMAGE_CACHE.with(|cache| {
+                    cache.borrow_mut().clear();
+                });
+                TRACK_ROW_ARTIST_IMAGE_CACHE.with(|cache| {
+                    cache.borrow_mut().clear();
+                });
+                self.pending_list_image_requests.clear();
+            }
+            if list_image_max_edge_changed
+                || cover_art_cache_budget_changed
+                || artist_image_cache_budget_changed
+            {
+                let _ = image_pipeline::prune_kind_disk_cache(
+                    ManagedImageKind::CoverArt,
+                    image_pipeline::mb_to_bytes(self.cover_art_cache_max_size_mb),
+                );
+                let _ = image_pipeline::prune_kind_disk_cache(
+                    ManagedImageKind::ArtistImage,
+                    image_pipeline::mb_to_bytes(self.artist_image_cache_max_size_mb),
+                );
+            }
+            if online_metadata_enabled_changed && !self.library_online_metadata_enabled {
+                self.library_enrichment_pending.clear();
+                self.library_enrichment_last_request_at.clear();
+                self.library_enrichment_retry_counts.clear();
+                self.library_enrichment_retry_not_before.clear();
+                self.library_enrichment_not_found_not_before.clear();
+                self.library_enrichment_failed_attempt_counts.clear();
+                self.replace_prefetch_queue_if_changed(Vec::new());
+                self.replace_background_queue_if_changed(Vec::new());
+                self.library_last_detail_enrichment_entity = None;
+            }
+        }
+
+        let mut playlist_columns_changed = false;
+        let mut album_art_column_width_limits_changed = false;
+        if let Some(ui_config) = ui_update {
+            self.auto_scroll_to_playing_track = ui_config.auto_scroll_to_playing_track;
+            self.playlist_columns = ui_config.playlist_columns.clone();
+            self.album_art_column_min_width_px = ui_config.playlist_album_art_column_min_width_px;
+            self.album_art_column_max_width_px = ui_config.playlist_album_art_column_max_width_px;
+            let valid_column_keys: HashSet<String> = self
+                .playlist_columns
+                .iter()
+                .map(Self::playlist_column_key)
+                .collect();
+            self.apply_layout_column_width_overrides(
+                &ui_config.layout.playlist_column_width_overrides,
+            );
+            self.playlist_column_target_widths_px
+                .retain(|key, _| valid_column_keys.contains(key));
+            self.refresh_playlist_column_content_targets();
+            self.apply_playlist_column_layout();
+            let playlist_columns = self.playlist_columns.clone();
+
+            let visible_headers: Vec<slint::SharedString> = playlist_columns
+                .iter()
+                .filter(|column| column.enabled)
+                .map(|column| column.name.as_str().into())
+                .collect();
+            let visible_kinds = Self::visible_playlist_column_kinds(&playlist_columns);
+            let menu_labels: Vec<slint::SharedString> = playlist_columns
+                .iter()
+                .map(|column| column.name.as_str().into())
+                .collect();
+            let menu_checked: Vec<bool> = playlist_columns
+                .iter()
+                .map(|column| column.enabled)
+                .collect();
+            let menu_is_custom: Vec<bool> = playlist_columns
+                .iter()
+                .map(|column| column.custom)
+                .collect();
+            let _ = self.ui.upgrade_in_event_loop(move |ui| {
+                ui.set_playlist_visible_column_headers(ModelRc::from(Rc::new(VecModel::from(
+                    visible_headers,
+                ))));
+                ui.set_playlist_visible_column_kinds(ModelRc::from(Rc::new(VecModel::from(
+                    visible_kinds,
+                ))));
+                ui.set_playlist_column_menu_labels(ModelRc::from(Rc::new(VecModel::from(
+                    menu_labels,
+                ))));
+                ui.set_playlist_column_menu_checked(ModelRc::from(Rc::new(VecModel::from(
+                    menu_checked,
+                ))));
+                ui.set_playlist_column_menu_is_custom(ModelRc::from(Rc::new(VecModel::from(
+                    menu_is_custom,
+                ))));
+            });
+            playlist_columns_changed = previous_playlist_columns != self.playlist_columns;
+            album_art_column_width_limits_changed = previous_album_art_column_min_width_px
+                != self.album_art_column_min_width_px
+                || previous_album_art_column_max_width_px != self.album_art_column_max_width_px;
+        }
+
+        let refresh_library_ui = list_image_max_edge_changed
+            || online_metadata_enabled_changed
+            || online_metadata_prompt_changed;
+        let rebuild_playlist_rows = list_image_max_edge_changed || playlist_columns_changed;
+        let refresh_display_target =
+            refresh_library_ui || playlist_columns_changed || album_art_column_width_limits_changed;
+        if refresh_library_ui {
+            self.sync_library_ui();
+        }
+        if rebuild_playlist_rows {
+            self.rebuild_track_model();
+        }
+        if refresh_display_target {
+            self.update_display_for_active_collection();
+        }
+    }
+
     /// Starts the blocking UI event loop that listens for bus messages.
     pub fn run(&mut self) {
         self.sync_library_ui();
@@ -9435,205 +9622,34 @@ impl UiManager {
                                 }
                             });
                         }
-                        protocol::Message::Config(protocol::ConfigMessage::ConfigChanged(
+                        protocol::Message::Config(protocol::ConfigMessage::ConfigLoaded(
                             config,
                         )) => {
-                            let previous_list_image_max_edge_px = self.list_image_max_edge_px;
-                            let previous_cover_art_cache_max_size_mb =
-                                self.cover_art_cache_max_size_mb;
-                            let previous_artist_image_cache_max_size_mb =
-                                self.artist_image_cache_max_size_mb;
-                            let previous_cover_art_memory_cache_max_size_mb =
-                                self.cover_art_memory_cache_max_size_mb;
-                            let previous_artist_image_memory_cache_max_size_mb =
-                                self.artist_image_memory_cache_max_size_mb;
-                            let previous_library_online_metadata_enabled =
-                                self.library_online_metadata_enabled;
-                            let previous_library_online_metadata_prompt_pending =
-                                self.library_online_metadata_prompt_pending;
-                            let previous_playlist_columns = self.playlist_columns.clone();
-                            let previous_album_art_column_min_width_px =
-                                self.album_art_column_min_width_px;
-                            let previous_album_art_column_max_width_px =
-                                self.album_art_column_max_width_px;
-                            self.auto_scroll_to_playing_track =
-                                config.ui.auto_scroll_to_playing_track;
-                            self.library_online_metadata_enabled =
-                                config.library.online_metadata_enabled;
-                            self.library_online_metadata_prompt_pending =
-                                config.library.online_metadata_prompt_pending;
-                            self.list_image_max_edge_px = config.library.list_image_max_edge_px;
-                            self.cover_art_cache_max_size_mb =
-                                config.library.cover_art_cache_max_size_mb;
-                            self.artist_image_cache_max_size_mb =
-                                config.library.artist_image_cache_max_size_mb;
-                            self.cover_art_memory_cache_max_size_mb =
-                                config.library.cover_art_memory_cache_max_size_mb;
-                            self.artist_image_memory_cache_max_size_mb =
-                                config.library.artist_image_memory_cache_max_size_mb;
-                            let list_image_max_edge_changed =
-                                previous_list_image_max_edge_px != self.list_image_max_edge_px;
-                            let cover_art_cache_budget_changed =
-                                previous_cover_art_cache_max_size_mb
-                                    != self.cover_art_cache_max_size_mb;
-                            let artist_image_cache_budget_changed =
-                                previous_artist_image_cache_max_size_mb
-                                    != self.artist_image_cache_max_size_mb;
-                            let cover_art_memory_budget_changed =
-                                previous_cover_art_memory_cache_max_size_mb
-                                    != self.cover_art_memory_cache_max_size_mb;
-                            let artist_image_memory_budget_changed =
-                                previous_artist_image_memory_cache_max_size_mb
-                                    != self.artist_image_memory_cache_max_size_mb;
-                            let online_metadata_enabled_changed =
-                                previous_library_online_metadata_enabled
-                                    != self.library_online_metadata_enabled;
-                            let online_metadata_prompt_changed =
-                                previous_library_online_metadata_prompt_pending
-                                    != self.library_online_metadata_prompt_pending;
-
-                            if list_image_max_edge_changed
-                                || cover_art_cache_budget_changed
-                                || artist_image_cache_budget_changed
-                            {
-                                image_pipeline::configure_runtime_limits(
-                                    self.list_image_max_edge_px,
-                                    self.cover_art_cache_max_size_mb,
-                                    self.artist_image_cache_max_size_mb,
-                                );
-                            }
-                            if cover_art_memory_budget_changed {
-                                COVER_ART_MEMORY_CACHE_BUDGET_BYTES.store(
-                                    image_pipeline::mb_to_bytes(
-                                        self.cover_art_memory_cache_max_size_mb,
-                                    ),
-                                    Ordering::Relaxed,
-                                );
-                            }
-                            if artist_image_memory_budget_changed {
-                                ARTIST_IMAGE_MEMORY_CACHE_BUDGET_BYTES.store(
-                                    image_pipeline::mb_to_bytes(
-                                        self.artist_image_memory_cache_max_size_mb,
-                                    ),
-                                    Ordering::Relaxed,
-                                );
-                            }
-                            if list_image_max_edge_changed {
-                                TRACK_ROW_COVER_ART_IMAGE_CACHE.with(|cache| {
-                                    cache.borrow_mut().clear();
-                                });
-                                TRACK_ROW_ARTIST_IMAGE_CACHE.with(|cache| {
-                                    cache.borrow_mut().clear();
-                                });
-                                self.pending_list_image_requests.clear();
-                            }
-                            if list_image_max_edge_changed
-                                || cover_art_cache_budget_changed
-                                || artist_image_cache_budget_changed
-                            {
-                                let _ = image_pipeline::prune_kind_disk_cache(
-                                    ManagedImageKind::CoverArt,
-                                    image_pipeline::mb_to_bytes(self.cover_art_cache_max_size_mb),
-                                );
-                                let _ = image_pipeline::prune_kind_disk_cache(
-                                    ManagedImageKind::ArtistImage,
-                                    image_pipeline::mb_to_bytes(
-                                        self.artist_image_cache_max_size_mb,
-                                    ),
-                                );
-                            }
-                            if online_metadata_enabled_changed
-                                && !self.library_online_metadata_enabled
-                            {
-                                self.library_enrichment_pending.clear();
-                                self.library_enrichment_last_request_at.clear();
-                                self.library_enrichment_retry_counts.clear();
-                                self.library_enrichment_retry_not_before.clear();
-                                self.library_enrichment_not_found_not_before.clear();
-                                self.library_enrichment_failed_attempt_counts.clear();
-                                self.replace_prefetch_queue_if_changed(Vec::new());
-                                self.replace_background_queue_if_changed(Vec::new());
-                                self.library_last_detail_enrichment_entity = None;
-                            }
-                            self.playlist_columns = config.ui.playlist_columns.clone();
-                            self.album_art_column_min_width_px =
-                                config.ui.playlist_album_art_column_min_width_px;
-                            self.album_art_column_max_width_px =
-                                config.ui.playlist_album_art_column_max_width_px;
-                            let valid_column_keys: HashSet<String> = self
-                                .playlist_columns
-                                .iter()
-                                .map(Self::playlist_column_key)
-                                .collect();
-                            self.apply_layout_column_width_overrides(
-                                &config.ui.layout.playlist_column_width_overrides,
+                            self.apply_ui_library_config_updates(
+                                Some(config.ui),
+                                Some(config.library),
                             );
-                            self.playlist_column_target_widths_px
-                                .retain(|key, _| valid_column_keys.contains(key));
-                            self.refresh_playlist_column_content_targets();
-                            self.apply_playlist_column_layout();
-                            let playlist_columns = self.playlist_columns.clone();
-
-                            let visible_headers: Vec<slint::SharedString> = playlist_columns
-                                .iter()
-                                .filter(|column| column.enabled)
-                                .map(|column| column.name.as_str().into())
-                                .collect();
-                            let visible_kinds =
-                                Self::visible_playlist_column_kinds(&playlist_columns);
-                            let menu_labels: Vec<slint::SharedString> = playlist_columns
-                                .iter()
-                                .map(|column| column.name.as_str().into())
-                                .collect();
-                            let menu_checked: Vec<bool> = playlist_columns
-                                .iter()
-                                .map(|column| column.enabled)
-                                .collect();
-                            let menu_is_custom: Vec<bool> = playlist_columns
-                                .iter()
-                                .map(|column| column.custom)
-                                .collect();
-                            let _ = self.ui.upgrade_in_event_loop(move |ui| {
-                                ui.set_playlist_visible_column_headers(ModelRc::from(Rc::new(
-                                    VecModel::from(visible_headers),
-                                )));
-                                ui.set_playlist_visible_column_kinds(ModelRc::from(Rc::new(
-                                    VecModel::from(visible_kinds),
-                                )));
-                                ui.set_playlist_column_menu_labels(ModelRc::from(Rc::new(
-                                    VecModel::from(menu_labels),
-                                )));
-                                ui.set_playlist_column_menu_checked(ModelRc::from(Rc::new(
-                                    VecModel::from(menu_checked),
-                                )));
-                                ui.set_playlist_column_menu_is_custom(ModelRc::from(Rc::new(
-                                    VecModel::from(menu_is_custom),
-                                )));
-                            });
-                            let playlist_columns_changed =
-                                previous_playlist_columns != self.playlist_columns;
-                            let album_art_column_width_limits_changed =
-                                previous_album_art_column_min_width_px
-                                    != self.album_art_column_min_width_px
-                                    || previous_album_art_column_max_width_px
-                                        != self.album_art_column_max_width_px;
-                            let refresh_library_ui = list_image_max_edge_changed
-                                || online_metadata_enabled_changed
-                                || online_metadata_prompt_changed;
-                            let rebuild_playlist_rows =
-                                list_image_max_edge_changed || playlist_columns_changed;
-                            let refresh_display_target = refresh_library_ui
-                                || playlist_columns_changed
-                                || album_art_column_width_limits_changed;
-                            if refresh_library_ui {
-                                self.sync_library_ui();
+                        }
+                        protocol::Message::Config(protocol::ConfigMessage::ConfigChanged(
+                            changes,
+                        )) => {
+                            let mut ui_update = None;
+                            let mut library_update = None;
+                            for change in changes {
+                                match change {
+                                    protocol::ConfigDeltaEntry::Ui(ui) => {
+                                        ui_update = Some(ui);
+                                    }
+                                    protocol::ConfigDeltaEntry::Library(library) => {
+                                        library_update = Some(library);
+                                    }
+                                    protocol::ConfigDeltaEntry::Output(_)
+                                    | protocol::ConfigDeltaEntry::Cast(_)
+                                    | protocol::ConfigDeltaEntry::Buffering(_)
+                                    | protocol::ConfigDeltaEntry::Integrations(_) => {}
+                                }
                             }
-                            if rebuild_playlist_rows {
-                                self.rebuild_track_model();
-                            }
-                            if refresh_display_target {
-                                self.update_display_for_active_collection();
-                            }
+                            self.apply_ui_library_config_updates(ui_update, library_update);
                         }
                         protocol::Message::Playlist(
                             protocol::PlaylistMessage::PlaylistViewportChanged {

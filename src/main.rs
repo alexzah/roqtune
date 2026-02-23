@@ -75,8 +75,8 @@ use metadata_manager::MetadataManager;
 use playlist::Playlist;
 use playlist_manager::PlaylistManager;
 use protocol::{
-    CastMessage, ConfigMessage, IntegrationMessage, Message, MetadataMessage, PlaybackMessage,
-    PlaylistMessage,
+    CastMessage, ConfigDeltaEntry, ConfigMessage, IntegrationMessage, Message, MetadataMessage,
+    PlaybackMessage, PlaylistMessage,
 };
 use slint::winit_030::{winit, EventResult as WinitEventResult, WinitWindowAccessor};
 use slint::{language::ColorScheme, ComponentHandle, LogicalSize, Model, ModelRc, VecModel};
@@ -476,6 +476,7 @@ struct LibraryFolderImportContext {
     output_options: Arc<Mutex<OutputSettingsOptions>>,
     runtime_output_override: Arc<Mutex<RuntimeOutputOverride>>,
     runtime_audio_state: Arc<Mutex<RuntimeAudioState>>,
+    last_runtime_config: Arc<Mutex<Config>>,
     last_runtime_signature: Arc<Mutex<OutputRuntimeSignature>>,
     config_file: PathBuf,
     layout_workspace_size: Arc<Mutex<(u32, u32)>>,
@@ -556,11 +557,11 @@ fn add_library_folders_to_config_and_scan(
             .expect("runtime signature lock poisoned");
         *last_runtime = OutputRuntimeSignature::from_output(&runtime_config.output);
     }
-    let _ = context
-        .bus_sender
-        .send(Message::Config(ConfigMessage::ConfigChanged(
-            runtime_config,
-        )));
+    let _ = publish_runtime_config_delta(
+        &context.bus_sender,
+        &context.last_runtime_config,
+        runtime_config,
+    );
     let _ = context
         .bus_sender
         .send(Message::Library(protocol::LibraryMessage::RequestScan));
@@ -757,6 +758,78 @@ fn output_preferences_changed(previous: &OutputConfig, next: &OutputConfig) -> b
 fn audio_settings_changed(previous: &Config, next: &Config) -> bool {
     output_preferences_changed(&previous.output, &next.output)
         || previous.cast.allow_transcode_fallback != next.cast.allow_transcode_fallback
+}
+
+fn config_delta_entries(previous: &Config, next: &Config) -> Vec<ConfigDeltaEntry> {
+    let mut deltas = Vec::new();
+    if previous.output != next.output {
+        deltas.push(ConfigDeltaEntry::Output(next.output.clone()));
+    }
+    if previous.cast != next.cast {
+        deltas.push(ConfigDeltaEntry::Cast(next.cast.clone()));
+    }
+    if previous.ui != next.ui {
+        deltas.push(ConfigDeltaEntry::Ui(next.ui.clone()));
+    }
+    if previous.library != next.library {
+        deltas.push(ConfigDeltaEntry::Library(next.library.clone()));
+    }
+    if previous.buffering != next.buffering {
+        deltas.push(ConfigDeltaEntry::Buffering(next.buffering.clone()));
+    }
+    if previous.integrations != next.integrations {
+        deltas.push(ConfigDeltaEntry::Integrations(next.integrations.clone()));
+    }
+    deltas
+}
+
+fn publish_runtime_config_delta(
+    bus_sender: &broadcast::Sender<Message>,
+    last_runtime_config: &Arc<Mutex<Config>>,
+    next_runtime_config: Config,
+) -> bool {
+    let deltas = {
+        let mut previous_runtime = last_runtime_config
+            .lock()
+            .expect("last runtime config lock poisoned");
+        let deltas = config_delta_entries(&previous_runtime, &next_runtime_config);
+        *previous_runtime = next_runtime_config;
+        deltas
+    };
+    if deltas.is_empty() {
+        return false;
+    }
+    let _ = bus_sender.send(Message::Config(ConfigMessage::ConfigChanged(deltas)));
+    true
+}
+
+fn update_last_runtime_config_snapshot(
+    last_runtime_config: &Arc<Mutex<Config>>,
+    runtime_config: Config,
+) {
+    let mut previous_runtime = last_runtime_config
+        .lock()
+        .expect("last runtime config lock poisoned");
+    *previous_runtime = runtime_config;
+}
+
+fn config_diff_is_runtime_sample_rate_only(previous: &Config, next: &Config) -> bool {
+    if previous.cast != next.cast
+        || previous.ui != next.ui
+        || previous.library != next.library
+        || previous.buffering != next.buffering
+        || previous.integrations != next.integrations
+    {
+        return false;
+    }
+    if previous.output.sample_rate_khz == next.output.sample_rate_khz {
+        return false;
+    }
+    let mut previous_output_without_rate = previous.output.clone();
+    let mut next_output_without_rate = next.output.clone();
+    previous_output_without_rate.sample_rate_khz = 0;
+    next_output_without_rate.sample_rate_khz = 0;
+    previous_output_without_rate == next_output_without_rate
 }
 
 fn snapshot_output_device_names(host: &cpal::Host) -> Vec<String> {
@@ -3220,6 +3293,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     )));
     let layout_undo_stack: Arc<Mutex<Vec<LayoutConfig>>> = Arc::new(Mutex::new(Vec::new()));
     let layout_redo_stack: Arc<Mutex<Vec<LayoutConfig>>> = Arc::new(Mutex::new(Vec::new()));
+    let last_runtime_config = Arc::new(Mutex::new(runtime_config.clone()));
     let last_runtime_signature = Arc::new(Mutex::new(OutputRuntimeSignature::from_output(
         &runtime_config.output,
     )));
@@ -3271,6 +3345,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         output_options: Arc::clone(&output_options),
         runtime_output_override: Arc::clone(&runtime_output_override),
         runtime_audio_state: Arc::clone(&runtime_audio_state),
+        last_runtime_config: Arc::clone(&last_runtime_config),
         last_runtime_signature: Arc::clone(&last_runtime_signature),
         config_file: config_file.clone(),
         layout_workspace_size: Arc::clone(&layout_workspace_size),
@@ -3580,6 +3655,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let runtime_output_override_clone = Arc::clone(&runtime_output_override);
     let runtime_audio_state_clone = Arc::clone(&runtime_audio_state);
     let last_runtime_signature_clone = Arc::clone(&last_runtime_signature);
+    let last_runtime_config_clone = Arc::clone(&last_runtime_config);
     let config_file_clone = config_file.clone();
     let layout_workspace_size_clone = Arc::clone(&layout_workspace_size);
     let ui_handle_clone = ui.as_weak().clone();
@@ -3633,9 +3709,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 .expect("runtime signature lock poisoned");
             *last_runtime = OutputRuntimeSignature::from_output(&runtime_config.output);
         }
-        let _ = bus_sender_clone.send(Message::Config(ConfigMessage::ConfigChanged(
+        let _ = publish_runtime_config_delta(
+            &bus_sender_clone,
+            &last_runtime_config_clone,
             runtime_config,
-        )));
+        );
         let _ = bus_sender_clone.send(Message::Library(protocol::LibraryMessage::RequestScan));
     });
 
@@ -3657,6 +3735,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let runtime_output_override_clone = Arc::clone(&runtime_output_override);
     let runtime_audio_state_clone = Arc::clone(&runtime_audio_state);
     let last_runtime_signature_clone = Arc::clone(&last_runtime_signature);
+    let last_runtime_config_clone = Arc::clone(&last_runtime_config);
     let config_file_clone = config_file.clone();
     let layout_workspace_size_clone = Arc::clone(&layout_workspace_size);
     let ui_handle_clone = ui.as_weak().clone();
@@ -3703,9 +3782,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 .expect("runtime signature lock poisoned");
             *last_runtime = OutputRuntimeSignature::from_output(&runtime_config.output);
         }
-        let _ = bus_sender_clone.send(Message::Config(ConfigMessage::ConfigChanged(
+        let _ = publish_runtime_config_delta(
+            &bus_sender_clone,
+            &last_runtime_config_clone,
             runtime_config,
-        )));
+        );
     });
 
     let bus_sender_clone = bus_sender.clone();
@@ -3714,6 +3795,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let runtime_output_override_clone = Arc::clone(&runtime_output_override);
     let runtime_audio_state_clone = Arc::clone(&runtime_audio_state);
     let last_runtime_signature_clone = Arc::clone(&last_runtime_signature);
+    let last_runtime_config_clone = Arc::clone(&last_runtime_config);
     let config_file_clone = config_file.clone();
     let layout_workspace_size_clone = Arc::clone(&layout_workspace_size);
     let ui_handle_clone = ui.as_weak().clone();
@@ -3760,9 +3842,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 .expect("runtime signature lock poisoned");
             *last_runtime = OutputRuntimeSignature::from_output(&runtime_config.output);
         }
-        let _ = bus_sender_clone.send(Message::Config(ConfigMessage::ConfigChanged(
+        let _ = publish_runtime_config_delta(
+            &bus_sender_clone,
+            &last_runtime_config_clone,
             runtime_config,
-        )));
+        );
     });
 
     let bus_sender_clone = bus_sender.clone();
@@ -3771,6 +3855,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let runtime_output_override_clone = Arc::clone(&runtime_output_override);
     let runtime_audio_state_clone = Arc::clone(&runtime_audio_state);
     let last_runtime_signature_clone = Arc::clone(&last_runtime_signature);
+    let last_runtime_config_clone = Arc::clone(&last_runtime_config);
     let config_file_clone = config_file.clone();
     let layout_workspace_size_clone = Arc::clone(&layout_workspace_size);
     let ui_handle_clone = ui.as_weak().clone();
@@ -3818,9 +3903,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 .expect("runtime signature lock poisoned");
             *last_runtime = OutputRuntimeSignature::from_output(&runtime_config.output);
         }
-        let _ = bus_sender_clone.send(Message::Config(ConfigMessage::ConfigChanged(
+        let _ = publish_runtime_config_delta(
+            &bus_sender_clone,
+            &last_runtime_config_clone,
             runtime_config,
-        )));
+        );
     });
 
     let bus_sender_clone = bus_sender.clone();
@@ -3829,6 +3916,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let runtime_output_override_clone = Arc::clone(&runtime_output_override);
     let runtime_audio_state_clone = Arc::clone(&runtime_audio_state);
     let last_runtime_signature_clone = Arc::clone(&last_runtime_signature);
+    let last_runtime_config_clone = Arc::clone(&last_runtime_config);
     let config_file_clone = config_file.clone();
     let layout_workspace_size_clone = Arc::clone(&layout_workspace_size);
     let ui_handle_clone = ui.as_weak().clone();
@@ -3970,9 +4058,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 .expect("runtime signature lock poisoned");
             *last_runtime = OutputRuntimeSignature::from_output(&runtime_config.output);
         }
-        let _ = bus_sender_clone.send(Message::Config(ConfigMessage::ConfigChanged(
+        let _ = publish_runtime_config_delta(
+            &bus_sender_clone,
+            &last_runtime_config_clone,
             runtime_config,
-        )));
+        );
     });
 
     let bus_sender_clone = bus_sender.clone();
@@ -4677,6 +4767,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let runtime_output_override_clone = Arc::clone(&runtime_output_override);
     let runtime_audio_state_clone = Arc::clone(&runtime_audio_state);
     let last_runtime_signature_clone = Arc::clone(&last_runtime_signature);
+    let last_runtime_config_clone = Arc::clone(&last_runtime_config);
     let config_file_clone = config_file.clone();
     ui.on_commit_playlist_column_width(move |visible_index, width_px| {
         let (column_key, clamped_width_px) = {
@@ -4730,9 +4821,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     .expect("runtime signature lock poisoned");
                 *last_runtime = OutputRuntimeSignature::from_output(&runtime_config.output);
             }
-            let _ = bus_sender_clone.send(Message::Config(ConfigMessage::ConfigChanged(
+            let _ = publish_runtime_config_delta(
+                &bus_sender_clone,
+                &last_runtime_config_clone,
                 runtime_config,
-            )));
+            );
         }
     });
 
@@ -4742,6 +4835,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let runtime_output_override_clone = Arc::clone(&runtime_output_override);
     let runtime_audio_state_clone = Arc::clone(&runtime_audio_state);
     let last_runtime_signature_clone = Arc::clone(&last_runtime_signature);
+    let last_runtime_config_clone = Arc::clone(&last_runtime_config);
     let config_file_clone = config_file.clone();
     ui.on_reset_playlist_column_width(move |visible_index| {
         let column_key = {
@@ -4784,9 +4878,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     .expect("runtime signature lock poisoned");
                 *last_runtime = OutputRuntimeSignature::from_output(&runtime_config.output);
             }
-            let _ = bus_sender_clone.send(Message::Config(ConfigMessage::ConfigChanged(
+            let _ = publish_runtime_config_delta(
+                &bus_sender_clone,
+                &last_runtime_config_clone,
                 runtime_config,
-            )));
+            );
         }
     });
 
@@ -5058,6 +5154,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let output_options_clone = Arc::clone(&output_options);
     let runtime_output_override_clone = Arc::clone(&runtime_output_override);
     let runtime_audio_state_clone = Arc::clone(&runtime_audio_state);
+    let last_runtime_config_clone = Arc::clone(&last_runtime_config);
     let config_file_clone = config_file.clone();
     let layout_workspace_size_clone = Arc::clone(&layout_workspace_size);
     let ui_handle_clone = ui.as_weak().clone();
@@ -5097,9 +5194,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             Some(&runtime_override),
             &runtime_audio_state_clone,
         );
-        let _ = bus_sender_clone.send(Message::Config(ConfigMessage::ConfigChanged(
+        let _ = publish_runtime_config_delta(
+            &bus_sender_clone,
+            &last_runtime_config_clone,
             runtime_config,
-        )));
+        );
         if let Some(ui) = ui_handle_clone.upgrade() {
             apply_layout_to_ui(&ui, &next_config, workspace_width_px, workspace_height_px);
             ui.set_viewer_panel_settings_target_leaf_id(leaf_id_text.clone().into());
@@ -5127,6 +5226,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let output_options_clone = Arc::clone(&output_options);
     let runtime_output_override_clone = Arc::clone(&runtime_output_override);
     let runtime_audio_state_clone = Arc::clone(&runtime_audio_state);
+    let last_runtime_config_clone = Arc::clone(&last_runtime_config);
     let config_file_clone = config_file.clone();
     let layout_workspace_size_clone = Arc::clone(&layout_workspace_size);
     let ui_handle_clone = ui.as_weak().clone();
@@ -5166,9 +5266,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             Some(&runtime_override),
             &runtime_audio_state_clone,
         );
-        let _ = bus_sender_clone.send(Message::Config(ConfigMessage::ConfigChanged(
+        let _ = publish_runtime_config_delta(
+            &bus_sender_clone,
+            &last_runtime_config_clone,
             runtime_config,
-        )));
+        );
         if let Some(ui) = ui_handle_clone.upgrade() {
             apply_layout_to_ui(&ui, &next_config, workspace_width_px, workspace_height_px);
             ui.set_viewer_panel_settings_target_leaf_id(leaf_id_text.clone().into());
@@ -5196,6 +5298,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let output_options_clone = Arc::clone(&output_options);
     let runtime_output_override_clone = Arc::clone(&runtime_output_override);
     let runtime_audio_state_clone = Arc::clone(&runtime_audio_state);
+    let last_runtime_config_clone = Arc::clone(&last_runtime_config);
     let config_file_clone = config_file.clone();
     let layout_workspace_size_clone = Arc::clone(&layout_workspace_size);
     let ui_handle_clone = ui.as_weak().clone();
@@ -5235,9 +5338,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             Some(&runtime_override),
             &runtime_audio_state_clone,
         );
-        let _ = bus_sender_clone.send(Message::Config(ConfigMessage::ConfigChanged(
+        let _ = publish_runtime_config_delta(
+            &bus_sender_clone,
+            &last_runtime_config_clone,
             runtime_config,
-        )));
+        );
         if let Some(ui) = ui_handle_clone.upgrade() {
             apply_layout_to_ui(&ui, &next_config, workspace_width_px, workspace_height_px);
             ui.set_viewer_panel_settings_target_leaf_id(leaf_id_text.clone().into());
@@ -5942,6 +6047,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let staged_audio_settings_clone = Arc::clone(&staged_audio_settings);
     let playback_session_active_clone = Arc::clone(&playback_session_active);
     let last_runtime_signature_clone = Arc::clone(&last_runtime_signature);
+    let last_runtime_config_clone = Arc::clone(&last_runtime_config);
     let config_file_clone = config_file.clone();
     let layout_workspace_size_clone = Arc::clone(&layout_workspace_size);
     let ui_handle_clone = ui.as_weak().clone();
@@ -6156,9 +6262,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     .expect("runtime signature lock poisoned");
                 *last_runtime = OutputRuntimeSignature::from_output(&runtime_config.output);
             }
-            let _ = bus_sender_clone.send(Message::Config(ConfigMessage::ConfigChanged(
+            let _ = publish_runtime_config_delta(
+                &bus_sender_clone,
+                &last_runtime_config_clone,
                 runtime_config,
-            )));
+            );
         },
     );
 
@@ -6168,6 +6276,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let runtime_output_override_clone = Arc::clone(&runtime_output_override);
     let runtime_audio_state_clone = Arc::clone(&runtime_audio_state);
     let last_runtime_signature_clone = Arc::clone(&last_runtime_signature);
+    let last_runtime_config_clone = Arc::clone(&last_runtime_config);
     let config_file_clone = config_file.clone();
     let ui_handle_clone = ui.as_weak().clone();
     ui.on_toggle_playlist_column(move |column_index| {
@@ -6251,9 +6360,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 .expect("runtime signature lock poisoned");
             *last_runtime = OutputRuntimeSignature::from_output(&runtime_config.output);
         }
-        let _ = bus_sender_clone.send(Message::Config(ConfigMessage::ConfigChanged(
+        let _ = publish_runtime_config_delta(
+            &bus_sender_clone,
+            &last_runtime_config_clone,
             runtime_config,
-        )));
+        );
         let _ = bus_sender_clone.send(Message::Playlist(
             PlaylistMessage::SetActivePlaylistColumnOrder(playlist_column_order_keys(
                 &next_config.ui.playlist_columns,
@@ -6267,6 +6378,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let runtime_output_override_clone = Arc::clone(&runtime_output_override);
     let runtime_audio_state_clone = Arc::clone(&runtime_audio_state);
     let last_runtime_signature_clone = Arc::clone(&last_runtime_signature);
+    let last_runtime_config_clone = Arc::clone(&last_runtime_config);
     let config_file_clone = config_file.clone();
     let ui_handle_clone = ui.as_weak().clone();
     ui.on_add_custom_playlist_column(move |name, format| {
@@ -6356,9 +6468,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 .expect("runtime signature lock poisoned");
             *last_runtime = OutputRuntimeSignature::from_output(&runtime_config.output);
         }
-        let _ = bus_sender_clone.send(Message::Config(ConfigMessage::ConfigChanged(
+        let _ = publish_runtime_config_delta(
+            &bus_sender_clone,
+            &last_runtime_config_clone,
             runtime_config,
-        )));
+        );
         let _ = bus_sender_clone.send(Message::Playlist(
             PlaylistMessage::SetActivePlaylistColumnOrder(playlist_column_order_keys(
                 &next_config.ui.playlist_columns,
@@ -6372,6 +6486,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let runtime_output_override_clone = Arc::clone(&runtime_output_override);
     let runtime_audio_state_clone = Arc::clone(&runtime_audio_state);
     let last_runtime_signature_clone = Arc::clone(&last_runtime_signature);
+    let last_runtime_config_clone = Arc::clone(&last_runtime_config);
     let config_file_clone = config_file.clone();
     let ui_handle_clone = ui.as_weak().clone();
     ui.on_delete_custom_playlist_column(move |column_index| {
@@ -6463,9 +6578,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 .expect("runtime signature lock poisoned");
             *last_runtime = OutputRuntimeSignature::from_output(&runtime_config.output);
         }
-        let _ = bus_sender_clone.send(Message::Config(ConfigMessage::ConfigChanged(
+        let _ = publish_runtime_config_delta(
+            &bus_sender_clone,
+            &last_runtime_config_clone,
             runtime_config,
-        )));
+        );
         let _ = bus_sender_clone.send(Message::Playlist(
             PlaylistMessage::SetActivePlaylistColumnOrder(playlist_column_order_keys(
                 &next_config.ui.playlist_columns,
@@ -6479,6 +6596,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let runtime_output_override_clone = Arc::clone(&runtime_output_override);
     let runtime_audio_state_clone = Arc::clone(&runtime_audio_state);
     let last_runtime_signature_clone = Arc::clone(&last_runtime_signature);
+    let last_runtime_config_clone = Arc::clone(&last_runtime_config);
     let config_file_clone = config_file.clone();
     let ui_handle_clone = ui.as_weak().clone();
     ui.on_reorder_playlist_columns(move |from_visible_index, to_visible_index| {
@@ -6564,9 +6682,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 .expect("runtime signature lock poisoned");
             *last_runtime = OutputRuntimeSignature::from_output(&runtime_config.output);
         }
-        let _ = bus_sender_clone.send(Message::Config(ConfigMessage::ConfigChanged(
+        let _ = publish_runtime_config_delta(
+            &bus_sender_clone,
+            &last_runtime_config_clone,
             runtime_config,
-        )));
+        );
         let _ = bus_sender_clone.send(Message::Playlist(
             PlaylistMessage::SetActivePlaylistColumnOrder(playlist_column_order_keys(
                 &next_config.ui.playlist_columns,
@@ -6812,7 +6932,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let runtime_audio_state_clone = Arc::clone(&runtime_audio_state);
     let staged_audio_settings_clone = Arc::clone(&staged_audio_settings);
     let last_runtime_signature_clone = Arc::clone(&last_runtime_signature);
+    let last_runtime_config_clone = Arc::clone(&last_runtime_config);
     let playback_session_active_clone = Arc::clone(&playback_session_active);
+    let mut runtime_sample_rate_switch_in_progress = false;
     thread::spawn(move || loop {
         match device_event_receiver.blocking_recv() {
             Ok(Message::Config(ConfigMessage::SetRuntimeOutputRate {
@@ -6856,8 +6978,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         .expect("runtime signature lock poisoned");
                     *last_signature = runtime_signature;
                 }
-                let _ =
-                    bus_sender_clone.send(Message::Config(ConfigMessage::ConfigChanged(runtime)));
+                update_last_runtime_config_snapshot(&last_runtime_config_clone, runtime.clone());
+                let _ = bus_sender_clone.send(Message::Config(
+                    ConfigMessage::RuntimeOutputSampleRateChanged {
+                        sample_rate_hz: runtime.output.sample_rate_khz,
+                    },
+                ));
+                runtime_sample_rate_switch_in_progress = true;
             }
             Ok(Message::Config(ConfigMessage::ClearRuntimeOutputRateOverride)) => {
                 {
@@ -6902,6 +7029,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     &runtime_audio_state_clone,
                 );
                 let runtime_signature = OutputRuntimeSignature::from_output(&runtime.output);
+                let previous_runtime = {
+                    let previous = last_runtime_config_clone
+                        .lock()
+                        .expect("last runtime config lock poisoned");
+                    previous.clone()
+                };
                 let playback_active = playback_session_active_clone.load(Ordering::Relaxed);
                 let should_broadcast_runtime = {
                     let mut last_signature = last_runtime_signature_clone
@@ -6919,11 +7052,34 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     }
                 };
                 if should_broadcast_runtime {
-                    let _ = bus_sender_clone
-                        .send(Message::Config(ConfigMessage::ConfigChanged(runtime)));
+                    if config_diff_is_runtime_sample_rate_only(&previous_runtime, &runtime) {
+                        update_last_runtime_config_snapshot(
+                            &last_runtime_config_clone,
+                            runtime.clone(),
+                        );
+                        let _ = bus_sender_clone.send(Message::Config(
+                            ConfigMessage::RuntimeOutputSampleRateChanged {
+                                sample_rate_hz: runtime.output.sample_rate_khz,
+                            },
+                        ));
+                        runtime_sample_rate_switch_in_progress = true;
+                    } else {
+                        let _ = publish_runtime_config_delta(
+                            &bus_sender_clone,
+                            &last_runtime_config_clone,
+                            runtime,
+                        );
+                    }
+                } else {
+                    update_last_runtime_config_snapshot(&last_runtime_config_clone, runtime);
                 }
             }
             Ok(Message::Config(ConfigMessage::AudioDeviceOpened { .. })) => {
+                if runtime_sample_rate_switch_in_progress {
+                    runtime_sample_rate_switch_in_progress = false;
+                    debug!("Skipping output options re-detection after runtime sample-rate switch");
+                    continue;
+                }
                 let current_inventory = snapshot_output_device_names(&cpal::default_host());
                 let inventory_changed = {
                     let mut inventory = output_device_inventory_clone
@@ -6983,8 +7139,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     }
                 };
                 if should_broadcast_runtime {
-                    let _ = bus_sender_clone
-                        .send(Message::Config(ConfigMessage::ConfigChanged(runtime)));
+                    let _ = publish_runtime_config_delta(
+                        &bus_sender_clone,
+                        &last_runtime_config_clone,
+                        runtime,
+                    );
+                } else {
+                    update_last_runtime_config_snapshot(&last_runtime_config_clone, runtime);
                 }
 
                 let ui_weak = ui_handle_clone.clone();
@@ -7072,8 +7233,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         .expect("runtime signature lock poisoned");
                     *last_signature = runtime_signature;
                 }
-                let _ =
-                    bus_sender_clone.send(Message::Config(ConfigMessage::ConfigChanged(runtime)));
+                let _ = publish_runtime_config_delta(
+                    &bus_sender_clone,
+                    &last_runtime_config_clone,
+                    runtime,
+                );
 
                 let ui_weak = ui_handle_clone.clone();
                 let config_for_ui = next_config;
@@ -7191,8 +7355,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     ));
 
     let bus_sender_clone = bus_sender.clone();
-    let _ = bus_sender_clone.send(Message::Config(ConfigMessage::ConfigChanged(
-        runtime_config,
+    let _ = bus_sender_clone.send(Message::Config(ConfigMessage::ConfigLoaded(
+        runtime_config.clone(),
     )));
     let _ = bus_sender_clone.send(Message::Config(
         ConfigMessage::OutputDeviceCapabilitiesChanged {

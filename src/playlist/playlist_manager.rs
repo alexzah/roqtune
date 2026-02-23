@@ -7,7 +7,7 @@ use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::mpsc::Receiver as StdReceiver;
 
-use log::{debug, error, info, trace};
+use log::{debug, error, info, trace, warn};
 use symphonia::core::{
     formats::FormatOptions, io::MediaSourceStream, meta::MetadataOptions, probe::Hint,
 };
@@ -15,7 +15,7 @@ use tokio::sync::broadcast::{Receiver, Sender};
 use uuid::Uuid;
 
 use crate::{
-    config::{Config, UiPlaybackOrder, UiRepeatMode},
+    config::{OutputConfig, UiConfig, UiPlaybackOrder, UiRepeatMode},
     db_manager::DbManager,
     integration_uri::{is_remote_track_path, parse_opensubsonic_track_uri},
     playlist::{Playlist, Track},
@@ -760,21 +760,21 @@ impl PlaylistManager {
         true
     }
 
-    fn update_runtime_policy_from_config(&mut self, config: &Config) {
-        self.sample_rate_auto_enabled = config.output.sample_rate_auto;
+    fn update_runtime_policy_from_output_config(&mut self, output: &OutputConfig) {
+        self.sample_rate_auto_enabled = output.sample_rate_auto;
         if !self.sample_rate_auto_enabled {
             self.pending_rate_switch = None;
             self.pending_rate_switch_play_immediately = false;
         }
     }
 
-    fn restore_playback_preferences_from_config(&mut self, config: &Config) -> bool {
-        let next_playback_order = match config.ui.playback_order {
+    fn restore_playback_preferences_from_ui_config(&mut self, ui: &UiConfig) -> bool {
+        let next_playback_order = match ui.playback_order {
             UiPlaybackOrder::Default => protocol::PlaybackOrder::Default,
             UiPlaybackOrder::Shuffle => protocol::PlaybackOrder::Shuffle,
             UiPlaybackOrder::Random => protocol::PlaybackOrder::Random,
         };
-        let next_repeat_mode = match config.ui.repeat_mode {
+        let next_repeat_mode = match ui.repeat_mode {
             UiRepeatMode::Off => protocol::RepeatMode::Off,
             UiRepeatMode::Playlist => protocol::RepeatMode::Playlist,
             UiRepeatMode::Track => protocol::RepeatMode::Track,
@@ -871,19 +871,50 @@ impl PlaylistManager {
             .or_else(|| self.verified_output_rates.last().copied())
     }
 
-    fn request_runtime_output_rate_switch(&mut self, sample_rate_hz: u32, play_immediately: bool) {
-        let _ = self.bus_producer.send(protocol::Message::Config(
+    fn request_runtime_output_rate_switch(
+        &mut self,
+        sample_rate_hz: u32,
+        play_immediately: bool,
+    ) -> bool {
+        if self.current_output_rate_hz == Some(sample_rate_hz) {
+            debug!(
+                "PlaylistManager: Runtime output-rate switch to {} Hz skipped (already active)",
+                sample_rate_hz
+            );
+            return false;
+        }
+        if self.pending_rate_switch == Some(sample_rate_hz) {
+            self.pending_rate_switch_play_immediately |= play_immediately;
+            debug!(
+                "PlaylistManager: Runtime output-rate switch to {} Hz already pending",
+                sample_rate_hz
+            );
+            return true;
+        }
+
+        match self.bus_producer.send(protocol::Message::Config(
             protocol::ConfigMessage::SetRuntimeOutputRate {
                 sample_rate_hz,
                 reason: "playlist_rate_segment".to_string(),
             },
-        ));
-        self.pending_rate_switch = Some(sample_rate_hz);
-        self.pending_rate_switch_play_immediately = play_immediately;
-        debug!(
-            "PlaylistManager: Requested runtime output-rate switch to {} Hz",
-            sample_rate_hz
-        );
+        )) {
+            Ok(_) => {
+                self.pending_rate_switch = Some(sample_rate_hz);
+                self.pending_rate_switch_play_immediately = play_immediately;
+                debug!(
+                    "PlaylistManager: Requested runtime output-rate switch to {} Hz",
+                    sample_rate_hz
+                );
+                true
+            }
+            Err(err) => {
+                warn!(
+                    "PlaylistManager: Failed to request runtime output-rate switch to {} Hz: {}",
+                    sample_rate_hz, err
+                );
+                false
+            }
+        }
     }
 
     fn maybe_start_pending_after_rate_switch(&mut self) {
@@ -912,7 +943,9 @@ impl PlaylistManager {
                 meta.sample_rate_hz, self.current_output_rate_hz
             );
             self.clear_cached_tracks();
-            self.request_runtime_output_rate_switch(meta.sample_rate_hz, true);
+            if !self.request_runtime_output_rate_switch(meta.sample_rate_hz, true) {
+                self.cache_tracks(true);
+            }
         } else {
             debug!(
                 "PlaylistManager: Keeping output {:?} for source {} Hz (route={:?}, auto={}, pending={:?}, source_supported={})",
@@ -1558,16 +1591,46 @@ impl PlaylistManager {
                         self.broadcast_playlist_changed();
                         self.broadcast_selection_changed();
                     }
-                    protocol::Message::Config(protocol::ConfigMessage::ConfigChanged(config)) => {
+                    protocol::Message::Config(protocol::ConfigMessage::ConfigLoaded(config)) => {
                         let previous_sample_rate_auto = self.sample_rate_auto_enabled;
-                        self.update_runtime_policy_from_config(&config);
+                        self.update_runtime_policy_from_output_config(&config.output);
                         if !self.playback_preferences_restored_from_config {
                             let playback_changed =
-                                self.restore_playback_preferences_from_config(&config);
+                                self.restore_playback_preferences_from_ui_config(&config.ui);
                             self.playback_preferences_restored_from_config = true;
                             if playback_changed {
                                 self.broadcast_playlist_changed();
                             }
+                        }
+                        if self.playback_playlist.is_playing()
+                            && previous_sample_rate_auto != self.sample_rate_auto_enabled
+                        {
+                            self.cache_tracks(false);
+                        }
+                    }
+                    protocol::Message::Config(protocol::ConfigMessage::ConfigChanged(changes)) => {
+                        let previous_sample_rate_auto = self.sample_rate_auto_enabled;
+                        let mut playback_changed = false;
+                        for change in changes {
+                            match change {
+                                protocol::ConfigDeltaEntry::Output(output) => {
+                                    self.update_runtime_policy_from_output_config(&output);
+                                }
+                                protocol::ConfigDeltaEntry::Ui(ui) => {
+                                    if !self.playback_preferences_restored_from_config {
+                                        playback_changed =
+                                            self.restore_playback_preferences_from_ui_config(&ui);
+                                        self.playback_preferences_restored_from_config = true;
+                                    }
+                                }
+                                protocol::ConfigDeltaEntry::Cast(_)
+                                | protocol::ConfigDeltaEntry::Library(_)
+                                | protocol::ConfigDeltaEntry::Buffering(_)
+                                | protocol::ConfigDeltaEntry::Integrations(_) => {}
+                            }
+                        }
+                        if playback_changed {
+                            self.broadcast_playlist_changed();
                         }
                         if self.playback_playlist.is_playing()
                             && previous_sample_rate_auto != self.sample_rate_auto_enabled
@@ -1617,16 +1680,20 @@ impl PlaylistManager {
                                         "PlaylistManager: Requested {} Hz but device opened {} Hz. Falling back to {} Hz",
                                         expected_rate, stream_info.sample_rate_hz, fallback_rate
                                     );
-                                    self.request_runtime_output_rate_switch(
+                                    if !self.request_runtime_output_rate_switch(
                                         fallback_rate,
                                         self.pending_rate_switch_play_immediately,
-                                    );
+                                    ) {
+                                        self.pending_rate_switch = None;
+                                        self.maybe_start_pending_after_rate_switch();
+                                    }
                                 }
                             }
                         }
                     }
                     protocol::Message::Config(
                         protocol::ConfigMessage::SetRuntimeOutputRate { .. }
+                        | protocol::ConfigMessage::RuntimeOutputSampleRateChanged { .. }
                         | protocol::ConfigMessage::ClearRuntimeOutputRateOverride,
                     ) => {}
                     protocol::Message::Cast(protocol::CastMessage::ConnectionStateChanged {
@@ -2750,8 +2817,9 @@ impl PlaylistManager {
             .or(self.current_output_rate_hz);
         if let Some(desired_first_rate) = desired_first_rate {
             if self.current_output_rate_hz != Some(desired_first_rate) {
-                self.request_runtime_output_rate_switch(desired_first_rate, play_immediately);
-                return;
+                if self.request_runtime_output_rate_switch(desired_first_rate, play_immediately) {
+                    return;
+                }
             }
         }
 
@@ -2934,6 +3002,7 @@ impl PlaylistManager {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::Config;
     use std::path::PathBuf;
     use std::thread;
     use std::time::{Duration, Instant};
@@ -4584,7 +4653,9 @@ mod tests {
         config.output.sample_rate_auto = true;
         config.output.sample_rate_khz = 192_000;
         harness.send(protocol::Message::Config(
-            protocol::ConfigMessage::ConfigChanged(config),
+            protocol::ConfigMessage::ConfigChanged(vec![protocol::ConfigDeltaEntry::Output(
+                config.output,
+            )]),
         ));
 
         assert_no_message(
@@ -4608,7 +4679,7 @@ mod tests {
         initial.ui.playback_order = UiPlaybackOrder::Shuffle;
         initial.ui.repeat_mode = UiRepeatMode::Track;
         harness.send(protocol::Message::Config(
-            protocol::ConfigMessage::ConfigChanged(initial),
+            protocol::ConfigMessage::ConfigLoaded(initial),
         ));
         let _ = wait_for_message(&mut harness.receiver, Duration::from_secs(1), |message| {
             matches!(
@@ -4626,7 +4697,7 @@ mod tests {
         later.ui.playback_order = UiPlaybackOrder::Random;
         later.ui.repeat_mode = UiRepeatMode::Playlist;
         harness.send(protocol::Message::Config(
-            protocol::ConfigMessage::ConfigChanged(later),
+            protocol::ConfigMessage::ConfigChanged(vec![protocol::ConfigDeltaEntry::Ui(later.ui)]),
         ));
         harness.drain_messages();
 
@@ -4928,6 +4999,34 @@ mod tests {
                 .unwrap_or(false),
             "DecodeTracks should not be queued before output-rate switch ack"
         );
+    }
+
+    #[test]
+    fn test_request_runtime_output_rate_switch_skips_when_rate_already_active() {
+        let (mut manager, mut receiver) = make_direct_manager();
+        manager.current_output_rate_hz = Some(44_100);
+
+        let requested = manager.request_runtime_output_rate_switch(44_100, true);
+
+        assert!(!requested);
+        assert_eq!(manager.pending_rate_switch, None);
+        assert!(!manager.pending_rate_switch_play_immediately);
+        assert!(matches!(receiver.try_recv(), Err(TryRecvError::Empty)));
+    }
+
+    #[test]
+    fn test_request_runtime_output_rate_switch_coalesces_duplicate_pending_request() {
+        let (mut manager, mut receiver) = make_direct_manager();
+        manager.current_output_rate_hz = Some(44_100);
+        manager.pending_rate_switch = Some(48_000);
+        manager.pending_rate_switch_play_immediately = false;
+
+        let requested = manager.request_runtime_output_rate_switch(48_000, true);
+
+        assert!(requested);
+        assert_eq!(manager.pending_rate_switch, Some(48_000));
+        assert!(manager.pending_rate_switch_play_immediately);
+        assert!(matches!(receiver.try_recv(), Err(TryRecvError::Empty)));
     }
 
     #[test]

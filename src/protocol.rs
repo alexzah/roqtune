@@ -5,7 +5,9 @@
 
 use std::path::PathBuf;
 
-use crate::config::Config;
+use crate::config::{
+    BufferingConfig, CastConfig, Config, IntegrationsConfig, LibraryConfig, OutputConfig, UiConfig,
+};
 
 /// Repeat behavior applied when navigating beyond the current track.
 #[derive(Debug, Clone, Copy, PartialEq, serde::Deserialize, serde::Serialize)]
@@ -894,9 +896,23 @@ pub struct TrackMetadataSummary {
 
 /// Runtime configuration updates and hardware notifications.
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
+pub enum ConfigDeltaEntry {
+    Output(OutputConfig),
+    Cast(CastConfig),
+    Ui(UiConfig),
+    Library(LibraryConfig),
+    Buffering(BufferingConfig),
+    Integrations(IntegrationsConfig),
+}
+
+/// Runtime configuration updates and hardware notifications.
+#[derive(Debug, Clone)]
 #[allow(clippy::large_enum_variant)]
 pub enum ConfigMessage {
-    ConfigChanged(Config),
+    ConfigLoaded(Config),
+    ConfigChanged(Vec<ConfigDeltaEntry>),
+    RuntimeOutputSampleRateChanged { sample_rate_hz: u32 },
     AudioDeviceOpened { stream_info: OutputStreamInfo },
     SetRuntimeOutputRate { sample_rate_hz: u32, reason: String },
     ClearRuntimeOutputRateOverride,

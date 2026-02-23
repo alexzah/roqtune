@@ -2039,8 +2039,15 @@ impl CastManager {
 
     fn handle_message(&mut self, message: Message) {
         match message {
-            Message::Config(crate::protocol::ConfigMessage::ConfigChanged(config)) => {
+            Message::Config(crate::protocol::ConfigMessage::ConfigLoaded(config)) => {
                 self.allow_transcode_fallback = config.cast.allow_transcode_fallback;
+            }
+            Message::Config(crate::protocol::ConfigMessage::ConfigChanged(changes)) => {
+                for change in changes {
+                    if let crate::protocol::ConfigDeltaEntry::Cast(cast) = change {
+                        self.allow_transcode_fallback = cast.allow_transcode_fallback;
+                    }
+                }
             }
             Message::Cast(CastMessage::DiscoverDevices) => self.discover_devices(),
             Message::Cast(CastMessage::Connect { device_id }) => self.connect_device(&device_id),

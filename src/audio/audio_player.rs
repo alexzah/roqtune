@@ -88,6 +88,8 @@ pub struct AudioPlayer {
     config: Option<cpal::StreamConfig>,
     sample_format: Option<cpal::SampleFormat>,
     device: Option<cpal::Device>,
+    cached_requested_device_name: Option<String>,
+    cached_supported_output_configs: Vec<cpal::SupportedStreamConfigRange>,
     stream: Option<cpal::Stream>,
     last_output_signature: Option<OutputConfigSignature>,
 }
@@ -165,6 +167,36 @@ impl AudioPlayer {
             .filter(|rate| *rate >= min_rate && *rate <= max_rate)
             .min_by_key(|rate| rate.abs_diff(requested_sample_rate))
             .unwrap_or_else(|| requested_sample_rate.clamp(min_rate, max_rate))
+    }
+
+    fn choose_best_stream_config(
+        supported_configs: &[cpal::SupportedStreamConfigRange],
+        requested_sample_rate: u32,
+        requested_channels: u16,
+        requested_bits: u16,
+    ) -> Option<cpal::SupportedStreamConfig> {
+        let mut best: Option<(u64, cpal::SupportedStreamConfig)> = None;
+        for range in supported_configs {
+            let candidate_sample_rate =
+                Self::choose_sample_rate_for_range(range, requested_sample_rate.max(8_000));
+            let candidate = range.with_sample_rate(cpal::SampleRate(candidate_sample_rate));
+            let channel_penalty =
+                u64::from(candidate.channels().abs_diff(requested_channels)) * 1_000;
+            let sample_rate_penalty = u64::from(
+                candidate
+                    .sample_rate()
+                    .0
+                    .abs_diff(requested_sample_rate.max(8_000)),
+            );
+            let sample_format_penalty =
+                Self::score_sample_format(candidate.sample_format(), requested_bits);
+            let score = channel_penalty + sample_rate_penalty + sample_format_penalty;
+            match &best {
+                Some((best_score, _)) if *best_score <= score => {}
+                _ => best = Some((score, candidate)),
+            }
+        }
+        best.map(|(_, candidate)| candidate)
     }
 
     fn build_output_stream_info(
@@ -347,6 +379,8 @@ impl AudioPlayer {
             config: None,
             stream: None,
             sample_format: None,
+            cached_requested_device_name: None,
+            cached_supported_output_configs: Vec::new(),
             target_sample_rate: target_sample_rate.clone(),
             target_channels: target_channels.clone(),
             target_bits_per_sample: 24,
@@ -654,78 +688,82 @@ impl AudioPlayer {
     }
 
     fn setup_audio_device(&mut self) -> bool {
-        let host = cpal::default_host();
         let requested_device_name = self
             .target_output_device_name
             .lock()
             .unwrap()
             .as_ref()
             .cloned();
-        let selected_device = requested_device_name.as_ref().and_then(|device_name| {
-            host.output_devices().ok().and_then(|devices| {
-                devices
-                    .filter_map(|device| {
-                        let name = device.name().ok()?;
-                        if name == *device_name {
-                            Some(device)
-                        } else {
-                            None
-                        }
-                    })
-                    .next()
-            })
-        });
-        if requested_device_name.is_some() && selected_device.is_none() {
-            warn!("AudioPlayer: requested output device not found. Falling back to system default");
-        }
-        let device = match selected_device.or_else(|| host.default_output_device()) {
-            Some(device) => device,
-            None => {
+        let reuse_cached_default_device = requested_device_name.is_none()
+            && self.cached_requested_device_name.is_none()
+            && !self.cached_supported_output_configs.is_empty()
+            && self.device.is_some();
+        let (device, configs) = if reuse_cached_default_device {
+            debug!("AudioPlayer: Reusing cached default output device capabilities");
+            (
+                self.device
+                    .as_ref()
+                    .expect("cached default device should exist")
+                    .clone(),
+                self.cached_supported_output_configs.clone(),
+            )
+        } else {
+            let host = cpal::default_host();
+            let selected_device = requested_device_name.as_ref().and_then(|device_name| {
+                host.output_devices().ok().and_then(|devices| {
+                    devices
+                        .filter_map(|device| {
+                            let name = device.name().ok()?;
+                            if name == *device_name {
+                                Some(device)
+                            } else {
+                                None
+                            }
+                        })
+                        .next()
+                })
+            });
+            if requested_device_name.is_some() && selected_device.is_none() {
+                warn!(
+                    "AudioPlayer: requested output device not found. Falling back to system default"
+                );
+            }
+            let Some(device) = selected_device.or_else(|| host.default_output_device()) else {
                 error!("No output device available");
                 return false;
+            };
+            let configs = match device.supported_output_configs() {
+                Ok(configs) => configs.collect::<Vec<_>>(),
+                Err(e) => {
+                    error!("Error getting device configs: {}", e);
+                    return false;
+                }
+            };
+            if requested_device_name.is_none() {
+                self.cached_requested_device_name = None;
+                self.cached_supported_output_configs = configs.clone();
+            } else {
+                self.cached_requested_device_name = None;
+                self.cached_supported_output_configs.clear();
             }
+            (device, configs)
         };
 
         let requested_sample_rate = self.target_sample_rate.load(Ordering::Relaxed) as u32;
         let requested_channels = self.target_channels.load(Ordering::Relaxed) as u16;
         let requested_bits = self.target_bits_per_sample.max(8);
 
-        let configs = match device.supported_output_configs() {
-            Ok(configs) => configs.collect::<Vec<_>>(),
-            Err(e) => {
-                error!("Error getting device configs: {}", e);
-                return false;
-            }
-        };
-
         if configs.is_empty() {
             error!("No output configs reported for selected device");
             return false;
         }
 
-        let mut best: Option<(u64, cpal::SupportedStreamConfig)> = None;
-        for range in configs {
-            let candidate_sample_rate =
-                Self::choose_sample_rate_for_range(&range, requested_sample_rate.max(8_000));
-            let candidate = range.with_sample_rate(cpal::SampleRate(candidate_sample_rate));
-            let channel_penalty =
-                u64::from(candidate.channels().abs_diff(requested_channels)) * 1_000;
-            let sample_rate_penalty = u64::from(
-                candidate
-                    .sample_rate()
-                    .0
-                    .abs_diff(requested_sample_rate.max(8_000)),
-            );
-            let sample_format_penalty =
-                Self::score_sample_format(candidate.sample_format(), requested_bits);
-            let score = channel_penalty + sample_rate_penalty + sample_format_penalty;
-            match &best {
-                Some((best_score, _)) if *best_score <= score => {}
-                _ => best = Some((score, candidate)),
-            }
-        }
-
-        let Some((_, selected_config)) = best else {
+        let Some(selected_config) = Self::choose_best_stream_config(
+            &configs,
+            requested_sample_rate,
+            requested_channels,
+            requested_bits,
+        ) else {
             error!("No matching device config found");
             return false;
         };
@@ -758,6 +796,40 @@ impl AudioPlayer {
                 stream_info,
             }));
         true
+    }
+
+    fn apply_runtime_output_sample_rate_change(&mut self, sample_rate_hz: u32) {
+        let requested_sample_rate_hz = sample_rate_hz.max(8_000);
+        debug!(
+            "AudioPlayer: Applying runtime output sample-rate change to {} Hz",
+            requested_sample_rate_hz
+        );
+        let previous_sample_rate = self.target_sample_rate.load(Ordering::Relaxed);
+        let previous_channels = self.target_channels.load(Ordering::Relaxed);
+        let previous_bits_per_sample = self.target_bits_per_sample;
+        let previous_dither = self.dither_on_bitdepth_reduce;
+        let previous_device_name = self.target_output_device_name.lock().unwrap().clone();
+        self.target_sample_rate
+            .store(requested_sample_rate_hz as usize, Ordering::Relaxed);
+
+        if self.setup_audio_device() {
+            if self.stream.is_some() {
+                self.stream = None;
+                self.create_stream();
+            }
+            self.last_output_signature = Some(self.current_output_signature());
+            if let Some(metadata) = self.current_metadata.lock().unwrap().clone() {
+                self.emit_output_path_for_metadata(&metadata);
+            }
+        } else {
+            self.target_sample_rate
+                .store(previous_sample_rate, Ordering::Relaxed);
+            self.target_channels
+                .store(previous_channels, Ordering::Relaxed);
+            self.target_bits_per_sample = previous_bits_per_sample;
+            self.dither_on_bitdepth_reduce = previous_dither;
+            *self.target_output_device_name.lock().unwrap() = previous_device_name;
+        }
     }
 
     fn create_stream(&mut self) {
@@ -1092,7 +1164,7 @@ impl AudioPlayer {
                         *self.current_metadata.lock().unwrap() = None;
                         debug!("AudioPlayer: Cache cleared");
                     }
-                    Message::Config(ConfigMessage::ConfigChanged(config)) => {
+                    Message::Config(ConfigMessage::ConfigLoaded(config)) => {
                         let low_watermark_ms = config.buffering.player_low_watermark_ms as usize;
                         let target_buffer_ms = (config.buffering.player_target_buffer_ms as usize)
                             .max(low_watermark_ms.saturating_add(500));
@@ -1188,6 +1260,98 @@ impl AudioPlayer {
                                 self.emit_output_path_for_metadata(metadata_for_path);
                             }
                         }
+                    }
+                    Message::Config(ConfigMessage::ConfigChanged(changes)) => {
+                        let mut latest_output: Option<crate::config::OutputConfig> = None;
+                        let mut latest_buffering: Option<crate::config::BufferingConfig> = None;
+                        for change in changes {
+                            match change {
+                                crate::protocol::ConfigDeltaEntry::Output(output) => {
+                                    latest_output = Some(output);
+                                }
+                                crate::protocol::ConfigDeltaEntry::Buffering(buffering) => {
+                                    latest_buffering = Some(buffering);
+                                }
+                                crate::protocol::ConfigDeltaEntry::Cast(_)
+                                | crate::protocol::ConfigDeltaEntry::Ui(_)
+                                | crate::protocol::ConfigDeltaEntry::Library(_)
+                                | crate::protocol::ConfigDeltaEntry::Integrations(_) => {}
+                            }
+                        }
+                        if let Some(buffering) = latest_buffering {
+                            let low_watermark_ms = buffering.player_low_watermark_ms as usize;
+                            let target_buffer_ms = (buffering.player_target_buffer_ms as usize)
+                                .max(low_watermark_ms.saturating_add(500));
+                            self.buffer_low_watermark_ms
+                                .store(low_watermark_ms, Ordering::Relaxed);
+                            self.buffer_target_ms
+                                .store(target_buffer_ms, Ordering::Relaxed);
+                            self.buffer_request_interval_ms.store(
+                                buffering.player_request_interval_ms.max(20) as usize,
+                                Ordering::Relaxed,
+                            );
+                        }
+                        let Some(output) = latest_output else {
+                            continue;
+                        };
+                        self.downmix_higher_channel_tracks = output.downmix_higher_channel_tracks;
+                        let next_output_signature = OutputConfigSignature {
+                            sample_rate_hz: output.sample_rate_khz,
+                            channel_count: output.channel_count,
+                            bits_per_sample: output.bits_per_sample,
+                            dither_on_bitdepth_reduce: output.dither_on_bitdepth_reduce,
+                            device_name: Some(output.output_device_name),
+                        };
+                        if self.last_output_signature.as_ref() != Some(&next_output_signature) {
+                            let previous_sample_rate =
+                                self.target_sample_rate.load(Ordering::Relaxed);
+                            let previous_channels = self.target_channels.load(Ordering::Relaxed);
+                            let previous_bits_per_sample = self.target_bits_per_sample;
+                            let previous_dither = self.dither_on_bitdepth_reduce;
+                            let previous_device_name =
+                                self.target_output_device_name.lock().unwrap().clone();
+
+                            self.target_sample_rate.store(
+                                next_output_signature.sample_rate_hz as usize,
+                                Ordering::Relaxed,
+                            );
+                            self.target_channels.store(
+                                next_output_signature.channel_count as usize,
+                                Ordering::Relaxed,
+                            );
+                            self.target_bits_per_sample = next_output_signature.bits_per_sample;
+                            self.dither_on_bitdepth_reduce =
+                                next_output_signature.dither_on_bitdepth_reduce;
+                            *self.target_output_device_name.lock().unwrap() =
+                                next_output_signature.device_name.clone();
+
+                            if self.setup_audio_device() {
+                                if self.stream.is_some() {
+                                    self.stream = None;
+                                    self.create_stream();
+                                }
+                                self.last_output_signature = Some(next_output_signature);
+                                if let Some(metadata) =
+                                    self.current_metadata.lock().unwrap().clone()
+                                {
+                                    self.emit_output_path_for_metadata(&metadata);
+                                }
+                            } else {
+                                self.target_sample_rate
+                                    .store(previous_sample_rate, Ordering::Relaxed);
+                                self.target_channels
+                                    .store(previous_channels, Ordering::Relaxed);
+                                self.target_bits_per_sample = previous_bits_per_sample;
+                                self.dither_on_bitdepth_reduce = previous_dither;
+                                *self.target_output_device_name.lock().unwrap() =
+                                    previous_device_name;
+                            }
+                        }
+                    }
+                    Message::Config(ConfigMessage::RuntimeOutputSampleRateChanged {
+                        sample_rate_hz,
+                    }) => {
+                        self.apply_runtime_output_sample_rate_change(sample_rate_hz);
                     }
                     Message::Playback(PlaybackMessage::SetVolume(volume)) => {
                         let clamped = volume.clamp(0.0, 1.0);

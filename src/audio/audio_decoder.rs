@@ -51,7 +51,11 @@ enum DecodeWorkItem {
     Stop {
         generation: u64,
     },
-    ConfigChanged(Config),
+    ConfigLoaded(Config),
+    ConfigChanged(Vec<protocol::ConfigDeltaEntry>),
+    RuntimeOutputSampleRateChanged {
+        sample_rate_hz: u32,
+    },
     AudioDeviceOpened {
         stream_info: protocol::OutputStreamInfo,
     },
@@ -276,6 +280,55 @@ Check Settings -> OpenSubsonic status and re-save credentials if needed.",
         }
     }
 
+    fn apply_decode_config(
+        &mut self,
+        output: Option<&crate::config::OutputConfig>,
+        buffering: Option<&BufferingConfig>,
+    ) {
+        let next_target_sample_rate = output
+            .map(|value| value.sample_rate_khz)
+            .unwrap_or(self.target_sample_rate);
+        let next_target_channels = output
+            .map(|value| value.channel_count)
+            .unwrap_or(self.target_channels);
+        let next_target_bits_per_sample = output
+            .map(|value| value.bits_per_sample)
+            .unwrap_or(self.target_bits_per_sample);
+        let next_resampler_quality = output
+            .map(|value| value.resampler_quality)
+            .unwrap_or(self.resampler_quality);
+        let next_dither_on_bitdepth_reduce = output
+            .map(|value| value.dither_on_bitdepth_reduce)
+            .unwrap_or(self.dither_on_bitdepth_reduce);
+        let next_downmix_higher_channel_tracks = output
+            .map(|value| value.downmix_higher_channel_tracks)
+            .unwrap_or(self.downmix_higher_channel_tracks);
+        let next_decoder_request_chunk_ms = buffering
+            .map(|value| value.decoder_request_chunk_ms)
+            .unwrap_or(self.decoder_request_chunk_ms);
+
+        let audio_processing_changed = self.target_sample_rate != next_target_sample_rate
+            || self.target_channels != next_target_channels
+            || self.target_bits_per_sample != next_target_bits_per_sample
+            || self.resampler_quality != next_resampler_quality
+            || self.dither_on_bitdepth_reduce != next_dither_on_bitdepth_reduce
+            || self.downmix_higher_channel_tracks != next_downmix_higher_channel_tracks;
+
+        self.target_sample_rate = next_target_sample_rate;
+        self.target_channels = next_target_channels;
+        self.target_bits_per_sample = next_target_bits_per_sample;
+        self.resampler_quality = next_resampler_quality;
+        self.dither_on_bitdepth_reduce = next_dither_on_bitdepth_reduce;
+        self.downmix_higher_channel_tracks = next_downmix_higher_channel_tracks;
+        self.decoder_request_chunk_ms = next_decoder_request_chunk_ms;
+
+        if audio_processing_changed {
+            self.resampler = None;
+            self.resampler_flushed = false;
+            self.resample_buffer.clear();
+        }
+    }
+
     fn handle_work_item(&mut self, item: DecodeWorkItem) {
         match item {
             DecodeWorkItem::Stop { generation } => {
@@ -329,36 +382,33 @@ Check Settings -> OpenSubsonic status and re-save credentials if needed.",
                 }
                 self.decode_requested_samples(requested_samples);
             }
-            DecodeWorkItem::ConfigChanged(config) => {
-                let next_target_sample_rate = config.output.sample_rate_khz;
-                let next_target_channels = config.output.channel_count;
-                let next_target_bits_per_sample = config.output.bits_per_sample;
-                let next_resampler_quality = config.output.resampler_quality;
-                let next_dither_on_bitdepth_reduce = config.output.dither_on_bitdepth_reduce;
-                let next_downmix_higher_channel_tracks =
-                    config.output.downmix_higher_channel_tracks;
-                let next_decoder_request_chunk_ms = config.buffering.decoder_request_chunk_ms;
-
-                let audio_processing_changed = self.target_sample_rate != next_target_sample_rate
-                    || self.target_channels != next_target_channels
-                    || self.target_bits_per_sample != next_target_bits_per_sample
-                    || self.resampler_quality != next_resampler_quality
-                    || self.dither_on_bitdepth_reduce != next_dither_on_bitdepth_reduce
-                    || self.downmix_higher_channel_tracks != next_downmix_higher_channel_tracks;
-
-                self.target_sample_rate = next_target_sample_rate;
-                self.target_channels = next_target_channels;
-                self.target_bits_per_sample = next_target_bits_per_sample;
-                self.resampler_quality = next_resampler_quality;
-                self.dither_on_bitdepth_reduce = next_dither_on_bitdepth_reduce;
-                self.downmix_higher_channel_tracks = next_downmix_higher_channel_tracks;
-                self.decoder_request_chunk_ms = next_decoder_request_chunk_ms;
-
-                if audio_processing_changed {
-                    self.resampler = None;
-                    self.resampler_flushed = false;
-                    self.resample_buffer.clear();
+            DecodeWorkItem::ConfigLoaded(config) => {
+                self.apply_decode_config(Some(&config.output), Some(&config.buffering));
+            }
+            DecodeWorkItem::ConfigChanged(changes) => {
+                let mut output_update: Option<crate::config::OutputConfig> = None;
+                let mut buffering_update: Option<BufferingConfig> = None;
+                for change in changes {
+                    match change {
+                        protocol::ConfigDeltaEntry::Output(output) => {
+                            output_update = Some(output);
+                        }
+                        protocol::ConfigDeltaEntry::Buffering(buffering) => {
+                            buffering_update = Some(buffering);
+                        }
+                        protocol::ConfigDeltaEntry::Cast(_)
+                        | protocol::ConfigDeltaEntry::Ui(_)
+                        | protocol::ConfigDeltaEntry::Library(_)
+                        | protocol::ConfigDeltaEntry::Integrations(_) => {}
+                    }
                 }
+                self.apply_decode_config(output_update.as_ref(), buffering_update.as_ref());
+            }
+            DecodeWorkItem::RuntimeOutputSampleRateChanged { sample_rate_hz } => {
+                self.target_sample_rate = sample_rate_hz.max(8_000);
+                self.resampler = None;
+                self.resampler_flushed = false;
+                self.resample_buffer.clear();
             }
             DecodeWorkItem::AudioDeviceOpened { stream_info } => {
                 self.target_sample_rate = stream_info.sample_rate_hz;
@@ -1188,13 +1238,32 @@ impl AudioDecoder {
                             .worker_sender
                             .blocking_send(DecodeWorkItem::Stop { generation });
                     }
-                    Message::Config(ConfigMessage::ConfigChanged(config)) => {
+                    Message::Config(ConfigMessage::ConfigLoaded(config)) => {
                         debug!(
-                            "AudioDecoder: Received config changed command: {:?}",
+                            "AudioDecoder: Received full config load command: {:?}",
                             config
                         );
                         self.worker_sender
-                            .blocking_send(DecodeWorkItem::ConfigChanged(config))
+                            .blocking_send(DecodeWorkItem::ConfigLoaded(config))
+                            .unwrap();
+                    }
+                    Message::Config(ConfigMessage::ConfigChanged(changes)) => {
+                        debug!("AudioDecoder: Received config delta command: {:?}", changes);
+                        self.worker_sender
+                            .blocking_send(DecodeWorkItem::ConfigChanged(changes))
+                            .unwrap();
+                    }
+                    Message::Config(ConfigMessage::RuntimeOutputSampleRateChanged {
+                        sample_rate_hz,
+                    }) => {
+                        debug!(
+                            "AudioDecoder: Received runtime output sample-rate change: {} Hz",
+                            sample_rate_hz
+                        );
+                        self.worker_sender
+                            .blocking_send(DecodeWorkItem::RuntimeOutputSampleRateChanged {
+                                sample_rate_hz,
+                            })
                             .unwrap();
                     }
                     Message::Config(ConfigMessage::AudioDeviceOpened { stream_info }) => {

@@ -3504,7 +3504,7 @@ impl LibraryEnrichmentManager {
 
     fn handle_bus_message(&mut self, message: Message) {
         match message {
-            Message::Config(crate::protocol::ConfigMessage::ConfigChanged(config)) => {
+            Message::Config(crate::protocol::ConfigMessage::ConfigLoaded(config)) => {
                 self.online_metadata_enabled = config.library.online_metadata_enabled;
                 self.artist_image_cache_ttl_days = config.library.artist_image_cache_ttl_days;
                 self.artist_image_cache_max_size_mb = config.library.artist_image_cache_max_size_mb;
@@ -3512,6 +3512,34 @@ impl LibraryEnrichmentManager {
                     config.library.list_image_max_edge_px,
                     config.library.cover_art_cache_max_size_mb,
                     config.library.artist_image_cache_max_size_mb,
+                );
+                if !self.online_metadata_enabled {
+                    self.queued_attempts.clear();
+                    self.detail_queue.clear();
+                    self.visible_artist_queue.clear();
+                    self.background_artist_queue.clear();
+                    self.deferred_not_before.clear();
+                }
+                self.prune_enrichment_cache();
+                self.prune_artist_image_cache_by_size();
+            }
+            Message::Config(crate::protocol::ConfigMessage::ConfigChanged(changes)) => {
+                let mut library_update: Option<crate::config::LibraryConfig> = None;
+                for change in changes {
+                    if let crate::protocol::ConfigDeltaEntry::Library(library) = change {
+                        library_update = Some(library);
+                    }
+                }
+                let Some(library) = library_update else {
+                    return;
+                };
+                self.online_metadata_enabled = library.online_metadata_enabled;
+                self.artist_image_cache_ttl_days = library.artist_image_cache_ttl_days;
+                self.artist_image_cache_max_size_mb = library.artist_image_cache_max_size_mb;
+                image_pipeline::configure_runtime_limits(
+                    library.list_image_max_edge_px,
+                    library.cover_art_cache_max_size_mb,
+                    library.artist_image_cache_max_size_mb,
                 );
                 if !self.online_metadata_enabled {
                     self.queued_attempts.clear();
