@@ -16,6 +16,7 @@ use lofty::read_from_path;
 use lofty::tag::{ItemKey, Tag};
 
 use crate::db_manager::DbManager;
+use crate::metadata_tags;
 use crate::protocol::{Message, MetadataEditorField, MetadataMessage, TrackMetadataSummary};
 
 const COMMON_FIELD_SPECS: [(&str, &str); 17] = [
@@ -196,14 +197,61 @@ impl MetadataManager {
         values.join("; ")
     }
 
-    fn read_properties_payload(path: &Path) -> Result<(String, Vec<MetadataEditorField>), String> {
-        let tagged_file =
-            read_from_path(path).map_err(|error| format!("Failed to read tags: {error}"))?;
-        let source_tag = tagged_file
-            .primary_tag()
-            .or_else(|| tagged_file.first_tag());
+    fn get_common_fallback_value(
+        metadata: Option<&metadata_tags::CommonTrackMetadata>,
+        field_id: &str,
+    ) -> String {
+        let Some(metadata) = metadata else {
+            return String::new();
+        };
 
-        let title = Self::get_common_value(source_tag, "common:title");
+        match field_id {
+            "common:title" => metadata.title.clone(),
+            "common:artist" => metadata.artist.clone(),
+            "common:album" => metadata.album.clone(),
+            "common:album_artist" => metadata.album_artist.clone(),
+            "common:track_number" => metadata.track_number.clone(),
+            "common:year" => metadata.year.clone(),
+            "common:date" => metadata.date.clone(),
+            "common:genre" => metadata.genre.clone(),
+            _ => String::new(),
+        }
+    }
+
+    fn get_common_value_from_sources(
+        tag: Option<&Tag>,
+        fallback: Option<&metadata_tags::CommonTrackMetadata>,
+        field_id: &str,
+    ) -> String {
+        let primary = Self::get_common_value(tag, field_id);
+        if !primary.trim().is_empty() {
+            return primary;
+        }
+        Self::get_common_fallback_value(fallback, field_id)
+    }
+
+    fn read_properties_payload(path: &Path) -> Result<(String, Vec<MetadataEditorField>), String> {
+        let tagged_file = match read_from_path(path) {
+            Ok(tagged_file) => Some(tagged_file),
+            Err(error) => {
+                warn!(
+                    "MetadataManager: lofty failed to read {}, using common metadata fallback: {}",
+                    path.display(),
+                    error
+                );
+                None
+            }
+        };
+        let source_tag = tagged_file
+            .as_ref()
+            .and_then(|tagged| tagged.primary_tag().or_else(|| tagged.first_tag()));
+        let common_fallback = metadata_tags::read_common_track_metadata(path);
+
+        let title = Self::get_common_value_from_sources(
+            source_tag,
+            common_fallback.as_ref(),
+            "common:title",
+        );
         let display_name = if !title.trim().is_empty() {
             title
         } else {
@@ -218,7 +266,11 @@ impl MetadataManager {
             .map(|(id, field_name)| MetadataEditorField {
                 id: (*id).to_string(),
                 field_name: (*field_name).to_string(),
-                value: Self::get_common_value(source_tag, id),
+                value: Self::get_common_value_from_sources(
+                    source_tag,
+                    common_fallback.as_ref(),
+                    id,
+                ),
                 common: true,
             })
             .collect();
