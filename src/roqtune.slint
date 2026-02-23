@@ -1846,6 +1846,7 @@ export component AppWindow inherits Window {
                             padding-right: 6px;
 
                             library-search-input := LineEdit {
+                                text <=> root.library_search_query;
                                 placeholder-text: "Search this library view...";
                                 horizontal-stretch: 1;
                                 edited(text) => {
@@ -5464,6 +5465,7 @@ export component AppWindow inherits Window {
     in-out property <bool> playlist_filter_blocked_feedback: false;
     in-out property <bool> playlist_search_visible: false;
     in-out property <string> playlist_search_query: "";
+    in-out property <string> library_search_query: "";
     in-out property <string> playlist_search_result_text: "0/0";
     in-out property <bool> library_search_visible: false;
     in-out property <int> library_search_focus_token: 0;

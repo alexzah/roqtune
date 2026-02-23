@@ -4610,10 +4610,12 @@ impl UiManager {
 
     fn sync_library_search_state_to_ui(&self) {
         let search_visible = self.library_search_visible;
+        let search_query = self.library_search_query.clone();
         let search_result_text = self.library_search_result_text();
 
         let _ = self.ui.upgrade_in_event_loop(move |ui| {
             ui.set_library_search_visible(search_visible);
+            ui.set_library_search_query(search_query.into());
             ui.set_library_search_result_text(search_result_text.into());
         });
     }
@@ -4972,6 +4974,7 @@ impl UiManager {
     }
 
     fn open_global_library_search(&mut self) {
+        self.clear_search_bars_for_track_list_view_switch();
         self.set_collection_mode(COLLECTION_MODE_LIBRARY);
         if !matches!(self.current_library_view(), LibraryViewState::GlobalSearch) {
             self.library_view_stack.push(LibraryViewState::GlobalSearch);
@@ -4982,6 +4985,11 @@ impl UiManager {
         self.request_library_view_data();
         self.open_library_search();
         self.sync_library_ui();
+    }
+
+    fn clear_search_bars_for_track_list_view_switch(&mut self) {
+        self.close_playlist_search();
+        self.close_library_search();
     }
 
     fn clear_playlist_filter_view(&mut self) {
@@ -6822,6 +6830,7 @@ impl UiManager {
         if self.collection_mode == normalized_mode {
             return;
         }
+        self.clear_search_bars_for_track_list_view_switch();
         self.collection_mode = normalized_mode;
         if self.collection_mode == COLLECTION_MODE_LIBRARY {
             self.update_library_playing_index();
@@ -6848,6 +6857,7 @@ impl UiManager {
     }
 
     fn set_library_root_section(&mut self, section: i32) {
+        self.clear_search_bars_for_track_list_view_switch();
         self.remember_current_library_scroll_position();
         let root = match section {
             1 => LibraryViewState::ArtistsRoot,
@@ -6871,6 +6881,7 @@ impl UiManager {
         if self.library_view_stack.len() <= 1 {
             return;
         }
+        self.clear_search_bars_for_track_list_view_switch();
         let current_view = self.current_library_view();
         self.remember_scroll_position_for_view(
             &current_view,
@@ -7334,6 +7345,7 @@ impl UiManager {
                 self.start_queue_if_possible(self.build_library_queue_request(Some(index)));
             }
             LibraryEntry::Artist(artist) => {
+                self.clear_search_bars_for_track_list_view_switch();
                 self.remember_current_library_scroll_position();
                 self.library_view_stack
                     .push(LibraryViewState::ArtistDetail {
@@ -7346,6 +7358,7 @@ impl UiManager {
                 self.sync_library_ui();
             }
             LibraryEntry::Album(album) => {
+                self.clear_search_bars_for_track_list_view_switch();
                 self.remember_current_library_scroll_position();
                 self.library_view_stack.push(LibraryViewState::AlbumDetail {
                     album: album.album,
@@ -7358,6 +7371,7 @@ impl UiManager {
                 self.sync_library_ui();
             }
             LibraryEntry::Genre(genre) => {
+                self.clear_search_bars_for_track_list_view_switch();
                 self.remember_current_library_scroll_position();
                 self.library_view_stack
                     .push(LibraryViewState::GenreDetail { genre: genre.genre });
@@ -7368,6 +7382,7 @@ impl UiManager {
                 self.sync_library_ui();
             }
             LibraryEntry::Decade(decade) => {
+                self.clear_search_bars_for_track_list_view_switch();
                 self.remember_current_library_scroll_position();
                 self.library_view_stack
                     .push(LibraryViewState::DecadeDetail {
@@ -8601,6 +8616,7 @@ impl UiManager {
                             // Switching playlists should always start in the playlist's natural order
                             // with no active read-only filter/search view state.
                             self.reset_filter_state();
+                            self.close_library_search();
                             self.selection_anchor_track_id = None;
                             self.track_ids.clear();
                             self.track_paths.clear();
