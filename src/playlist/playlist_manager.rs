@@ -1773,6 +1773,16 @@ impl PlaylistManager {
                             let mut advanced = false;
                             if let Some(index) = index {
                                 if index < self.playback_playlist.num_tracks() {
+                                    if index == playing_idx {
+                                        let replay_track_id =
+                                            self.playback_playlist.get_track_id(playing_idx);
+                                        // Natural replay of the same track cannot rely on the
+                                        // previous decode span because the player cursor has
+                                        // already advanced past that span.
+                                        self.cached_track_ids.remove(&replay_track_id);
+                                        self.fully_cached_track_ids.remove(&replay_track_id);
+                                        self.requested_track_offsets.remove(&replay_track_id);
+                                    }
                                     self.play_playback_track(index, true);
                                     advanced = true;
                                 }
@@ -2747,6 +2757,7 @@ impl PlaylistManager {
 
         let mut current_index = first_index;
         let mut track_paths = Vec::new();
+        let mut staged_track_ids = HashSet::new();
         let mut segment_rate: Option<u32> = desired_first_rate;
 
         for _ in 0..self.max_num_cached_tracks {
@@ -2755,11 +2766,15 @@ impl PlaylistManager {
                 let is_cached_at_track_start =
                     self.cached_track_ids.get(&track_id).copied() == Some(0);
                 let is_requested_at_track_start =
-                    self.requested_track_offsets.get(&track_id).copied() == Some(0);
+                    self.requested_track_offsets.get(&track_id).copied() == Some(0)
+                        || staged_track_ids.contains(&track_id);
                 if is_cached_at_track_start || is_requested_at_track_start {
                     if let Some(next_index) =
                         self.playback_playlist.get_next_track_index(current_index)
                     {
+                        if next_index == current_index {
+                            break;
+                        }
                         current_index = next_index;
                         if next_index >= self.playback_playlist.num_tracks() {
                             break;
@@ -2783,13 +2798,17 @@ impl PlaylistManager {
                 }
 
                 track_paths.push(TrackIdentifier {
-                    id: track_id,
+                    id: track_id.clone(),
                     path: track.path.clone(),
                     play_immediately: play_immediately && current_index == first_index,
                     start_offset_ms: 0,
                 });
+                staged_track_ids.insert(track_id);
             }
             if let Some(next_index) = self.playback_playlist.get_next_track_index(current_index) {
+                if next_index == current_index {
+                    break;
+                }
                 current_index = next_index;
                 if next_index >= self.playback_playlist.num_tracks() {
                     break;
@@ -4140,6 +4159,74 @@ mod tests {
     }
 
     #[test]
+    fn test_repeat_track_recaches_from_start_after_zero_offset_cache() {
+        let mut harness = PlaylistManagerHarness::new();
+        let (id0, _) = harness.add_track("pm_repeat_cached_zero_0");
+        harness.drain_messages();
+
+        harness.start_playlist_queue_from_ids(std::slice::from_ref(&id0), 0);
+        let _ = wait_for_message(&mut harness.receiver, Duration::from_secs(1), |message| {
+            matches!(
+                message,
+                protocol::Message::Playlist(protocol::PlaylistMessage::PlaylistIndicesChanged {
+                    is_playing: true,
+                    playing_index: Some(0),
+                    ..
+                })
+            )
+        });
+
+        // Set Repeat=Track
+        harness.send(protocol::Message::Playlist(
+            protocol::PlaylistMessage::ToggleRepeat,
+        ));
+        harness.send(protocol::Message::Playlist(
+            protocol::PlaylistMessage::ToggleRepeat,
+        ));
+        let _ = wait_for_message(&mut harness.receiver, Duration::from_secs(1), |message| {
+            matches!(
+                message,
+                protocol::Message::Playlist(protocol::PlaylistMessage::RepeatModeChanged(
+                    protocol::RepeatMode::Track
+                ))
+            )
+        });
+
+        // Simulate local state where the track is considered fully cached from start.
+        harness.send(protocol::Message::Audio(
+            protocol::AudioMessage::TrackCached(id0.clone(), 0),
+        ));
+        let _ = wait_for_message(&mut harness.receiver, Duration::from_secs(1), |message| {
+            matches!(
+                message,
+                protocol::Message::Audio(protocol::AudioMessage::TrackCached(id, offset))
+                    if id == &id0 && *offset == 0
+            )
+        });
+
+        harness.drain_messages();
+        harness.send(protocol::Message::Playback(
+            protocol::PlaybackMessage::TrackFinished(id0.clone()),
+        ));
+
+        // Regression check: even if cache metadata says offset 0, natural replay of the
+        // same track must request a fresh decode from start.
+        let _ =
+            wait_for_message(
+                &mut harness.receiver,
+                Duration::from_secs(1),
+                |message| match message {
+                    protocol::Message::Audio(protocol::AudioMessage::DecodeTracks(tracks)) => {
+                        tracks.iter().any(|track| {
+                            track.id == id0 && track.start_offset_ms == 0 && track.play_immediately
+                        })
+                    }
+                    _ => false,
+                },
+            );
+    }
+
+    #[test]
     fn test_ready_for_playback_does_not_restart_already_started_track() {
         let mut harness = PlaylistManagerHarness::new();
         let (id0, _) = harness.add_track("pm_late_ready_0");
@@ -4759,6 +4846,42 @@ mod tests {
         };
         assert_eq!(tracks.len(), 1);
         assert_eq!(tracks[0].id, "t0");
+    }
+
+    #[test]
+    fn test_cache_tracks_repeat_track_does_not_enqueue_duplicate_ids() {
+        let (mut manager, mut receiver) = make_direct_manager();
+        manager.sample_rate_auto_enabled = false;
+        manager.current_output_rate_hz = Some(44_100);
+        manager.playback_playlist = Playlist::new();
+        manager.playback_playlist.add_track(Track {
+            id: "t0".to_string(),
+            path: PathBuf::from("/tmp/t0_repeat.flac"),
+        });
+        manager.playback_playlist.add_track(Track {
+            id: "t1".to_string(),
+            path: PathBuf::from("/tmp/t1_repeat.flac"),
+        });
+        manager.playback_playlist.set_playing_track_index(Some(0));
+        manager.playback_playlist.set_playing(true);
+        manager
+            .playback_playlist
+            .set_repeat_mode(protocol::RepeatMode::Track);
+
+        manager.cache_tracks(true);
+
+        let message = wait_for_message(&mut receiver, Duration::from_secs(1), |message| {
+            matches!(
+                message,
+                protocol::Message::Audio(protocol::AudioMessage::DecodeTracks(_))
+            )
+        });
+        let protocol::Message::Audio(protocol::AudioMessage::DecodeTracks(tracks)) = message else {
+            panic!("expected DecodeTracks message");
+        };
+        assert_eq!(tracks.len(), 1);
+        assert_eq!(tracks[0].id, "t0");
+        assert!(tracks[0].play_immediately);
     }
 
     #[test]

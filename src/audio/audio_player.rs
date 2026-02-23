@@ -598,7 +598,11 @@ impl AudioPlayer {
                         id.clone(),
                     )));
                     input_current_position = input_current_position.saturating_add(1);
-                    queue_cursor = Some((entry_index + 1, 0));
+                    is_playing.store(false, Ordering::Relaxed);
+                    for sample in &mut output_buffer[output_current_position..] {
+                        *sample = silence_value;
+                    }
+                    break;
                 }
             }
         }
@@ -1203,8 +1207,16 @@ impl AudioPlayer {
 
 #[cfg(test)]
 mod tests {
-    use super::AudioPlayer;
+    use super::{AudioPlayer, AudioQueueEntry, TrackHeader};
     use crate::config::Config;
+    use crate::protocol::{Message, PlaybackMessage};
+    use std::collections::{HashMap, VecDeque};
+    use std::sync::{
+        atomic::{AtomicBool, AtomicU32, AtomicUsize, Ordering},
+        Arc, Mutex,
+    };
+    use tokio::sync::broadcast;
+    use tokio::sync::broadcast::error::TryRecvError;
 
     #[test]
     fn test_milliseconds_to_samples_stereo() {
@@ -1284,5 +1296,86 @@ mod tests {
 
         let signature = AudioPlayer::output_signature_from_config(&config);
         assert_eq!(signature.device_name, None);
+    }
+
+    #[test]
+    fn test_render_stops_after_footer_and_does_not_leak_next_track_audio() {
+        let is_playing = Arc::new(AtomicBool::new(true));
+        let sample_queue = Arc::new(Mutex::new(VecDeque::from(vec![
+            AudioQueueEntry::TrackHeader(TrackHeader {
+                id: "t1".to_string(),
+                start_offset_ms: 0,
+            }),
+            AudioQueueEntry::Samples(vec![0.5, 0.25]),
+            AudioQueueEntry::TrackFooter("t1".to_string()),
+            AudioQueueEntry::TrackHeader(TrackHeader {
+                id: "t2".to_string(),
+                start_offset_ms: 0,
+            }),
+            AudioQueueEntry::Samples(vec![0.9, 0.8]),
+        ])));
+        let queue_start_position = Arc::new(AtomicUsize::new(0));
+        let queue_end_position = Arc::new(AtomicUsize::new(7));
+        let cached_track_indices = Arc::new(Mutex::new(HashMap::new()));
+        let current_track_id = Arc::new(Mutex::new("t1".to_string()));
+        let current_track_position = Arc::new(AtomicUsize::new(0));
+        let volume = Arc::new(AtomicU32::new(1.0f32.to_bits()));
+        let (bus_sender, mut bus_receiver) = broadcast::channel(32);
+        let mut output = [0.0f32; 8];
+
+        AudioPlayer::render_output_buffer(
+            &mut output,
+            &is_playing,
+            &sample_queue,
+            &queue_start_position,
+            &queue_end_position,
+            &cached_track_indices,
+            &current_track_id,
+            &bus_sender,
+            &current_track_position,
+            &volume,
+            |sample| sample,
+            0.0f32,
+        );
+
+        assert!(!is_playing.load(Ordering::Relaxed));
+        assert_eq!(current_track_position.load(Ordering::Relaxed), 4);
+        assert_eq!(queue_start_position.load(Ordering::Relaxed), 4);
+        assert_eq!(output[0], 0.5);
+        assert_eq!(output[1], 0.25);
+        assert!(output[2..].iter().all(|sample| *sample == 0.0));
+        let queue_guard = sample_queue.lock().expect("sample queue lock poisoned");
+        assert!(
+            matches!(queue_guard.front(), Some(AudioQueueEntry::TrackHeader(header)) if header.id == "t2")
+        );
+        drop(queue_guard);
+
+        let mut saw_started_t1 = false;
+        let mut saw_finished_t1 = false;
+        let mut saw_started_t2 = false;
+        loop {
+            match bus_receiver.try_recv() {
+                Ok(Message::Playback(PlaybackMessage::TrackStarted(track_started))) => {
+                    if track_started.id == "t1" {
+                        saw_started_t1 = true;
+                    } else if track_started.id == "t2" {
+                        saw_started_t2 = true;
+                    }
+                }
+                Ok(Message::Playback(PlaybackMessage::TrackFinished(id))) => {
+                    if id == "t1" {
+                        saw_finished_t1 = true;
+                    }
+                }
+                Ok(_) => {}
+                Err(TryRecvError::Empty) => break,
+                Err(TryRecvError::Lagged(_)) => continue,
+                Err(TryRecvError::Closed) => break,
+            }
+        }
+
+        assert!(saw_started_t1);
+        assert!(saw_finished_t1);
+        assert!(!saw_started_t2);
     }
 }
