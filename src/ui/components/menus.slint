@@ -85,6 +85,7 @@ export component ColumnHeaderMenu inherits PopupWindow {
 
     width: 220px;
     height: 16px + labels.length * 24px + 32px;
+    close-policy: PopupClosePolicy.close-on-click-outside;
 
     Rectangle {
         background: root.dark ? #2f2f2f : #f3f6fb;

@@ -2369,7 +2369,6 @@ export component AppWindow inherits Window {
         custom: root.playlist_column_menu_is_custom;
         toggle-column(index) => {
             root.toggle_playlist_column(index);
-            column-header-menu.close();
         }
         delete-column(index) => {
             if (index >= 0 && index < root.playlist_column_menu_labels.length

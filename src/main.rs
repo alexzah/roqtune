@@ -7628,6 +7628,10 @@ mod tests {
             "Column header menu should expose delete callback"
         );
         assert!(
+            menu_ui.contains("close-policy: PopupClosePolicy.close-on-click-outside;"),
+            "Column header menu should only auto-close when clicking outside"
+        );
+        assert!(
             menu_ui.contains("column-toggle := Switch {")
                 && menu_ui.contains("width: 36px;")
                 && menu_ui.contains("font-size: 12px;"),
@@ -7646,6 +7650,12 @@ mod tests {
             slint_ui
                 .contains("root.delete_custom_playlist_column(root.delete_custom_column_index);"),
             "Confirmed deletion should invoke custom-column delete callback"
+        );
+        assert!(
+            !slint_ui.contains(
+                "root.toggle_playlist_column(index);\n            column-header-menu.close();"
+            ),
+            "Column toggle should not force-close the column header menu"
         );
     }
 
