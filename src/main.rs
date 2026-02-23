@@ -5,6 +5,8 @@ mod audio_decoder;
 mod audio_player;
 #[path = "audio/audio_probe.rs"]
 mod audio_probe;
+#[path = "runtime/audio_runtime_reactor.rs"]
+mod audio_runtime_reactor;
 mod backends;
 #[path = "cast/cast_manager.rs"]
 mod cast_manager;
@@ -55,6 +57,7 @@ use std::{
 
 use app_bootstrap::services::{spawn_background_services, BackgroundServicesConfig};
 use audio_probe::get_or_probe_output_device;
+use audio_runtime_reactor::{spawn_runtime_event_reactor, RuntimeEventReactorContext};
 use config::{
     BackendProfileConfig, BufferingConfig, ButtonClusterInstanceConfig, CastConfig, Config,
     IntegrationsConfig, LibraryConfig, OutputConfig, PlaylistColumnConfig, ResamplerQuality,
@@ -93,9 +96,8 @@ use protocol::{
     PlaylistMessage,
 };
 use runtime_config::{
-    audio_settings_changed, config_diff_is_runtime_sample_rate_only, output_preferences_changed,
-    publish_runtime_config_delta, runtime_output_override_snapshot,
-    update_last_runtime_config_snapshot, OutputRuntimeSignature, RuntimeAudioState,
+    audio_settings_changed, output_preferences_changed, publish_runtime_config_delta,
+    runtime_output_override_snapshot, OutputRuntimeSignature, RuntimeAudioState,
     RuntimeOutputOverride, StagedAudioSettings,
 };
 use slint::winit_030::{winit, EventResult as WinitEventResult, WinitWindowAccessor};
@@ -165,20 +167,20 @@ fn spawn_debounced_query_dispatcher(
 
 /// Detected and filtered output-setting choices presented in the settings dialog.
 #[derive(Debug, Clone)]
-struct OutputSettingsOptions {
-    device_names: Vec<String>,
-    auto_device_name: String,
-    channel_values: Vec<u16>,
-    sample_rate_values: Vec<u32>,
-    bits_per_sample_values: Vec<u16>,
-    verified_sample_rate_values: Vec<u32>,
-    verified_sample_rates_summary: String,
-    auto_channel_value: u16,
-    auto_sample_rate_value: u32,
-    auto_bits_per_sample_value: u16,
+pub(crate) struct OutputSettingsOptions {
+    pub(crate) device_names: Vec<String>,
+    pub(crate) auto_device_name: String,
+    pub(crate) channel_values: Vec<u16>,
+    pub(crate) sample_rate_values: Vec<u32>,
+    pub(crate) bits_per_sample_values: Vec<u16>,
+    pub(crate) verified_sample_rate_values: Vec<u32>,
+    pub(crate) verified_sample_rates_summary: String,
+    pub(crate) auto_channel_value: u16,
+    pub(crate) auto_sample_rate_value: u32,
+    pub(crate) auto_bits_per_sample_value: u16,
 }
 
-fn resolve_effective_runtime_config(
+pub(crate) fn resolve_effective_runtime_config(
     persisted_config: &Config,
     output_options: &OutputSettingsOptions,
     runtime_output_override: Option<&RuntimeOutputOverride>,
@@ -486,7 +488,7 @@ fn format_verified_rates_summary(rates: &[u32]) -> String {
     format!("Verified rates: {}", values)
 }
 
-fn snapshot_output_device_names(host: &cpal::Host) -> Vec<String> {
+pub(crate) fn snapshot_output_device_names(host: &cpal::Host) -> Vec<String> {
     let mut device_names = Vec::new();
     if let Ok(devices) = host.output_devices() {
         for device in devices {
@@ -502,7 +504,7 @@ fn snapshot_output_device_names(host: &cpal::Host) -> Vec<String> {
     device_names
 }
 
-fn detect_output_settings_options(config: &Config) -> OutputSettingsOptions {
+pub(crate) fn detect_output_settings_options(config: &Config) -> OutputSettingsOptions {
     const COMMON_SAMPLE_RATES: [u32; 6] = [44_100, 48_000, 88_200, 96_000, 176_400, 192_000];
     const COMMON_CHANNEL_COUNTS: [u16; 4] = [2, 1, 6, 8];
     const COMMON_BIT_DEPTHS: [u16; 3] = [16, 24, 32];
@@ -665,7 +667,7 @@ fn detect_output_settings_options(config: &Config) -> OutputSettingsOptions {
     }
 }
 
-fn sanitize_config(config: Config) -> Config {
+pub(crate) fn sanitize_config(config: Config) -> Config {
     let sanitized_playlist_columns = sanitize_playlist_columns(&config.ui.playlist_columns);
     let output_device_name = config.output.output_device_name.trim().to_string();
     let clamped_channels = config.output.channel_count.clamp(1, 8);
@@ -1332,7 +1334,7 @@ fn reorder_visible_playlist_columns(
     reordered
 }
 
-fn apply_column_order_keys(
+pub(crate) fn apply_column_order_keys(
     columns: &[PlaylistColumnConfig],
     column_order_keys: &[String],
 ) -> Vec<PlaylistColumnConfig> {
@@ -1442,7 +1444,7 @@ fn sidebar_width_from_window(window_width_px: u32) -> i32 {
     proportional.clamp(180, 300) as i32
 }
 
-fn workspace_size_snapshot(workspace_size: &Arc<Mutex<(u32, u32)>>) -> (u32, u32) {
+pub(crate) fn workspace_size_snapshot(workspace_size: &Arc<Mutex<(u32, u32)>>) -> (u32, u32) {
     let (width, height) = *workspace_size
         .lock()
         .expect("layout workspace size lock poisoned");
@@ -2053,7 +2055,7 @@ fn should_apply_custom_column_delete(
     pending_index >= 0 && pending_index as usize == requested_index
 }
 
-fn apply_config_to_ui(
+pub(crate) fn apply_config_to_ui(
     ui: &AppWindow,
     config: &Config,
     output_options: &OutputSettingsOptions,
@@ -5887,432 +5889,19 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Re-detect output options only when an audio-device open coincides with
     // an output-device inventory change (startup has already done initial detection).
-    let mut device_event_receiver = bus_sender.subscribe();
-    let bus_sender_clone = bus_sender.clone();
-    let config_state_clone = Arc::clone(&config_state);
-    let output_options_clone = Arc::clone(&output_options);
-    let output_device_inventory_clone = Arc::clone(&output_device_inventory);
-    let ui_handle_clone = ui.as_weak().clone();
-    let layout_workspace_size_clone = Arc::clone(&layout_workspace_size);
-    let runtime_output_override_clone = Arc::clone(&runtime_output_override);
-    let runtime_audio_state_clone = Arc::clone(&runtime_audio_state);
-    let staged_audio_settings_clone = Arc::clone(&staged_audio_settings);
-    let last_runtime_signature_clone = Arc::clone(&last_runtime_signature);
-    let last_runtime_config_clone = Arc::clone(&last_runtime_config);
-    let playback_session_active_clone = Arc::clone(&playback_session_active);
-    let mut runtime_sample_rate_switch_in_progress = false;
-    thread::spawn(move || loop {
-        match device_event_receiver.blocking_recv() {
-            Ok(Message::Config(ConfigMessage::SetRuntimeOutputRate {
-                sample_rate_hz,
-                reason,
-            })) => {
-                {
-                    let mut runtime_override = runtime_output_override_clone
-                        .lock()
-                        .expect("runtime output override lock poisoned");
-                    runtime_override.sample_rate_hz = Some(sample_rate_hz.clamp(8_000, 192_000));
-                }
-                debug!(
-                    "Runtime output sample-rate override set to {} Hz ({})",
-                    sample_rate_hz, reason
-                );
-                let persisted_config = {
-                    let state = config_state_clone
-                        .lock()
-                        .expect("config state lock poisoned");
-                    state.clone()
-                };
-                let options_snapshot = {
-                    let options = output_options_clone
-                        .lock()
-                        .expect("output options lock poisoned");
-                    options.clone()
-                };
-                let runtime_override =
-                    runtime_output_override_snapshot(&runtime_output_override_clone);
-                let runtime = resolve_effective_runtime_config(
-                    &persisted_config,
-                    &options_snapshot,
-                    Some(&runtime_override),
-                    &runtime_audio_state_clone,
-                );
-                let runtime_signature = OutputRuntimeSignature::from_output(&runtime.output);
-                {
-                    let mut last_signature = last_runtime_signature_clone
-                        .lock()
-                        .expect("runtime signature lock poisoned");
-                    *last_signature = runtime_signature;
-                }
-                update_last_runtime_config_snapshot(&last_runtime_config_clone, runtime.clone());
-                let _ = bus_sender_clone.send(Message::Config(
-                    ConfigMessage::RuntimeOutputSampleRateChanged {
-                        sample_rate_hz: runtime.output.sample_rate_khz,
-                    },
-                ));
-                runtime_sample_rate_switch_in_progress = true;
-            }
-            Ok(Message::Config(ConfigMessage::ClearRuntimeOutputRateOverride)) => {
-                {
-                    let mut runtime_override = runtime_output_override_clone
-                        .lock()
-                        .expect("runtime output override lock poisoned");
-                    runtime_override.sample_rate_hz = None;
-                }
-                debug!("Runtime output sample-rate override cleared");
-                let mut force_broadcast_runtime = false;
-                if let Some(staged) = {
-                    let mut pending = staged_audio_settings_clone
-                        .lock()
-                        .expect("staged audio settings lock poisoned");
-                    pending.take()
-                } {
-                    let mut runtime_audio_state = runtime_audio_state_clone
-                        .lock()
-                        .expect("runtime audio state lock poisoned");
-                    runtime_audio_state.output = staged.output;
-                    runtime_audio_state.cast = staged.cast;
-                    force_broadcast_runtime = true;
-                }
-                let persisted_config = {
-                    let state = config_state_clone
-                        .lock()
-                        .expect("config state lock poisoned");
-                    state.clone()
-                };
-                let options_snapshot = {
-                    let options = output_options_clone
-                        .lock()
-                        .expect("output options lock poisoned");
-                    options.clone()
-                };
-                let runtime_override =
-                    runtime_output_override_snapshot(&runtime_output_override_clone);
-                let runtime = resolve_effective_runtime_config(
-                    &persisted_config,
-                    &options_snapshot,
-                    Some(&runtime_override),
-                    &runtime_audio_state_clone,
-                );
-                let runtime_signature = OutputRuntimeSignature::from_output(&runtime.output);
-                let previous_runtime = {
-                    let previous = last_runtime_config_clone
-                        .lock()
-                        .expect("last runtime config lock poisoned");
-                    previous.clone()
-                };
-                let playback_active = playback_session_active_clone.load(Ordering::Relaxed);
-                let should_broadcast_runtime = {
-                    let mut last_signature = last_runtime_signature_clone
-                        .lock()
-                        .expect("runtime signature lock poisoned");
-                    if !playback_active && !force_broadcast_runtime {
-                        // Keep runtime metadata in sync without forcing an idle-time audio-device reopen.
-                        *last_signature = runtime_signature;
-                        false
-                    } else if *last_signature == runtime_signature {
-                        force_broadcast_runtime
-                    } else {
-                        *last_signature = runtime_signature;
-                        true
-                    }
-                };
-                if should_broadcast_runtime {
-                    if config_diff_is_runtime_sample_rate_only(&previous_runtime, &runtime) {
-                        update_last_runtime_config_snapshot(
-                            &last_runtime_config_clone,
-                            runtime.clone(),
-                        );
-                        let _ = bus_sender_clone.send(Message::Config(
-                            ConfigMessage::RuntimeOutputSampleRateChanged {
-                                sample_rate_hz: runtime.output.sample_rate_khz,
-                            },
-                        ));
-                        runtime_sample_rate_switch_in_progress = true;
-                    } else {
-                        let _ = publish_runtime_config_delta(
-                            &bus_sender_clone,
-                            &last_runtime_config_clone,
-                            runtime,
-                        );
-                    }
-                } else {
-                    update_last_runtime_config_snapshot(&last_runtime_config_clone, runtime);
-                }
-            }
-            Ok(Message::Config(ConfigMessage::AudioDeviceOpened { .. })) => {
-                if runtime_sample_rate_switch_in_progress {
-                    runtime_sample_rate_switch_in_progress = false;
-                    debug!("Skipping output options re-detection after runtime sample-rate switch");
-                    continue;
-                }
-                let current_inventory = snapshot_output_device_names(&cpal::default_host());
-                let inventory_changed = {
-                    let mut inventory = output_device_inventory_clone
-                        .lock()
-                        .expect("output device inventory lock poisoned");
-                    if *inventory == current_inventory {
-                        false
-                    } else {
-                        *inventory = current_inventory;
-                        true
-                    }
-                };
-                if !inventory_changed {
-                    debug!(
-                        "Skipping output options re-detection after audio-device open: inventory unchanged"
-                    );
-                    continue;
-                }
-                let persisted_config = {
-                    let state = config_state_clone
-                        .lock()
-                        .expect("config state lock poisoned");
-                    state.clone()
-                };
-                let detected_options = detect_output_settings_options(&persisted_config);
-                {
-                    let mut options = output_options_clone
-                        .lock()
-                        .expect("output options lock poisoned");
-                    *options = detected_options.clone();
-                }
-
-                let _ = bus_sender_clone.send(Message::Config(
-                    ConfigMessage::OutputDeviceCapabilitiesChanged {
-                        verified_sample_rates: detected_options.verified_sample_rate_values.clone(),
-                    },
-                ));
-
-                let runtime_override =
-                    runtime_output_override_snapshot(&runtime_output_override_clone);
-                let runtime = resolve_effective_runtime_config(
-                    &persisted_config,
-                    &detected_options,
-                    Some(&runtime_override),
-                    &runtime_audio_state_clone,
-                );
-                let runtime_signature = OutputRuntimeSignature::from_output(&runtime.output);
-                let should_broadcast_runtime = {
-                    let mut last_signature = last_runtime_signature_clone
-                        .lock()
-                        .expect("runtime signature lock poisoned");
-                    if *last_signature == runtime_signature {
-                        false
-                    } else {
-                        *last_signature = runtime_signature;
-                        true
-                    }
-                };
-                if should_broadcast_runtime {
-                    let _ = publish_runtime_config_delta(
-                        &bus_sender_clone,
-                        &last_runtime_config_clone,
-                        runtime,
-                    );
-                } else {
-                    update_last_runtime_config_snapshot(&last_runtime_config_clone, runtime);
-                }
-
-                let ui_weak = ui_handle_clone.clone();
-                let config_for_ui = persisted_config.clone();
-                let options_for_ui = detected_options.clone();
-                let (workspace_width_px, workspace_height_px) =
-                    workspace_size_snapshot(&layout_workspace_size_clone);
-                let _ = slint::invoke_from_event_loop(move || {
-                    if let Some(ui) = ui_weak.upgrade() {
-                        apply_config_to_ui(
-                            &ui,
-                            &config_for_ui,
-                            &options_for_ui,
-                            workspace_width_px,
-                            workspace_height_px,
-                        );
-                    }
-                });
-            }
-            Ok(Message::Playlist(PlaylistMessage::ActivePlaylistColumnOrder(
-                column_order_keys,
-            ))) => {
-                let Some(column_order_keys) = column_order_keys else {
-                    continue;
-                };
-
-                let next_config = {
-                    let mut state = config_state_clone
-                        .lock()
-                        .expect("config state lock poisoned");
-                    let reordered_columns =
-                        apply_column_order_keys(&state.ui.playlist_columns, &column_order_keys);
-                    if reordered_columns == state.ui.playlist_columns {
-                        continue;
-                    }
-                    let updated = sanitize_config(Config {
-                        output: state.output.clone(),
-                        cast: state.cast.clone(),
-                        ui: UiConfig {
-                            show_layout_edit_intro: state.ui.show_layout_edit_intro,
-                            show_tooltips: state.ui.show_tooltips,
-                            auto_scroll_to_playing_track: state.ui.auto_scroll_to_playing_track,
-                            dark_mode: state.ui.dark_mode,
-                            playlist_album_art_column_min_width_px: state
-                                .ui
-                                .playlist_album_art_column_min_width_px,
-                            playlist_album_art_column_max_width_px: state
-                                .ui
-                                .playlist_album_art_column_max_width_px,
-                            layout: state.ui.layout.clone(),
-                            playlist_columns: reordered_columns,
-                            window_width: state.ui.window_width,
-                            window_height: state.ui.window_height,
-                            volume: state.ui.volume,
-                            playback_order: state.ui.playback_order,
-                            repeat_mode: state.ui.repeat_mode,
-                        },
-                        library: state.library.clone(),
-                        buffering: state.buffering.clone(),
-                        integrations: state.integrations.clone(),
-                    });
-                    *state = updated.clone();
-                    updated
-                };
-
-                let options_snapshot = {
-                    let options = output_options_clone
-                        .lock()
-                        .expect("output options lock poisoned");
-                    options.clone()
-                };
-
-                let runtime_override =
-                    runtime_output_override_snapshot(&runtime_output_override_clone);
-                let runtime = resolve_effective_runtime_config(
-                    &next_config,
-                    &options_snapshot,
-                    Some(&runtime_override),
-                    &runtime_audio_state_clone,
-                );
-                let runtime_signature = OutputRuntimeSignature::from_output(&runtime.output);
-                {
-                    let mut last_signature = last_runtime_signature_clone
-                        .lock()
-                        .expect("runtime signature lock poisoned");
-                    *last_signature = runtime_signature;
-                }
-                let _ = publish_runtime_config_delta(
-                    &bus_sender_clone,
-                    &last_runtime_config_clone,
-                    runtime,
-                );
-
-                let ui_weak = ui_handle_clone.clone();
-                let config_for_ui = next_config;
-                let options_for_ui = options_snapshot;
-                let (workspace_width_px, workspace_height_px) =
-                    workspace_size_snapshot(&layout_workspace_size_clone);
-                let _ = slint::invoke_from_event_loop(move || {
-                    if let Some(ui) = ui_weak.upgrade() {
-                        apply_config_to_ui(
-                            &ui,
-                            &config_for_ui,
-                            &options_for_ui,
-                            workspace_width_px,
-                            workspace_height_px,
-                        );
-                    }
-                });
-            }
-            Ok(Message::Playlist(PlaylistMessage::RemoteDetachConfirmationRequested {
-                playlist_id,
-                playlist_name,
-            })) => {
-                let ui_weak = ui_handle_clone.clone();
-                let message = format!(
-                    "This edit will detach '{}' from OpenSubsonic sync and keep it local-only. Continue?",
-                    playlist_name
-                );
-                let _ = slint::invoke_from_event_loop(move || {
-                    if let Some(ui) = ui_weak.upgrade() {
-                        ui.set_remote_detach_target_playlist_id(playlist_id.into());
-                        ui.set_remote_detach_confirm_message(message.into());
-                        ui.set_show_remote_detach_confirm(true);
-                    }
-                });
-            }
-            Ok(Message::Playlist(PlaylistMessage::RemotePlaylistWritebackState {
-                playlist_id,
-                success,
-                error,
-            })) => {
-                let ui_weak = ui_handle_clone.clone();
-                let status = if success {
-                    format!("OpenSubsonic playlist sync complete ({playlist_id})")
-                } else {
-                    format!(
-                        "OpenSubsonic playlist sync failed ({playlist_id}): {}",
-                        error.unwrap_or_else(|| "unknown error".to_string())
-                    )
-                };
-                let _ = slint::invoke_from_event_loop(move || {
-                    if let Some(ui) = ui_weak.upgrade() {
-                        ui.set_settings_subsonic_status(status.into());
-                    }
-                });
-            }
-            Ok(Message::Integration(IntegrationMessage::BackendSnapshotUpdated(snapshot))) => {
-                let ui_weak = ui_handle_clone.clone();
-                let status = snapshot
-                    .profiles
-                    .iter()
-                    .find(|profile| profile.profile_id == OPENSUBSONIC_PROFILE_ID)
-                    .map(|profile| {
-                        profile.status_text.clone().unwrap_or_else(|| {
-                            match profile.connection_state {
-                                protocol::BackendConnectionState::Connected => {
-                                    "Connected".to_string()
-                                }
-                                protocol::BackendConnectionState::Connecting => {
-                                    "Connecting...".to_string()
-                                }
-                                protocol::BackendConnectionState::Disconnected => {
-                                    "Disconnected".to_string()
-                                }
-                                protocol::BackendConnectionState::Error => "Error".to_string(),
-                            }
-                        })
-                    })
-                    .unwrap_or_else(|| "Not configured".to_string());
-                let _ = slint::invoke_from_event_loop(move || {
-                    if let Some(ui) = ui_weak.upgrade() {
-                        ui.set_settings_subsonic_status(status.into());
-                    }
-                });
-            }
-            Ok(Message::Integration(IntegrationMessage::BackendOperationFailed {
-                profile_id,
-                action,
-                error,
-            })) => {
-                if profile_id.as_deref() != Some(OPENSUBSONIC_PROFILE_ID) {
-                    continue;
-                }
-                let ui_weak = ui_handle_clone.clone();
-                let status = format!("OpenSubsonic {action} failed: {error}");
-                let _ = slint::invoke_from_event_loop(move || {
-                    if let Some(ui) = ui_weak.upgrade() {
-                        ui.set_settings_subsonic_status(status.into());
-                    }
-                });
-            }
-            Ok(_) => {}
-            Err(tokio::sync::broadcast::error::RecvError::Lagged(skipped)) => {
-                warn!(
-                    "Main device-event listener lagged on control bus, skipped {} message(s)",
-                    skipped
-                );
-            }
-            Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
-        }
+    spawn_runtime_event_reactor(RuntimeEventReactorContext {
+        bus_sender: bus_sender.clone(),
+        config_state: Arc::clone(&config_state),
+        output_options: Arc::clone(&output_options),
+        output_device_inventory: Arc::clone(&output_device_inventory),
+        ui_handle: ui.as_weak().clone(),
+        layout_workspace_size: Arc::clone(&layout_workspace_size),
+        runtime_output_override: Arc::clone(&runtime_output_override),
+        runtime_audio_state: Arc::clone(&runtime_audio_state),
+        staged_audio_settings: Arc::clone(&staged_audio_settings),
+        last_runtime_signature: Arc::clone(&last_runtime_signature),
+        last_runtime_config: Arc::clone(&last_runtime_config),
+        playback_session_active: Arc::clone(&playback_session_active),
     });
 
     let bus_sender_clone = bus_sender.clone();
