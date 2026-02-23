@@ -16,7 +16,7 @@ use rubato::{
 };
 use std::cmp::min;
 use std::collections::{HashMap, VecDeque};
-use std::io::{Cursor, Read};
+use std::io::{Cursor, ErrorKind, Read};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -35,6 +35,8 @@ use tokio::sync::mpsc::{self, Receiver as MpscReceiver, Sender as MpscSender};
 
 const OPENSUBSONIC_API_VERSION: &str = "1.16.1";
 const OPENSUBSONIC_CLIENT_ID: &str = "roqtune";
+const MAX_CONSECUTIVE_FRAME_DECODE_ERRORS: u32 = 1_000;
+const MAX_CONSECUTIVE_PACKET_READ_ERRORS: u32 = 10_000;
 
 /// Work items consumed by the decode worker thread.
 #[derive(Debug, Clone)]
@@ -79,6 +81,7 @@ struct ActiveDecodeTrack {
     source_channels: u16,
     input_exhausted: bool,
     consecutive_decode_errors: u32,
+    consecutive_packet_read_errors: u32,
 }
 
 /// Single-threaded decode worker that owns decoder/resampler mutable state.
@@ -846,6 +849,7 @@ Check Settings -> OpenSubsonic status and re-save credentials if needed.",
 
             match active.format_reader.next_packet() {
                 Ok(packet) => {
+                    active.consecutive_packet_read_errors = 0;
                     if packet.track_id() != active.source_track_id {
                         return true;
                     }
@@ -863,10 +867,23 @@ Check Settings -> OpenSubsonic status and re-save credentials if needed.",
                             ));
                         }
                         Err(Error::DecodeError(msg)) => {
-                            warn!("Decode error (skipping frame): {}", msg);
                             active.consecutive_decode_errors += 1;
-                            if active.consecutive_decode_errors > 50 {
-                                error!("Too many consecutive decode errors. Giving up on track.");
+                            if active.consecutive_decode_errors == 1
+                                || active.consecutive_decode_errors % 250 == 0
+                            {
+                                warn!(
+                                    "DecodeWorker: decode error while reading {} (consecutive={}): {}",
+                                    active.track_identifier.path.display(),
+                                    active.consecutive_decode_errors,
+                                    msg
+                                );
+                            }
+                            if active.consecutive_decode_errors > MAX_CONSECUTIVE_FRAME_DECODE_ERRORS
+                            {
+                                error!(
+                                    "DecodeWorker: too many consecutive decode errors while reading {}. Giving up on track.",
+                                    active.track_identifier.path.display()
+                                );
                                 exhausted_input = true;
                             }
                         }
@@ -891,8 +908,89 @@ Check Settings -> OpenSubsonic status and re-save credentials if needed.",
                         }
                     }
                 }
-                Err(Error::IoError(_)) => {
-                    exhausted_input = true;
+                Err(Error::DecodeError(msg)) => {
+                    active.consecutive_packet_read_errors =
+                        active.consecutive_packet_read_errors.saturating_add(1);
+                    if active.consecutive_packet_read_errors == 1
+                        || active.consecutive_packet_read_errors % 500 == 0
+                    {
+                        warn!(
+                            "DecodeWorker: packet read error while scanning {} (consecutive={}): {}",
+                            active.track_identifier.path.display(),
+                            active.consecutive_packet_read_errors,
+                            msg
+                        );
+                    }
+                    if active.consecutive_packet_read_errors > MAX_CONSECUTIVE_PACKET_READ_ERRORS {
+                        error!(
+                            "DecodeWorker: too many consecutive packet read errors while scanning {}. Giving up on track.",
+                            active.track_identifier.path.display()
+                        );
+                        exhausted_input = true;
+                    }
+                }
+                Err(Error::LimitError(msg)) => {
+                    active.consecutive_packet_read_errors =
+                        active.consecutive_packet_read_errors.saturating_add(1);
+                    if active.consecutive_packet_read_errors == 1
+                        || active.consecutive_packet_read_errors % 500 == 0
+                    {
+                        warn!(
+                            "DecodeWorker: packet read limit error while scanning {} (consecutive={}): {}",
+                            active.track_identifier.path.display(),
+                            active.consecutive_packet_read_errors,
+                            msg
+                        );
+                    }
+                    if active.consecutive_packet_read_errors > MAX_CONSECUTIVE_PACKET_READ_ERRORS {
+                        error!(
+                            "DecodeWorker: too many consecutive packet read limit errors while scanning {}. Giving up on track.",
+                            active.track_identifier.path.display()
+                        );
+                        exhausted_input = true;
+                    }
+                }
+                Err(Error::ResetRequired) => {
+                    debug!("DecodeWorker: Packet reader requested decoder reset.");
+                    match symphonia::default::get_codecs()
+                        .make(&active.codec_params, &DecoderOptions::default())
+                    {
+                        Ok(decoder) => {
+                            active.decoder = decoder;
+                            active.consecutive_decode_errors = 0;
+                        }
+                        Err(e) => {
+                            error!("DecodeWorker: Failed to re-create decoder after reset: {}", e);
+                            exhausted_input = true;
+                        }
+                    }
+                }
+                Err(Error::IoError(err)) => {
+                    if err.kind() == ErrorKind::UnexpectedEof {
+                        exhausted_input = true;
+                    } else {
+                        active.consecutive_packet_read_errors =
+                            active.consecutive_packet_read_errors.saturating_add(1);
+                        if active.consecutive_packet_read_errors == 1
+                            || active.consecutive_packet_read_errors % 500 == 0
+                        {
+                            warn!(
+                                "DecodeWorker: packet IO error while scanning {} (consecutive={}): {}",
+                                active.track_identifier.path.display(),
+                                active.consecutive_packet_read_errors,
+                                err
+                            );
+                        }
+                        if active.consecutive_packet_read_errors
+                            > MAX_CONSECUTIVE_PACKET_READ_ERRORS
+                        {
+                            error!(
+                                "DecodeWorker: too many consecutive packet IO errors while scanning {}. Giving up on track.",
+                                active.track_identifier.path.display()
+                            );
+                            exhausted_input = true;
+                        }
+                    }
                 }
                 Err(e) => {
                     debug!(
@@ -1018,28 +1116,67 @@ Check Settings -> OpenSubsonic status and re-save credentials if needed.",
             }
         };
 
-        let (source_track_id, codec_params) = {
-            let track = match format_reader.default_track() {
-                Some(track) => track,
-                None => {
-                    error!("No default track found");
-                    self.emit_track_unavailable_if_remote(
-                        &input_track,
-                        "No default track found in remote stream payload",
-                    );
-                    return None;
+        let mut candidate_tracks: Vec<(u32, CodecParameters)> = Vec::new();
+        if let Some(default_track) = format_reader.default_track() {
+            candidate_tracks.push((default_track.id, default_track.codec_params.clone()));
+        }
+        for track in format_reader.tracks() {
+            if !candidate_tracks
+                .iter()
+                .any(|(track_id, _)| *track_id == track.id)
+            {
+                candidate_tracks.push((track.id, track.codec_params.clone()));
+            }
+        }
+        if candidate_tracks.is_empty() {
+            error!("No candidate tracks found");
+            self.emit_track_unavailable_if_remote(
+                &input_track,
+                "No candidate tracks found in stream payload",
+            );
+            return None;
+        }
+
+        let mut selected_track: Option<(u32, CodecParameters, Box<dyn Decoder>)> = None;
+        for (track_id, codec_params) in candidate_tracks {
+            match symphonia::default::get_codecs().make(&codec_params, &DecoderOptions::default()) {
+                Ok(decoder) => {
+                    selected_track = Some((track_id, codec_params, decoder));
+                    break;
                 }
-            };
-            (track.id, track.codec_params.clone())
+                Err(err) => {
+                    debug!(
+                        "DecodeWorker: Skipping non-decodable track candidate id={} for {}: {}",
+                        track_id,
+                        input_track.path.display(),
+                        err
+                    );
+                }
+            }
+        }
+
+        let (source_track_id, codec_params, decoder) = match selected_track {
+            Some(selected) => selected,
+            None => {
+                error!(
+                    "DecodeWorker: No decodable track candidates found for {}",
+                    input_track.path.display()
+                );
+                self.emit_track_unavailable_if_remote(
+                    &input_track,
+                    "No decodable track candidates found in stream payload",
+                );
+                return None;
+            }
         };
 
-        let source_sample_rate = codec_params.sample_rate.unwrap_or(44100);
+        let source_sample_rate = codec_params.sample_rate.unwrap_or(44_100);
         let source_channels = codec_params.channels.map(|c| c.count() as u16).unwrap_or(2);
         if source_channels == 0 {
             error!("Unsupported channel count 0 in {:?}", input_track.path);
             self.emit_track_unavailable_if_remote(
                 &input_track,
-                "Unsupported channel count in remote stream payload",
+                "Unsupported channel count in stream payload",
             );
             return None;
         }
@@ -1058,20 +1195,6 @@ Check Settings -> OpenSubsonic status and re-save credentials if needed.",
                 error!("Seek failed: {}", e);
             }
         }
-
-        let decoder = match symphonia::default::get_codecs()
-            .make(&codec_params, &DecoderOptions::default())
-        {
-            Ok(decoder) => decoder,
-            Err(e) => {
-                error!("Failed to create decoder: {}", e);
-                self.emit_track_unavailable_if_remote(
-                    &input_track,
-                    format!("Failed to create decoder for remote stream: {e}").as_str(),
-                );
-                return None;
-            }
-        };
 
         let technical_metadata = self.build_technical_metadata(&input_track.path, &codec_params);
         debug!(
@@ -1100,6 +1223,7 @@ Check Settings -> OpenSubsonic status and re-save credentials if needed.",
             source_channels,
             input_exhausted: false,
             consecutive_decode_errors: 0,
+            consecutive_packet_read_errors: 0,
         })
     }
 
