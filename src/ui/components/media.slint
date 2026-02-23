@@ -124,11 +124,33 @@ export component SeekBarControl inherits Rectangle {
     private property <bool> dark: Palette.color-scheme == ColorScheme.dark;
     private property <bool> scrub-active: false;
     private property <float> scrub-position: max(0, min(1, root.position-percentage));
-    private property <float> display-position: root.scrub-active ? root.scrub-position : root.position-percentage;
+    private property <bool> pending-seek-active: false;
+    private property <float> pending-seek-position: max(0, min(1, root.position-percentage));
+    private property <int> pending-seek-updates-remaining: 0;
+    private property <float> display-position: root.scrub-active
+        ? root.scrub-position
+        : root.pending-seek-active
+            ? root.pending-seek-position
+            : root.position-percentage;
 
     changed position-percentage => {
-        if (!root.scrub-active) {
-            root.scrub-position = max(0, min(1, root.position-percentage));
+        let clamped = max(0, min(1, root.position-percentage));
+        if (root.scrub-active) {
+            return;
+        }
+        if (root.pending-seek-active) {
+            root.pending-seek-updates-remaining = max(0, root.pending-seek-updates-remaining - 1);
+            if (abs(clamped - root.pending-seek-position) <= 0.02
+                    || root.pending-seek-updates-remaining == 0) {
+                root.pending-seek-active = false;
+                root.pending-seek-position = clamped;
+                root.scrub-position = clamped;
+            } else {
+                // Hold to avoid release jitter until playback position catches up.
+                root.scrub-position = root.pending-seek-position;
+            }
+        } else {
+            root.scrub-position = clamped;
         }
     }
 
@@ -199,9 +221,14 @@ export component SeekBarControl inherits Rectangle {
 
                     if (self.pressed) {
                         root.scrub-active = true;
+                        root.pending-seek-active = false;
+                        root.pending-seek-updates-remaining = 0;
                         root.scrub-position = max(0, min(1, self.mouse-x / seekbar.width));
                     } else if (root.scrub-active) {
                         root.scrub-active = false;
+                        root.pending-seek-position = root.scrub-position;
+                        root.pending-seek-active = true;
+                        root.pending-seek-updates-remaining = 36;
                         root.seek-requested(root.scrub-position);
                     }
                 }
