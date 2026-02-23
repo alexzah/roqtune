@@ -10,6 +10,7 @@ use std::time::UNIX_EPOCH;
 use image::{imageops::FilterType, DynamicImage, GenericImageView, ImageFormat};
 
 const PIPELINE_VERSION: &str = "img-v1";
+const DETAIL_PREVIEW_VERSION: &str = "detail-v2";
 const DEFAULT_LIST_IMAGE_MAX_EDGE_PX: u32 = 320;
 const DEFAULT_COVER_DISK_BUDGET_BYTES: u64 = 512u64 * 1024u64 * 1024u64;
 const DEFAULT_ARTIST_DISK_BUDGET_BYTES: u64 = 256u64 * 1024u64 * 1024u64;
@@ -81,6 +82,16 @@ pub fn artist_thumbs_dir(max_edge_px: u32) -> Option<PathBuf> {
         .map(|path| path.join("thumbs").join(max_edge_px.to_string()))
 }
 
+pub fn cover_detail_previews_dir(max_edge_px: u32) -> Option<PathBuf> {
+    kind_cache_root(ManagedImageKind::CoverArt)
+        .map(|path| path.join("detail").join(max_edge_px.to_string()))
+}
+
+pub fn artist_detail_previews_dir(max_edge_px: u32) -> Option<PathBuf> {
+    kind_cache_root(ManagedImageKind::ArtistImage)
+        .map(|path| path.join("detail").join(max_edge_px.to_string()))
+}
+
 fn originals_dir(kind: ManagedImageKind) -> Option<PathBuf> {
     match kind {
         ManagedImageKind::CoverArt => cover_originals_dir(),
@@ -92,6 +103,13 @@ fn thumbs_dir(kind: ManagedImageKind, max_edge_px: u32) -> Option<PathBuf> {
     match kind {
         ManagedImageKind::CoverArt => cover_thumbs_dir(max_edge_px),
         ManagedImageKind::ArtistImage => artist_thumbs_dir(max_edge_px),
+    }
+}
+
+fn detail_previews_dir(kind: ManagedImageKind, max_edge_px: u32) -> Option<PathBuf> {
+    match kind {
+        ManagedImageKind::CoverArt => cover_detail_previews_dir(max_edge_px),
+        ManagedImageKind::ArtistImage => artist_detail_previews_dir(max_edge_px),
     }
 }
 
@@ -185,9 +203,56 @@ fn fit_to_max_edge(width: u32, height: u32, max_edge: u32) -> (u32, u32) {
     }
 }
 
+fn resize_for_detail_display(
+    decoded: DynamicImage,
+    target_width: u32,
+    target_height: u32,
+) -> DynamicImage {
+    let mut current = decoded;
+    let mut current_dims = current.dimensions();
+    let target_w = target_width.max(1);
+    let target_h = target_height.max(1);
+
+    // Multi-stage reduction reduces aliasing/moire on very high-resolution scans.
+    while current_dims.0 > target_w.saturating_mul(2) || current_dims.1 > target_h.saturating_mul(2)
+    {
+        let next_w = (current_dims.0 / 2).max(target_w);
+        let next_h = (current_dims.1 / 2).max(target_h);
+        current = current.resize(next_w, next_h, FilterType::Triangle);
+        current_dims = current.dimensions();
+    }
+
+    if current_dims.0 == target_w && current_dims.1 == target_h {
+        return current;
+    }
+
+    let current_long_edge = current_dims.0.max(current_dims.1).max(1) as f32;
+    let target_long_edge = target_w.max(target_h).max(1) as f32;
+    let ratio = current_long_edge / target_long_edge;
+    let antialias_source = if ratio > 1.8 {
+        current.blur(0.6)
+    } else {
+        current
+    };
+    let final_filter = if ratio > 2.6 {
+        FilterType::Gaussian
+    } else {
+        FilterType::CatmullRom
+    };
+    antialias_source.resize(target_w, target_h, final_filter)
+}
+
 fn thumbnail_stem(path: &Path, max_edge_px: u32) -> String {
     hash_string(&format!(
         "{PIPELINE_VERSION}|thumb|{}|{}",
+        source_fingerprint(path),
+        max_edge_px
+    ))
+}
+
+fn detail_preview_stem(path: &Path, max_edge_px: u32) -> String {
+    hash_string(&format!(
+        "{PIPELINE_VERSION}|{DETAIL_PREVIEW_VERSION}|{}|{}",
         source_fingerprint(path),
         max_edge_px
     ))
@@ -238,6 +303,72 @@ pub fn ensure_list_thumbnail(
     ensure_parent_dir(&target_path)?;
     let temp_path = target_path.with_extension("png.tmp");
     save_png_atomic(&resized, &temp_path, &target_path)?;
+    Some(target_path)
+}
+
+pub fn detail_preview_path(
+    kind: ManagedImageKind,
+    source_path: &Path,
+    max_edge_px: u32,
+) -> Option<PathBuf> {
+    let stem = detail_preview_stem(source_path, max_edge_px);
+    Some(detail_previews_dir(kind, max_edge_px)?.join(format!("{stem}.png")))
+}
+
+pub fn detail_preview_path_if_present(
+    kind: ManagedImageKind,
+    source_path: &Path,
+    max_edge_px: u32,
+) -> Option<PathBuf> {
+    let candidate = detail_preview_path(kind, source_path, max_edge_px)?;
+    if !candidate.exists() {
+        return None;
+    }
+    if !image_is_decodable(&candidate) {
+        let _ = fs::remove_file(&candidate);
+        return None;
+    }
+    Some(candidate)
+}
+
+pub fn ensure_detail_preview(
+    kind: ManagedImageKind,
+    source_path: &Path,
+    max_edge_px: u32,
+) -> Option<PathBuf> {
+    ensure_detail_preview_with_threshold(kind, source_path, max_edge_px, max_edge_px)
+}
+
+pub fn ensure_detail_preview_with_threshold(
+    kind: ManagedImageKind,
+    source_path: &Path,
+    max_edge_px: u32,
+    convert_threshold_px: u32,
+) -> Option<PathBuf> {
+    let clamped_max_edge_px = max_edge_px.max(1);
+    let clamped_convert_threshold_px = convert_threshold_px.max(clamped_max_edge_px);
+    let (source_width, source_height) = image::image_dimensions(source_path).ok()?;
+    if source_width.max(source_height) <= clamped_convert_threshold_px {
+        return Some(source_path.to_path_buf());
+    }
+
+    if let Some(existing) = detail_preview_path_if_present(kind, source_path, clamped_max_edge_px) {
+        return Some(existing);
+    }
+
+    let decoded = image::open(source_path).ok()?;
+    let (target_width, target_height) =
+        fit_to_max_edge(source_width, source_height, clamped_max_edge_px);
+    let resized = resize_for_detail_display(decoded, target_width, target_height);
+    let target_path = detail_preview_path(kind, source_path, clamped_max_edge_px)?;
+    ensure_parent_dir(&target_path)?;
+    let temp_path = target_path.with_extension("png.tmp");
+    save_png_atomic(&resized, &temp_path, &target_path)?;
+    let disk_budget = match kind {
+        ManagedImageKind::CoverArt => runtime_cover_disk_budget_bytes(),
+        ManagedImageKind::ArtistImage => runtime_artist_disk_budget_bytes(),
+    };
+    let _ = prune_kind_disk_cache(kind, disk_budget);
     Some(target_path)
 }
 
@@ -320,7 +451,8 @@ pub fn clear_kind_disk_cache(kind: ManagedImageKind) -> usize {
 
 #[cfg(test)]
 mod tests {
-    use super::{fit_to_max_edge, hash_string, mb_to_bytes};
+    use super::{fit_to_max_edge, hash_string, mb_to_bytes, resize_for_detail_display};
+    use image::{DynamicImage, GenericImageView, ImageBuffer, Rgba};
 
     #[test]
     fn test_mb_to_bytes_never_returns_zero() {
@@ -339,5 +471,18 @@ mod tests {
         assert_eq!(fit_to_max_edge(2000, 1000, 320), (320, 160));
         assert_eq!(fit_to_max_edge(1000, 2000, 320), (160, 320));
         assert_eq!(fit_to_max_edge(128, 64, 320), (128, 64));
+    }
+
+    #[test]
+    fn test_resize_for_detail_display_matches_requested_dimensions() {
+        let source = DynamicImage::ImageRgba8(ImageBuffer::from_fn(2200, 1800, |x, y| {
+            if (x + y) % 2 == 0 {
+                Rgba([255, 0, 0, 255])
+            } else {
+                Rgba([0, 0, 255, 255])
+            }
+        }));
+        let resized = resize_for_detail_display(source, 384, 314);
+        assert_eq!(resized.dimensions(), (384, 314));
     }
 }

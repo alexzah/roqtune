@@ -412,6 +412,9 @@ const LIBRARY_PAGE_FETCH_LIMIT: usize = 512;
 const REMOTE_TRACK_UNAVAILABLE_TITLE: &str = "Remote track unavailable";
 const PLAYLIST_COLUMN_SPACING_PX: u32 = 10;
 const DEFAULT_IMAGE_MEMORY_CACHE_MAX_BYTES: u64 = 50 * 1024 * 1024;
+const DETAIL_VIEWER_RENDER_MAX_EDGE_PX: u32 = 512;
+const DETAIL_VIEWER_CONVERT_THRESHOLD_PX: u32 = 1024;
+const DETAIL_COMPACT_RENDER_MAX_EDGE_PX: u32 = 384;
 
 static COVER_ART_MEMORY_CACHE_BUDGET_BYTES: AtomicU64 =
     AtomicU64::new(DEFAULT_IMAGE_MEMORY_CACHE_MAX_BYTES);
@@ -939,6 +942,7 @@ impl UiManager {
 
     fn embedded_art_cache_path_if_present(track_path: &Path) -> Option<PathBuf> {
         let candidates = Self::embedded_art_cache_candidates(track_path)?;
+        let normalized_path = image_pipeline::cover_original_path_for_track(track_path);
         for cache_path in candidates {
             if Self::failed_cover_path(&cache_path) {
                 continue;
@@ -950,9 +954,37 @@ impl UiManager {
                 Self::delete_cached_image_file_if_managed(&cache_path);
                 continue;
             }
+            if normalized_path
+                .as_ref()
+                .is_some_and(|normalized| cache_path != *normalized)
+            {
+                if let Some(migrated) =
+                    Self::migrate_legacy_embedded_art_cache(track_path, &cache_path)
+                {
+                    return Some(migrated);
+                }
+            }
             return Some(cache_path);
         }
         None
+    }
+
+    fn migrate_legacy_embedded_art_cache(track_path: &Path, legacy_path: &Path) -> Option<PathBuf> {
+        let source_key = track_path.to_string_lossy().to_string();
+        let legacy_bytes = std::fs::read(legacy_path).ok()?;
+        let normalized_path = image_pipeline::normalize_and_cache_original_bytes(
+            ManagedImageKind::CoverArt,
+            source_key.as_str(),
+            &legacy_bytes,
+        )?;
+        if normalized_path != legacy_path {
+            let _ = std::fs::remove_file(legacy_path);
+        }
+        let _ = image_pipeline::prune_kind_disk_cache(
+            ManagedImageKind::CoverArt,
+            image_pipeline::runtime_cover_disk_budget_bytes(),
+        );
+        Some(normalized_path)
     }
 
     fn make_opensubsonic_salt() -> String {
@@ -1911,6 +1943,42 @@ impl UiManager {
         self.list_thumbnail_path_if_ready(source_path.as_path(), kind)
     }
 
+    fn detail_render_path(
+        path: &Path,
+        kind: protocol::UiImageKind,
+        max_edge_px: u32,
+        convert_threshold_px: u32,
+    ) -> PathBuf {
+        let managed_kind = Self::managed_kind_for_ui_kind(kind);
+        let resolved = if convert_threshold_px <= max_edge_px {
+            image_pipeline::ensure_detail_preview(managed_kind, path, max_edge_px)
+        } else {
+            image_pipeline::ensure_detail_preview_with_threshold(
+                managed_kind,
+                path,
+                max_edge_px,
+                convert_threshold_px,
+            )
+        };
+        resolved.unwrap_or_else(|| path.to_path_buf())
+    }
+
+    fn try_load_detail_cover_art_image_with_kind(
+        path: &Path,
+        kind: protocol::UiImageKind,
+        max_edge_px: u32,
+        convert_threshold_px: u32,
+    ) -> Option<Image> {
+        let detail_path = Self::detail_render_path(path, kind, max_edge_px, convert_threshold_px);
+        if let Some(image) = Self::try_load_cover_art_image_with_kind(detail_path.as_path(), kind) {
+            return Some(image);
+        }
+        if detail_path.as_path() != path {
+            return Self::try_load_cover_art_image_with_kind(path, kind);
+        }
+        None
+    }
+
     fn approximate_cover_art_size_bytes(path: &Path) -> u64 {
         image_pipeline::decoded_rgba_bytes(path).unwrap_or(256 * 1024)
     }
@@ -1988,10 +2056,6 @@ impl UiManager {
                 None
             }
         }
-    }
-
-    fn try_load_cover_art_image(path: &Path) -> Option<Image> {
-        Self::try_load_cover_art_image_with_kind(path, protocol::UiImageKind::CoverArt)
     }
 
     fn load_track_row_cover_art_image(path: Option<&PathBuf>) -> Image {
@@ -3431,7 +3495,12 @@ impl UiManager {
                     let art_source = art_path
                         .as_ref()
                         .and_then(|path| {
-                            UiManager::try_load_cover_art_image_with_kind(path, image_kind)
+                            UiManager::try_load_detail_cover_art_image_with_kind(
+                                path,
+                                image_kind,
+                                DETAIL_VIEWER_RENDER_MAX_EDGE_PX,
+                                DETAIL_VIEWER_CONVERT_THRESHOLD_PX,
+                            )
                         })
                         .unwrap_or_default();
                     let has_art = art_path.is_some();
@@ -6621,7 +6690,12 @@ impl UiManager {
             ui.set_library_scan_in_progress(scan_in_progress);
             ui.set_library_status_text(status_text.into());
             let album_header_art = detail_header_art_path.as_deref().and_then(|path| {
-                UiManager::try_load_cover_art_image_with_kind(path, detail_header_image_kind)
+                UiManager::try_load_detail_cover_art_image_with_kind(
+                    path,
+                    detail_header_image_kind,
+                    DETAIL_COMPACT_RENDER_MAX_EDGE_PX,
+                    DETAIL_COMPACT_RENDER_MAX_EDGE_PX,
+                )
             });
             ui.set_library_album_header_has_art(album_header_art.is_some());
             ui.set_library_album_header_art(album_header_art.unwrap_or_default());
@@ -9083,7 +9157,14 @@ impl UiManager {
                             }
                             let _ = self.ui.upgrade_in_event_loop(move |ui| {
                                 if let Some(path) = path {
-                                    if let Some(img) = UiManager::try_load_cover_art_image(&path) {
+                                    if let Some(img) =
+                                        UiManager::try_load_detail_cover_art_image_with_kind(
+                                            &path,
+                                            protocol::UiImageKind::CoverArt,
+                                            DETAIL_COMPACT_RENDER_MAX_EDGE_PX,
+                                            DETAIL_COMPACT_RENDER_MAX_EDGE_PX,
+                                        )
+                                    {
                                         ui.set_current_cover_art(img);
                                         ui.set_current_cover_art_available(true);
                                     } else {
