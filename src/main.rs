@@ -22,6 +22,7 @@ mod library_enrichment_manager;
 #[path = "library/library_manager.rs"]
 mod library_manager;
 mod media_controls_manager;
+mod media_file_discovery;
 #[path = "metadata/metadata_manager.rs"]
 mod metadata_manager;
 #[path = "metadata/metadata_tags.rs"]
@@ -31,6 +32,7 @@ mod playlist;
 #[path = "playlist/playlist_manager.rs"]
 mod playlist_manager;
 mod protocol;
+mod runtime_config;
 mod ui_manager;
 
 use std::{
@@ -71,12 +73,23 @@ use library_enrichment_manager::LibraryEnrichmentManager;
 use library_manager::LibraryManager;
 use log::{debug, info, trace, warn};
 use media_controls_manager::MediaControlsManager;
+use media_file_discovery::{
+    collect_audio_files_from_dropped_paths, collect_audio_files_from_folder,
+    collect_library_folders_from_dropped_paths, is_supported_audio_file,
+    SUPPORTED_AUDIO_EXTENSIONS,
+};
 use metadata_manager::MetadataManager;
 use playlist::Playlist;
 use playlist_manager::PlaylistManager;
 use protocol::{
-    CastMessage, ConfigDeltaEntry, ConfigMessage, IntegrationMessage, Message, MetadataMessage,
-    PlaybackMessage, PlaylistMessage,
+    CastMessage, ConfigMessage, IntegrationMessage, Message, MetadataMessage, PlaybackMessage,
+    PlaylistMessage,
+};
+use runtime_config::{
+    audio_settings_changed, config_diff_is_runtime_sample_rate_only, output_preferences_changed,
+    publish_runtime_config_delta, runtime_output_override_snapshot,
+    update_last_runtime_config_snapshot, OutputRuntimeSignature, RuntimeAudioState,
+    RuntimeOutputOverride, StagedAudioSettings,
 };
 use slint::winit_030::{winit, EventResult as WinitEventResult, WinitWindowAccessor};
 use slint::{language::ColorScheme, ComponentHandle, LogicalSize, Model, ModelRc, VecModel};
@@ -169,43 +182,6 @@ struct OutputSettingsOptions {
     auto_bits_per_sample_value: u16,
 }
 
-#[derive(Debug, Clone, Default)]
-struct RuntimeOutputOverride {
-    sample_rate_hz: Option<u32>,
-}
-
-#[derive(Debug, Clone)]
-struct RuntimeAudioState {
-    output: OutputConfig,
-    cast: CastConfig,
-}
-
-#[derive(Debug, Clone)]
-struct StagedAudioSettings {
-    output: OutputConfig,
-    cast: CastConfig,
-}
-
-/// Lightweight signature used to detect meaningful runtime-output changes.
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct OutputRuntimeSignature {
-    output_device_name: String,
-    channel_count: u16,
-    sample_rate_hz: u32,
-    bits_per_sample: u16,
-}
-
-impl OutputRuntimeSignature {
-    fn from_output(output: &OutputConfig) -> Self {
-        Self {
-            output_device_name: output.output_device_name.clone(),
-            channel_count: output.channel_count,
-            sample_rate_hz: output.sample_rate_khz,
-            bits_per_sample: output.bits_per_sample,
-        }
-    }
-}
-
 fn resolve_effective_runtime_config(
     persisted_config: &Config,
     output_options: &OutputSettingsOptions,
@@ -225,7 +201,6 @@ fn resolve_effective_runtime_config(
 const IMPORT_CLUSTER_PRESET: [i32; 1] = [1];
 const TRANSPORT_CLUSTER_PRESET: [i32; 5] = [2, 3, 4, 5, 6];
 const UTILITY_CLUSTER_PRESET: [i32; 4] = [7, 8, 11, 10];
-const SUPPORTED_AUDIO_EXTENSIONS: [&str; 7] = ["mp3", "wav", "ogg", "flac", "aac", "m4a", "mp4"];
 const PLAYLIST_COLUMN_KIND_TEXT: i32 = 0;
 const PLAYLIST_COLUMN_KIND_ALBUM_ART: i32 = 1;
 const TOOLTIP_HOVER_DELAY_MS: u64 = 650;
@@ -290,17 +265,6 @@ fn resolve_opensubsonic_password(
     }
 }
 
-fn is_supported_audio_file(path: &Path) -> bool {
-    path.extension()
-        .and_then(|ext| ext.to_str())
-        .map(|ext| {
-            SUPPORTED_AUDIO_EXTENSIONS
-                .iter()
-                .any(|supported| ext.eq_ignore_ascii_case(supported))
-        })
-        .unwrap_or(false)
-}
-
 fn find_opensubsonic_backend(config: &Config) -> Option<&BackendProfileConfig> {
     config
         .integrations
@@ -355,92 +319,6 @@ fn opensubsonic_profile_snapshot(
         connection_state: protocol::BackendConnectionState::Disconnected,
         status_text,
     }
-}
-
-fn collect_audio_files_from_folder(folder_path: &Path) -> Vec<PathBuf> {
-    let mut pending_directories = vec![folder_path.to_path_buf()];
-    let mut tracks = Vec::new();
-
-    while let Some(directory) = pending_directories.pop() {
-        let entries = match std::fs::read_dir(&directory) {
-            Ok(entries) => entries,
-            Err(err) => {
-                debug!("Failed to read directory {}: {}", directory.display(), err);
-                continue;
-            }
-        };
-
-        for entry in entries {
-            let entry = match entry {
-                Ok(entry) => entry,
-                Err(err) => {
-                    debug!(
-                        "Failed to read a directory entry in {}: {}",
-                        directory.display(),
-                        err
-                    );
-                    continue;
-                }
-            };
-
-            let path = entry.path();
-            let file_type = match entry.file_type() {
-                Ok(file_type) => file_type,
-                Err(err) => {
-                    debug!("Failed to inspect {}: {}", path.display(), err);
-                    continue;
-                }
-            };
-
-            if file_type.is_dir() {
-                pending_directories.push(path);
-                continue;
-            }
-
-            if file_type.is_file() && is_supported_audio_file(&path) {
-                tracks.push(path);
-            }
-        }
-    }
-
-    tracks.sort_unstable();
-    tracks
-}
-
-fn collect_audio_files_from_dropped_paths(paths: &[PathBuf]) -> Vec<PathBuf> {
-    let mut tracks = BTreeSet::new();
-    for path in paths {
-        if path.is_file() {
-            if is_supported_audio_file(path) {
-                tracks.insert(path.clone());
-            }
-            continue;
-        }
-        if path.is_dir() {
-            for track in collect_audio_files_from_folder(path) {
-                tracks.insert(track);
-            }
-        }
-    }
-    tracks.into_iter().collect()
-}
-
-fn collect_library_folders_from_dropped_paths(paths: &[PathBuf]) -> Vec<String> {
-    let mut folders = BTreeSet::new();
-    for path in paths {
-        if path.is_dir() {
-            folders.insert(path.to_string_lossy().to_string());
-            continue;
-        }
-        if path.is_file() && is_supported_audio_file(path) {
-            if let Some(parent) = path.parent() {
-                if !parent.as_os_str().is_empty() {
-                    folders.insert(parent.to_string_lossy().to_string());
-                }
-            }
-        }
-    }
-    folders.into_iter().collect()
 }
 
 fn enqueue_playlist_bulk_import(
@@ -730,106 +608,6 @@ fn format_verified_rates_summary(rates: &[u32]) -> String {
         .collect::<Vec<_>>()
         .join(", ");
     format!("Verified rates: {}", values)
-}
-
-fn runtime_output_override_snapshot(
-    runtime_output_override: &Arc<Mutex<RuntimeOutputOverride>>,
-) -> RuntimeOutputOverride {
-    let state = runtime_output_override
-        .lock()
-        .expect("runtime output override lock poisoned");
-    state.clone()
-}
-
-fn output_preferences_changed(previous: &OutputConfig, next: &OutputConfig) -> bool {
-    previous.output_device_name != next.output_device_name
-        || previous.output_device_auto != next.output_device_auto
-        || previous.channel_count != next.channel_count
-        || previous.sample_rate_khz != next.sample_rate_khz
-        || previous.bits_per_sample != next.bits_per_sample
-        || previous.channel_count_auto != next.channel_count_auto
-        || previous.sample_rate_auto != next.sample_rate_auto
-        || previous.bits_per_sample_auto != next.bits_per_sample_auto
-        || previous.resampler_quality != next.resampler_quality
-        || previous.dither_on_bitdepth_reduce != next.dither_on_bitdepth_reduce
-        || previous.downmix_higher_channel_tracks != next.downmix_higher_channel_tracks
-}
-
-fn audio_settings_changed(previous: &Config, next: &Config) -> bool {
-    output_preferences_changed(&previous.output, &next.output)
-        || previous.cast.allow_transcode_fallback != next.cast.allow_transcode_fallback
-}
-
-fn config_delta_entries(previous: &Config, next: &Config) -> Vec<ConfigDeltaEntry> {
-    let mut deltas = Vec::new();
-    if previous.output != next.output {
-        deltas.push(ConfigDeltaEntry::Output(next.output.clone()));
-    }
-    if previous.cast != next.cast {
-        deltas.push(ConfigDeltaEntry::Cast(next.cast.clone()));
-    }
-    if previous.ui != next.ui {
-        deltas.push(ConfigDeltaEntry::Ui(next.ui.clone()));
-    }
-    if previous.library != next.library {
-        deltas.push(ConfigDeltaEntry::Library(next.library.clone()));
-    }
-    if previous.buffering != next.buffering {
-        deltas.push(ConfigDeltaEntry::Buffering(next.buffering.clone()));
-    }
-    if previous.integrations != next.integrations {
-        deltas.push(ConfigDeltaEntry::Integrations(next.integrations.clone()));
-    }
-    deltas
-}
-
-fn publish_runtime_config_delta(
-    bus_sender: &broadcast::Sender<Message>,
-    last_runtime_config: &Arc<Mutex<Config>>,
-    next_runtime_config: Config,
-) -> bool {
-    let deltas = {
-        let mut previous_runtime = last_runtime_config
-            .lock()
-            .expect("last runtime config lock poisoned");
-        let deltas = config_delta_entries(&previous_runtime, &next_runtime_config);
-        *previous_runtime = next_runtime_config;
-        deltas
-    };
-    if deltas.is_empty() {
-        return false;
-    }
-    let _ = bus_sender.send(Message::Config(ConfigMessage::ConfigChanged(deltas)));
-    true
-}
-
-fn update_last_runtime_config_snapshot(
-    last_runtime_config: &Arc<Mutex<Config>>,
-    runtime_config: Config,
-) {
-    let mut previous_runtime = last_runtime_config
-        .lock()
-        .expect("last runtime config lock poisoned");
-    *previous_runtime = runtime_config;
-}
-
-fn config_diff_is_runtime_sample_rate_only(previous: &Config, next: &Config) -> bool {
-    if previous.cast != next.cast
-        || previous.ui != next.ui
-        || previous.library != next.library
-        || previous.buffering != next.buffering
-        || previous.integrations != next.integrations
-    {
-        return false;
-    }
-    if previous.output.sample_rate_khz == next.output.sample_rate_khz {
-        return false;
-    }
-    let mut previous_output_without_rate = previous.output.clone();
-    let mut next_output_without_rate = next.output.clone();
-    previous_output_without_rate.sample_rate_khz = 0;
-    next_output_without_rate.sample_rate_khz = 0;
-    previous_output_without_rate == next_output_without_rate
 }
 
 fn snapshot_output_device_names(host: &cpal::Host) -> Vec<String> {
