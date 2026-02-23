@@ -1,3 +1,4 @@
+mod app_bootstrap;
 #[path = "audio/audio_decoder.rs"]
 mod audio_decoder;
 #[path = "audio/audio_player.rs"]
@@ -52,14 +53,12 @@ use std::{
     time::{Duration, Instant},
 };
 
-use audio_decoder::AudioDecoder;
-use audio_player::AudioPlayer;
+use app_bootstrap::services::{spawn_background_services, BackgroundServicesConfig};
 use audio_probe::get_or_probe_output_device;
-use cast_manager::CastManager;
 use config::{
     BackendProfileConfig, BufferingConfig, ButtonClusterInstanceConfig, CastConfig, Config,
-    IntegrationsConfig, LibraryConfig, OutputConfig, PlaylistColumnConfig,
-    ResamplerQuality, UiConfig, UiPlaybackOrder, UiRepeatMode,
+    IntegrationsConfig, LibraryConfig, OutputConfig, PlaylistColumnConfig, ResamplerQuality,
+    UiConfig, UiPlaybackOrder, UiRepeatMode,
 };
 use config_persistence::{
     hydrate_ui_columns_from_layout, load_layout_file, load_system_layout_template,
@@ -70,9 +69,7 @@ use config_persistence::{
     serialize_config_with_preserved_comments, serialize_layout_with_preserved_comments,
 };
 use cpal::traits::{DeviceTrait, HostTrait};
-use db_manager::DbManager;
 use integration_keyring::set_opensubsonic_password;
-use integration_manager::IntegrationManager;
 use layout::{
     add_root_leaf_if_empty, compute_tree_layout_metrics, delete_leaf, first_leaf_id,
     replace_leaf_panel, sanitize_layout_config, set_split_ratio, split_leaf, LayoutConfig,
@@ -80,23 +77,17 @@ use layout::{
     ViewerPanelDisplayPriority, ViewerPanelImageSource, ViewerPanelInstanceConfig,
     ViewerPanelMetadataSource, SPLITTER_THICKNESS_PX,
 };
-use library_enrichment_manager::LibraryEnrichmentManager;
-use library_manager::LibraryManager;
 use log::{debug, info, trace, warn};
-use media_controls_manager::MediaControlsManager;
 use media_file_discovery::{
     collect_audio_files_from_dropped_paths, collect_audio_files_from_folder,
     collect_library_folders_from_dropped_paths, is_supported_audio_file,
     SUPPORTED_AUDIO_EXTENSIONS,
 };
-use metadata_manager::MetadataManager;
 use opensubsonic_controller::{
     find_opensubsonic_backend, keyring_unavailable_error, opensubsonic_profile_snapshot,
     resolve_opensubsonic_password, upsert_opensubsonic_backend_config,
     OpenSubsonicPasswordResolution, OPENSUBSONIC_PROFILE_ID, OPENSUBSONIC_SESSION_KEYRING_NOTICE,
 };
-use playlist::Playlist;
-use playlist_manager::PlaylistManager;
 use protocol::{
     CastMessage, ConfigMessage, IntegrationMessage, Message, MetadataMessage, PlaybackMessage,
     PlaylistMessage,
@@ -110,7 +101,7 @@ use runtime_config::{
 use slint::winit_030::{winit, EventResult as WinitEventResult, WinitWindowAccessor};
 use slint::{language::ColorScheme, ComponentHandle, LogicalSize, Model, ModelRc, VecModel};
 use tokio::sync::broadcast;
-use ui_manager::{UiManager, UiState};
+use ui_manager::UiState;
 
 slint::include_modules!();
 
@@ -131,16 +122,6 @@ fn setup_app_state_associations(ui: &AppWindow, ui_state: &UiState) {
     ui.set_settings_library_folders(ModelRc::from(Rc::new(VecModel::from(Vec::<
         slint::SharedString,
     >::new()))));
-}
-
-fn panic_payload_to_string(payload: &(dyn std::any::Any + Send)) -> String {
-    if let Some(s) = payload.downcast_ref::<&str>() {
-        return (*s).to_string();
-    }
-    if let Some(s) = payload.downcast_ref::<String>() {
-        return s.clone();
-    }
-    "non-string panic payload".to_string()
 }
 
 fn flash_read_only_view_indicator(ui_handle: slint::Weak<AppWindow>) {
@@ -5842,16 +5823,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         ));
     });
 
-    // Setup playlist manager
-    let integration_manager_bus_receiver = bus_sender.subscribe();
-    let integration_manager_bus_sender = bus_sender.clone();
-    thread::spawn(move || {
-        let mut integration_manager = IntegrationManager::new(
-            integration_manager_bus_receiver,
-            integration_manager_bus_sender,
-        );
-        integration_manager.run();
-    });
     let mut startup_subsonic_session_prompt: Option<(String, String, String)> = None;
     let startup_opensubsonic_seed = find_opensubsonic_backend(&config).map(|backend| {
         let (password, status_text) = match resolve_opensubsonic_password(
@@ -5901,126 +5872,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let connect_now = backend.enabled && password.is_some();
         (snapshot, password, connect_now)
     });
-
-    let playlist_manager_bus_receiver = bus_sender.subscribe();
-    let playlist_manager_bus_sender = bus_sender.clone();
-    let db_manager = DbManager::new().expect("Failed to initialize database");
-    thread::spawn(move || {
-        let mut playlist_manager = PlaylistManager::new(
-            Playlist::new(),
-            playlist_manager_bus_receiver,
-            playlist_manager_bus_sender,
-            db_manager,
-            playlist_bulk_import_rx,
-        );
-        playlist_manager.run();
-    });
-
-    // Setup library manager
-    let library_manager_bus_receiver = bus_sender.subscribe();
-    let library_manager_bus_sender = bus_sender.clone();
-    thread::spawn(move || {
-        let db_manager = DbManager::new().expect("Failed to initialize database");
-        let mut library_manager = LibraryManager::new(
-            library_manager_bus_receiver,
-            library_manager_bus_sender,
-            db_manager,
-            library_scan_progress_tx,
-        );
-        library_manager.run();
-    });
-
-    // Setup library enrichment manager
-    let enrichment_manager_bus_receiver = bus_sender.subscribe();
-    let enrichment_manager_bus_sender = bus_sender.clone();
-    thread::spawn(move || {
-        let db_manager = DbManager::new().expect("Failed to initialize database");
-        let mut enrichment_manager = LibraryEnrichmentManager::new(
-            enrichment_manager_bus_receiver,
-            enrichment_manager_bus_sender,
-            db_manager,
-        );
-        enrichment_manager.run();
-    });
-
-    // Setup metadata manager
-    let metadata_manager_bus_receiver = bus_sender.subscribe();
-    let metadata_manager_bus_sender = bus_sender.clone();
-    thread::spawn(move || {
-        let db_manager = DbManager::new().expect("Failed to initialize database");
-        let mut metadata_manager = MetadataManager::new(
-            metadata_manager_bus_receiver,
-            metadata_manager_bus_sender,
-            db_manager,
-        );
-        metadata_manager.run();
-    });
-
-    // Setup media controls manager
-    let media_controls_bus_receiver = bus_sender.subscribe();
-    let media_controls_bus_sender = bus_sender.clone();
-    thread::spawn(move || {
-        let mut media_controls_manager =
-            MediaControlsManager::new(media_controls_bus_receiver, media_controls_bus_sender);
-        media_controls_manager.run();
-    });
-
-    // Setup cast manager
-    let cast_manager_bus_receiver = bus_sender.subscribe();
-    let cast_manager_bus_sender = bus_sender.clone();
-    thread::spawn(move || {
-        let mut cast_manager = CastManager::new(cast_manager_bus_receiver, cast_manager_bus_sender);
-        cast_manager.run();
-    });
-
-    // Setup UI manager
-    let ui_manager_bus_sender = bus_sender.clone();
-    let ui_handle_clone = ui.as_weak().clone();
-    let initial_online_metadata_enabled = config.library.online_metadata_enabled;
-    let initial_online_metadata_prompt_pending = config.library.online_metadata_prompt_pending;
-    thread::spawn(move || {
-        let run_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            let mut ui_manager = UiManager::new(
-                ui_handle_clone,
-                ui_manager_bus_sender.subscribe(),
-                ui_manager_bus_sender.clone(),
-                initial_online_metadata_enabled,
-                initial_online_metadata_prompt_pending,
-                library_scan_progress_rx,
-            );
-            ui_manager.run();
-        }));
-        if let Err(payload) = run_result {
-            log::error!(
-                "UiManager thread terminated due to panic: {}",
-                panic_payload_to_string(payload.as_ref())
-            );
-        }
-    });
-
-    // Setup AudioDecoder
-    let decoder_bus_sender = bus_sender.clone();
-    let decoder_bus_receiver = bus_sender.subscribe();
-    thread::spawn(move || {
-        let mut audio_decoder = AudioDecoder::new(decoder_bus_receiver, decoder_bus_sender);
-        audio_decoder.run();
-    });
-    if let Some((snapshot, password, connect_now)) = startup_opensubsonic_seed {
-        let _ = bus_sender.send(Message::Integration(
-            IntegrationMessage::UpsertBackendProfile {
-                profile: snapshot,
-                password,
-                connect_now,
-            },
-        ));
-    }
-
-    // Setup AudioPlayer
-    let player_bus_sender = bus_sender.clone();
-    let player_bus_receiver = bus_sender.subscribe();
-    thread::spawn(move || {
-        let mut audio_player = AudioPlayer::new(player_bus_receiver, player_bus_sender);
-        audio_player.run();
+    spawn_background_services(BackgroundServicesConfig {
+        bus_sender: bus_sender.clone(),
+        ui_handle: ui.as_weak().clone(),
+        initial_online_metadata_enabled: config.library.online_metadata_enabled,
+        initial_online_metadata_prompt_pending: config.library.online_metadata_prompt_pending,
+        playlist_bulk_import_rx,
+        library_scan_progress_tx,
+        library_scan_progress_rx,
+        startup_opensubsonic_seed,
     });
 
     let _ = bus_sender.send(Message::Integration(IntegrationMessage::RequestSnapshot));
