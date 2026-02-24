@@ -3,50 +3,37 @@ mod app_callbacks;
 mod app_config_coordinator;
 mod app_context;
 mod app_runtime;
-#[path = "audio/audio_decoder.rs"]
-mod audio_decoder;
-#[path = "audio/audio_player.rs"]
-mod audio_player;
-#[path = "audio/audio_probe.rs"]
-mod audio_probe;
-#[path = "runtime/audio_runtime_reactor.rs"]
-mod audio_runtime_reactor;
+mod audio;
 mod backends;
-#[path = "cast/cast_manager.rs"]
-mod cast_manager;
+mod cast;
 mod config;
 mod config_persistence;
 mod db_manager;
 mod image_pipeline;
-#[path = "integration/integration_keyring.rs"]
-mod integration_keyring;
-#[path = "integration/integration_manager.rs"]
-mod integration_manager;
-#[path = "integration/integration_uri.rs"]
-mod integration_uri;
+mod integration;
 mod layout;
-#[path = "library/library_enrichment_manager.rs"]
-mod library_enrichment_manager;
-#[path = "library/library_manager.rs"]
-mod library_manager;
+mod library;
 mod media_controls_manager;
 mod media_file_discovery;
-#[path = "metadata/metadata_manager.rs"]
-mod metadata_manager;
-#[path = "metadata/metadata_tags.rs"]
-mod metadata_tags;
-#[path = "integration/opensubsonic_controller.rs"]
-mod opensubsonic_controller;
-#[path = "audio/output_option_selection.rs"]
-mod output_option_selection;
+mod metadata;
 #[path = "playlist/playlist.rs"]
 mod playlist;
 #[path = "playlist/playlist_manager.rs"]
 mod playlist_manager;
 mod protocol;
+mod runtime;
 mod runtime_config;
 mod ui;
 mod ui_manager;
+
+pub(crate) use audio::{audio_decoder, audio_player, audio_probe, output_option_selection};
+pub(crate) use cast::cast_manager;
+pub(crate) use integration::{
+    integration_keyring, integration_manager, integration_uri, opensubsonic_controller,
+};
+pub(crate) use library::{library_enrichment_manager, library_manager};
+pub(crate) use metadata::{metadata_manager, metadata_tags};
+pub(crate) use runtime::audio_runtime_reactor;
 
 use std::{
     collections::HashSet,
@@ -85,8 +72,9 @@ use protocol::Message;
 use runtime_config::{RuntimeAudioState, RuntimeOutputOverride};
 use slint::{language::ColorScheme, ComponentHandle, ModelRc, VecModel};
 use tokio::sync::broadcast;
+// Re-export shared UI helpers at crate root for callback modules that call through `crate::...`.
 pub(crate) use ui::layout_editor_state::*;
-use ui::playlist_columns::*;
+pub(crate) use ui::playlist_columns::*;
 use ui_manager::UiState;
 
 slint::include_modules!();
