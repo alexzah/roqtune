@@ -193,7 +193,25 @@ export component TrackRow inherits Rectangle {
                 }
             }
 
-            if self.column-kind != 1 : Text {
+            if self.column-kind == 2 : Rectangle {
+                x: (parent.width - self.width) / 2;
+                y: (parent.height - self.height) / 2;
+                width: 18px;
+                height: 18px;
+                Image {
+                    source: root.data.favorited ? AppIcons.heart-filled : AppIcons.heart;
+                    width: 14px;
+                    height: 14px;
+                    x: (parent.width - self.width) / 2;
+                    y: (parent.height - self.height) / 2;
+                    image-fit: contain;
+                    colorize: root.data.favorited
+                        ? (root.dark ? #ff91a8 : #d63a5f)
+                        : (root.dark ? #99a2ae : #6e7b89);
+                }
+            }
+
+            if self.column-kind != 1 && self.column-kind != 2 : Text {
                 x: 0px;
                 width: parent.width;
                 text: column-value;

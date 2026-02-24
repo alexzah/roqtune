@@ -110,6 +110,12 @@ impl IntegrationManager {
                         playlists: Vec::new(),
                     },
                 ));
+                let _ = self.bus_producer.send(Message::Integration(
+                    IntegrationMessage::OpenSubsonicFavoriteTracksUpdated {
+                        profile_id: profile_id.to_string(),
+                        tracks: Vec::new(),
+                    },
+                ));
             }
             self.emit_snapshot();
         }
@@ -174,6 +180,35 @@ impl IntegrationManager {
             IntegrationMessage::OpenSubsonicLibraryTracksUpdated {
                 profile_id: profile_id.to_string(),
                 tracks: library_tracks,
+            },
+        ));
+
+        let favorite_tracks = self.opensubsonic_adapter.fetch_favorite_tracks(auth)?;
+        let favorite_library_tracks: Vec<LibraryTrack> = favorite_tracks
+            .iter()
+            .map(|track| LibraryTrack {
+                id: format!("subsonic:{}:{}", profile_id, track.item_id),
+                path: encode_opensubsonic_track_uri(
+                    &auth.profile_id,
+                    &track.item_id,
+                    &auth.endpoint,
+                    &auth.username,
+                    track.format_hint.as_deref(),
+                )
+                .into(),
+                title: track.title.clone(),
+                artist: track.artist.clone(),
+                album: track.album.clone(),
+                album_artist: track.artist.clone(),
+                genre: track.genre.clone(),
+                year: track.year.clone(),
+                track_number: track.track_number.clone(),
+            })
+            .collect();
+        let _ = self.bus_producer.send(Message::Integration(
+            IntegrationMessage::OpenSubsonicFavoriteTracksUpdated {
+                profile_id: profile_id.to_string(),
+                tracks: favorite_library_tracks,
             },
         ));
 
@@ -325,6 +360,12 @@ impl IntegrationManager {
                     playlists: Vec::new(),
                 },
             ));
+            let _ = self.bus_producer.send(Message::Integration(
+                IntegrationMessage::OpenSubsonicFavoriteTracksUpdated {
+                    profile_id: profile_id.to_string(),
+                    tracks: Vec::new(),
+                },
+            ));
         }
     }
 
@@ -405,6 +446,62 @@ impl IntegrationManager {
                 let _ = self.bus_producer.send(Message::Integration(
                     IntegrationMessage::OpenSubsonicPlaylistWritebackResult {
                         local_playlist_id: local_playlist_id.to_string(),
+                        success: false,
+                        error: Some(error),
+                    },
+                ));
+            }
+        }
+    }
+
+    fn push_track_favorite_update(
+        &mut self,
+        profile_id: &str,
+        song_id: &str,
+        favorited: bool,
+        entity_key: &str,
+    ) {
+        let auth = match self.profile_auth(profile_id) {
+            Ok(auth) => auth,
+            Err(error) => {
+                let _ = self.bus_producer.send(Message::Integration(
+                    IntegrationMessage::OpenSubsonicTrackFavoriteUpdateResult {
+                        profile_id: profile_id.to_string(),
+                        entity_key: entity_key.to_string(),
+                        favorited,
+                        success: false,
+                        error: Some(error),
+                    },
+                ));
+                return;
+            }
+        };
+        match self
+            .opensubsonic_adapter
+            .set_track_favorite(&auth, song_id, favorited)
+        {
+            Ok(()) => {
+                let _ = self.bus_producer.send(Message::Integration(
+                    IntegrationMessage::OpenSubsonicTrackFavoriteUpdateResult {
+                        profile_id: profile_id.to_string(),
+                        entity_key: entity_key.to_string(),
+                        favorited,
+                        success: true,
+                        error: None,
+                    },
+                ));
+            }
+            Err(error) => {
+                self.emit_operation_failed(
+                    Some(profile_id.to_string()),
+                    "favorite_writeback",
+                    error.clone(),
+                );
+                let _ = self.bus_producer.send(Message::Integration(
+                    IntegrationMessage::OpenSubsonicTrackFavoriteUpdateResult {
+                        profile_id: profile_id.to_string(),
+                        entity_key: entity_key.to_string(),
+                        favorited,
                         success: false,
                         error: Some(error),
                     },
@@ -524,6 +621,16 @@ impl IntegrationManager {
                     );
                 }
                 Ok(Message::Integration(
+                    IntegrationMessage::PushOpenSubsonicTrackFavoriteUpdate {
+                        profile_id,
+                        song_id,
+                        favorited,
+                        entity_key,
+                    },
+                )) => {
+                    self.push_track_favorite_update(&profile_id, &song_id, favorited, &entity_key);
+                }
+                Ok(Message::Integration(
                     IntegrationMessage::CreateOpenSubsonicPlaylistFromLocal {
                         profile_id,
                         local_playlist_id,
@@ -550,6 +657,9 @@ impl IntegrationManager {
                 | Ok(Message::Integration(
                     IntegrationMessage::OpenSubsonicLibraryTracksUpdated { .. },
                 ))
+                | Ok(Message::Integration(
+                    IntegrationMessage::OpenSubsonicFavoriteTracksUpdated { .. },
+                ))
                 | Ok(Message::Integration(IntegrationMessage::OpenSubsonicPlaylistsUpdated {
                     ..
                 }))
@@ -558,6 +668,9 @@ impl IntegrationManager {
                 ))
                 | Ok(Message::Integration(
                     IntegrationMessage::OpenSubsonicPlaylistCreateResult { .. },
+                ))
+                | Ok(Message::Integration(
+                    IntegrationMessage::OpenSubsonicTrackFavoriteUpdateResult { .. },
                 ))
                 | Ok(_) => {}
                 Err(tokio::sync::broadcast::error::RecvError::Lagged(skipped)) => {

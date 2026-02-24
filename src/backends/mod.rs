@@ -39,8 +39,18 @@ pub trait MediaBackendAdapter: Send + Sync {
         &self,
         profile: &BackendProfileAuth,
     ) -> Result<Vec<BackendTrack>, String>;
+    fn fetch_favorite_tracks(
+        &self,
+        profile: &BackendProfileAuth,
+    ) -> Result<Vec<BackendTrack>, String>;
     fn fetch_playlists(&self, profile: &BackendProfileAuth)
         -> Result<Vec<BackendPlaylist>, String>;
+    fn set_track_favorite(
+        &self,
+        profile: &BackendProfileAuth,
+        song_id: &str,
+        favorited: bool,
+    ) -> Result<(), String>;
     fn create_playlist(
         &self,
         profile: &BackendProfileAuth,

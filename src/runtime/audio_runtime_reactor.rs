@@ -12,7 +12,7 @@ use log::{debug, warn};
 use tokio::sync::broadcast;
 
 use crate::{
-    config::{Config, UiConfig},
+    config::Config,
     opensubsonic_controller::OPENSUBSONIC_PROFILE_ID,
     protocol::{self, ConfigMessage, IntegrationMessage, Message, PlaylistMessage},
     runtime_config::{
@@ -269,91 +269,6 @@ pub fn spawn_runtime_event_reactor(context: RuntimeEventReactorContext) {
                 let ui_weak = ui_handle.clone();
                 let config_for_ui = persisted_config.clone();
                 let options_for_ui = detected_options.clone();
-                let (workspace_width_px, workspace_height_px) =
-                    crate::workspace_size_snapshot(&layout_workspace_size);
-                let _ = slint::invoke_from_event_loop(move || {
-                    if let Some(ui) = ui_weak.upgrade() {
-                        crate::apply_config_to_ui(
-                            &ui,
-                            &config_for_ui,
-                            &options_for_ui,
-                            workspace_width_px,
-                            workspace_height_px,
-                        );
-                    }
-                });
-            }
-            Ok(Message::Playlist(PlaylistMessage::ActivePlaylistColumnOrder(
-                column_order_keys,
-            ))) => {
-                let Some(column_order_keys) = column_order_keys else {
-                    continue;
-                };
-
-                let next_config = {
-                    let mut state = config_state.lock().expect("config state lock poisoned");
-                    let reordered_columns = crate::apply_column_order_keys(
-                        &state.ui.playlist_columns,
-                        &column_order_keys,
-                    );
-                    if reordered_columns == state.ui.playlist_columns {
-                        continue;
-                    }
-                    let updated = crate::sanitize_config(Config {
-                        output: state.output.clone(),
-                        cast: state.cast.clone(),
-                        ui: UiConfig {
-                            show_layout_edit_intro: state.ui.show_layout_edit_intro,
-                            show_tooltips: state.ui.show_tooltips,
-                            auto_scroll_to_playing_track: state.ui.auto_scroll_to_playing_track,
-                            dark_mode: state.ui.dark_mode,
-                            playlist_album_art_column_min_width_px: state
-                                .ui
-                                .playlist_album_art_column_min_width_px,
-                            playlist_album_art_column_max_width_px: state
-                                .ui
-                                .playlist_album_art_column_max_width_px,
-                            layout: state.ui.layout.clone(),
-                            playlist_columns: reordered_columns,
-                            window_width: state.ui.window_width,
-                            window_height: state.ui.window_height,
-                            volume: state.ui.volume,
-                            playback_order: state.ui.playback_order,
-                            repeat_mode: state.ui.repeat_mode,
-                        },
-                        library: state.library.clone(),
-                        buffering: state.buffering.clone(),
-                        integrations: state.integrations.clone(),
-                    });
-                    *state = updated.clone();
-                    updated
-                };
-
-                let options_snapshot = {
-                    let options = output_options.lock().expect("output options lock poisoned");
-                    options.clone()
-                };
-
-                let runtime_override = runtime_output_override_snapshot(&runtime_output_override);
-                let runtime = crate::resolve_effective_runtime_config(
-                    &next_config,
-                    &options_snapshot,
-                    Some(&runtime_override),
-                    &runtime_audio_state,
-                );
-                let runtime_signature = OutputRuntimeSignature::from_output(&runtime.output);
-                {
-                    let mut last_signature = last_runtime_signature
-                        .lock()
-                        .expect("runtime signature lock poisoned");
-                    *last_signature = runtime_signature;
-                }
-                let _ =
-                    publish_runtime_config_delta(&bus_sender_clone, &last_runtime_config, runtime);
-
-                let ui_weak = ui_handle.clone();
-                let config_for_ui = next_config;
-                let options_for_ui = options_snapshot;
                 let (workspace_width_px, workspace_height_px) =
                     crate::workspace_size_snapshot(&layout_workspace_size);
                 let _ = slint::invoke_from_event_loop(move || {

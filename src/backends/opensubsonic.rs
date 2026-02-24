@@ -239,6 +239,29 @@ impl OpenSubsonicAdapter {
         );
         Ok(entries.into_iter().filter_map(Self::parse_track).collect())
     }
+
+    fn fetch_starred_tracks(
+        &self,
+        profile: &BackendProfileAuth,
+    ) -> Result<Vec<BackendTrack>, String> {
+        let payload = self.request_json(profile, "getStarred2", &[])?;
+        let songs = Self::array_or_single(
+            payload
+                .get("subsonic-response")
+                .and_then(|value| value.get("starred2"))
+                .and_then(|value| value.get("song")),
+        );
+        let mut seen_song_ids = HashSet::new();
+        let mut tracks = Vec::new();
+        for song in songs {
+            if let Some(track) = Self::parse_track(song) {
+                if seen_song_ids.insert(track.item_id.clone()) {
+                    tracks.push(track);
+                }
+            }
+        }
+        Ok(tracks)
+    }
 }
 
 impl Default for OpenSubsonicAdapter {
@@ -284,6 +307,13 @@ impl MediaBackendAdapter for OpenSubsonicAdapter {
             }
         }
         Ok(tracks)
+    }
+
+    fn fetch_favorite_tracks(
+        &self,
+        profile: &BackendProfileAuth,
+    ) -> Result<Vec<BackendTrack>, String> {
+        self.fetch_starred_tracks(profile)
     }
 
     fn fetch_playlists(
@@ -346,6 +376,25 @@ impl MediaBackendAdapter for OpenSubsonicAdapter {
             .and_then(Value::as_str)
             .map(ToOwned::to_owned)
             .ok_or_else(|| "OpenSubsonic createPlaylist response missing playlist id".to_string())
+    }
+
+    fn set_track_favorite(
+        &self,
+        profile: &BackendProfileAuth,
+        song_id: &str,
+        favorited: bool,
+    ) -> Result<(), String> {
+        let trimmed_song_id = song_id.trim();
+        if trimmed_song_id.is_empty() {
+            return Err("song id cannot be empty".to_string());
+        }
+        let method = if favorited { "star" } else { "unstar" };
+        let _ = self.request_json(
+            profile,
+            method,
+            &[("id".to_string(), trimmed_song_id.to_string())],
+        )?;
+        Ok(())
     }
 
     fn replace_playlist_tracks(

@@ -1,10 +1,10 @@
 //! SQLite-backed persistence for playlists, library index data, and playlist-scoped UI metadata.
 
 use crate::protocol::{
-    LibraryAlbum, LibraryArtist, LibraryDecade, LibraryEnrichmentAttemptKind,
-    LibraryEnrichmentEntity, LibraryEnrichmentErrorKind, LibraryEnrichmentPayload,
-    LibraryEnrichmentStatus, LibraryGenre, LibraryTrack, PlaylistInfo, RestoredTrack,
-    TrackMetadataSummary,
+    FavoriteEntityKind, FavoriteEntityRef, LibraryAlbum, LibraryArtist, LibraryDecade,
+    LibraryEnrichmentAttemptKind, LibraryEnrichmentEntity, LibraryEnrichmentErrorKind,
+    LibraryEnrichmentPayload, LibraryEnrichmentStatus, LibraryGenre, LibraryTrack, PlaylistInfo,
+    RestoredTrack, TrackMetadataSummary,
 };
 use rusqlite::{params, Connection, OptionalExtension};
 use std::{
@@ -65,6 +65,16 @@ pub struct LibraryTrackMetadataUpdate {
     pub file_size_bytes: i64,
     pub metadata_ready: bool,
     pub last_scanned_unix_ms: i64,
+}
+
+/// Favorite sync queue row persisted for deferred remote propagation.
+#[derive(Debug, Clone)]
+pub struct FavoriteSyncQueueEntry {
+    pub entity_kind: FavoriteEntityKind,
+    pub entity_key: String,
+    pub remote_profile_id: String,
+    pub remote_item_id: String,
+    pub desired_favorited: bool,
 }
 
 impl DbManager {
@@ -192,6 +202,22 @@ impl DbManager {
             return fallback.to_string();
         }
         trimmed.to_ascii_lowercase()
+    }
+
+    fn favorite_kind_to_db(kind: FavoriteEntityKind) -> &'static str {
+        match kind {
+            FavoriteEntityKind::Track => "track",
+            FavoriteEntityKind::Artist => "artist",
+            FavoriteEntityKind::Album => "album",
+        }
+    }
+
+    fn favorite_kind_from_db(value: &str) -> FavoriteEntityKind {
+        match value {
+            "artist" => FavoriteEntityKind::Artist,
+            "album" => FavoriteEntityKind::Album,
+            _ => FavoriteEntityKind::Track,
+        }
     }
 
     fn configure_connection_pragmas(conn: &Connection) {
@@ -336,6 +362,47 @@ impl DbManager {
             "CREATE INDEX IF NOT EXISTS idx_library_enrichment_cache_expires ON library_enrichment_cache(expires_unix_ms)",
             [],
         )?;
+        self.conn.execute(
+            "CREATE TABLE IF NOT EXISTS favorites (
+                entity_type TEXT NOT NULL,
+                entity_key TEXT NOT NULL PRIMARY KEY,
+                display_primary TEXT NOT NULL,
+                display_secondary TEXT NOT NULL,
+                track_path TEXT,
+                source_kind TEXT NOT NULL DEFAULT '',
+                remote_profile_id TEXT,
+                remote_item_id TEXT,
+                updated_unix_ms INTEGER NOT NULL DEFAULT 0
+            )",
+            [],
+        )?;
+        self.conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_favorites_entity_type ON favorites(entity_type, display_primary, entity_key)",
+            [],
+        )?;
+        self.conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_favorites_remote_profile ON favorites(remote_profile_id, entity_type, entity_key)",
+            [],
+        )?;
+        self.conn.execute(
+            "CREATE TABLE IF NOT EXISTS favorite_sync_queue (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                entity_type TEXT NOT NULL,
+                entity_key TEXT NOT NULL,
+                remote_profile_id TEXT NOT NULL,
+                remote_item_id TEXT NOT NULL,
+                desired_favorited INTEGER NOT NULL DEFAULT 1,
+                retry_count INTEGER NOT NULL DEFAULT 0,
+                last_error TEXT NOT NULL DEFAULT '',
+                updated_unix_ms INTEGER NOT NULL DEFAULT 0,
+                UNIQUE(remote_profile_id, entity_type, entity_key)
+            )",
+            [],
+        )?;
+        self.conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_favorite_sync_queue_profile_updated ON favorite_sync_queue(remote_profile_id, updated_unix_ms)",
+            [],
+        )?;
         Ok(())
     }
 
@@ -472,6 +539,109 @@ impl DbManager {
         if !has_conclusive {
             self.conn.execute(
                 "ALTER TABLE library_enrichment_cache ADD COLUMN conclusive INTEGER NOT NULL DEFAULT 1",
+                [],
+            )?;
+        }
+
+        self.conn.execute(
+            "CREATE TABLE IF NOT EXISTS favorites (
+                entity_type TEXT NOT NULL,
+                entity_key TEXT NOT NULL PRIMARY KEY,
+                display_primary TEXT NOT NULL,
+                display_secondary TEXT NOT NULL,
+                track_path TEXT,
+                source_kind TEXT NOT NULL DEFAULT '',
+                remote_profile_id TEXT,
+                remote_item_id TEXT,
+                updated_unix_ms INTEGER NOT NULL DEFAULT 0
+            )",
+            [],
+        )?;
+        self.conn.execute(
+            "CREATE TABLE IF NOT EXISTS favorite_sync_queue (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                entity_type TEXT NOT NULL,
+                entity_key TEXT NOT NULL,
+                remote_profile_id TEXT NOT NULL,
+                remote_item_id TEXT NOT NULL,
+                desired_favorited INTEGER NOT NULL DEFAULT 1,
+                retry_count INTEGER NOT NULL DEFAULT 0,
+                last_error TEXT NOT NULL DEFAULT '',
+                updated_unix_ms INTEGER NOT NULL DEFAULT 0,
+                UNIQUE(remote_profile_id, entity_type, entity_key)
+            )",
+            [],
+        )?;
+
+        let mut favorites_stmt = self.conn.prepare("PRAGMA table_info(favorites)")?;
+        let favorites_columns = favorites_stmt.query_map([], |row| row.get::<_, String>(1))?;
+        let mut has_source_kind = false;
+        let mut has_remote_profile_id = false;
+        let mut has_remote_item_id = false;
+        let mut has_updated_unix_ms = false;
+        for col in favorites_columns {
+            match col?.as_str() {
+                "source_kind" => has_source_kind = true,
+                "remote_profile_id" => has_remote_profile_id = true,
+                "remote_item_id" => has_remote_item_id = true,
+                "updated_unix_ms" => has_updated_unix_ms = true,
+                _ => {}
+            }
+        }
+        if !has_source_kind {
+            self.conn.execute(
+                "ALTER TABLE favorites ADD COLUMN source_kind TEXT NOT NULL DEFAULT ''",
+                [],
+            )?;
+        }
+        if !has_remote_profile_id {
+            self.conn.execute(
+                "ALTER TABLE favorites ADD COLUMN remote_profile_id TEXT",
+                [],
+            )?;
+        }
+        if !has_remote_item_id {
+            self.conn
+                .execute("ALTER TABLE favorites ADD COLUMN remote_item_id TEXT", [])?;
+        }
+        if !has_updated_unix_ms {
+            self.conn.execute(
+                "ALTER TABLE favorites ADD COLUMN updated_unix_ms INTEGER NOT NULL DEFAULT 0",
+                [],
+            )?;
+        }
+
+        let mut favorite_queue_stmt = self
+            .conn
+            .prepare("PRAGMA table_info(favorite_sync_queue)")?;
+        let favorite_queue_columns =
+            favorite_queue_stmt.query_map([], |row| row.get::<_, String>(1))?;
+        let mut has_last_error = false;
+        let mut has_retry_count = false;
+        let mut has_updated_unix_ms_in_queue = false;
+        for col in favorite_queue_columns {
+            match col?.as_str() {
+                "last_error" => has_last_error = true,
+                "retry_count" => has_retry_count = true,
+                "updated_unix_ms" => has_updated_unix_ms_in_queue = true,
+                _ => {}
+            }
+        }
+        if !has_last_error {
+            self.conn.execute(
+                "ALTER TABLE favorite_sync_queue ADD COLUMN last_error TEXT NOT NULL DEFAULT ''",
+                [],
+            )?;
+        }
+        if !has_retry_count {
+            self.conn.execute(
+                "ALTER TABLE favorite_sync_queue ADD COLUMN retry_count INTEGER NOT NULL DEFAULT 0",
+                [],
+            )?;
+        }
+        if !has_updated_unix_ms_in_queue {
+            self.conn.execute(
+                "ALTER TABLE favorite_sync_queue ADD COLUMN updated_unix_ms INTEGER NOT NULL DEFAULT 0",
                 [],
             )?;
         }
@@ -644,47 +814,6 @@ impl DbManager {
         drop(stmt);
         self.conn.execute("COMMIT", [])?;
         Ok(())
-    }
-
-    /// Persists a complete playlist column ordering payload.
-    pub fn set_playlist_column_order(
-        &self,
-        playlist_id: &str,
-        column_order: &[String],
-    ) -> Result<(), rusqlite::Error> {
-        let serialized_order = serde_json::to_string(column_order)
-            .map_err(|err| rusqlite::Error::ToSqlConversionFailure(Box::new(err)))?;
-        self.conn.execute(
-            "UPDATE playlists SET column_order = ?1 WHERE id = ?2",
-            params![serialized_order, playlist_id],
-        )?;
-        Ok(())
-    }
-
-    /// Loads the saved column ordering for a playlist, if present.
-    pub fn get_playlist_column_order(
-        &self,
-        playlist_id: &str,
-    ) -> Result<Option<Vec<String>>, rusqlite::Error> {
-        let raw: Option<String> = self
-            .conn
-            .query_row(
-                "SELECT column_order FROM playlists WHERE id = ?1",
-                params![playlist_id],
-                |row| row.get(0),
-            )
-            .optional()?
-            .flatten();
-
-        if let Some(raw) = raw {
-            if raw.trim().is_empty() {
-                return Ok(None);
-            }
-            if let Ok(parsed) = serde_json::from_str::<Vec<String>>(&raw) {
-                return Ok(Some(parsed));
-            }
-        }
-        Ok(None)
     }
 
     /// Batch upserts many scan stubs in one transaction.
@@ -1597,6 +1726,331 @@ impl DbManager {
             .execute("DELETE FROM library_enrichment_cache", [])?;
         Ok(deleted_rows)
     }
+
+    fn favorite_row_to_ref(row: &rusqlite::Row<'_>) -> Result<FavoriteEntityRef, rusqlite::Error> {
+        let entity_type: String = row.get(0)?;
+        let entity_key: String = row.get(1)?;
+        let display_primary: String = row.get(2)?;
+        let display_secondary: String = row.get(3)?;
+        let track_path: Option<String> = row.get(4)?;
+        let remote_profile_id: Option<String> = row.get(5)?;
+        let remote_item_id: Option<String> = row.get(6)?;
+        Ok(FavoriteEntityRef {
+            kind: Self::favorite_kind_from_db(&entity_type),
+            entity_key,
+            display_primary,
+            display_secondary,
+            track_path: track_path.map(PathBuf::from),
+            remote_profile_id,
+            remote_item_id,
+        })
+    }
+
+    /// Inserts or updates one favorite row.
+    pub fn upsert_favorite(
+        &self,
+        favorite: &FavoriteEntityRef,
+        source_kind: &str,
+        updated_unix_ms: i64,
+    ) -> Result<(), rusqlite::Error> {
+        self.conn.execute(
+            "INSERT INTO favorites (
+                entity_type, entity_key, display_primary, display_secondary,
+                track_path, source_kind, remote_profile_id, remote_item_id, updated_unix_ms
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
+            ON CONFLICT(entity_key) DO UPDATE SET
+                entity_type = excluded.entity_type,
+                display_primary = excluded.display_primary,
+                display_secondary = excluded.display_secondary,
+                track_path = excluded.track_path,
+                source_kind = excluded.source_kind,
+                remote_profile_id = excluded.remote_profile_id,
+                remote_item_id = excluded.remote_item_id,
+                updated_unix_ms = excluded.updated_unix_ms",
+            params![
+                Self::favorite_kind_to_db(favorite.kind),
+                favorite.entity_key,
+                favorite.display_primary,
+                favorite.display_secondary,
+                favorite
+                    .track_path
+                    .as_ref()
+                    .map(|path| path.to_string_lossy().to_string()),
+                source_kind,
+                favorite.remote_profile_id,
+                favorite.remote_item_id,
+                updated_unix_ms,
+            ],
+        )?;
+        Ok(())
+    }
+
+    /// Deletes one favorite row by canonical key.
+    pub fn remove_favorite(&self, entity_key: &str) -> Result<usize, rusqlite::Error> {
+        self.conn.execute(
+            "DELETE FROM favorites WHERE entity_key = ?1",
+            params![entity_key],
+        )
+    }
+
+    /// Returns `true` when a canonical key exists in favorites.
+    pub fn is_favorited(&self, entity_key: &str) -> Result<bool, rusqlite::Error> {
+        let found: Option<i64> = self
+            .conn
+            .query_row(
+                "SELECT 1 FROM favorites WHERE entity_key = ?1",
+                params![entity_key],
+                |row| row.get(0),
+            )
+            .optional()?;
+        Ok(found.is_some())
+    }
+
+    /// Loads all favorites sorted for stable UI model generation.
+    pub fn get_all_favorites(&self) -> Result<Vec<FavoriteEntityRef>, rusqlite::Error> {
+        let mut stmt = self.conn.prepare(
+            "SELECT entity_type, entity_key, display_primary, display_secondary, track_path, remote_profile_id, remote_item_id
+             FROM favorites
+             ORDER BY entity_type ASC, display_primary COLLATE NOCASE ASC, entity_key ASC",
+        )?;
+        let iter = stmt.query_map([], Self::favorite_row_to_ref)?;
+        let mut rows = Vec::new();
+        for row in iter {
+            rows.push(row?);
+        }
+        Ok(rows)
+    }
+
+    /// Returns total favorite row count.
+    pub fn get_favorites_count(&self) -> Result<usize, rusqlite::Error> {
+        let count: i64 = self
+            .conn
+            .query_row("SELECT COUNT(*) FROM favorites", [], |row| row.get(0))?;
+        Ok(count.max(0) as usize)
+    }
+
+    /// Returns favorite row count for one kind.
+    pub fn get_favorites_count_by_kind(
+        &self,
+        kind: FavoriteEntityKind,
+    ) -> Result<usize, rusqlite::Error> {
+        let count: i64 = self.conn.query_row(
+            "SELECT COUNT(*) FROM favorites WHERE entity_type = ?1",
+            params![Self::favorite_kind_to_db(kind)],
+            |row| row.get(0),
+        )?;
+        Ok(count.max(0) as usize)
+    }
+
+    /// Returns paged favorite rows for one kind and total matching count.
+    pub fn get_favorites_page_by_kind(
+        &self,
+        kind: FavoriteEntityKind,
+        offset: usize,
+        limit: usize,
+    ) -> Result<(Vec<FavoriteEntityRef>, usize), rusqlite::Error> {
+        let total = self.get_favorites_count_by_kind(kind)?;
+        let mut stmt = self.conn.prepare(
+            "SELECT entity_type, entity_key, display_primary, display_secondary, track_path, remote_profile_id, remote_item_id
+             FROM favorites
+             WHERE entity_type = ?1
+             ORDER BY display_primary COLLATE NOCASE ASC, entity_key ASC
+             LIMIT ?2 OFFSET ?3",
+        )?;
+        let iter = stmt.query_map(
+            params![
+                Self::favorite_kind_to_db(kind),
+                limit.max(1) as i64,
+                offset as i64
+            ],
+            Self::favorite_row_to_ref,
+        )?;
+        let mut rows = Vec::new();
+        for row in iter {
+            rows.push(row?);
+        }
+        Ok((rows, total))
+    }
+
+    /// Replaces the remote favorite-track set for one profile, preserving local-only favorites.
+    pub fn replace_remote_track_favorites_for_profile(
+        &self,
+        profile_id: &str,
+        favorites: &[FavoriteEntityRef],
+        protected_entity_keys: &HashSet<String>,
+        updated_unix_ms: i64,
+    ) -> Result<(), rusqlite::Error> {
+        self.conn.execute("BEGIN IMMEDIATE TRANSACTION", [])?;
+        let delete_result = self.conn.execute(
+            "DELETE FROM favorites
+             WHERE entity_type = 'track'
+               AND remote_profile_id = ?1
+               AND entity_key NOT IN (
+                   SELECT entity_key FROM favorite_sync_queue
+                   WHERE remote_profile_id = ?1 AND entity_type = 'track'
+               )",
+            params![profile_id],
+        );
+        if let Err(err) = delete_result {
+            let _ = self.conn.execute("ROLLBACK", []);
+            return Err(err);
+        }
+
+        let mut stmt = match self.conn.prepare(
+            "INSERT INTO favorites (
+                entity_type, entity_key, display_primary, display_secondary, track_path, source_kind,
+                remote_profile_id, remote_item_id, updated_unix_ms
+            ) VALUES ('track', ?1, ?2, ?3, ?4, 'opensubsonic', ?5, ?6, ?7)
+            ON CONFLICT(entity_key) DO UPDATE SET
+                entity_type = excluded.entity_type,
+                display_primary = excluded.display_primary,
+                display_secondary = excluded.display_secondary,
+                track_path = excluded.track_path,
+                source_kind = excluded.source_kind,
+                remote_profile_id = excluded.remote_profile_id,
+                remote_item_id = excluded.remote_item_id,
+                updated_unix_ms = excluded.updated_unix_ms",
+        ) {
+            Ok(stmt) => stmt,
+            Err(err) => {
+                let _ = self.conn.execute("ROLLBACK", []);
+                return Err(err);
+            }
+        };
+
+        for favorite in favorites {
+            if protected_entity_keys.contains(&favorite.entity_key) {
+                continue;
+            }
+            if let Err(err) = stmt.execute(params![
+                favorite.entity_key,
+                favorite.display_primary,
+                favorite.display_secondary,
+                favorite
+                    .track_path
+                    .as_ref()
+                    .map(|path| path.to_string_lossy().to_string()),
+                favorite
+                    .remote_profile_id
+                    .clone()
+                    .unwrap_or_else(|| profile_id.to_string()),
+                favorite.remote_item_id,
+                updated_unix_ms,
+            ]) {
+                drop(stmt);
+                let _ = self.conn.execute("ROLLBACK", []);
+                return Err(err);
+            }
+        }
+        drop(stmt);
+        self.conn.execute("COMMIT", [])?;
+        Ok(())
+    }
+
+    /// Upserts one pending remote favorite sync operation.
+    pub fn upsert_favorite_sync_queue(
+        &self,
+        entity_kind: FavoriteEntityKind,
+        entity_key: &str,
+        remote_profile_id: &str,
+        remote_item_id: &str,
+        desired_favorited: bool,
+        updated_unix_ms: i64,
+    ) -> Result<(), rusqlite::Error> {
+        self.conn.execute(
+            "INSERT INTO favorite_sync_queue (
+                entity_type, entity_key, remote_profile_id, remote_item_id,
+                desired_favorited, retry_count, last_error, updated_unix_ms
+            ) VALUES (?1, ?2, ?3, ?4, ?5, 0, '', ?6)
+            ON CONFLICT(remote_profile_id, entity_type, entity_key) DO UPDATE SET
+                remote_item_id = excluded.remote_item_id,
+                desired_favorited = excluded.desired_favorited,
+                retry_count = 0,
+                last_error = '',
+                updated_unix_ms = excluded.updated_unix_ms",
+            params![
+                Self::favorite_kind_to_db(entity_kind),
+                entity_key,
+                remote_profile_id,
+                remote_item_id,
+                i64::from(desired_favorited),
+                updated_unix_ms,
+            ],
+        )?;
+        Ok(())
+    }
+
+    /// Returns queued remote favorite updates for one profile.
+    pub fn list_favorite_sync_queue_for_profile(
+        &self,
+        profile_id: &str,
+    ) -> Result<Vec<FavoriteSyncQueueEntry>, rusqlite::Error> {
+        let mut stmt = self.conn.prepare(
+            "SELECT entity_type, entity_key, remote_profile_id, remote_item_id, desired_favorited, retry_count
+             FROM favorite_sync_queue
+             WHERE remote_profile_id = ?1
+             ORDER BY updated_unix_ms ASC, id ASC",
+        )?;
+        let iter = stmt.query_map(params![profile_id], |row| {
+            let entity_type: String = row.get(0)?;
+            Ok(FavoriteSyncQueueEntry {
+                entity_kind: Self::favorite_kind_from_db(&entity_type),
+                entity_key: row.get(1)?,
+                remote_profile_id: row.get(2)?,
+                remote_item_id: row.get(3)?,
+                desired_favorited: row.get::<_, i64>(4)? != 0,
+            })
+        })?;
+        let mut rows = Vec::new();
+        for row in iter {
+            rows.push(row?);
+        }
+        Ok(rows)
+    }
+
+    /// Deletes one queued favorite sync operation.
+    pub fn remove_favorite_sync_queue_entry(
+        &self,
+        profile_id: &str,
+        kind: FavoriteEntityKind,
+        entity_key: &str,
+    ) -> Result<usize, rusqlite::Error> {
+        self.conn.execute(
+            "DELETE FROM favorite_sync_queue
+             WHERE remote_profile_id = ?1
+               AND entity_type = ?2
+               AND entity_key = ?3",
+            params![profile_id, Self::favorite_kind_to_db(kind), entity_key],
+        )
+    }
+
+    /// Updates retry metadata for one queued favorite sync operation.
+    pub fn mark_favorite_sync_queue_failure(
+        &self,
+        profile_id: &str,
+        kind: FavoriteEntityKind,
+        entity_key: &str,
+        error: &str,
+        updated_unix_ms: i64,
+    ) -> Result<(), rusqlite::Error> {
+        self.conn.execute(
+            "UPDATE favorite_sync_queue
+             SET retry_count = retry_count + 1,
+                 last_error = ?4,
+                 updated_unix_ms = ?5
+             WHERE remote_profile_id = ?1
+               AND entity_type = ?2
+               AND entity_key = ?3",
+            params![
+                profile_id,
+                Self::favorite_kind_to_db(kind),
+                entity_key,
+                error,
+                updated_unix_ms
+            ],
+        )?;
+        Ok(())
+    }
 }
 
 #[cfg(test)]
@@ -1610,30 +2064,6 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("{prefix}_{}", Uuid::new_v4()));
         fs::create_dir_all(&dir).expect("should create test temp directory");
         dir
-    }
-
-    #[test]
-    fn test_set_and_get_playlist_column_order_round_trip() {
-        let db = DbManager::new_in_memory().expect("in-memory db should initialize");
-        let playlists = db
-            .get_all_playlists()
-            .expect("playlists should be queryable after init");
-        let playlist = playlists
-            .first()
-            .expect("default playlist should exist after init");
-
-        let saved_order = vec![
-            "{artist}".to_string(),
-            "{title}".to_string(),
-            "custom:Album & Year|{album} ({year})".to_string(),
-        ];
-        db.set_playlist_column_order(&playlist.id, &saved_order)
-            .expect("column order should persist");
-
-        let loaded_order = db
-            .get_playlist_column_order(&playlist.id)
-            .expect("column order query should succeed");
-        assert_eq!(loaded_order, Some(saved_order));
     }
 
     #[test]

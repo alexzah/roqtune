@@ -118,6 +118,7 @@ pub struct UiManager {
     last_elapsed_ms: u64,
     last_total_ms: u64,
     playing_track: PlayingTrackState,
+    favorites_by_key: HashMap<String, protocol::FavoriteEntityRef>,
     display_target_priority: DisplayTargetPriority,
     current_technical_metadata: Option<protocol::TechnicalMetadata>,
     current_output_path_info: Option<protocol::OutputPathInfo>,
@@ -164,7 +165,7 @@ pub struct UiManager {
     library_view_indices: Vec<usize>,
     library_selected_indices: Vec<usize>,
     library_selection_anchor: Option<usize>,
-    library_root_counts: [usize; 5],
+    library_root_counts: [usize; 6],
     library_cover_art_paths: HashMap<PathBuf, Option<PathBuf>>,
     folder_cover_art_paths: HashMap<PathBuf, Option<PathBuf>>,
     library_enrichment:
@@ -256,6 +257,7 @@ struct ColumnWidthProfile {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum PlaylistColumnClass {
     AlbumArt,
+    Favorite,
     TrackNumber,
     DiscNumber,
     YearDate,
@@ -327,6 +329,10 @@ enum LibraryViewState {
     AlbumsRoot,
     GenresRoot,
     DecadesRoot,
+    FavoritesRoot,
+    FavoriteTracks,
+    FavoriteArtists,
+    FavoriteAlbums,
     GlobalSearch,
     ArtistDetail { artist: String },
     AlbumDetail { album: String, album_artist: String },
@@ -341,6 +347,10 @@ enum LibraryScrollViewKey {
     AlbumsRoot,
     GenresRoot,
     DecadesRoot,
+    FavoritesRoot,
+    FavoriteTracks,
+    FavoriteArtists,
+    FavoriteAlbums,
     GlobalSearch,
 }
 
@@ -351,6 +361,7 @@ enum LibraryEntry {
     Album(protocol::LibraryAlbum),
     Genre(protocol::LibraryGenre),
     Decade(protocol::LibraryDecade),
+    FavoriteCategory(protocol::FavoriteCategory),
 }
 
 #[derive(Clone, Debug)]
@@ -362,6 +373,8 @@ struct LibraryRowPresentation {
     cover_art_path: Option<PathBuf>,
     source_badge: String,
     is_playing: bool,
+    favoritable: bool,
+    favorited: bool,
     selected: bool,
 }
 
@@ -388,6 +401,7 @@ enum DisplayTargetResolutionMode {
 
 const PLAYLIST_COLUMN_KIND_TEXT: i32 = 0;
 const PLAYLIST_COLUMN_KIND_ALBUM_ART: i32 = 1;
+const PLAYLIST_COLUMN_KIND_FAVORITE: i32 = 2;
 const BASE_ROW_HEIGHT_PX: u32 = 30;
 const ALBUM_ART_ROW_PADDING_PX: u32 = 8;
 const COLLECTION_MODE_PLAYLIST: i32 = 0;
@@ -838,6 +852,140 @@ impl UiManager {
         }
     }
 
+    fn normalize_favorite_component(value: &str) -> String {
+        value.trim().to_ascii_lowercase()
+    }
+
+    fn favorite_key_for_track_path(path: &Path) -> String {
+        if let Some(locator) = parse_opensubsonic_track_uri(path) {
+            return format!("os:{}:song:{}", locator.profile_id, locator.song_id);
+        }
+        if path.is_absolute() {
+            return format!("file:{}", path.to_string_lossy());
+        }
+        format!("uri:{}", path.to_string_lossy())
+    }
+
+    fn favorite_key_for_artist(artist: &str) -> String {
+        format!("artist:{}", Self::normalize_favorite_component(artist))
+    }
+
+    fn favorite_key_for_album(album: &str, album_artist: &str) -> String {
+        format!(
+            "album:{}\u{001f}{}",
+            Self::normalize_favorite_component(album),
+            Self::normalize_favorite_component(album_artist)
+        )
+    }
+
+    fn item_kind_for_favorite_category(kind: protocol::FavoriteEntityKind) -> i32 {
+        match kind {
+            protocol::FavoriteEntityKind::Track => LIBRARY_ITEM_KIND_SONG,
+            protocol::FavoriteEntityKind::Artist => LIBRARY_ITEM_KIND_ARTIST,
+            protocol::FavoriteEntityKind::Album => LIBRARY_ITEM_KIND_ALBUM,
+        }
+    }
+
+    fn library_view_supports_artist_enrichment_prefetch(view: &LibraryViewState) -> bool {
+        matches!(
+            view,
+            LibraryViewState::ArtistsRoot | LibraryViewState::FavoriteArtists
+        )
+    }
+
+    fn favorite_entity_for_library_entry(
+        &self,
+        entry: &LibraryEntry,
+    ) -> Option<protocol::FavoriteEntityRef> {
+        match entry {
+            LibraryEntry::Track(track) => {
+                let (remote_profile_id, remote_item_id) =
+                    if let Some(locator) = parse_opensubsonic_track_uri(track.path.as_path()) {
+                        (Some(locator.profile_id), Some(locator.song_id))
+                    } else {
+                        (None, None)
+                    };
+                Some(protocol::FavoriteEntityRef {
+                    kind: protocol::FavoriteEntityKind::Track,
+                    entity_key: Self::favorite_key_for_track_path(track.path.as_path()),
+                    display_primary: track.title.clone(),
+                    display_secondary: format!("{} · {}", track.artist, track.album),
+                    track_path: Some(track.path.clone()),
+                    remote_profile_id,
+                    remote_item_id,
+                })
+            }
+            LibraryEntry::Artist(artist) => Some(protocol::FavoriteEntityRef {
+                kind: protocol::FavoriteEntityKind::Artist,
+                entity_key: Self::favorite_key_for_artist(&artist.artist),
+                display_primary: artist.artist.clone(),
+                display_secondary: String::new(),
+                track_path: None,
+                remote_profile_id: None,
+                remote_item_id: None,
+            }),
+            LibraryEntry::Album(album) => Some(protocol::FavoriteEntityRef {
+                kind: protocol::FavoriteEntityKind::Album,
+                entity_key: Self::favorite_key_for_album(&album.album, &album.album_artist),
+                display_primary: album.album.clone(),
+                display_secondary: album.album_artist.clone(),
+                track_path: None,
+                remote_profile_id: None,
+                remote_item_id: None,
+            }),
+            LibraryEntry::Genre(_)
+            | LibraryEntry::Decade(_)
+            | LibraryEntry::FavoriteCategory(_) => None,
+        }
+    }
+
+    fn favorite_entity_for_playlist_source_index(
+        &self,
+        source_index: usize,
+    ) -> Option<protocol::FavoriteEntityRef> {
+        let track_path = self.track_paths.get(source_index)?.clone();
+        let metadata = self.track_metadata.get(source_index)?;
+        let (remote_profile_id, remote_item_id) =
+            if let Some(locator) = parse_opensubsonic_track_uri(track_path.as_path()) {
+                (Some(locator.profile_id), Some(locator.song_id))
+            } else {
+                (None, None)
+            };
+        Some(protocol::FavoriteEntityRef {
+            kind: protocol::FavoriteEntityKind::Track,
+            entity_key: Self::favorite_key_for_track_path(track_path.as_path()),
+            display_primary: metadata.title.clone(),
+            display_secondary: format!("{} · {}", metadata.artist, metadata.album),
+            track_path: Some(track_path),
+            remote_profile_id,
+            remote_item_id,
+        })
+    }
+
+    fn current_track_favorite_entity(&self) -> Option<protocol::FavoriteEntityRef> {
+        let playing_path = self.playing_track.path.as_ref()?;
+        let (remote_profile_id, remote_item_id) =
+            if let Some(locator) = parse_opensubsonic_track_uri(playing_path.as_path()) {
+                (Some(locator.profile_id), Some(locator.song_id))
+            } else {
+                (None, None)
+            };
+        let metadata = self.playing_track.metadata.as_ref();
+        Some(protocol::FavoriteEntityRef {
+            kind: protocol::FavoriteEntityKind::Track,
+            entity_key: Self::favorite_key_for_track_path(playing_path.as_path()),
+            display_primary: metadata
+                .map(|m| m.title.clone())
+                .unwrap_or_else(|| "Unknown Title".to_string()),
+            display_secondary: metadata
+                .map(|m| format!("{} · {}", m.artist, m.album))
+                .unwrap_or_default(),
+            track_path: Some(playing_path.clone()),
+            remote_profile_id,
+            remote_item_id,
+        })
+    }
+
     fn is_pure_remote_playlist_id(playlist_id: &str) -> bool {
         playlist_id
             .strip_prefix("remote:opensubsonic:")
@@ -1242,6 +1390,7 @@ impl UiManager {
                 LibraryEntry::Album(album) => album.album.to_ascii_lowercase(),
                 LibraryEntry::Genre(genre) => genre.genre.to_ascii_lowercase(),
                 LibraryEntry::Decade(decade) => decade.decade.to_ascii_lowercase(),
+                LibraryEntry::FavoriteCategory(category) => category.title.to_ascii_lowercase(),
             };
             let right_key = match right {
                 LibraryEntry::Track(track) => track.title.to_ascii_lowercase(),
@@ -1249,6 +1398,7 @@ impl UiManager {
                 LibraryEntry::Album(album) => album.album.to_ascii_lowercase(),
                 LibraryEntry::Genre(genre) => genre.genre.to_ascii_lowercase(),
                 LibraryEntry::Decade(decade) => decade.decade.to_ascii_lowercase(),
+                LibraryEntry::FavoriteCategory(category) => category.title.to_ascii_lowercase(),
             };
             let left_kind_rank = match left {
                 LibraryEntry::Artist(_) => 0,
@@ -1256,6 +1406,7 @@ impl UiManager {
                 LibraryEntry::Track(_) => 2,
                 LibraryEntry::Genre(_) => 3,
                 LibraryEntry::Decade(_) => 4,
+                LibraryEntry::FavoriteCategory(_) => 5,
             };
             let right_kind_rank = match right {
                 LibraryEntry::Artist(_) => 0,
@@ -1263,6 +1414,7 @@ impl UiManager {
                 LibraryEntry::Track(_) => 2,
                 LibraryEntry::Genre(_) => 3,
                 LibraryEntry::Decade(_) => 4,
+                LibraryEntry::FavoriteCategory(_) => 5,
             };
             left_key
                 .cmp(&right_key)
@@ -1519,6 +1671,7 @@ impl UiManager {
             last_elapsed_ms: 0,
             last_total_ms: 0,
             playing_track: PlayingTrackState::default(),
+            favorites_by_key: HashMap::new(),
             display_target_priority: DisplayTargetPriority::Playing,
             current_technical_metadata: None,
             current_output_path_info: None,
@@ -1560,7 +1713,7 @@ impl UiManager {
             library_view_indices: Vec::new(),
             library_selected_indices: Vec::new(),
             library_selection_anchor: None,
-            library_root_counts: [0; 5],
+            library_root_counts: [0; 6],
             library_cover_art_paths: HashMap::new(),
             folder_cover_art_paths: HashMap::new(),
             library_enrichment: HashMap::new(),
@@ -2291,9 +2444,15 @@ impl UiManager {
         !column.custom && Self::normalize_column_format(&column.format) == "{album_art}"
     }
 
+    fn is_favorite_builtin_column(column: &PlaylistColumnConfig) -> bool {
+        !column.custom && Self::normalize_column_format(&column.format) == "{favorite}"
+    }
+
     fn playlist_column_kind(column: &PlaylistColumnConfig) -> i32 {
         if Self::is_album_art_builtin_column(column) {
             PLAYLIST_COLUMN_KIND_ALBUM_ART
+        } else if Self::is_favorite_builtin_column(column) {
+            PLAYLIST_COLUMN_KIND_FAVORITE
         } else {
             PLAYLIST_COLUMN_KIND_TEXT
         }
@@ -2352,12 +2511,15 @@ impl UiManager {
     }
 
     fn is_sortable_playlist_column(column: &PlaylistColumnConfig) -> bool {
-        !Self::is_album_art_builtin_column(column)
+        !Self::is_album_art_builtin_column(column) && !Self::is_favorite_builtin_column(column)
     }
 
     fn playlist_column_class(column: &PlaylistColumnConfig) -> PlaylistColumnClass {
         if Self::is_album_art_builtin_column(column) {
             return PlaylistColumnClass::AlbumArt;
+        }
+        if Self::is_favorite_builtin_column(column) {
+            return PlaylistColumnClass::Favorite;
         }
 
         let normalized_format = column.format.trim().to_ascii_lowercase();
@@ -2434,6 +2596,11 @@ impl UiManager {
     fn column_width_profile_for_column(&self, column: &PlaylistColumnConfig) -> ColumnWidthProfile {
         match Self::playlist_column_class(column) {
             PlaylistColumnClass::AlbumArt => self.album_art_column_width_profile(),
+            PlaylistColumnClass::Favorite => ColumnWidthProfile {
+                min_px: 24,
+                preferred_px: 24,
+                max_px: 24,
+            },
             PlaylistColumnClass::TrackNumber => ColumnWidthProfile {
                 min_px: 52,
                 preferred_px: 68,
@@ -2489,7 +2656,7 @@ impl UiManager {
 
     fn column_shrink_priority(class: PlaylistColumnClass) -> u8 {
         match class {
-            PlaylistColumnClass::AlbumArt => 255,
+            PlaylistColumnClass::AlbumArt | PlaylistColumnClass::Favorite => 255,
             PlaylistColumnClass::TrackNumber
             | PlaylistColumnClass::DiscNumber
             | PlaylistColumnClass::YearDate
@@ -2504,7 +2671,7 @@ impl UiManager {
 
     fn auto_growth_headroom_px(class: PlaylistColumnClass) -> u32 {
         match class {
-            PlaylistColumnClass::AlbumArt => 0,
+            PlaylistColumnClass::AlbumArt | PlaylistColumnClass::Favorite => 0,
             PlaylistColumnClass::TrackNumber
             | PlaylistColumnClass::DiscNumber
             | PlaylistColumnClass::YearDate
@@ -2522,7 +2689,10 @@ impl UiManager {
         profile: ColumnWidthProfile,
         content_target_width_px: u32,
     ) -> u32 {
-        if matches!(class, PlaylistColumnClass::AlbumArt) {
+        if matches!(
+            class,
+            PlaylistColumnClass::AlbumArt | PlaylistColumnClass::Favorite
+        ) {
             return profile.max_px;
         }
         content_target_width_px
@@ -2534,6 +2704,7 @@ impl UiManager {
     fn semantic_floor_for_column(class: PlaylistColumnClass, profile: ColumnWidthProfile) -> u32 {
         match class {
             PlaylistColumnClass::AlbumArt => profile.preferred_px,
+            PlaylistColumnClass::Favorite => profile.preferred_px,
             PlaylistColumnClass::TrackNumber => profile.min_px.max(52),
             PlaylistColumnClass::DiscNumber => profile.min_px.max(50),
             PlaylistColumnClass::YearDate => profile.min_px.max(64),
@@ -2552,6 +2723,7 @@ impl UiManager {
         let fallback = profile.min_px.min(64);
         match class {
             PlaylistColumnClass::AlbumArt => profile.preferred_px,
+            PlaylistColumnClass::Favorite => profile.preferred_px,
             PlaylistColumnClass::TrackNumber => 24,
             PlaylistColumnClass::DiscNumber => 24,
             PlaylistColumnClass::YearDate => 36,
@@ -2583,7 +2755,8 @@ impl UiManager {
         let mut targets = Vec::with_capacity(visible_columns.len());
         for column in visible_columns {
             let profile = self.column_width_profile_for_column(column);
-            if Self::is_album_art_builtin_column(column) {
+            if Self::is_album_art_builtin_column(column) || Self::is_favorite_builtin_column(column)
+            {
                 targets.push(profile.preferred_px.clamp(profile.min_px, profile.max_px));
                 continue;
             }
@@ -2648,7 +2821,7 @@ impl UiManager {
         profile: ColumnWidthProfile,
         target_width_px: u32,
     ) -> u32 {
-        if Self::is_album_art_builtin_column(column) {
+        if Self::is_album_art_builtin_column(column) || Self::is_favorite_builtin_column(column) {
             return target_width_px;
         }
         profile.min_px
@@ -2714,7 +2887,8 @@ impl UiManager {
                     .max(min_width_px),
                 emergency_floor_px,
                 shrink_priority: Self::column_shrink_priority(class),
-                fixed_width: Self::is_album_art_builtin_column(column),
+                fixed_width: Self::is_album_art_builtin_column(column)
+                    || Self::is_favorite_builtin_column(column),
             });
         }
 
@@ -4419,6 +4593,10 @@ impl UiManager {
                 Self::library_text_matches_search(&decade.decade, normalized_query)
                     || decade.track_count.to_string().contains(normalized_query)
             }
+            LibraryEntry::FavoriteCategory(category) => {
+                Self::library_text_matches_search(&category.title, normalized_query)
+                    || category.count.to_string().contains(normalized_query)
+            }
         }
     }
 
@@ -4753,7 +4931,15 @@ impl UiManager {
             .map(|index| index as i32)
             .unwrap_or(-1);
         let (cover_decode_start, cover_decode_end) = self.playlist_cover_decode_window(rows.len());
-        type TrackRowPayload = (Vec<String>, Option<PathBuf>, String, bool, String, bool);
+        type TrackRowPayload = (
+            Vec<String>,
+            Option<PathBuf>,
+            String,
+            bool,
+            bool,
+            String,
+            bool,
+        );
         let row_data: Vec<TrackRowPayload> = rows
             .into_iter()
             .enumerate()
@@ -4793,10 +4979,17 @@ impl UiManager {
                     .get(row.source_index)
                     .map(|path| Self::source_badge_for_track_path(path.as_path()))
                     .unwrap_or_default();
+                let favorited = self
+                    .track_paths
+                    .get(row.source_index)
+                    .map(|path| Self::favorite_key_for_track_path(path.as_path()))
+                    .map(|key| self.favorites_by_key.contains_key(&key))
+                    .unwrap_or(false);
                 (
                     row.values,
                     album_art_path,
                     source_badge,
+                    favorited,
                     selected_set.contains(&row.source_index),
                     status.to_string(),
                     track_unavailable,
@@ -4806,7 +4999,9 @@ impl UiManager {
 
         let _ = self.ui.upgrade_in_event_loop(move |ui| {
             let mut rows = Vec::with_capacity(row_data.len());
-            for (values, album_art_path, source_badge, selected, status, unavailable) in row_data {
+            for (values, album_art_path, source_badge, favorited, selected, status, unavailable) in
+                row_data
+            {
                 let values_shared: Vec<slint::SharedString> =
                     values.into_iter().map(Into::into).collect();
                 rows.push(TrackRowData {
@@ -4814,6 +5009,7 @@ impl UiManager {
                     values: ModelRc::from(values_shared.as_slice()),
                     album_art: UiManager::load_track_row_cover_art_image(album_art_path.as_ref()),
                     source_badge: source_badge.into(),
+                    favorited,
                     selected,
                     unavailable,
                 });
@@ -4826,6 +5022,7 @@ impl UiManager {
         });
 
         self.sync_filter_state_to_ui();
+        self.sync_now_playing_favorite_state_to_ui();
         self.sync_properties_action_state();
     }
 
@@ -4882,6 +5079,19 @@ impl UiManager {
                 vec_model.set_row_data(row_index, row_data);
             }
             ui.set_playing_track_index(playing_view_index);
+        });
+    }
+
+    fn sync_now_playing_favorite_state_to_ui(&self) {
+        let current_favorite_entity = self.current_track_favorite_entity();
+        let has_current_track_context = current_favorite_entity.is_some();
+        let now_playing_favorited = current_favorite_entity
+            .as_ref()
+            .map(|entity| self.favorites_by_key.contains_key(&entity.entity_key))
+            .unwrap_or(false);
+        let _ = self.ui.upgrade_in_event_loop(move |ui| {
+            ui.set_has_current_track_context(has_current_track_context);
+            ui.set_now_playing_favorited(now_playing_favorited);
         });
     }
 
@@ -5264,6 +5474,9 @@ impl UiManager {
                     format!("decade:{}", decade.decade),
                     decade.track_count as usize,
                 ),
+                LibraryEntry::FavoriteCategory(category) => {
+                    (format!("favorite_category:{}", category.title), 0usize)
+                }
             };
             if seen.insert(key) {
                 total = total.saturating_add(count);
@@ -5379,6 +5592,10 @@ impl UiManager {
             LibraryViewState::AlbumsRoot => Some(LibraryScrollViewKey::AlbumsRoot),
             LibraryViewState::GenresRoot => Some(LibraryScrollViewKey::GenresRoot),
             LibraryViewState::DecadesRoot => Some(LibraryScrollViewKey::DecadesRoot),
+            LibraryViewState::FavoritesRoot => Some(LibraryScrollViewKey::FavoritesRoot),
+            LibraryViewState::FavoriteTracks => Some(LibraryScrollViewKey::FavoriteTracks),
+            LibraryViewState::FavoriteArtists => Some(LibraryScrollViewKey::FavoriteArtists),
+            LibraryViewState::FavoriteAlbums => Some(LibraryScrollViewKey::FavoriteAlbums),
             LibraryViewState::GlobalSearch => Some(LibraryScrollViewKey::GlobalSearch),
             LibraryViewState::ArtistDetail { .. }
             | LibraryViewState::AlbumDetail { .. }
@@ -5413,12 +5630,17 @@ impl UiManager {
             Some(LibraryViewState::AlbumsRoot) => 2,
             Some(LibraryViewState::GenresRoot) => 3,
             Some(LibraryViewState::DecadesRoot) => 4,
+            Some(LibraryViewState::FavoritesRoot) => 5,
+            Some(LibraryViewState::FavoriteTracks) => 5,
+            Some(LibraryViewState::FavoriteArtists) => 5,
+            Some(LibraryViewState::FavoriteAlbums) => 5,
             Some(LibraryViewState::GlobalSearch) => match self.library_view_stack.first() {
                 Some(LibraryViewState::TracksRoot) => 0,
                 Some(LibraryViewState::ArtistsRoot) => 1,
                 Some(LibraryViewState::AlbumsRoot) => 2,
                 Some(LibraryViewState::GenresRoot) => 3,
                 Some(LibraryViewState::DecadesRoot) => 4,
+                Some(LibraryViewState::FavoritesRoot) => 5,
                 _ => 0,
             },
             Some(LibraryViewState::ArtistDetail { .. }) => 1,
@@ -5436,6 +5658,10 @@ impl UiManager {
             LibraryViewState::AlbumsRoot => ("Albums".to_string(), String::new()),
             LibraryViewState::GenresRoot => ("Genres".to_string(), String::new()),
             LibraryViewState::DecadesRoot => ("Decades".to_string(), String::new()),
+            LibraryViewState::FavoritesRoot => ("Favorites".to_string(), String::new()),
+            LibraryViewState::FavoriteTracks => ("Favorite Tracks".to_string(), String::new()),
+            LibraryViewState::FavoriteArtists => ("Favorite Artists".to_string(), String::new()),
+            LibraryViewState::FavoriteAlbums => ("Favorite Albums".to_string(), String::new()),
             LibraryViewState::GlobalSearch => ("Global Search".to_string(), String::new()),
             LibraryViewState::ArtistDetail { artist } => (artist.clone(), String::new()),
             LibraryViewState::AlbumDetail {
@@ -5858,7 +6084,7 @@ impl UiManager {
     }
 
     fn prefetch_artist_enrichment_window(&mut self, first_row: usize, row_count: usize) {
-        if !matches!(self.current_library_view(), LibraryViewState::ArtistsRoot) {
+        if !Self::library_view_supports_artist_enrichment_prefetch(&self.current_library_view()) {
             self.retain_pending_detail_entity_only();
             self.replace_prefetch_queue_if_changed(Vec::new());
             self.replace_background_queue_if_changed(Vec::new());
@@ -5960,7 +6186,7 @@ impl UiManager {
         }
         self.maybe_retry_stalled_detail_enrichment();
 
-        if matches!(self.current_library_view(), LibraryViewState::ArtistsRoot) {
+        if Self::library_view_supports_artist_enrichment_prefetch(&self.current_library_view()) {
             let prefetch_row_count = if self.library_artist_prefetch_row_count == 0 {
                 LIBRARY_PREFETCH_FALLBACK_VISIBLE_ROWS
             } else {
@@ -5979,7 +6205,9 @@ impl UiManager {
         let view = self.current_library_view();
         if !matches!(
             view,
-            LibraryViewState::ArtistsRoot | LibraryViewState::GlobalSearch
+            LibraryViewState::ArtistsRoot
+                | LibraryViewState::FavoriteArtists
+                | LibraryViewState::GlobalSearch
         ) {
             return false;
         }
@@ -6207,6 +6435,8 @@ impl UiManager {
             has_album_art,
             source_badge: entry.source_badge.into(),
             is_playing: entry.is_playing,
+            favoritable: entry.favoritable,
+            favorited: entry.favorited,
             selected: entry.selected,
         }
     }
@@ -6394,38 +6624,41 @@ impl UiManager {
             let Some(entry) = entries.get(*index) else {
                 continue;
             };
-            let (key, spec) = match entry {
-                LibraryEntry::Track(track) => (
+            let Some((key, spec)) = (match entry {
+                LibraryEntry::Track(track) => Some((
                     format!("track:{}", track.path.to_string_lossy()),
                     protocol::LibrarySelectionSpec::Track {
                         path: track.path.clone(),
                     },
-                ),
-                LibraryEntry::Artist(artist) => (
+                )),
+                LibraryEntry::Artist(artist) => Some((
                     format!("artist:{}", artist.artist),
                     protocol::LibrarySelectionSpec::Artist {
                         artist: artist.artist.clone(),
                     },
-                ),
-                LibraryEntry::Album(album) => (
+                )),
+                LibraryEntry::Album(album) => Some((
                     format!("album:{}\u{001f}{}", album.album, album.album_artist),
                     protocol::LibrarySelectionSpec::Album {
                         album: album.album.clone(),
                         album_artist: album.album_artist.clone(),
                     },
-                ),
-                LibraryEntry::Genre(genre) => (
+                )),
+                LibraryEntry::Genre(genre) => Some((
                     format!("genre:{}", genre.genre),
                     protocol::LibrarySelectionSpec::Genre {
                         genre: genre.genre.clone(),
                     },
-                ),
-                LibraryEntry::Decade(decade) => (
+                )),
+                LibraryEntry::Decade(decade) => Some((
                     format!("decade:{}", decade.decade),
                     protocol::LibrarySelectionSpec::Decade {
                         decade: decade.decade.clone(),
                     },
-                ),
+                )),
+                LibraryEntry::FavoriteCategory(_) => None,
+            }) else {
+                continue;
             };
             if seen.insert(key) {
                 specs.push(spec);
@@ -6553,78 +6786,93 @@ impl UiManager {
         );
         let global_search_view = matches!(view, LibraryViewState::GlobalSearch);
         match entry {
-            LibraryEntry::Track(track) => LibraryRowPresentation {
-                leading: if compact_track_row_view {
-                    Self::library_track_number_leading(&track.track_number)
-                } else {
-                    String::new()
-                },
-                primary: track.title.clone(),
-                secondary: if compact_track_row_view {
-                    track.artist.clone()
-                } else if global_search_view {
-                    format!("Track • {} • {}", track.artist, track.album)
-                } else {
-                    format!("{} • {}", track.artist, track.album)
-                },
-                item_kind: LIBRARY_ITEM_KIND_SONG,
-                cover_art_path: if compact_track_row_view || !resolve_cover_art {
-                    None
-                } else {
-                    self.resolve_library_cover_art_path(&track.path)
-                },
-                source_badge: Self::source_badge_for_track_path(track.path.as_path()),
-                is_playing: self.playing_track.path.as_ref() == Some(&track.path),
-                selected,
-            },
-            LibraryEntry::Artist(artist) => LibraryRowPresentation {
-                leading: String::new(),
-                primary: artist.artist.clone(),
-                secondary: if global_search_view {
-                    format!(
-                        "Artist • {} albums • {} tracks",
-                        artist.album_count, artist.track_count
-                    )
-                } else {
-                    format!(
-                        "{} albums • {} tracks",
-                        artist.album_count, artist.track_count
-                    )
-                },
-                item_kind: LIBRARY_ITEM_KIND_ARTIST,
-                cover_art_path: if resolve_cover_art {
-                    self.artist_enrichment_image_path(&artist.artist)
-                } else {
-                    None
-                },
-                source_badge: String::new(),
-                is_playing: false,
-                selected,
-            },
-            LibraryEntry::Album(album) => LibraryRowPresentation {
-                leading: String::new(),
-                primary: album.album.clone(),
-                secondary: if global_search_view {
-                    format!(
-                        "Album • {} • {} tracks",
-                        album.album_artist, album.track_count
-                    )
-                } else {
-                    format!("{} • {} tracks", album.album_artist, album.track_count)
-                },
-                item_kind: LIBRARY_ITEM_KIND_ALBUM,
-                cover_art_path: if resolve_cover_art {
-                    album
-                        .representative_track_path
-                        .as_ref()
-                        .and_then(|track_path| self.resolve_library_cover_art_path(track_path))
-                } else {
-                    None
-                },
-                source_badge: String::new(),
-                is_playing: false,
-                selected,
-            },
+            LibraryEntry::Track(track) => {
+                let favorite_key = Self::favorite_key_for_track_path(track.path.as_path());
+                LibraryRowPresentation {
+                    leading: if compact_track_row_view {
+                        Self::library_track_number_leading(&track.track_number)
+                    } else {
+                        String::new()
+                    },
+                    primary: track.title.clone(),
+                    secondary: if compact_track_row_view {
+                        track.artist.clone()
+                    } else if global_search_view {
+                        format!("Track • {} • {}", track.artist, track.album)
+                    } else {
+                        format!("{} • {}", track.artist, track.album)
+                    },
+                    item_kind: LIBRARY_ITEM_KIND_SONG,
+                    cover_art_path: if compact_track_row_view || !resolve_cover_art {
+                        None
+                    } else {
+                        self.resolve_library_cover_art_path(&track.path)
+                    },
+                    source_badge: Self::source_badge_for_track_path(track.path.as_path()),
+                    is_playing: self.playing_track.path.as_ref() == Some(&track.path),
+                    favoritable: true,
+                    favorited: self.favorites_by_key.contains_key(&favorite_key),
+                    selected,
+                }
+            }
+            LibraryEntry::Artist(artist) => {
+                let favorite_key = Self::favorite_key_for_artist(&artist.artist);
+                LibraryRowPresentation {
+                    leading: String::new(),
+                    primary: artist.artist.clone(),
+                    secondary: if global_search_view {
+                        format!(
+                            "Artist • {} albums • {} tracks",
+                            artist.album_count, artist.track_count
+                        )
+                    } else {
+                        format!(
+                            "{} albums • {} tracks",
+                            artist.album_count, artist.track_count
+                        )
+                    },
+                    item_kind: LIBRARY_ITEM_KIND_ARTIST,
+                    cover_art_path: if resolve_cover_art {
+                        self.artist_enrichment_image_path(&artist.artist)
+                    } else {
+                        None
+                    },
+                    source_badge: String::new(),
+                    is_playing: false,
+                    favoritable: true,
+                    favorited: self.favorites_by_key.contains_key(&favorite_key),
+                    selected,
+                }
+            }
+            LibraryEntry::Album(album) => {
+                let favorite_key = Self::favorite_key_for_album(&album.album, &album.album_artist);
+                LibraryRowPresentation {
+                    leading: String::new(),
+                    primary: album.album.clone(),
+                    secondary: if global_search_view {
+                        format!(
+                            "Album • {} • {} tracks",
+                            album.album_artist, album.track_count
+                        )
+                    } else {
+                        format!("{} • {} tracks", album.album_artist, album.track_count)
+                    },
+                    item_kind: LIBRARY_ITEM_KIND_ALBUM,
+                    cover_art_path: if resolve_cover_art {
+                        album
+                            .representative_track_path
+                            .as_ref()
+                            .and_then(|track_path| self.resolve_library_cover_art_path(track_path))
+                    } else {
+                        None
+                    },
+                    source_badge: String::new(),
+                    is_playing: false,
+                    favoritable: true,
+                    favorited: self.favorites_by_key.contains_key(&favorite_key),
+                    selected,
+                }
+            }
             LibraryEntry::Genre(genre) => LibraryRowPresentation {
                 leading: String::new(),
                 primary: genre.genre.clone(),
@@ -6633,6 +6881,8 @@ impl UiManager {
                 cover_art_path: None,
                 source_badge: String::new(),
                 is_playing: false,
+                favoritable: false,
+                favorited: false,
                 selected,
             },
             LibraryEntry::Decade(decade) => LibraryRowPresentation {
@@ -6643,6 +6893,20 @@ impl UiManager {
                 cover_art_path: None,
                 source_badge: String::new(),
                 is_playing: false,
+                favoritable: false,
+                favorited: false,
+                selected,
+            },
+            LibraryEntry::FavoriteCategory(category) => LibraryRowPresentation {
+                leading: String::new(),
+                primary: category.title.clone(),
+                secondary: format!("{} items", category.count),
+                item_kind: Self::item_kind_for_favorite_category(category.kind),
+                cover_art_path: None,
+                source_badge: String::new(),
+                is_playing: false,
+                favoritable: false,
+                favorited: false,
                 selected,
             },
         }
@@ -6875,8 +7139,8 @@ impl UiManager {
             })
             .map(|index| index as i32)
             .unwrap_or(-1);
-        let fetch_capable_view =
-            detail_entity.is_some() || matches!(view, LibraryViewState::ArtistsRoot);
+        let fetch_capable_view = detail_entity.is_some()
+            || Self::library_view_supports_artist_enrichment_prefetch(&view);
         let online_prompt_visible = self.collection_mode == COLLECTION_MODE_LIBRARY
             && fetch_capable_view
             && self.library_online_metadata_prompt_pending;
@@ -6978,6 +7242,7 @@ impl UiManager {
             2 => LibraryViewState::AlbumsRoot,
             3 => LibraryViewState::GenresRoot,
             4 => LibraryViewState::DecadesRoot,
+            5 => LibraryViewState::FavoritesRoot,
             _ => LibraryViewState::TracksRoot,
         };
         self.library_view_stack.clear();
@@ -7036,6 +7301,10 @@ impl UiManager {
             LibraryViewState::AlbumsRoot => protocol::LibraryViewQuery::Albums,
             LibraryViewState::GenresRoot => protocol::LibraryViewQuery::Genres,
             LibraryViewState::DecadesRoot => protocol::LibraryViewQuery::Decades,
+            LibraryViewState::FavoritesRoot => protocol::LibraryViewQuery::FavoritesRoot,
+            LibraryViewState::FavoriteTracks => protocol::LibraryViewQuery::FavoriteTracks,
+            LibraryViewState::FavoriteArtists => protocol::LibraryViewQuery::FavoriteArtists,
+            LibraryViewState::FavoriteAlbums => protocol::LibraryViewQuery::FavoriteAlbums,
             LibraryViewState::GlobalSearch => protocol::LibraryViewQuery::GlobalSearch,
             LibraryViewState::ArtistDetail { artist } => protocol::LibraryViewQuery::ArtistDetail {
                 artist: artist.clone(),
@@ -7071,6 +7340,9 @@ impl UiManager {
             protocol::LibraryEntryPayload::Album(album) => LibraryEntry::Album(album),
             protocol::LibraryEntryPayload::Genre(genre) => LibraryEntry::Genre(genre),
             protocol::LibraryEntryPayload::Decade(decade) => LibraryEntry::Decade(decade),
+            protocol::LibraryEntryPayload::FavoriteCategory(category) => {
+                LibraryEntry::FavoriteCategory(category)
+            }
         }
     }
 
@@ -7125,7 +7397,10 @@ impl UiManager {
                 match entry {
                     LibraryEntry::Album(album) => albums.push(album),
                     LibraryEntry::Track(track) => tracks.push(track),
-                    LibraryEntry::Artist(_) | LibraryEntry::Genre(_) | LibraryEntry::Decade(_) => {}
+                    LibraryEntry::Artist(_)
+                    | LibraryEntry::Genre(_)
+                    | LibraryEntry::Decade(_)
+                    | LibraryEntry::FavoriteCategory(_) => {}
                 }
             }
             final_entries = Self::build_artist_detail_entries(albums, tracks);
@@ -7508,7 +7783,75 @@ impl UiManager {
                 self.request_library_view_data();
                 self.sync_library_ui();
             }
+            LibraryEntry::FavoriteCategory(category) => {
+                self.clear_search_bars_for_track_list_view_switch();
+                self.remember_current_library_scroll_position();
+                let next_view = match category.kind {
+                    protocol::FavoriteEntityKind::Track => LibraryViewState::FavoriteTracks,
+                    protocol::FavoriteEntityKind::Artist => LibraryViewState::FavoriteArtists,
+                    protocol::FavoriteEntityKind::Album => LibraryViewState::FavoriteAlbums,
+                };
+                self.library_view_stack.push(next_view);
+                self.prepare_library_view_transition();
+                self.request_library_view_data();
+                self.sync_library_ui();
+            }
         }
+    }
+
+    fn toggle_favorite_for_library_row(&self, view_row: usize) {
+        let Some(source_index) = self.map_library_view_to_source_index(view_row) else {
+            return;
+        };
+        let Some(entry) = self.library_entries.get(source_index) else {
+            return;
+        };
+        let Some(entity) = self.favorite_entity_for_library_entry(entry) else {
+            return;
+        };
+        let _ = self.bus_sender.send(protocol::Message::Library(
+            protocol::LibraryMessage::ToggleFavorite {
+                entity,
+                desired: None,
+            },
+        ));
+    }
+
+    fn toggle_favorite_for_playlist_row(&self, view_row: usize) {
+        let Some(source_index) = self.map_view_to_source_index(view_row) else {
+            return;
+        };
+        let Some(entity) = self.favorite_entity_for_playlist_source_index(source_index) else {
+            return;
+        };
+        let _ = self.bus_sender.send(protocol::Message::Library(
+            protocol::LibraryMessage::ToggleFavorite {
+                entity,
+                desired: None,
+            },
+        ));
+    }
+
+    fn toggle_favorite_now_playing(&self) {
+        let Some(entity) = self.current_track_favorite_entity() else {
+            return;
+        };
+        let _ = self.bus_sender.send(protocol::Message::Library(
+            protocol::LibraryMessage::ToggleFavorite {
+                entity,
+                desired: None,
+            },
+        ));
+    }
+
+    fn apply_favorites_snapshot(&mut self, items: Vec<protocol::FavoriteEntityRef>) {
+        self.favorites_by_key = items
+            .into_iter()
+            .map(|item| (item.entity_key.clone(), item))
+            .collect();
+        self.rebuild_track_model();
+        self.sync_library_ui();
+        self.sync_now_playing_favorite_state_to_ui();
     }
 
     fn fallback_track_metadata(path: &Path) -> TrackMetadata {
@@ -8332,7 +8675,11 @@ impl UiManager {
         self.refresh_technical_info_ui();
         self.sync_library_add_to_playlist_ui();
         self.sync_library_root_counts_to_ui();
+        self.sync_now_playing_favorite_state_to_ui();
         self.request_library_root_counts();
+        let _ = self.bus_sender.send(protocol::Message::Library(
+            protocol::LibraryMessage::RequestFavoritesSnapshot,
+        ));
         let _ = self.bus_sender.send(protocol::Message::Playlist(
             protocol::PlaylistMessage::RequestPlaylistState,
         ));
@@ -8373,6 +8720,17 @@ impl UiManager {
                                     self.activate_library_item(source_index);
                                 }
                             }
+                            protocol::LibraryMessage::ToggleFavoriteForLibraryRow { row_index } => {
+                                self.toggle_favorite_for_library_row(row_index);
+                            }
+                            protocol::LibraryMessage::ToggleFavoriteForPlaylistRow { view_row } => {
+                                self.toggle_favorite_for_playlist_row(view_row);
+                            }
+                            protocol::LibraryMessage::ToggleFavoriteNowPlaying => {
+                                self.toggle_favorite_now_playing();
+                            }
+                            protocol::LibraryMessage::RequestFavoritesSnapshot => {}
+                            protocol::LibraryMessage::ToggleFavorite { .. } => {}
                             protocol::LibraryMessage::PrepareAddToPlaylists => {
                                 self.prepare_library_add_to_playlists();
                             }
@@ -8506,9 +8864,10 @@ impl UiManager {
                                 albums,
                                 genres,
                                 decades,
+                                favorites,
                             } => {
                                 self.library_root_counts =
-                                    [tracks, artists, albums, genres, decades];
+                                    [tracks, artists, albums, genres, decades, favorites];
                                 self.sync_library_root_counts_to_ui();
                             }
                             protocol::LibraryMessage::GlobalSearchDataResult {
@@ -8672,6 +9031,23 @@ impl UiManager {
                                 self.library_status_text = toast_text.clone();
                                 self.show_library_toast(toast_text);
                                 self.sync_library_ui();
+                            }
+                            protocol::LibraryMessage::FavoritesSnapshot { items } => {
+                                self.apply_favorites_snapshot(items);
+                            }
+                            protocol::LibraryMessage::FavoriteStateChanged {
+                                entity,
+                                favorited,
+                            } => {
+                                if favorited {
+                                    self.favorites_by_key
+                                        .insert(entity.entity_key.clone(), entity);
+                                } else {
+                                    self.favorites_by_key.remove(&entity.entity_key);
+                                }
+                                self.rebuild_track_model();
+                                self.sync_library_ui();
+                                self.sync_now_playing_favorite_state_to_ui();
                             }
                             protocol::LibraryMessage::AddToPlaylistsCompleted {
                                 playlist_count,
@@ -10490,9 +10866,10 @@ mod tests {
                 LibraryEntry::Track(track) => {
                     format!("track:{}\u{001f}{}", track.album, track.title)
                 }
-                LibraryEntry::Artist(_) | LibraryEntry::Genre(_) | LibraryEntry::Decade(_) => {
-                    "unexpected".to_string()
-                }
+                LibraryEntry::Artist(_)
+                | LibraryEntry::Genre(_)
+                | LibraryEntry::Decade(_)
+                | LibraryEntry::FavoriteCategory(_) => "unexpected".to_string(),
             })
             .collect();
 
@@ -10562,7 +10939,9 @@ mod tests {
                 LibraryEntry::Track(track) => format!("track:{}", track.title),
                 LibraryEntry::Artist(artist) => format!("artist:{}", artist.artist),
                 LibraryEntry::Album(album) => format!("album:{}", album.album),
-                LibraryEntry::Genre(_) | LibraryEntry::Decade(_) => "unexpected".to_string(),
+                LibraryEntry::Genre(_)
+                | LibraryEntry::Decade(_)
+                | LibraryEntry::FavoriteCategory(_) => "unexpected".to_string(),
             })
             .collect();
 
@@ -10788,6 +11167,12 @@ mod tests {
             enabled: true,
             custom: false,
         };
+        let favorite = PlaylistColumnConfig {
+            name: "Favorite".to_string(),
+            format: "{favorite}".to_string(),
+            enabled: true,
+            custom: false,
+        };
         let title = PlaylistColumnConfig {
             name: "Title".to_string(),
             format: "{title}".to_string(),
@@ -10796,7 +11181,64 @@ mod tests {
         };
 
         assert!(!UiManager::is_sortable_playlist_column(&album_art));
+        assert!(!UiManager::is_sortable_playlist_column(&favorite));
         assert!(UiManager::is_sortable_playlist_column(&title));
+    }
+
+    #[test]
+    fn test_item_kind_for_favorite_category_uses_entity_kind_specific_icons() {
+        assert_eq!(
+            UiManager::item_kind_for_favorite_category(protocol::FavoriteEntityKind::Track),
+            0
+        );
+        assert_eq!(
+            UiManager::item_kind_for_favorite_category(protocol::FavoriteEntityKind::Artist),
+            1
+        );
+        assert_eq!(
+            UiManager::item_kind_for_favorite_category(protocol::FavoriteEntityKind::Album),
+            2
+        );
+    }
+
+    #[test]
+    fn test_library_view_supports_artist_enrichment_prefetch_for_favorites_artists() {
+        assert!(UiManager::library_view_supports_artist_enrichment_prefetch(
+            &LibraryViewState::ArtistsRoot
+        ));
+        assert!(UiManager::library_view_supports_artist_enrichment_prefetch(
+            &LibraryViewState::FavoriteArtists
+        ));
+        assert!(
+            !UiManager::library_view_supports_artist_enrichment_prefetch(
+                &LibraryViewState::AlbumsRoot
+            )
+        );
+    }
+
+    #[test]
+    fn test_playlist_column_class_identifies_favorite_builtin() {
+        let favorite = PlaylistColumnConfig {
+            name: "Favorite".to_string(),
+            format: "{favorite}".to_string(),
+            enabled: true,
+            custom: false,
+        };
+        let custom_favorite = PlaylistColumnConfig {
+            name: "Favorite".to_string(),
+            format: "{favorite}".to_string(),
+            enabled: true,
+            custom: true,
+        };
+
+        assert_eq!(
+            UiManager::playlist_column_class(&favorite),
+            PlaylistColumnClass::Favorite
+        );
+        assert_eq!(
+            UiManager::playlist_column_class(&custom_favorite),
+            PlaylistColumnClass::Custom
+        );
     }
 
     #[test]

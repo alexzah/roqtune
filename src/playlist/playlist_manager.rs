@@ -959,25 +959,6 @@ impl PlaylistManager {
         }
     }
 
-    fn broadcast_active_playlist_column_order(&self) {
-        match self
-            .db_manager
-            .get_playlist_column_order(&self.active_playlist_id)
-        {
-            Ok(order) => {
-                let _ = self.bus_producer.send(protocol::Message::Playlist(
-                    protocol::PlaylistMessage::ActivePlaylistColumnOrder(order),
-                ));
-            }
-            Err(err) => {
-                error!(
-                    "Failed to load playlist column order for {}: {}",
-                    self.active_playlist_id, err
-                );
-            }
-        }
-    }
-
     fn snapshot_editing_playlist_tracks(&self) -> Vec<protocol::RestoredTrack> {
         (0..self.editing_playlist.num_tracks())
             .map(|index| {
@@ -1005,7 +986,8 @@ impl PlaylistManager {
             let _ = self.bus_producer.send(protocol::Message::Playlist(
                 protocol::PlaylistMessage::ActivePlaylistChanged(self.active_playlist_id.clone()),
             ));
-            self.broadcast_active_playlist_column_order();
+            // Column layout is global (`layout.toml`), so switching active playlists must not
+            // trigger playlist-scoped column-order reloads.
         }
     }
 
@@ -2444,7 +2426,6 @@ impl PlaylistManager {
                         let _ = self.bus_producer.send(protocol::Message::Playlist(
                             protocol::PlaylistMessage::ActivePlaylistChanged(id),
                         ));
-                        self.broadcast_active_playlist_column_order();
                         self.broadcast_playlist_changed();
                     }
                     protocol::Message::Integration(
@@ -2569,30 +2550,6 @@ impl PlaylistManager {
                                 );
                             }
                         }
-                    }
-                    protocol::Message::Playlist(
-                        protocol::PlaylistMessage::SetActivePlaylistColumnOrder(column_order),
-                    ) => {
-                        if self.active_playlist_id.is_empty() {
-                            continue;
-                        }
-                        if let Err(err) = self
-                            .db_manager
-                            .set_playlist_column_order(&self.active_playlist_id, &column_order)
-                        {
-                            error!(
-                                "Failed to persist playlist column order for {}: {}",
-                                self.active_playlist_id, err
-                            );
-                        }
-                    }
-                    protocol::Message::Playlist(
-                        protocol::PlaylistMessage::RequestActivePlaylistColumnOrder,
-                    ) => {
-                        if self.active_playlist_id.is_empty() {
-                            continue;
-                        }
-                        self.broadcast_active_playlist_column_order();
                     }
                     protocol::Message::Audio(protocol::AudioMessage::TrackCached(id, offset)) => {
                         if self.playback_route == protocol::PlaybackRoute::Cast {

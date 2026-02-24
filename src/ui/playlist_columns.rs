@@ -13,6 +13,8 @@ use crate::{
     AppWindow,
 };
 
+const FAVORITE_COLUMN_WIDTH_PX: i32 = 24;
+
 /// Normalizes a column format token for stable comparisons and keys.
 pub(crate) fn normalize_column_format(format: &str) -> String {
     format.trim().to_ascii_lowercase()
@@ -23,10 +25,17 @@ pub(crate) fn is_album_art_builtin_column(column: &PlaylistColumnConfig) -> bool
     !column.custom && normalize_column_format(&column.format) == "{album_art}"
 }
 
+/// Returns `true` when a column is the built-in favorite-button placeholder column.
+pub(crate) fn is_favorite_builtin_column(column: &PlaylistColumnConfig) -> bool {
+    !column.custom && normalize_column_format(&column.format) == "{favorite}"
+}
+
 /// Maps a column to its UI kind code used by Slint models.
 pub(crate) fn playlist_column_kind(column: &PlaylistColumnConfig) -> i32 {
     if is_album_art_builtin_column(column) {
         crate::PLAYLIST_COLUMN_KIND_ALBUM_ART
+    } else if is_favorite_builtin_column(column) {
+        crate::PLAYLIST_COLUMN_KIND_FAVORITE
     } else {
         crate::PLAYLIST_COLUMN_KIND_TEXT
     }
@@ -119,11 +128,6 @@ pub(crate) fn playlist_column_key(column: &PlaylistColumnConfig) -> String {
     }
 }
 
-/// Returns stable keys for the given playlist column list.
-pub(crate) fn playlist_column_order_keys(columns: &[PlaylistColumnConfig]) -> Vec<String> {
-    columns.iter().map(playlist_column_key).collect()
-}
-
 #[derive(Clone, Copy)]
 /// Pixel bounds for a playlist column width.
 pub(crate) struct ColumnWidthBounds {
@@ -157,6 +161,12 @@ pub(crate) fn playlist_column_width_bounds_with_album_art(
 ) -> ColumnWidthBounds {
     if is_album_art_builtin_column(column) {
         return album_art_bounds;
+    }
+    if is_favorite_builtin_column(column) {
+        return ColumnWidthBounds {
+            min_px: FAVORITE_COLUMN_WIDTH_PX,
+            max_px: FAVORITE_COLUMN_WIDTH_PX,
+        };
     }
 
     let normalized_format = column.format.trim().to_ascii_lowercase();
@@ -424,31 +434,6 @@ pub(crate) fn reorder_visible_playlist_columns(
     reordered
 }
 
-/// Applies a persisted column-order key list to a current column list.
-pub(crate) fn apply_column_order_keys(
-    columns: &[PlaylistColumnConfig],
-    column_order_keys: &[String],
-) -> Vec<PlaylistColumnConfig> {
-    if column_order_keys.is_empty() {
-        return columns.to_vec();
-    }
-
-    let mut remaining: Vec<PlaylistColumnConfig> = columns.to_vec();
-    let mut reordered: Vec<PlaylistColumnConfig> = Vec::with_capacity(columns.len());
-
-    for key in column_order_keys {
-        if let Some(index) = remaining
-            .iter()
-            .position(|column| playlist_column_key(column) == *key)
-        {
-            reordered.push(remaining.remove(index));
-        }
-    }
-
-    reordered.extend(remaining);
-    reordered
-}
-
 /// Extracts column widths from a Slint model into a plain vector.
 pub(crate) fn playlist_column_widths_from_model(widths_model: ModelRc<i32>) -> Vec<i32> {
     (0..widths_model.row_count())
@@ -543,8 +528,8 @@ mod tests {
     use crate::config::PlaylistColumnConfig;
 
     use super::{
-        apply_column_order_keys, clamp_width_for_visible_column,
-        default_album_art_column_width_bounds, is_album_art_builtin_column,
+        clamp_width_for_visible_column, default_album_art_column_width_bounds,
+        is_album_art_builtin_column, is_favorite_builtin_column,
         playlist_column_key_at_visible_index, playlist_column_width_bounds,
         playlist_column_width_bounds_with_album_art, playlist_column_widths_from_model,
         reorder_visible_playlist_columns, resolve_playlist_header_column_from_x,
@@ -595,47 +580,6 @@ mod tests {
                 "{title}".to_string(),
                 "{artist}".to_string(),
                 "{track_number}".to_string(),
-            ]
-        );
-    }
-
-    #[test]
-    fn test_apply_column_order_keys_prioritizes_saved_order_and_appends_unknowns() {
-        let columns = vec![
-            PlaylistColumnConfig {
-                name: "Title".to_string(),
-                format: "{title}".to_string(),
-                enabled: true,
-                custom: false,
-            },
-            PlaylistColumnConfig {
-                name: "Artist".to_string(),
-                format: "{artist}".to_string(),
-                enabled: true,
-                custom: false,
-            },
-            PlaylistColumnConfig {
-                name: "Mood".to_string(),
-                format: "{mood}".to_string(),
-                enabled: true,
-                custom: true,
-            },
-        ];
-        let order = vec![
-            "custom:Mood|{mood}".to_string(),
-            "{title}".to_string(),
-            "{missing}".to_string(),
-        ];
-
-        let applied = apply_column_order_keys(&columns, &order);
-        let applied_formats: Vec<String> =
-            applied.iter().map(|column| column.format.clone()).collect();
-        assert_eq!(
-            applied_formats,
-            vec![
-                "{mood}".to_string(),
-                "{title}".to_string(),
-                "{artist}".to_string(),
             ]
         );
     }
@@ -708,6 +652,19 @@ mod tests {
     }
 
     #[test]
+    fn test_playlist_column_width_bounds_for_favorite_column_are_fixed() {
+        let favorite_column = PlaylistColumnConfig {
+            name: "Favorite".to_string(),
+            format: "{favorite}".to_string(),
+            enabled: true,
+            custom: false,
+        };
+
+        let bounds = playlist_column_width_bounds(&favorite_column);
+        assert_eq!((bounds.min_px, bounds.max_px), (24, 24));
+    }
+
+    #[test]
     fn test_playlist_column_width_bounds_use_custom_album_art_limits() {
         let album_art_column = PlaylistColumnConfig {
             name: "Album Art".to_string(),
@@ -752,6 +709,32 @@ mod tests {
     }
 
     #[test]
+    fn test_is_favorite_builtin_column_requires_builtin_marker() {
+        let builtin_favorite = PlaylistColumnConfig {
+            name: "Favorite".to_string(),
+            format: "{favorite}".to_string(),
+            enabled: true,
+            custom: false,
+        };
+        let custom_favorite = PlaylistColumnConfig {
+            name: "Favorite".to_string(),
+            format: "{favorite}".to_string(),
+            enabled: true,
+            custom: true,
+        };
+        let title_column = PlaylistColumnConfig {
+            name: "Title".to_string(),
+            format: "{title}".to_string(),
+            enabled: true,
+            custom: false,
+        };
+
+        assert!(is_favorite_builtin_column(&builtin_favorite));
+        assert!(!is_favorite_builtin_column(&custom_favorite));
+        assert!(!is_favorite_builtin_column(&title_column));
+    }
+
+    #[test]
     fn test_clamp_width_for_visible_column_respects_column_profile_bounds() {
         let columns = vec![
             PlaylistColumnConfig {
@@ -769,6 +752,12 @@ mod tests {
             PlaylistColumnConfig {
                 name: "Title".to_string(),
                 format: "{title}".to_string(),
+                enabled: true,
+                custom: false,
+            },
+            PlaylistColumnConfig {
+                name: "Favorite".to_string(),
+                format: "{favorite}".to_string(),
                 enabled: true,
                 custom: false,
             },
@@ -798,6 +787,14 @@ mod tests {
         assert_eq!(
             clamp_width_for_visible_column(&columns, 2, 720, album_art_bounds),
             Some(440)
+        );
+        assert_eq!(
+            clamp_width_for_visible_column(&columns, 3, 10, album_art_bounds),
+            Some(24)
+        );
+        assert_eq!(
+            clamp_width_for_visible_column(&columns, 3, 120, album_art_bounds),
+            Some(24)
         );
     }
 

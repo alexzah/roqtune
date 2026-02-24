@@ -3,6 +3,7 @@ export struct TrackRowData {
     values: [string],
     album_art: image,
     source_badge: string,
+    favorited: bool,
     selected: bool,
     unavailable: bool,
 }
@@ -16,6 +17,8 @@ export struct LibraryRowData {
     has_album_art: bool,
     source_badge: string,
     is_playing: bool,
+    favoritable: bool,
+    favorited: bool,
     selected: bool,
 }
 

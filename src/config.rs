@@ -391,6 +391,12 @@ pub fn default_playlist_columns() -> Vec<PlaylistColumnConfig> {
             custom: false,
         },
         PlaylistColumnConfig {
+            name: "Favorite".to_string(),
+            format: "{favorite}".to_string(),
+            enabled: false,
+            custom: false,
+        },
+        PlaylistColumnConfig {
             name: "Album Art".to_string(),
             format: "{album_art}".to_string(),
             enabled: false,

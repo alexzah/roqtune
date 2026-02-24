@@ -13,8 +13,10 @@ use log::{debug, info, warn};
 use tokio::sync::broadcast::{Receiver, Sender};
 
 use crate::db_manager::{
-    DbManager, LibraryScanState, LibraryTrackMetadataUpdate, LibraryTrackScanStub,
+    DbManager, FavoriteSyncQueueEntry, LibraryScanState, LibraryTrackMetadataUpdate,
+    LibraryTrackScanStub,
 };
+use crate::integration_uri::parse_opensubsonic_track_uri;
 use crate::metadata_tags;
 use crate::protocol::{self, IntegrationMessage, LibraryMessage, Message};
 
@@ -170,6 +172,54 @@ impl LibraryManager {
         let mut hasher = std::collections::hash_map::DefaultHasher::new();
         path.hash(&mut hasher);
         format!("lib-{:x}", hasher.finish())
+    }
+
+    fn unix_now_ms() -> i64 {
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|duration| duration.as_millis() as i64)
+            .unwrap_or(0)
+    }
+
+    fn favorite_secondary_for_track(track: &protocol::LibraryTrack) -> String {
+        let artist = track.artist.trim();
+        let album = track.album.trim();
+        if !artist.is_empty() && !album.is_empty() {
+            format!("{artist} · {album}")
+        } else if !artist.is_empty() {
+            artist.to_string()
+        } else {
+            album.to_string()
+        }
+    }
+
+    fn favorite_from_library_track(
+        track: &protocol::LibraryTrack,
+    ) -> Option<protocol::FavoriteEntityRef> {
+        let (entity_key, remote_profile_id, remote_item_id) =
+            if let Some(locator) = parse_opensubsonic_track_uri(track.path.as_path()) {
+                (
+                    format!("os:{}:song:{}", locator.profile_id, locator.song_id),
+                    Some(locator.profile_id),
+                    Some(locator.song_id),
+                )
+            } else if track.path.is_absolute() {
+                (format!("file:{}", track.path.to_string_lossy()), None, None)
+            } else {
+                (format!("uri:{}", track.path.to_string_lossy()), None, None)
+            };
+        if entity_key.trim().is_empty() {
+            return None;
+        }
+        Some(protocol::FavoriteEntityRef {
+            kind: protocol::FavoriteEntityKind::Track,
+            entity_key,
+            display_primary: track.title.clone(),
+            display_secondary: Self::favorite_secondary_for_track(track),
+            track_path: Some(track.path.clone()),
+            remote_profile_id,
+            remote_item_id,
+        })
     }
 
     fn normalize_sort_key(value: &str, fallback: &str) -> String {
@@ -701,6 +751,13 @@ impl LibraryManager {
                 return;
             }
         };
+        let favorites = match self.db_manager.get_favorites_count() {
+            Ok(count) => count,
+            Err(err) => {
+                warn!("Failed to load favorites count: {}", err);
+                return;
+            }
+        };
 
         let _ = self
             .bus_producer
@@ -710,7 +767,323 @@ impl LibraryManager {
                 albums,
                 genres,
                 decades,
+                favorites,
             }));
+    }
+
+    fn publish_favorites_snapshot(&self) {
+        match self.db_manager.get_all_favorites() {
+            Ok(items) => {
+                let _ =
+                    self.bus_producer
+                        .send(Message::Library(LibraryMessage::FavoritesSnapshot {
+                            items,
+                        }));
+            }
+            Err(err) => {
+                self.send_scan_failed(format!("Failed to load favorites snapshot: {}", err))
+            }
+        }
+    }
+
+    fn publish_favorites_root_page(&self, request_id: u64, offset: usize, limit: usize) {
+        let track_count = self
+            .db_manager
+            .get_favorites_count_by_kind(protocol::FavoriteEntityKind::Track)
+            .unwrap_or(0);
+        let artist_count = self
+            .db_manager
+            .get_favorites_count_by_kind(protocol::FavoriteEntityKind::Artist)
+            .unwrap_or(0);
+        let album_count = self
+            .db_manager
+            .get_favorites_count_by_kind(protocol::FavoriteEntityKind::Album)
+            .unwrap_or(0);
+        let all_rows = vec![
+            protocol::LibraryEntryPayload::FavoriteCategory(protocol::FavoriteCategory {
+                kind: protocol::FavoriteEntityKind::Track,
+                title: "Favorite Tracks".to_string(),
+                count: track_count,
+            }),
+            protocol::LibraryEntryPayload::FavoriteCategory(protocol::FavoriteCategory {
+                kind: protocol::FavoriteEntityKind::Artist,
+                title: "Favorite Artists".to_string(),
+                count: artist_count,
+            }),
+            protocol::LibraryEntryPayload::FavoriteCategory(protocol::FavoriteCategory {
+                kind: protocol::FavoriteEntityKind::Album,
+                title: "Favorite Albums".to_string(),
+                count: album_count,
+            }),
+        ];
+        let total = all_rows.len();
+        let entries = all_rows
+            .into_iter()
+            .skip(offset)
+            .take(limit.max(1))
+            .collect();
+        let _ = self
+            .bus_producer
+            .send(Message::Library(LibraryMessage::LibraryPageResult {
+                request_id,
+                total,
+                entries,
+            }));
+    }
+
+    fn publish_favorite_entities_page(
+        &self,
+        request_id: u64,
+        kind: protocol::FavoriteEntityKind,
+        offset: usize,
+        limit: usize,
+    ) {
+        let result = self
+            .db_manager
+            .get_favorites_page_by_kind(kind, offset, limit.max(1));
+        match result {
+            Ok((favorites, total)) => {
+                let entries = favorites
+                    .into_iter()
+                    .map(|favorite| match favorite.kind {
+                        protocol::FavoriteEntityKind::Track => {
+                            let track_path = favorite.track_path.unwrap_or_else(|| {
+                                PathBuf::from(favorite.entity_key.trim_start_matches("file:"))
+                            });
+                            protocol::LibraryEntryPayload::Track(protocol::LibraryTrack {
+                                id: favorite.entity_key.clone(),
+                                path: track_path,
+                                title: favorite.display_primary.clone(),
+                                artist: favorite.display_secondary.clone(),
+                                album: String::new(),
+                                album_artist: String::new(),
+                                genre: String::new(),
+                                year: String::new(),
+                                track_number: String::new(),
+                            })
+                        }
+                        protocol::FavoriteEntityKind::Artist => {
+                            let (album_count, track_count) = match self
+                                .db_manager
+                                .get_library_artist_detail(&favorite.display_primary)
+                            {
+                                Ok((albums, tracks)) => (albums.len() as u32, tracks.len() as u32),
+                                Err(err) => {
+                                    warn!(
+                                        "Failed to load artist favorite detail for '{}': {}",
+                                        favorite.display_primary, err
+                                    );
+                                    (0, 0)
+                                }
+                            };
+                            protocol::LibraryEntryPayload::Artist(protocol::LibraryArtist {
+                                artist: favorite.display_primary.clone(),
+                                album_count,
+                                track_count,
+                            })
+                        }
+                        protocol::FavoriteEntityKind::Album => {
+                            let (track_count, representative_track_path) =
+                                match self.db_manager.get_library_album_tracks(
+                                    &favorite.display_primary,
+                                    &favorite.display_secondary,
+                                ) {
+                                    Ok(tracks) => {
+                                        let representative_track_path =
+                                            tracks.first().map(|track| track.path.clone());
+                                        (tracks.len() as u32, representative_track_path)
+                                    }
+                                    Err(err) => {
+                                        warn!(
+                                        "Failed to load album favorite detail for '{} / {}': {}",
+                                        favorite.display_primary, favorite.display_secondary, err
+                                    );
+                                        (0, None)
+                                    }
+                                };
+                            protocol::LibraryEntryPayload::Album(protocol::LibraryAlbum {
+                                album: favorite.display_primary.clone(),
+                                album_artist: favorite.display_secondary.clone(),
+                                track_count,
+                                representative_track_path,
+                            })
+                        }
+                    })
+                    .collect();
+                let _ =
+                    self.bus_producer
+                        .send(Message::Library(LibraryMessage::LibraryPageResult {
+                            request_id,
+                            total,
+                            entries,
+                        }));
+            }
+            Err(err) => self.send_scan_failed(format!("Failed to load favorites page: {}", err)),
+        }
+    }
+
+    fn queue_track_favorite_sync(
+        &self,
+        favorite: &protocol::FavoriteEntityRef,
+        favorited: bool,
+        updated_unix_ms: i64,
+    ) {
+        let (Some(remote_profile_id), Some(remote_item_id)) = (
+            favorite.remote_profile_id.as_deref(),
+            favorite.remote_item_id.as_deref(),
+        ) else {
+            return;
+        };
+        if self
+            .db_manager
+            .upsert_favorite_sync_queue(
+                protocol::FavoriteEntityKind::Track,
+                &favorite.entity_key,
+                remote_profile_id,
+                remote_item_id,
+                favorited,
+                updated_unix_ms,
+            )
+            .is_err()
+        {
+            return;
+        }
+        let _ = self.bus_producer.send(Message::Integration(
+            IntegrationMessage::PushOpenSubsonicTrackFavoriteUpdate {
+                profile_id: remote_profile_id.to_string(),
+                song_id: remote_item_id.to_string(),
+                favorited,
+                entity_key: favorite.entity_key.clone(),
+            },
+        ));
+    }
+
+    fn apply_toggle_favorite(
+        &self,
+        favorite: protocol::FavoriteEntityRef,
+        desired: Option<bool>,
+    ) -> Result<(), String> {
+        let is_currently_favorited = self
+            .db_manager
+            .is_favorited(&favorite.entity_key)
+            .map_err(|err| format!("Failed to query favorite state: {}", err))?;
+        let next_favorited = desired.unwrap_or(!is_currently_favorited);
+        let now = Self::unix_now_ms();
+        if next_favorited {
+            self.db_manager
+                .upsert_favorite(&favorite, "local", now)
+                .map_err(|err| format!("Failed to save favorite: {}", err))?;
+        } else {
+            self.db_manager
+                .remove_favorite(&favorite.entity_key)
+                .map_err(|err| format!("Failed to remove favorite: {}", err))?;
+        }
+        if favorite.kind == protocol::FavoriteEntityKind::Track {
+            self.queue_track_favorite_sync(&favorite, next_favorited, now);
+        }
+        let _ = self
+            .bus_producer
+            .send(Message::Library(LibraryMessage::FavoriteStateChanged {
+                entity: favorite,
+                favorited: next_favorited,
+            }));
+        self.publish_root_counts();
+        self.publish_favorites_snapshot();
+        Ok(())
+    }
+
+    fn process_pending_favorite_sync_for_profile(&self, profile_id: &str) {
+        let queued = match self
+            .db_manager
+            .list_favorite_sync_queue_for_profile(profile_id)
+        {
+            Ok(rows) => rows,
+            Err(err) => {
+                warn!(
+                    "Failed to load pending favorite sync queue for profile {}: {}",
+                    profile_id, err
+                );
+                return;
+            }
+        };
+        for FavoriteSyncQueueEntry {
+            entity_kind,
+            entity_key,
+            remote_profile_id,
+            remote_item_id,
+            desired_favorited,
+            ..
+        } in queued
+        {
+            if entity_kind != protocol::FavoriteEntityKind::Track {
+                continue;
+            }
+            let _ = self.bus_producer.send(Message::Integration(
+                IntegrationMessage::PushOpenSubsonicTrackFavoriteUpdate {
+                    profile_id: remote_profile_id,
+                    song_id: remote_item_id,
+                    favorited: desired_favorited,
+                    entity_key,
+                },
+            ));
+        }
+    }
+
+    fn merge_remote_favorite_tracks(
+        &self,
+        profile_id: &str,
+        tracks: &[protocol::LibraryTrack],
+    ) -> Result<(), String> {
+        let mut favorites = Vec::new();
+        for track in tracks {
+            if let Some(favorite) = Self::favorite_from_library_track(track) {
+                favorites.push(favorite);
+            }
+        }
+        let protected_queue_entries = self
+            .db_manager
+            .list_favorite_sync_queue_for_profile(profile_id)
+            .map_err(|err| format!("Failed to load favorite queue for merge: {}", err))?;
+        let protected_entity_keys: HashSet<String> = protected_queue_entries
+            .iter()
+            .filter(|entry| entry.entity_kind == protocol::FavoriteEntityKind::Track)
+            .map(|entry| entry.entity_key.clone())
+            .collect();
+        self.db_manager
+            .replace_remote_track_favorites_for_profile(
+                profile_id,
+                &favorites,
+                &protected_entity_keys,
+                Self::unix_now_ms(),
+            )
+            .map_err(|err| format!("Failed to merge remote favorite tracks: {}", err))?;
+        self.publish_root_counts();
+        self.publish_favorites_snapshot();
+        Ok(())
+    }
+
+    fn handle_favorite_sync_result(
+        &self,
+        profile_id: &str,
+        entity_key: &str,
+        success: bool,
+        error: Option<&str>,
+    ) {
+        if success {
+            let _ = self.db_manager.remove_favorite_sync_queue_entry(
+                profile_id,
+                protocol::FavoriteEntityKind::Track,
+                entity_key,
+            );
+        } else {
+            let _ = self.db_manager.mark_favorite_sync_queue_failure(
+                profile_id,
+                protocol::FavoriteEntityKind::Track,
+                entity_key,
+                error.unwrap_or("favorite sync failed"),
+                Self::unix_now_ms(),
+            );
+        }
     }
 
     fn publish_artist_detail(&self, artist: String) {
@@ -844,6 +1217,37 @@ impl LibraryManager {
                     )
                 })
                 .map_err(|err| format!("Failed to load decades page: {}", err)),
+            protocol::LibraryViewQuery::FavoritesRoot => {
+                self.publish_favorites_root_page(request_id, offset, limit);
+                return;
+            }
+            protocol::LibraryViewQuery::FavoriteTracks => {
+                self.publish_favorite_entities_page(
+                    request_id,
+                    protocol::FavoriteEntityKind::Track,
+                    offset,
+                    limit,
+                );
+                return;
+            }
+            protocol::LibraryViewQuery::FavoriteArtists => {
+                self.publish_favorite_entities_page(
+                    request_id,
+                    protocol::FavoriteEntityKind::Artist,
+                    offset,
+                    limit,
+                );
+                return;
+            }
+            protocol::LibraryViewQuery::FavoriteAlbums => {
+                self.publish_favorite_entities_page(
+                    request_id,
+                    protocol::FavoriteEntityKind::Album,
+                    offset,
+                    limit,
+                );
+                return;
+            }
             protocol::LibraryViewQuery::GlobalSearch => self
                 .db_manager
                 .get_library_tracks()
@@ -877,6 +1281,9 @@ impl LibraryManager {
                             protocol::LibraryEntryPayload::Decade(decade) => {
                                 decade.decade.to_ascii_lowercase()
                             }
+                            protocol::LibraryEntryPayload::FavoriteCategory(category) => {
+                                category.title.to_ascii_lowercase()
+                            }
                         };
                         let right_key = match right {
                             protocol::LibraryEntryPayload::Track(track) => {
@@ -894,6 +1301,9 @@ impl LibraryManager {
                             protocol::LibraryEntryPayload::Decade(decade) => {
                                 decade.decade.to_ascii_lowercase()
                             }
+                            protocol::LibraryEntryPayload::FavoriteCategory(category) => {
+                                category.title.to_ascii_lowercase()
+                            }
                         };
                         let left_kind_rank = match left {
                             protocol::LibraryEntryPayload::Artist(_) => 0,
@@ -901,6 +1311,7 @@ impl LibraryManager {
                             protocol::LibraryEntryPayload::Track(_) => 2,
                             protocol::LibraryEntryPayload::Genre(_) => 3,
                             protocol::LibraryEntryPayload::Decade(_) => 4,
+                            protocol::LibraryEntryPayload::FavoriteCategory(_) => 5,
                         };
                         let right_kind_rank = match right {
                             protocol::LibraryEntryPayload::Artist(_) => 0,
@@ -908,6 +1319,7 @@ impl LibraryManager {
                             protocol::LibraryEntryPayload::Track(_) => 2,
                             protocol::LibraryEntryPayload::Genre(_) => 3,
                             protocol::LibraryEntryPayload::Decade(_) => 4,
+                            protocol::LibraryEntryPayload::FavoriteCategory(_) => 5,
                         };
                         left_key
                             .cmp(&right_key)
@@ -1244,6 +1656,9 @@ impl LibraryManager {
                     Message::Library(LibraryMessage::RequestRootCounts) => {
                         self.publish_root_counts();
                     }
+                    Message::Library(LibraryMessage::RequestFavoritesSnapshot) => {
+                        self.publish_favorites_snapshot();
+                    }
                     Message::Library(LibraryMessage::RequestTracks) => {
                         self.publish_tracks();
                     }
@@ -1289,6 +1704,49 @@ impl LibraryManager {
                         self.publish_tracks();
                         self.publish_global_search_data();
                     }
+                    Message::Integration(
+                        IntegrationMessage::OpenSubsonicFavoriteTracksUpdated {
+                            profile_id,
+                            tracks,
+                        },
+                    ) => {
+                        if let Err(error) = self.merge_remote_favorite_tracks(&profile_id, &tracks)
+                        {
+                            warn!(
+                                "Failed merging OpenSubsonic favorite tracks for profile {}: {}",
+                                profile_id, error
+                            );
+                        }
+                        self.process_pending_favorite_sync_for_profile(&profile_id);
+                    }
+                    Message::Integration(
+                        IntegrationMessage::OpenSubsonicTrackFavoriteUpdateResult {
+                            profile_id,
+                            entity_key,
+                            favorited,
+                            success,
+                            error,
+                            ..
+                        },
+                    ) => {
+                        debug!(
+                            "Favorite sync result profile={} key={} favorited={} success={}",
+                            profile_id, entity_key, favorited, success
+                        );
+                        self.handle_favorite_sync_result(
+                            &profile_id,
+                            &entity_key,
+                            success,
+                            error.as_deref(),
+                        );
+                    }
+                    Message::Integration(IntegrationMessage::ConnectBackendProfile {
+                        profile_id,
+                    })
+                    | Message::Integration(IntegrationMessage::SyncBackendProfile { profile_id }) =>
+                    {
+                        self.process_pending_favorite_sync_for_profile(&profile_id);
+                    }
                     Message::Library(LibraryMessage::DrainScanProgressQueue) => {}
                     Message::Library(LibraryMessage::RequestLibraryPage {
                         request_id,
@@ -1318,6 +1776,11 @@ impl LibraryManager {
                     }
                     Message::Library(LibraryMessage::RemoveSelectionFromLibrary { selections }) => {
                         self.remove_selection_from_library(selections);
+                    }
+                    Message::Library(LibraryMessage::ToggleFavorite { entity, desired }) => {
+                        if let Err(error) = self.apply_toggle_favorite(entity, desired) {
+                            warn!("Failed to apply favorite toggle: {}", error);
+                        }
                     }
                     _ => {}
                 },
