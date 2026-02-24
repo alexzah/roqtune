@@ -8,6 +8,8 @@ use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use std::time::UNIX_EPOCH;
 
 use image::{imageops::FilterType, DynamicImage, GenericImageView, ImageFormat};
+use zune_core::{colorspace::ColorSpace, options::DecoderOptions};
+use zune_jpeg::JpegDecoder;
 
 const PIPELINE_VERSION: &str = "img-v1";
 const DETAIL_PREVIEW_VERSION: &str = "detail-v2";
@@ -122,7 +124,7 @@ fn ensure_parent_dir(path: &Path) -> Option<()> {
 }
 
 fn image_is_decodable(path: &Path) -> bool {
-    image::image_dimensions(path).is_ok()
+    image_dimensions_with_fallback(path).is_some()
 }
 
 fn hash_string(value: &str) -> String {
@@ -161,7 +163,7 @@ pub fn normalize_and_cache_original_bytes(
     source_key: &str,
     bytes: &[u8],
 ) -> Option<PathBuf> {
-    let decoded = image::load_from_memory(bytes).ok()?;
+    let decoded = decode_image_from_memory_with_fallback(bytes)?;
     let stem = hash_string(&format!("{PIPELINE_VERSION}|source-key|{source_key}"));
     let target_path = originals_dir(kind)?.join(format!("{stem}.png"));
     ensure_parent_dir(&target_path)?;
@@ -182,6 +184,46 @@ fn save_png_atomic(image: &DynamicImage, temp_path: &Path, target_path: &Path) -
     image.save_with_format(temp_path, ImageFormat::Png).ok()?;
     fs::rename(temp_path, target_path).ok()?;
     Some(())
+}
+
+fn looks_like_jpeg(bytes: &[u8]) -> bool {
+    bytes.len() >= 2 && bytes[0] == 0xff && bytes[1] == 0xd8
+}
+
+fn decode_jpeg_non_strict(bytes: &[u8]) -> Option<DynamicImage> {
+    if !looks_like_jpeg(bytes) {
+        return None;
+    }
+
+    let options = DecoderOptions::new_cmd()
+        .set_strict_mode(false)
+        .jpeg_set_out_colorspace(ColorSpace::RGBA);
+    let mut decoder = JpegDecoder::new_with_options(bytes, options);
+    let pixels = decoder.decode().ok()?;
+    let (width, height) = decoder.dimensions()?;
+    let image = image::RgbaImage::from_raw(width as u32, height as u32, pixels)?;
+    Some(DynamicImage::ImageRgba8(image))
+}
+
+fn decode_image_from_memory_with_fallback(bytes: &[u8]) -> Option<DynamicImage> {
+    // Preserve broad support for PNG/WebP/GIF/BMP/etc via the primary decoder.
+    // Use non-strict JPEG fallback only when the primary path fails.
+    image::load_from_memory(bytes)
+        .ok()
+        .or_else(|| decode_jpeg_non_strict(bytes))
+}
+
+fn decode_image_from_path_with_fallback(path: &Path) -> Option<DynamicImage> {
+    image::open(path).ok().or_else(|| {
+        let bytes = fs::read(path).ok()?;
+        decode_image_from_memory_with_fallback(&bytes)
+    })
+}
+
+fn image_dimensions_with_fallback(path: &Path) -> Option<(u32, u32)> {
+    image::image_dimensions(path)
+        .ok()
+        .or_else(|| decode_image_from_path_with_fallback(path).map(|decoded| decoded.dimensions()))
 }
 
 fn fit_to_max_edge(width: u32, height: u32, max_edge: u32) -> (u32, u32) {
@@ -291,7 +333,7 @@ pub fn ensure_list_thumbnail(
     if let Some(existing) = list_thumbnail_path_if_present(kind, source_path, max_edge_px) {
         return Some(existing);
     }
-    let decoded = image::open(source_path).ok()?;
+    let decoded = decode_image_from_path_with_fallback(source_path)?;
     let (source_width, source_height) = decoded.dimensions();
     let (target_width, target_height) = fit_to_max_edge(source_width, source_height, max_edge_px);
     let resized = if target_width == source_width && target_height == source_height {
@@ -347,16 +389,19 @@ pub fn ensure_detail_preview_with_threshold(
 ) -> Option<PathBuf> {
     let clamped_max_edge_px = max_edge_px.max(1);
     let clamped_convert_threshold_px = convert_threshold_px.max(clamped_max_edge_px);
-    let (source_width, source_height) = image::image_dimensions(source_path).ok()?;
-    if source_width.max(source_height) <= clamped_convert_threshold_px {
-        return Some(source_path.to_path_buf());
+    let strict_dimensions = image::image_dimensions(source_path).ok();
+    if let Some((source_width, source_height)) = strict_dimensions {
+        if source_width.max(source_height) <= clamped_convert_threshold_px {
+            return Some(source_path.to_path_buf());
+        }
     }
 
     if let Some(existing) = detail_preview_path_if_present(kind, source_path, clamped_max_edge_px) {
         return Some(existing);
     }
 
-    let decoded = image::open(source_path).ok()?;
+    let decoded = decode_image_from_path_with_fallback(source_path)?;
+    let (source_width, source_height) = decoded.dimensions();
     let (target_width, target_height) =
         fit_to_max_edge(source_width, source_height, clamped_max_edge_px);
     let resized = resize_for_detail_display(decoded, target_width, target_height);
@@ -373,7 +418,7 @@ pub fn ensure_detail_preview_with_threshold(
 }
 
 pub fn decoded_rgba_bytes(path: &Path) -> Option<u64> {
-    let (width, height) = image::image_dimensions(path).ok()?;
+    let (width, height) = image_dimensions_with_fallback(path)?;
     Some(u64::from(width) * u64::from(height) * 4u64)
 }
 
@@ -451,8 +496,15 @@ pub fn clear_kind_disk_cache(kind: ManagedImageKind) -> usize {
 
 #[cfg(test)]
 mod tests {
-    use super::{fit_to_max_edge, hash_string, mb_to_bytes, resize_for_detail_display};
-    use image::{DynamicImage, GenericImageView, ImageBuffer, Rgba};
+    use super::{
+        decode_image_from_memory_with_fallback, fit_to_max_edge, hash_string, mb_to_bytes,
+        resize_for_detail_display,
+    };
+    use image::{
+        codecs::jpeg::JpegEncoder, DynamicImage, GenericImageView, ImageBuffer, ImageFormat, Rgb,
+        RgbImage, Rgba,
+    };
+    use std::io::Cursor;
 
     #[test]
     fn test_mb_to_bytes_never_returns_zero() {
@@ -484,5 +536,44 @@ mod tests {
         }));
         let resized = resize_for_detail_display(source, 384, 314);
         assert_eq!(resized.dimensions(), (384, 314));
+    }
+
+    #[test]
+    fn test_decode_image_from_memory_with_fallback_decodes_jpeg_bytes() {
+        let rgb = RgbImage::from_pixel(12, 9, Rgb([90, 140, 210]));
+        let mut encoded = Vec::new();
+        {
+            let mut encoder = JpegEncoder::new_with_quality(&mut encoded, 85);
+            encoder
+                .encode_image(&DynamicImage::ImageRgb8(rgb))
+                .expect("jpeg encoding should succeed");
+        }
+        // Simulate trailing garbage often seen in malformed files.
+        encoded.extend_from_slice(&[0xde, 0xad, 0xbe, 0xef]);
+
+        let decoded = decode_image_from_memory_with_fallback(&encoded)
+            .expect("fallback decoder should decode jpeg bytes");
+        assert_eq!(decoded.dimensions(), (12, 9));
+    }
+
+    #[test]
+    fn test_decode_image_from_memory_with_fallback_rejects_non_image_bytes() {
+        let decoded = decode_image_from_memory_with_fallback(b"definitely-not-an-image");
+        assert!(decoded.is_none());
+    }
+
+    #[test]
+    fn test_decode_image_from_memory_with_fallback_decodes_png_bytes() {
+        let source =
+            DynamicImage::ImageRgba8(ImageBuffer::from_pixel(7, 5, Rgba([8, 16, 24, 255])));
+        let mut cursor = Cursor::new(Vec::<u8>::new());
+        source
+            .write_to(&mut cursor, ImageFormat::Png)
+            .expect("png encoding should succeed");
+        let encoded = cursor.into_inner();
+
+        let decoded = decode_image_from_memory_with_fallback(&encoded)
+            .expect("primary decoder should decode png bytes");
+        assert_eq!(decoded.dimensions(), (7, 5));
     }
 }

@@ -5002,6 +5002,8 @@ dependencies = [
  "urlencoding",
  "uuid",
  "webbrowser",
+ "zune-core 0.4.12",
+ "zune-jpeg 0.4.21",
 ]
 
 [[package]]
