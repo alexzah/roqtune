@@ -1,3 +1,5 @@
+//! Application runtime bootstrap and top-level orchestration.
+
 use std::{
     collections::HashMap,
     path::PathBuf,
@@ -41,6 +43,7 @@ use crate::{
     AppWindow,
 };
 
+/// Owns startup wiring and launches the running Slint application instance.
 pub(crate) struct AppRuntime {
     ui: AppWindow,
     config_state: Arc<Mutex<Config>>,
@@ -49,6 +52,7 @@ pub(crate) struct AppRuntime {
 }
 
 impl AppRuntime {
+    /// Builds the runtime by loading config/layout state and wiring all services/callbacks.
     pub(crate) fn build() -> Result<Self, Box<dyn std::error::Error>> {
         let configured_backend = std::env::var("SLINT_BACKEND").unwrap_or_else(|_| {
             info!("SLINT_BACKEND not set. Defaulting to winit-software");
@@ -368,6 +372,7 @@ impl AppRuntime {
         })
     }
 
+    /// Starts the UI event loop after all runtime services are registered.
     pub(crate) fn run(self) -> Result<(), Box<dyn std::error::Error>> {
         self.ui.run()?;
 

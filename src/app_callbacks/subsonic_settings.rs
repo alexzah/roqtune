@@ -1,3 +1,5 @@
+//! Callback registration for OpenSubsonic settings and session credential flows.
+
 use log::warn;
 
 use crate::{
@@ -14,6 +16,7 @@ use crate::{
     AppWindow,
 };
 
+/// Registers settings callbacks for saving/testing/syncing OpenSubsonic integration state.
 pub(crate) fn register_subsonic_settings_callbacks(ui: &AppWindow, shared_state: &AppSharedState) {
     let shared_state_clone = shared_state.clone();
     ui.on_settings_save_subsonic_profile(move |enabled, endpoint, username, password| {

@@ -1,3 +1,5 @@
+//! Callback registration for file/folder import and library folder management.
+
 use std::{
     cell::{Cell, RefCell},
     path::PathBuf,
@@ -17,6 +19,7 @@ use crate::{
     AppWindow,
 };
 
+/// Registers import and library-folder callbacks on the root app component.
 pub(crate) fn register_imports_library_callbacks(ui: &AppWindow, shared_state: &AppSharedState) {
     let library_folder_import_context = crate::LibraryFolderImportContext {
         shared_state: shared_state.clone(),

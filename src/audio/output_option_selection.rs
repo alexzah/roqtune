@@ -1,3 +1,5 @@
+//! Output device/format option selection and effective runtime config helpers.
+
 use std::collections::BTreeSet;
 
 use cpal::traits::{DeviceTrait, HostTrait};
@@ -43,6 +45,7 @@ fn filter_common_u32(detected: &BTreeSet<u32>, common_values: &[u32], fallback: 
     filtered
 }
 
+/// Picks the first preferred `u16` value present in `detected`, with fallbacks.
 pub(crate) fn choose_preferred_u16(
     detected: &BTreeSet<u16>,
     preferred_values: &[u16],
@@ -57,6 +60,7 @@ pub(crate) fn choose_preferred_u16(
         .unwrap_or(fallback)
 }
 
+/// Picks the first preferred `u32` value present in `detected`, with fallbacks.
 pub(crate) fn choose_preferred_u32(
     detected: &BTreeSet<u32>,
     preferred_values: &[u32],
@@ -71,6 +75,7 @@ pub(crate) fn choose_preferred_u32(
         .unwrap_or(fallback)
 }
 
+/// Resolves effective runtime output values from persisted settings plus auto/override state.
 pub(crate) fn resolve_runtime_config(
     config: &Config,
     output_options: &OutputSettingsOptions,
@@ -95,6 +100,7 @@ pub(crate) fn resolve_runtime_config(
     runtime
 }
 
+/// Resolves a settings dropdown index for string-valued options with an Auto slot at index `0`.
 pub(crate) fn select_output_option_index_string(
     is_auto: bool,
     value: &str,
@@ -111,6 +117,7 @@ pub(crate) fn select_output_option_index_string(
         .unwrap_or(custom_index)
 }
 
+/// Resolves a settings dropdown index for `u16` options with an Auto slot at index `0`.
 pub(crate) fn select_output_option_index_u16(
     is_auto: bool,
     value: u16,
@@ -127,6 +134,7 @@ pub(crate) fn select_output_option_index_u16(
         .unwrap_or(custom_index)
 }
 
+/// Resolves a manual selection index for `u32` options without an Auto slot.
 pub(crate) fn select_manual_output_option_index_u32(
     value: u32,
     values: &[u32],
@@ -175,6 +183,7 @@ fn format_verified_rates_summary(rates: &[u32]) -> String {
     format!("Verified rates: {}", values)
 }
 
+/// Returns a stable, deduplicated snapshot of output device names from a host.
 pub(crate) fn snapshot_output_device_names(host: &cpal::Host) -> Vec<String> {
     let mut device_names = Vec::new();
     if let Ok(devices) = host.output_devices() {
@@ -191,6 +200,7 @@ pub(crate) fn snapshot_output_device_names(host: &cpal::Host) -> Vec<String> {
     device_names
 }
 
+/// Detects available output settings and computes preferred auto defaults.
 pub(crate) fn detect_output_settings_options(config: &Config) -> OutputSettingsOptions {
     const COMMON_SAMPLE_RATES: [u32; 6] = [44_100, 48_000, 88_200, 96_000, 176_400, 192_000];
     const COMMON_CHANNEL_COUNTS: [u16; 4] = [2, 1, 6, 8];

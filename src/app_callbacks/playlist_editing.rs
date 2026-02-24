@@ -1,3 +1,5 @@
+//! Callback registration for playlist track-list editing interactions.
+
 use log::{debug, trace};
 use slint::Model;
 
@@ -7,6 +9,7 @@ use crate::{
     AppWindow,
 };
 
+/// Registers edit/drag/cut/copy/paste callbacks for the playlist and library lists.
 pub(crate) fn register_playlist_editing_callbacks(ui: &AppWindow, shared_state: &AppSharedState) {
     let bus_sender_clone = shared_state.bus_sender.clone();
     let ui_handle_clone = shared_state.ui_handles.ui_handle.clone();

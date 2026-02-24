@@ -1,3 +1,5 @@
+//! Layout-editor state transforms, model syncing, and utility helpers.
+
 use std::{
     collections::{HashMap, HashSet},
     rc::Rc,
@@ -79,6 +81,7 @@ fn layout_leaf_ids(layout: &LayoutConfig) -> Vec<String> {
     ids
 }
 
+/// Returns leaf IDs that exist in `next_layout` but not `previous_layout`.
 pub(crate) fn newly_added_leaf_ids(
     previous_layout: &LayoutConfig,
     next_layout: &LayoutConfig,
@@ -98,6 +101,7 @@ fn sanitize_button_actions(actions: &[i32]) -> Vec<i32> {
         .collect()
 }
 
+/// Returns default button actions for a button-cluster slot index.
 pub(crate) fn default_button_cluster_actions_by_index(index: usize) -> Vec<i32> {
     match index {
         0 => IMPORT_CLUSTER_PRESET.to_vec(),
@@ -107,6 +111,7 @@ pub(crate) fn default_button_cluster_actions_by_index(index: usize) -> Vec<i32> 
     }
 }
 
+/// Sanitizes button-cluster instances against the active layout leaf set.
 pub(crate) fn sanitize_button_cluster_instances(
     layout: &LayoutConfig,
     instances: &[ButtonClusterInstanceConfig],
@@ -141,6 +146,7 @@ pub(crate) fn sanitize_button_cluster_instances(
         .collect()
 }
 
+/// Sanitizes viewer-panel instances against the active layout leaf set.
 pub(crate) fn sanitize_viewer_panel_instances(
     layout: &LayoutConfig,
     instances: &[ViewerPanelInstanceConfig],
@@ -179,11 +185,13 @@ pub(crate) fn sanitize_viewer_panel_instances(
         .collect()
 }
 
+/// Computes sidebar width from current window width with responsive clamping.
 pub(crate) fn sidebar_width_from_window(window_width_px: u32) -> i32 {
     let proportional = ((window_width_px as f32) * 0.24).round() as u32;
     proportional.clamp(180, 300) as i32
 }
 
+/// Returns a non-zero workspace-size snapshot from shared state.
 pub(crate) fn workspace_size_snapshot(workspace_size: &Arc<Mutex<(u32, u32)>>) -> (u32, u32) {
     let (width, height) = *workspace_size
         .lock()
@@ -191,6 +199,7 @@ pub(crate) fn workspace_size_snapshot(workspace_size: &Arc<Mutex<(u32, u32)>>) -
     (width.max(1), height.max(1))
 }
 
+/// Quantizes splitter ratios to two-decimal precision for stable persistence.
 pub(crate) fn quantize_splitter_ratio_to_precision(ratio: f32) -> f32 {
     if !ratio.is_finite() {
         return ratio;
@@ -198,6 +207,7 @@ pub(crate) fn quantize_splitter_ratio_to_precision(ratio: f32) -> f32 {
     (ratio * 100.0).round() / 100.0
 }
 
+/// Returns available layout-panel options shown in the layout editor UI.
 pub(crate) fn layout_panel_options() -> Vec<slint::SharedString> {
     vec![
         "None".into(),
@@ -216,6 +226,7 @@ pub(crate) fn layout_panel_options() -> Vec<slint::SharedString> {
     ]
 }
 
+/// Resolves a panel selection code into a concrete layout panel and optional preset actions.
 pub(crate) fn resolve_layout_panel_selection(
     panel_code: i32,
 ) -> (LayoutPanelKind, Option<Vec<i32>>) {
@@ -240,6 +251,7 @@ pub(crate) fn resolve_layout_panel_selection(
     (LayoutPanelKind::from_code(panel_code), None)
 }
 
+/// Returns button-cluster action IDs configured for a leaf.
 pub(crate) fn button_cluster_actions_for_leaf(
     instances: &[ButtonClusterInstanceConfig],
     leaf_id: &str,
@@ -251,6 +263,7 @@ pub(crate) fn button_cluster_actions_for_leaf(
         .unwrap_or_default()
 }
 
+/// Inserts or updates button-cluster actions for a leaf.
 pub(crate) fn upsert_button_cluster_actions_for_leaf(
     instances: &mut Vec<ButtonClusterInstanceConfig>,
     leaf_id: &str,
@@ -269,6 +282,7 @@ pub(crate) fn upsert_button_cluster_actions_for_leaf(
     });
 }
 
+/// Removes any button-cluster instance bound to a leaf.
 pub(crate) fn remove_button_cluster_instance_for_leaf(
     instances: &mut Vec<ButtonClusterInstanceConfig>,
     leaf_id: &str,
@@ -276,6 +290,7 @@ pub(crate) fn remove_button_cluster_instance_for_leaf(
     instances.retain(|instance| instance.leaf_id != leaf_id);
 }
 
+/// Inserts or updates viewer display priority for a leaf.
 pub(crate) fn upsert_viewer_panel_display_priority_for_leaf(
     instances: &mut Vec<ViewerPanelInstanceConfig>,
     leaf_id: &str,
@@ -296,6 +311,7 @@ pub(crate) fn upsert_viewer_panel_display_priority_for_leaf(
     });
 }
 
+/// Inserts or updates viewer metadata source for a leaf.
 pub(crate) fn upsert_viewer_panel_metadata_source_for_leaf(
     instances: &mut Vec<ViewerPanelInstanceConfig>,
     leaf_id: &str,
@@ -316,6 +332,7 @@ pub(crate) fn upsert_viewer_panel_metadata_source_for_leaf(
     });
 }
 
+/// Inserts or updates viewer image source for a leaf.
 pub(crate) fn upsert_viewer_panel_image_source_for_leaf(
     instances: &mut Vec<ViewerPanelInstanceConfig>,
     leaf_id: &str,
@@ -336,6 +353,7 @@ pub(crate) fn upsert_viewer_panel_image_source_for_leaf(
     });
 }
 
+/// Applies control-cluster action menu models for the target leaf.
 pub(crate) fn apply_control_cluster_menu_actions_for_leaf(
     ui: &AppWindow,
     config: &Config,
@@ -371,6 +389,7 @@ fn apply_button_cluster_views_to_ui(
     ui.set_layout_button_cluster_panels(ModelRc::from(Rc::new(VecModel::from(views))));
 }
 
+/// Converts a viewer display-priority enum to its UI code.
 pub(crate) fn viewer_panel_display_priority_to_code(priority: ViewerPanelDisplayPriority) -> i32 {
     match priority {
         ViewerPanelDisplayPriority::Default => 0,
@@ -381,6 +400,7 @@ pub(crate) fn viewer_panel_display_priority_to_code(priority: ViewerPanelDisplay
     }
 }
 
+/// Converts a UI display-priority code into its enum form.
 pub(crate) fn viewer_panel_display_priority_from_code(priority: i32) -> ViewerPanelDisplayPriority {
     match priority {
         1 => ViewerPanelDisplayPriority::PreferSelection,
@@ -391,6 +411,7 @@ pub(crate) fn viewer_panel_display_priority_from_code(priority: i32) -> ViewerPa
     }
 }
 
+/// Converts a viewer metadata-source enum to its UI code.
 pub(crate) fn viewer_panel_metadata_source_to_code(source: ViewerPanelMetadataSource) -> i32 {
     match source {
         ViewerPanelMetadataSource::Track => 0,
@@ -399,6 +420,7 @@ pub(crate) fn viewer_panel_metadata_source_to_code(source: ViewerPanelMetadataSo
     }
 }
 
+/// Converts a UI metadata-source code into its enum form.
 pub(crate) fn viewer_panel_metadata_source_from_code(source: i32) -> ViewerPanelMetadataSource {
     match source {
         1 => ViewerPanelMetadataSource::AlbumDescription,
@@ -407,6 +429,7 @@ pub(crate) fn viewer_panel_metadata_source_from_code(source: i32) -> ViewerPanel
     }
 }
 
+/// Converts a viewer image-source enum to its UI code.
 pub(crate) fn viewer_panel_image_source_to_code(source: ViewerPanelImageSource) -> i32 {
     match source {
         ViewerPanelImageSource::AlbumArt => 0,
@@ -414,6 +437,7 @@ pub(crate) fn viewer_panel_image_source_to_code(source: ViewerPanelImageSource) 
     }
 }
 
+/// Converts a UI image-source code into its enum form.
 pub(crate) fn viewer_panel_image_source_from_code(source: i32) -> ViewerPanelImageSource {
     match source {
         1 => ViewerPanelImageSource::ArtistImage,
@@ -430,6 +454,7 @@ fn viewer_panel_instance_for_leaf<'a>(
         .find(|instance| instance.leaf_id == leaf_id)
 }
 
+/// Returns viewer display-priority for a leaf with a default fallback.
 pub(crate) fn viewer_panel_display_priority_for_leaf(
     instances: &[ViewerPanelInstanceConfig],
     leaf_id: &str,
@@ -439,6 +464,7 @@ pub(crate) fn viewer_panel_display_priority_for_leaf(
         .unwrap_or_default()
 }
 
+/// Returns viewer metadata-source for a leaf with a default fallback.
 pub(crate) fn viewer_panel_metadata_source_for_leaf(
     instances: &[ViewerPanelInstanceConfig],
     leaf_id: &str,
@@ -448,6 +474,7 @@ pub(crate) fn viewer_panel_metadata_source_for_leaf(
         .unwrap_or_default()
 }
 
+/// Returns viewer image-source for a leaf with a default fallback.
 pub(crate) fn viewer_panel_image_source_for_leaf(
     instances: &[ViewerPanelInstanceConfig],
     leaf_id: &str,
@@ -578,6 +605,7 @@ fn apply_viewer_panel_views_to_ui(
     ui.set_layout_album_art_viewer_panels(ModelRc::from(Rc::new(VecModel::from(album_art_views))));
 }
 
+/// Returns a copy of `previous` with `layout` installed and sanitized.
 pub(crate) fn with_updated_layout(previous: &Config, layout: LayoutConfig) -> Config {
     crate::sanitize_config(Config {
         output: previous.output.clone(),
@@ -607,6 +635,7 @@ pub(crate) fn with_updated_layout(previous: &Config, layout: LayoutConfig) -> Co
     })
 }
 
+/// Pushes a layout snapshot onto a bounded stack.
 pub(crate) fn push_layout_snapshot(stack: &Arc<Mutex<Vec<LayoutConfig>>>, layout: &LayoutConfig) {
     let mut stack = stack.lock().expect("layout history stack lock poisoned");
     stack.push(layout.clone());
@@ -623,6 +652,7 @@ fn clear_layout_snapshot_stack(stack: &Arc<Mutex<Vec<LayoutConfig>>>) {
         .clear();
 }
 
+/// Pushes a layout snapshot to undo history and clears redo history.
 pub(crate) fn push_layout_undo_snapshot(
     undo_stack: &Arc<Mutex<Vec<LayoutConfig>>>,
     redo_stack: &Arc<Mutex<Vec<LayoutConfig>>>,
@@ -632,6 +662,7 @@ pub(crate) fn push_layout_undo_snapshot(
     clear_layout_snapshot_stack(redo_stack);
 }
 
+/// Pops the most recent layout snapshot from a stack.
 pub(crate) fn pop_layout_snapshot(stack: &Arc<Mutex<Vec<LayoutConfig>>>) -> Option<LayoutConfig> {
     stack
         .lock()
@@ -639,6 +670,7 @@ pub(crate) fn pop_layout_snapshot(stack: &Arc<Mutex<Vec<LayoutConfig>>>) -> Opti
         .pop()
 }
 
+/// Reuses an existing `VecModel` when possible, otherwise replaces it with a new one.
 pub(crate) fn update_or_replace_vec_model<T: Clone + 'static>(
     current_model: ModelRc<T>,
     next_values: Vec<T>,
@@ -657,6 +689,7 @@ pub(crate) fn update_or_replace_vec_model<T: Clone + 'static>(
     }
 }
 
+/// Applies layout-derived models and editor state to the root UI.
 pub(crate) fn apply_layout_to_ui(
     ui: &AppWindow,
     config: &Config,

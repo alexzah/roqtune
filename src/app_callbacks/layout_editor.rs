@@ -1,3 +1,5 @@
+//! Callback registration for interactive layout-editing workflows.
+
 use crate::{
     app_config_coordinator::publish_runtime_from_state,
     app_context::AppSharedState,
@@ -9,6 +11,7 @@ use crate::{
     AppWindow,
 };
 
+/// Registers layout-editor callbacks for panel/menu/splitter editing actions.
 pub(crate) fn register_layout_editor_callbacks(ui: &AppWindow, shared_state: &AppSharedState) {
     let config_state_clone = shared_state.config_state.clone();
     let ui_handle_clone = shared_state.ui_handles.ui_handle.clone();

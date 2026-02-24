@@ -1,3 +1,5 @@
+//! Config/layout persistence helpers with comment-preserving TOML updates.
+
 use std::path::{Path, PathBuf};
 
 use log::warn;
@@ -433,6 +435,7 @@ fn merge_table_with_targeted_updates(destination: &mut Table, source: &Table) {
     }
 }
 
+/// Serializes `config` while preserving comments and unrelated keys from `existing_text`.
 pub fn serialize_config_with_preserved_comments(
     existing_text: &str,
     config: &Config,
@@ -446,6 +449,7 @@ pub fn serialize_config_with_preserved_comments(
     Ok(document.to_string())
 }
 
+/// Serializes `layout` while preserving comments and unrelated keys from `existing_text`.
 pub fn serialize_layout_with_preserved_comments(
     existing_text: &str,
     layout: &LayoutConfig,
@@ -463,6 +467,7 @@ pub fn serialize_layout_with_preserved_comments(
     Ok(existing_document.to_string())
 }
 
+/// Persists `config.toml`, preferring comment-preserving updates when possible.
 pub fn persist_config_file(config: &Config, path: &Path) {
     let existing_text = std::fs::read_to_string(path).ok();
     let config_text = if let Some(existing_text) = existing_text {
@@ -491,6 +496,7 @@ pub fn persist_config_file(config: &Config, path: &Path) {
     }
 }
 
+/// Persists `layout.toml`, preferring comment-preserving updates when possible.
 pub fn persist_layout_file(layout: &LayoutConfig, path: &Path) {
     let existing_text = std::fs::read_to_string(path).ok();
     let layout_text = if let Some(existing_text) = existing_text {
@@ -519,11 +525,13 @@ pub fn persist_layout_file(layout: &LayoutConfig, path: &Path) {
     }
 }
 
+/// Persists both config and layout state files to explicit paths.
 pub fn persist_state_files(config: &Config, config_path: &Path, layout_path: &Path) {
     persist_config_file(config, config_path);
     persist_layout_file(&config.ui.layout, layout_path);
 }
 
+/// Persists state files using a config path and a sibling `layout.toml`.
 pub fn persist_state_files_with_config_path(config: &Config, config_path: &Path) {
     let layout_path = config_path
         .parent()
@@ -532,15 +540,18 @@ pub fn persist_state_files_with_config_path(config: &Config, config_path: &Path)
     persist_state_files(config, config_path, &layout_path);
 }
 
+/// Returns the checked-in system layout template text.
 pub fn system_layout_template_text() -> &'static str {
     include_str!("../config/layout.system.toml")
 }
 
+/// Loads and parses the checked-in system layout template.
 pub fn load_system_layout_template() -> LayoutConfig {
     toml::from_str(system_layout_template_text())
         .expect("layout system template should parse into LayoutConfig")
 }
 
+/// Loads `layout.toml`, falling back to the system template on read/parse failure.
 pub fn load_layout_file(path: &Path) -> LayoutConfig {
     let layout_content = match std::fs::read_to_string(path) {
         Ok(content) => content,
@@ -567,6 +578,7 @@ pub fn load_layout_file(path: &Path) -> LayoutConfig {
     }
 }
 
+/// Copies layout-owned playlist column state into legacy UI fields for compatibility.
 pub fn hydrate_ui_columns_from_layout(config: &mut Config) {
     config.ui.playlist_album_art_column_min_width_px =
         config.ui.layout.playlist_album_art_column_min_width_px;

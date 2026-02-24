@@ -1,3 +1,5 @@
+//! Runtime audio-config diffing, snapshots, and bus-delta publication helpers.
+
 use std::sync::{Arc, Mutex};
 
 use tokio::sync::broadcast;
@@ -8,23 +10,32 @@ use crate::{
 };
 
 #[derive(Debug, Clone, Default)]
+/// Runtime-only output overrides that should not be persisted to disk.
 pub struct RuntimeOutputOverride {
+    /// Optional runtime sample-rate override in Hz.
     pub sample_rate_hz: Option<u32>,
 }
 
 #[derive(Debug, Clone)]
+/// Last audio settings acknowledged by runtime workers.
 pub struct RuntimeAudioState {
+    /// Effective output settings currently in use.
     pub output: OutputConfig,
+    /// Effective cast settings currently in use.
     pub cast: CastConfig,
 }
 
 #[derive(Debug, Clone)]
+/// Pending audio settings waiting for runtime apply/ack.
 pub struct StagedAudioSettings {
+    /// Pending output settings.
     pub output: OutputConfig,
+    /// Pending cast settings.
     pub cast: CastConfig,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+/// Signature of runtime output values used for fast change detection.
 pub struct OutputRuntimeSignature {
     output_device_name: String,
     channel_count: u16,
@@ -33,6 +44,7 @@ pub struct OutputRuntimeSignature {
 }
 
 impl OutputRuntimeSignature {
+    /// Builds a signature from an `OutputConfig` snapshot.
     pub fn from_output(output: &OutputConfig) -> Self {
         Self {
             output_device_name: output.output_device_name.clone(),
@@ -43,6 +55,7 @@ impl OutputRuntimeSignature {
     }
 }
 
+/// Clones the current runtime output override from shared state.
 pub fn runtime_output_override_snapshot(
     runtime_output_override: &Arc<Mutex<RuntimeOutputOverride>>,
 ) -> RuntimeOutputOverride {
@@ -52,6 +65,7 @@ pub fn runtime_output_override_snapshot(
     state.clone()
 }
 
+/// Returns `true` when runtime-relevant output preferences changed.
 pub fn output_preferences_changed(previous: &OutputConfig, next: &OutputConfig) -> bool {
     previous.output_device_name != next.output_device_name
         || previous.output_device_auto != next.output_device_auto
@@ -66,11 +80,13 @@ pub fn output_preferences_changed(previous: &OutputConfig, next: &OutputConfig) 
         || previous.downmix_higher_channel_tracks != next.downmix_higher_channel_tracks
 }
 
+/// Returns `true` when runtime-relevant audio settings changed.
 pub fn audio_settings_changed(previous: &Config, next: &Config) -> bool {
     output_preferences_changed(&previous.output, &next.output)
         || previous.cast.allow_transcode_fallback != next.cast.allow_transcode_fallback
 }
 
+/// Computes config delta entries between two config snapshots.
 pub fn config_delta_entries(previous: &Config, next: &Config) -> Vec<ConfigDeltaEntry> {
     let mut deltas = Vec::new();
     if previous.output != next.output {
@@ -94,6 +110,7 @@ pub fn config_delta_entries(previous: &Config, next: &Config) -> Vec<ConfigDelta
     deltas
 }
 
+/// Publishes a `ConfigChanged` delta message when runtime config differs.
 pub fn publish_runtime_config_delta(
     bus_sender: &broadcast::Sender<Message>,
     last_runtime_config: &Arc<Mutex<Config>>,
@@ -114,6 +131,7 @@ pub fn publish_runtime_config_delta(
     true
 }
 
+/// Replaces the last runtime config snapshot with a new value.
 pub fn update_last_runtime_config_snapshot(
     last_runtime_config: &Arc<Mutex<Config>>,
     runtime_config: Config,
@@ -124,6 +142,7 @@ pub fn update_last_runtime_config_snapshot(
     *previous_runtime = runtime_config;
 }
 
+/// Returns `true` when the only effective config change is output sample rate.
 pub fn config_diff_is_runtime_sample_rate_only(previous: &Config, next: &Config) -> bool {
     if previous.cast != next.cast
         || previous.ui != next.ui

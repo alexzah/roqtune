@@ -1,3 +1,5 @@
+//! Helpers for coordinated config persistence, UI refresh, and runtime publish.
+
 use crate::{
     app_context::AppSharedState,
     config::Config,
@@ -16,6 +18,7 @@ fn output_options_snapshot(shared: &AppSharedState) -> crate::OutputSettingsOpti
     options.clone()
 }
 
+/// Applies the current config state snapshot to the active UI, if available.
 pub(crate) fn apply_ui_from_state(shared: &AppSharedState) {
     let config_snapshot = {
         let state = shared
@@ -38,6 +41,7 @@ pub(crate) fn apply_ui_from_state(shared: &AppSharedState) {
     }
 }
 
+/// Publishes runtime-facing config updates derived from persisted state.
 pub(crate) fn publish_runtime_from_state(shared: &AppSharedState, next_config: &Config) {
     let options_snapshot = output_options_snapshot(shared);
     let runtime_override =
@@ -63,6 +67,7 @@ pub(crate) fn publish_runtime_from_state(shared: &AppSharedState, next_config: &
     );
 }
 
+/// Persists and applies a config update, then publishes runtime deltas.
 pub(crate) fn apply_config_update(
     shared: &AppSharedState,
     next_config: Config,

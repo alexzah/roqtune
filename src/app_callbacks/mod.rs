@@ -1,3 +1,5 @@
+//! UI callback registration modules grouped by feature area.
+
 pub mod bus_forwarding;
 pub mod imports_library;
 pub mod layout_editor;

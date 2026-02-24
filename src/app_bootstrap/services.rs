@@ -1,3 +1,5 @@
+//! Background service bootstrap for worker-thread components.
+
 use std::{
     any::Any,
     sync::mpsc::{Receiver, SyncSender},
@@ -23,14 +25,23 @@ use crate::{
     AppWindow,
 };
 
+/// Input parameters required to spawn all background services.
 pub struct BackgroundServicesConfig {
+    /// Shared broadcast bus used for inter-component messaging.
     pub bus_sender: broadcast::Sender<Message>,
+    /// Weak handle used by the UI manager thread to update Slint models.
     pub ui_handle: slint::Weak<AppWindow>,
+    /// Initial online-metadata toggle persisted in config.
     pub initial_online_metadata_enabled: bool,
+    /// Whether the online-metadata consent prompt still needs to be shown.
     pub initial_online_metadata_prompt_pending: bool,
+    /// Channel carrying batched playlist import requests.
     pub playlist_bulk_import_rx: Receiver<protocol::PlaylistBulkImportRequest>,
+    /// Progress producer forwarded into the library manager.
     pub library_scan_progress_tx: SyncSender<protocol::LibraryMessage>,
+    /// Progress consumer consumed by the UI manager.
     pub library_scan_progress_rx: Receiver<protocol::LibraryMessage>,
+    /// Optional OpenSubsonic profile seed to restore during startup.
     pub startup_opensubsonic_seed: Option<(protocol::BackendProfileSnapshot, Option<String>, bool)>,
 }
 
@@ -44,6 +55,7 @@ fn panic_payload_to_string(payload: &(dyn Any + Send)) -> String {
     "non-string panic payload".to_string()
 }
 
+/// Spawns all long-lived background services and wires their bus subscriptions.
 pub fn spawn_background_services(config: BackgroundServicesConfig) {
     let BackgroundServicesConfig {
         bus_sender,

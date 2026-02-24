@@ -1,3 +1,5 @@
+//! Slint-contract regression tests for callback/property wiring.
+
 #[cfg(test)]
 mod tests {
     #[test]

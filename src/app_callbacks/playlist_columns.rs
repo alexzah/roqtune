@@ -1,3 +1,5 @@
+//! Callback registration for playlist column visibility, sizing, and reordering.
+
 use std::{
     sync::{Arc, Mutex},
     time::Instant,
@@ -14,6 +16,7 @@ use crate::{
     AppWindow,
 };
 
+/// Returns `true` when a custom-column delete request matches the active confirmation state.
 pub(crate) fn should_apply_custom_column_delete(
     confirm_dialog_visible: bool,
     pending_index: i32,
@@ -25,6 +28,7 @@ pub(crate) fn should_apply_custom_column_delete(
     pending_index >= 0 && pending_index as usize == requested_index
 }
 
+/// Registers playlist-header and column-settings callbacks on the root app component.
 pub(crate) fn register_playlist_column_callbacks(ui: &AppWindow, shared_state: &AppSharedState) {
     let bus_sender_clone = shared_state.bus_sender.clone();
     ui.on_playlist_columns_viewport_resized(move |width_px| {

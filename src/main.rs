@@ -1,3 +1,5 @@
+//! roqtune binary entrypoint and top-level orchestration glue.
+
 mod app_bootstrap;
 mod app_callbacks;
 mod app_config_coordinator;
@@ -98,6 +100,7 @@ fn setup_app_state_associations(ui: &AppWindow, ui_state: &UiState) {
     >::new()))));
 }
 
+/// Briefly toggles the playlist read-only visual indicator for blocked edits.
 pub(crate) fn flash_read_only_view_indicator(ui_handle: slint::Weak<AppWindow>) {
     if let Some(ui) = ui_handle.upgrade() {
         // Reset first so repeated blocked actions retrigger the highlight reliably.
@@ -111,6 +114,7 @@ pub(crate) fn flash_read_only_view_indicator(ui_handle: slint::Weak<AppWindow>) 
     });
 }
 
+/// Spawns a background debouncer that emits only the latest queued query after inactivity.
 pub(crate) fn spawn_debounced_query_dispatcher(
     debounce_delay: Duration,
     mut dispatch: impl FnMut(String) + Send + 'static,
@@ -140,15 +144,25 @@ pub(crate) fn spawn_debounced_query_dispatcher(
 /// Detected and filtered output-setting choices presented in the settings dialog.
 #[derive(Debug, Clone)]
 pub(crate) struct OutputSettingsOptions {
+    /// Enumerated output device names shown to the user.
     pub(crate) device_names: Vec<String>,
+    /// Auto-selected output device name.
     pub(crate) auto_device_name: String,
+    /// Supported channel-count options.
     pub(crate) channel_values: Vec<u16>,
+    /// Supported sample-rate options.
     pub(crate) sample_rate_values: Vec<u32>,
+    /// Supported bit-depth options.
     pub(crate) bits_per_sample_values: Vec<u16>,
+    /// Sample rates verified by probing the selected device.
     pub(crate) verified_sample_rate_values: Vec<u32>,
+    /// Human-readable summary of verified sample rates.
     pub(crate) verified_sample_rates_summary: String,
+    /// Auto-selected channel-count value.
     pub(crate) auto_channel_value: u16,
+    /// Auto-selected sample-rate value.
     pub(crate) auto_sample_rate_value: u32,
+    /// Auto-selected bit-depth value.
     pub(crate) auto_bits_per_sample_value: u16,
 }
 
@@ -259,6 +273,7 @@ fn add_library_folders_to_config_and_scan(
     added_count
 }
 
+/// Sanitizes loaded config values and normalizes derived fields into safe runtime ranges.
 pub(crate) fn sanitize_config(config: Config) -> Config {
     let sanitized_playlist_columns = sanitize_playlist_columns(&config.ui.playlist_columns);
     let output_device_name = config.output.output_device_name.trim().to_string();
@@ -419,6 +434,7 @@ pub(crate) fn sanitize_config(config: Config) -> Config {
     }
 }
 
+/// Applies a config snapshot to Slint UI properties and models.
 pub(crate) fn apply_config_to_ui(
     ui: &AppWindow,
     config: &Config,

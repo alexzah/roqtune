@@ -1,3 +1,5 @@
+//! Playlist column sanitization, sizing, and header hit-testing helpers.
+
 use std::{
     collections::{HashMap, HashSet},
     rc::Rc,
@@ -11,14 +13,17 @@ use crate::{
     AppWindow,
 };
 
+/// Normalizes a column format token for stable comparisons and keys.
 pub(crate) fn normalize_column_format(format: &str) -> String {
     format.trim().to_ascii_lowercase()
 }
 
+/// Returns `true` when a column is the built-in album-art placeholder column.
 pub(crate) fn is_album_art_builtin_column(column: &PlaylistColumnConfig) -> bool {
     !column.custom && normalize_column_format(&column.format) == "{album_art}"
 }
 
+/// Maps a column to its UI kind code used by Slint models.
 pub(crate) fn playlist_column_kind(column: &PlaylistColumnConfig) -> i32 {
     if is_album_art_builtin_column(column) {
         crate::PLAYLIST_COLUMN_KIND_ALBUM_ART
@@ -27,6 +32,7 @@ pub(crate) fn playlist_column_kind(column: &PlaylistColumnConfig) -> i32 {
     }
 }
 
+/// Returns UI kind codes for currently visible playlist columns.
 pub(crate) fn visible_playlist_column_kinds(columns: &[PlaylistColumnConfig]) -> Vec<i32> {
     columns
         .iter()
@@ -35,6 +41,7 @@ pub(crate) fn visible_playlist_column_kinds(columns: &[PlaylistColumnConfig]) ->
         .collect()
 }
 
+/// Sanitizes playlist columns, restoring missing built-ins and deduplicating entries.
 pub(crate) fn sanitize_playlist_columns(
     columns: &[PlaylistColumnConfig],
 ) -> Vec<PlaylistColumnConfig> {
@@ -103,6 +110,7 @@ pub(crate) fn sanitize_playlist_columns(
     merged_columns
 }
 
+/// Builds a stable storage key for a playlist column definition.
 pub(crate) fn playlist_column_key(column: &PlaylistColumnConfig) -> String {
     if column.custom {
         format!("custom:{}|{}", column.name.trim(), column.format.trim())
@@ -111,16 +119,21 @@ pub(crate) fn playlist_column_key(column: &PlaylistColumnConfig) -> String {
     }
 }
 
+/// Returns stable keys for the given playlist column list.
 pub(crate) fn playlist_column_order_keys(columns: &[PlaylistColumnConfig]) -> Vec<String> {
     columns.iter().map(playlist_column_key).collect()
 }
 
 #[derive(Clone, Copy)]
+/// Pixel bounds for a playlist column width.
 pub(crate) struct ColumnWidthBounds {
+    /// Minimum width in pixels.
     pub(crate) min_px: i32,
+    /// Maximum width in pixels.
     pub(crate) max_px: i32,
 }
 
+/// Returns album-art width bounds derived from current UI config.
 pub(crate) fn album_art_column_width_bounds(ui: &UiConfig) -> ColumnWidthBounds {
     ColumnWidthBounds {
         min_px: ui.playlist_album_art_column_min_width_px as i32,
@@ -129,6 +142,7 @@ pub(crate) fn album_art_column_width_bounds(ui: &UiConfig) -> ColumnWidthBounds 
 }
 
 #[cfg(test)]
+/// Returns default album-art width bounds used by unit tests.
 pub(crate) fn default_album_art_column_width_bounds() -> ColumnWidthBounds {
     ColumnWidthBounds {
         min_px: config::default_playlist_album_art_column_min_width_px() as i32,
@@ -136,6 +150,7 @@ pub(crate) fn default_album_art_column_width_bounds() -> ColumnWidthBounds {
     }
 }
 
+/// Returns width bounds for a column, using album-art overrides when applicable.
 pub(crate) fn playlist_column_width_bounds_with_album_art(
     column: &PlaylistColumnConfig,
     album_art_bounds: ColumnWidthBounds,
@@ -230,10 +245,12 @@ pub(crate) fn playlist_column_width_bounds_with_album_art(
 }
 
 #[cfg(test)]
+/// Returns width bounds for a column using default album-art limits.
 pub(crate) fn playlist_column_width_bounds(column: &PlaylistColumnConfig) -> ColumnWidthBounds {
     playlist_column_width_bounds_with_album_art(column, default_album_art_column_width_bounds())
 }
 
+/// Resolves width bounds for a visible column index.
 pub(crate) fn playlist_column_bounds_at_visible_index(
     columns: &[PlaylistColumnConfig],
     visible_index: usize,
@@ -246,6 +263,7 @@ pub(crate) fn playlist_column_bounds_at_visible_index(
         .map(|column| playlist_column_width_bounds_with_album_art(column, album_art_bounds))
 }
 
+/// Resolves a stable column key for a visible column index.
 pub(crate) fn playlist_column_key_at_visible_index(
     columns: &[PlaylistColumnConfig],
     visible_index: usize,
@@ -257,6 +275,7 @@ pub(crate) fn playlist_column_key_at_visible_index(
         .map(playlist_column_key)
 }
 
+/// Clamps a proposed width for a visible column to its allowed bounds.
 pub(crate) fn clamp_width_for_visible_column(
     columns: &[PlaylistColumnConfig],
     visible_index: usize,
@@ -267,6 +286,7 @@ pub(crate) fn clamp_width_for_visible_column(
     Some(width_px.clamp(bounds.min_px, bounds.max_px.max(bounds.min_px)))
 }
 
+/// Applies playlist column models and width state to the root UI component.
 pub(crate) fn apply_playlist_columns_to_ui(ui: &AppWindow, config: &crate::config::Config) {
     let visible_headers: Vec<slint::SharedString> = config
         .ui
@@ -302,6 +322,7 @@ pub(crate) fn apply_playlist_columns_to_ui(ui: &AppWindow, config: &crate::confi
     ui.set_playlist_column_menu_is_custom(ModelRc::from(Rc::new(VecModel::from(menu_is_custom))));
 }
 
+/// Sanitizes layout-stored width overrides against known columns and bounds.
 pub(crate) fn sanitize_layout_column_width_overrides(
     overrides: &[PlaylistColumnWidthOverrideConfig],
     columns: &[PlaylistColumnConfig],
@@ -337,6 +358,7 @@ pub(crate) fn sanitize_layout_column_width_overrides(
     sanitized
 }
 
+/// Inserts or updates a width override for a given column key.
 pub(crate) fn upsert_layout_column_width_override(
     layout: &mut LayoutConfig,
     column_key: &str,
@@ -358,12 +380,14 @@ pub(crate) fn upsert_layout_column_width_override(
         });
 }
 
+/// Removes any width override stored for the given column key.
 pub(crate) fn clear_layout_column_width_override(layout: &mut LayoutConfig, column_key: &str) {
     layout
         .playlist_column_width_overrides
         .retain(|entry| entry.column_key != column_key);
 }
 
+/// Reorders visible columns while preserving hidden-column relative placement.
 pub(crate) fn reorder_visible_playlist_columns(
     columns: &[PlaylistColumnConfig],
     from_visible_index: usize,
@@ -400,6 +424,7 @@ pub(crate) fn reorder_visible_playlist_columns(
     reordered
 }
 
+/// Applies a persisted column-order key list to a current column list.
 pub(crate) fn apply_column_order_keys(
     columns: &[PlaylistColumnConfig],
     column_order_keys: &[String],
@@ -424,12 +449,14 @@ pub(crate) fn apply_column_order_keys(
     reordered
 }
 
+/// Extracts column widths from a Slint model into a plain vector.
 pub(crate) fn playlist_column_widths_from_model(widths_model: ModelRc<i32>) -> Vec<i32> {
     (0..widths_model.row_count())
         .filter_map(|index| widths_model.row_data(index))
         .collect()
 }
 
+/// Resolves the visible header column index at `mouse_x_px`, or `-1`.
 pub(crate) fn resolve_playlist_header_column_from_x(mouse_x_px: i32, widths_px: &[i32]) -> i32 {
     if mouse_x_px < 0 {
         return -1;
@@ -450,6 +477,7 @@ pub(crate) fn resolve_playlist_header_column_from_x(mouse_x_px: i32, widths_px: 
     -1
 }
 
+/// Resolves the visible header gap index at `mouse_x_px`, or `-1`.
 pub(crate) fn resolve_playlist_header_gap_from_x(mouse_x_px: i32, widths_px: &[i32]) -> i32 {
     if widths_px.is_empty() {
         return -1;
@@ -484,6 +512,7 @@ pub(crate) fn resolve_playlist_header_gap_from_x(mouse_x_px: i32, widths_px: &[i
     widths_px.len() as i32
 }
 
+/// Resolves the visible header divider index at `mouse_x_px`, or `-1`.
 pub(crate) fn resolve_playlist_header_divider_from_x(
     mouse_x_px: i32,
     widths_px: &[i32],

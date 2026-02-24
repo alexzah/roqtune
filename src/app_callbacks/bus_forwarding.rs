@@ -1,3 +1,5 @@
+//! UI callback registration for direct event-bus forwarding.
+
 use std::time::Duration;
 
 use log::{debug, warn};
@@ -8,11 +10,15 @@ use crate::{
     AppWindow,
 };
 
+/// Context required to register UI callbacks that forward into the bus.
 pub struct BusForwardingCallbacksContext {
+    /// Shared producer side of the application event bus.
     pub bus_sender: broadcast::Sender<Message>,
+    /// Weak app handle used for delayed UI-only effects.
     pub ui_handle: slint::Weak<AppWindow>,
 }
 
+/// Registers low-level UI callbacks that forward user actions to bus messages.
 pub fn register_bus_forwarding_callbacks(ui: &AppWindow, context: BusForwardingCallbacksContext) {
     let BusForwardingCallbacksContext {
         bus_sender,

@@ -1,3 +1,5 @@
+//! Filesystem discovery helpers for importable audio files and library folders.
+
 use std::{
     collections::BTreeSet,
     path::{Path, PathBuf},
@@ -5,9 +7,11 @@ use std::{
 
 use log::debug;
 
+/// File extensions treated as importable audio tracks.
 pub const SUPPORTED_AUDIO_EXTENSIONS: [&str; 7] =
     ["mp3", "wav", "ogg", "flac", "aac", "m4a", "mp4"];
 
+/// Returns `true` when `path` has a supported audio extension.
 pub fn is_supported_audio_file(path: &Path) -> bool {
     path.extension()
         .and_then(|ext| ext.to_str())
@@ -19,6 +23,7 @@ pub fn is_supported_audio_file(path: &Path) -> bool {
         .unwrap_or(false)
 }
 
+/// Recursively scans a folder and returns supported audio files in sorted order.
 pub fn collect_audio_files_from_folder(folder_path: &Path) -> Vec<PathBuf> {
     let mut pending_directories = vec![folder_path.to_path_buf()];
     let mut tracks = Vec::new();
@@ -69,6 +74,7 @@ pub fn collect_audio_files_from_folder(folder_path: &Path) -> Vec<PathBuf> {
     tracks
 }
 
+/// Collects supported audio files from mixed file/folder drag-and-drop paths.
 pub fn collect_audio_files_from_dropped_paths(paths: &[PathBuf]) -> Vec<PathBuf> {
     let mut tracks = BTreeSet::new();
     for path in paths {
@@ -87,6 +93,7 @@ pub fn collect_audio_files_from_dropped_paths(paths: &[PathBuf]) -> Vec<PathBuf>
     tracks.into_iter().collect()
 }
 
+/// Collects library root folders from dropped paths, deduplicated and sorted.
 pub fn collect_library_folders_from_dropped_paths(paths: &[PathBuf]) -> Vec<String> {
     let mut folders = BTreeSet::new();
     for path in paths {

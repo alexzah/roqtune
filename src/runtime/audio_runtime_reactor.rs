@@ -1,3 +1,5 @@
+//! Runtime reactor that reconciles config, device, and session events for audio settings.
+
 use std::{
     sync::{
         atomic::{AtomicBool, Ordering},
@@ -21,21 +23,35 @@ use crate::{
     AppWindow, OutputSettingsOptions,
 };
 
+/// Shared handles required by the runtime event reactor thread.
 pub struct RuntimeEventReactorContext {
+    /// Shared event bus producer.
     pub bus_sender: broadcast::Sender<Message>,
+    /// Persisted config state snapshot.
     pub config_state: Arc<Mutex<Config>>,
+    /// Detected output option inventory.
     pub output_options: Arc<Mutex<OutputSettingsOptions>>,
+    /// Last known device inventory for change detection.
     pub output_device_inventory: Arc<Mutex<Vec<String>>>,
+    /// Weak handle to the root UI.
     pub ui_handle: slint::Weak<AppWindow>,
+    /// Workspace dimensions used for layout application.
     pub layout_workspace_size: Arc<Mutex<(u32, u32)>>,
+    /// Runtime-only output overrides.
     pub runtime_output_override: Arc<Mutex<RuntimeOutputOverride>>,
+    /// Runtime-acknowledged audio state.
     pub runtime_audio_state: Arc<Mutex<RuntimeAudioState>>,
+    /// Pending staged settings awaiting runtime application.
     pub staged_audio_settings: Arc<Mutex<Option<StagedAudioSettings>>>,
+    /// Last output signature applied at runtime.
     pub last_runtime_signature: Arc<Mutex<OutputRuntimeSignature>>,
+    /// Last runtime config snapshot emitted to consumers.
     pub last_runtime_config: Arc<Mutex<Config>>,
+    /// Playback activity flag used for low-disruption apply paths.
     pub playback_session_active: Arc<AtomicBool>,
 }
 
+/// Spawns the runtime event reactor thread and starts processing bus messages.
 pub fn spawn_runtime_event_reactor(context: RuntimeEventReactorContext) {
     let RuntimeEventReactorContext {
         bus_sender,

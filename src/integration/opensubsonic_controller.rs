@@ -1,3 +1,5 @@
+//! OpenSubsonic-specific config, credentials, and profile snapshot helpers.
+
 use std::{
     collections::HashMap,
     sync::{Arc, Mutex},
@@ -11,17 +13,25 @@ use crate::{
     protocol,
 };
 
+/// Stable profile ID used for the built-in OpenSubsonic integration profile.
 pub const OPENSUBSONIC_PROFILE_ID: &str = "opensubsonic-default";
+/// User-facing notice shown when secure keyring storage is unavailable.
 pub const OPENSUBSONIC_SESSION_KEYRING_NOTICE: &str = "System keyring is not available. roqtune will keep your OpenSubsonic password only for this session and ask again after restart.";
 
 #[derive(Debug)]
+/// Result of resolving OpenSubsonic credentials from keyring/session state.
 pub enum OpenSubsonicPasswordResolution {
+    /// Password loaded from secure keyring storage.
     Saved(String),
+    /// Password loaded from in-memory session cache.
     SessionOnly(String),
+    /// No password was available from keyring or session cache.
     Missing,
+    /// Keyring access failed and no session fallback was available.
     KeyringError(String),
 }
 
+/// Returns `true` when an error string indicates keyring service unavailability.
 pub fn keyring_unavailable_error(error: &str) -> bool {
     error.contains("Platform secure storage failure")
         || error.contains("org.freedesktop.DBus.Error.ServiceUnknown")
@@ -38,6 +48,7 @@ fn session_cached_opensubsonic_password(
     cache.get(profile_id).cloned()
 }
 
+/// Resolves OpenSubsonic credentials from keyring with session-cache fallback.
 pub fn resolve_opensubsonic_password(
     profile_id: &str,
     session_passwords: &Arc<Mutex<HashMap<String, String>>>,
@@ -69,6 +80,7 @@ pub fn resolve_opensubsonic_password(
     }
 }
 
+/// Returns the configured OpenSubsonic backend profile, if present.
 pub fn find_opensubsonic_backend(config: &Config) -> Option<&BackendProfileConfig> {
     config
         .integrations
@@ -77,6 +89,7 @@ pub fn find_opensubsonic_backend(config: &Config) -> Option<&BackendProfileConfi
         .find(|backend| backend.profile_id == OPENSUBSONIC_PROFILE_ID)
 }
 
+/// Inserts or updates the OpenSubsonic backend entry in config.
 pub fn upsert_opensubsonic_backend_config(
     config: &mut Config,
     endpoint: &str,
@@ -108,6 +121,7 @@ pub fn upsert_opensubsonic_backend_config(
     });
 }
 
+/// Converts config-backed OpenSubsonic profile data into a runtime snapshot.
 pub fn opensubsonic_profile_snapshot(
     config_backend: &BackendProfileConfig,
     status_text: Option<String>,

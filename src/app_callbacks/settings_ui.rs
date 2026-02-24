@@ -1,3 +1,5 @@
+//! Callback registration for settings dialog, tooltip, and window-size UI events.
+
 use std::{
     sync::{atomic::Ordering, Arc, Mutex},
     time::Duration,
@@ -19,6 +21,7 @@ use crate::{
     AppWindow,
 };
 
+/// Registers callbacks that mutate persisted settings and runtime audio/UI state.
 pub(crate) fn register_settings_ui_callbacks(ui: &AppWindow, shared_state: &AppSharedState) {
     let bus_sender_clone = shared_state.bus_sender.clone();
     let config_state_clone = shared_state.config_state.clone();
