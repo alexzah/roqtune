@@ -1115,24 +1115,38 @@ export component AppWindow inherits Window {
                                 property <bool> is-drag-source: root.column_drag_from == i;
                                 property <bool> is-resize-target: root.column_resize_active && root.column_resize_index == i;
                                 property <int> sort-state: i < root.playlist_column_sort_states.length ? root.playlist_column_sort_states[i] : 0;
+                                property <bool> is-favorite-column: i < root.playlist_visible_column_kinds.length
+                                    && root.playlist_visible_column_kinds[i] == 2;
+                                property <color> header-color: (self.is-drag-source || self.is-resize-target || self.sort-state != 0)
+                                    ? (root.ui_dark_mode ? #afc4de : #365a81)
+                                    : root.theme_text_muted;
                                 width: root.playlist-column-width(i);
                                 border-radius: 2px;
                                 background: self.is-drag-source ? #2f3b4d : self.is-resize-target ? #243247 : self.sort-state != 0 ? #263546 : transparent;
                                 border-width: (self.is-drag-source || self.is-resize-target) ? 1px : 0px;
                                 border-color: #496180;
-                                Text {
+                                if !(i < root.playlist_visible_column_kinds.length
+                                        && root.playlist_visible_column_kinds[i] == 2) : Text {
                                     text: parent.sort-state == 1 ? column-header + " ▲"
                                         : parent.sort-state == 2 ? column-header + " ▼"
                                         : column-header;
-                                    color: (parent.is-drag-source || parent.is-resize-target || parent.sort-state != 0)
-                                        ? (root.ui_dark_mode ? #afc4de : #365a81)
-                                        : root.theme_text_muted;
+                                    color: parent.header-color;
                                     font-size: 12px;
                                     x: 0px;
                                     width: parent.width;
                                     vertical-alignment: center;
                                     horizontal-alignment: left;
                                     overflow: elide;
+                                }
+                                if i < root.playlist_visible_column_kinds.length
+                                        && root.playlist_visible_column_kinds[i] == 2 : Image {
+                                    source: AppIcons.heart-filled;
+                                    width: 12px;
+                                    height: 12px;
+                                    x: (parent.width - self.width) / 2;
+                                    y: (parent.height - self.height) / 2;
+                                    image-fit: contain;
+                                    colorize: parent.header-color;
                                 }
                                 Rectangle {
                                     x: parent.width - 1px;
