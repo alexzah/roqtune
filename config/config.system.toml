@@ -98,6 +98,10 @@ cover_art_memory_cache_max_size_mb = 50
 # Maximum in-memory artist-image cache size in MB.
 artist_image_memory_cache_max_size_mb = 50
 
+# In-memory cover/artist decoded-image TTL in seconds.
+# Entries not accessed within this window are proactively evicted.
+image_memory_cache_ttl_secs = 20
+
 # Artist image cache retention window in days.
 artist_image_cache_ttl_days = 30
 

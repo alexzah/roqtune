@@ -1004,6 +1004,7 @@ pub struct LibraryConfigDelta {
     pub cover_art_cache_max_size_mb: Option<u32>,
     pub cover_art_memory_cache_max_size_mb: Option<u32>,
     pub artist_image_memory_cache_max_size_mb: Option<u32>,
+    pub image_memory_cache_ttl_secs: Option<u32>,
     pub artist_image_cache_ttl_days: Option<u32>,
     pub artist_image_cache_max_size_mb: Option<u32>,
 }
