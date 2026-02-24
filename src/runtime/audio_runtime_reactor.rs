@@ -245,25 +245,54 @@ pub fn spawn_runtime_event_reactor(context: RuntimeEventReactorContext) {
                     &runtime_audio_state,
                 );
                 let runtime_signature = OutputRuntimeSignature::from_output(&runtime.output);
-                let should_broadcast_runtime = {
-                    let mut last_signature = last_runtime_signature
-                        .lock()
-                        .expect("runtime signature lock poisoned");
-                    if *last_signature == runtime_signature {
-                        false
+                let playback_active = playback_session_active.load(Ordering::Relaxed);
+                if playback_active {
+                    // Keep probe refreshes non-disruptive during active sessions: update
+                    // capabilities/UI now, but defer effective runtime output reconfiguration
+                    // until playback is fully stopped (same staging policy as manual changes).
+                    let signature_changed = {
+                        let last_signature = last_runtime_signature
+                            .lock()
+                            .expect("runtime signature lock poisoned");
+                        *last_signature != runtime_signature
+                    };
+                    if signature_changed {
+                        let mut staged = staged_audio_settings
+                            .lock()
+                            .expect("staged audio settings lock poisoned");
+                        *staged = Some(StagedAudioSettings {
+                            output: persisted_config.output.clone(),
+                            cast: persisted_config.cast.clone(),
+                        });
+                        debug!(
+                            "Deferring async probe output apply until playback stops (signature changed)"
+                        );
                     } else {
-                        *last_signature = runtime_signature;
-                        true
+                        debug!(
+                            "Skipping async probe output apply during playback: signature unchanged"
+                        );
                     }
-                };
-                if should_broadcast_runtime {
-                    let _ = publish_runtime_config_delta(
-                        &bus_sender_clone,
-                        &last_runtime_config,
-                        runtime,
-                    );
                 } else {
-                    update_last_runtime_config_snapshot(&last_runtime_config, runtime);
+                    let should_broadcast_runtime = {
+                        let mut last_signature = last_runtime_signature
+                            .lock()
+                            .expect("runtime signature lock poisoned");
+                        if *last_signature == runtime_signature {
+                            false
+                        } else {
+                            *last_signature = runtime_signature;
+                            true
+                        }
+                    };
+                    if should_broadcast_runtime {
+                        let _ = publish_runtime_config_delta(
+                            &bus_sender_clone,
+                            &last_runtime_config,
+                            runtime,
+                        );
+                    } else {
+                        update_last_runtime_config_snapshot(&last_runtime_config, runtime);
+                    }
                 }
 
                 let ui_weak = ui_handle.clone();
