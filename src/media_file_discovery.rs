@@ -104,3 +104,58 @@ pub fn collect_library_folders_from_dropped_paths(paths: &[PathBuf]) -> Vec<Stri
     }
     folders.into_iter().collect()
 }
+
+#[cfg(test)]
+mod tests {
+    use std::{
+        path::{Path, PathBuf},
+        time::{SystemTime, UNIX_EPOCH},
+    };
+
+    use super::{collect_audio_files_from_folder, is_supported_audio_file};
+
+    fn unique_temp_directory(test_name: &str) -> PathBuf {
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system clock should be after UNIX_EPOCH")
+            .as_nanos();
+        std::env::temp_dir().join(format!(
+            "roqtune_{}_{}_{}",
+            test_name,
+            std::process::id(),
+            nanos
+        ))
+    }
+
+    #[test]
+    fn test_is_supported_audio_file_checks_known_extensions_case_insensitively() {
+        assert!(is_supported_audio_file(Path::new("/tmp/track.mp3")));
+        assert!(is_supported_audio_file(Path::new("/tmp/track.FLAC")));
+        assert!(is_supported_audio_file(Path::new("/tmp/track.m4a")));
+        assert!(!is_supported_audio_file(Path::new("/tmp/track.txt")));
+        assert!(!is_supported_audio_file(Path::new("/tmp/track")));
+    }
+
+    #[test]
+    fn test_collect_audio_files_from_folder_recurses_and_filters_non_audio_files() {
+        let base = unique_temp_directory("import_scan");
+        let nested = base.join("nested");
+        let deep = nested.join("deep");
+        std::fs::create_dir_all(&deep).expect("test directories should be created");
+        std::fs::write(base.join("track_b.flac"), b"").expect("should write flac fixture");
+        std::fs::write(base.join("ignore.txt"), b"").expect("should write text fixture");
+        std::fs::write(nested.join("track_a.MP3"), b"").expect("should write mp3 fixture");
+        std::fs::write(deep.join("track_c.wav"), b"").expect("should write wav fixture");
+
+        let imported = collect_audio_files_from_folder(&base);
+        let mut expected = vec![
+            nested.join("track_a.MP3"),
+            base.join("track_b.flac"),
+            deep.join("track_c.wav"),
+        ];
+        expected.sort_unstable();
+        assert_eq!(imported, expected);
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
+}

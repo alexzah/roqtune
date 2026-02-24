@@ -353,3 +353,143 @@ pub(crate) fn detect_output_settings_options(config: &Config) -> OutputSettingsO
         auto_bits_per_sample_value,
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use std::collections::BTreeSet;
+
+    use crate::{
+        config::{
+            BufferingConfig, Config, LibraryConfig, OutputConfig, UiConfig, UiPlaybackOrder,
+            UiRepeatMode,
+        },
+        runtime_config::RuntimeOutputOverride,
+    };
+
+    use super::{
+        choose_preferred_u16, choose_preferred_u32, resolve_runtime_config,
+        select_manual_output_option_index_u32, select_output_option_index_string,
+        select_output_option_index_u16,
+    };
+
+    #[test]
+    fn test_choose_preferred_uses_priority_order_when_available() {
+        let detected_u16 = BTreeSet::from([1, 2, 6]);
+        let detected_u32 = BTreeSet::from([48_000, 96_000]);
+        assert_eq!(choose_preferred_u16(&detected_u16, &[6, 2, 1], 2), 6);
+        assert_eq!(
+            choose_preferred_u32(&detected_u32, &[44_100, 48_000, 96_000], 44_100),
+            48_000
+        );
+    }
+
+    #[test]
+    fn test_choose_preferred_falls_back_to_first_detected_when_needed() {
+        let detected_u16 = BTreeSet::from([4, 8]);
+        let detected_u32 = BTreeSet::from([32_000, 192_000]);
+        assert_eq!(choose_preferred_u16(&detected_u16, &[2, 6], 2), 4);
+        assert_eq!(
+            choose_preferred_u32(&detected_u32, &[44_100, 48_000], 44_100),
+            32_000
+        );
+    }
+
+    #[test]
+    fn test_select_output_option_index_uses_auto_and_custom_slots() {
+        let values = vec!["Device A".to_string(), "Device B".to_string()];
+        assert_eq!(
+            select_output_option_index_string(true, "Device A", &values, 3),
+            0
+        );
+        assert_eq!(
+            select_output_option_index_string(false, "Device B", &values, 3),
+            2
+        );
+        assert_eq!(
+            select_output_option_index_string(false, "Missing", &values, 3),
+            3
+        );
+
+        let rates = vec![44_100_u32, 48_000, 96_000];
+        assert_eq!(select_output_option_index_u16(true, 24, &[16, 24], 3), 0);
+        assert_eq!(select_manual_output_option_index_u32(96_000, &rates, 3), 2);
+        assert_eq!(select_manual_output_option_index_u32(88_200, &rates, 3), 3);
+    }
+
+    #[test]
+    fn test_resolve_runtime_config_applies_auto_values_only_for_auto_fields() {
+        let persisted = Config {
+            output: OutputConfig {
+                output_device_name: "Manual Device".to_string(),
+                output_device_auto: true,
+                channel_count: 6,
+                sample_rate_khz: 96_000,
+                bits_per_sample: 16,
+                channel_count_auto: true,
+                sample_rate_auto: false,
+                bits_per_sample_auto: true,
+                ..Config::default().output
+            },
+            ui: UiConfig {
+                show_tooltips: true,
+                auto_scroll_to_playing_track: true,
+                dark_mode: true,
+                show_layout_edit_intro: true,
+                playlist_album_art_column_min_width_px: 16,
+                playlist_album_art_column_max_width_px: 480,
+                layout: crate::layout::LayoutConfig::default(),
+                playlist_columns: crate::config::default_playlist_columns(),
+                window_width: 900,
+                window_height: 650,
+                volume: 1.0,
+                playback_order: UiPlaybackOrder::Default,
+                repeat_mode: UiRepeatMode::Off,
+            },
+            library: LibraryConfig::default(),
+            buffering: BufferingConfig::default(),
+            integrations: crate::config::IntegrationsConfig::default(),
+            cast: crate::config::CastConfig::default(),
+        };
+        let options = crate::OutputSettingsOptions {
+            device_names: vec!["Device A".to_string(), "Device B".to_string()],
+            auto_device_name: "Device B".to_string(),
+            channel_values: vec![1, 2, 6],
+            sample_rate_values: vec![44_100, 48_000],
+            bits_per_sample_values: vec![16, 24],
+            verified_sample_rate_values: vec![44_100, 48_000],
+            verified_sample_rates_summary: "Verified rates: 44.1k, 48k".to_string(),
+            auto_channel_value: 2,
+            auto_sample_rate_value: 44_100,
+            auto_bits_per_sample_value: 24,
+        };
+
+        let runtime = resolve_runtime_config(&persisted, &options, None);
+        assert_eq!(runtime.output.channel_count, 2);
+        assert_eq!(runtime.output.sample_rate_khz, 96_000);
+        assert_eq!(runtime.output.bits_per_sample, 24);
+        assert_eq!(runtime.output.output_device_name, "Device B");
+    }
+
+    #[test]
+    fn test_resolve_runtime_config_applies_runtime_sample_rate_override() {
+        let persisted = Config::default();
+        let options = crate::OutputSettingsOptions {
+            device_names: vec!["Device A".to_string()],
+            auto_device_name: "Device A".to_string(),
+            channel_values: vec![2],
+            sample_rate_values: vec![44_100, 48_000, 96_000],
+            bits_per_sample_values: vec![16, 24],
+            verified_sample_rate_values: vec![44_100, 48_000, 96_000],
+            verified_sample_rates_summary: "Verified rates: 44.1k, 48k, 96k".to_string(),
+            auto_channel_value: 2,
+            auto_sample_rate_value: 48_000,
+            auto_bits_per_sample_value: 24,
+        };
+        let runtime_override = RuntimeOutputOverride {
+            sample_rate_hz: Some(96_000),
+        };
+        let runtime = resolve_runtime_config(&persisted, &options, Some(&runtime_override));
+        assert_eq!(runtime.output.sample_rate_khz, 96_000);
+        assert_eq!(persisted.output.sample_rate_khz, 44_100);
+    }
+}

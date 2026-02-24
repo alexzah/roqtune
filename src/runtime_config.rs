@@ -142,3 +142,45 @@ pub fn config_diff_is_runtime_sample_rate_only(previous: &Config, next: &Config)
     next_output_without_rate.sample_rate_khz = 0;
     previous_output_without_rate == next_output_without_rate
 }
+
+#[cfg(test)]
+mod tests {
+    use crate::config::Config;
+
+    use super::{audio_settings_changed, output_preferences_changed};
+
+    #[test]
+    fn test_output_preferences_changed_detects_output_changes() {
+        let previous = Config::default().output;
+        let mut next = previous.clone();
+        next.sample_rate_auto = false;
+
+        assert!(output_preferences_changed(&previous, &next));
+    }
+
+    #[test]
+    fn test_output_preferences_changed_detects_downmix_toggle() {
+        let previous = Config::default().output;
+        let mut next = previous.clone();
+        next.downmix_higher_channel_tracks = !next.downmix_higher_channel_tracks;
+
+        assert!(output_preferences_changed(&previous, &next));
+    }
+
+    #[test]
+    fn test_output_preferences_changed_ignores_non_output_fields() {
+        let previous = Config::default().output;
+        let next = previous.clone();
+
+        assert!(!output_preferences_changed(&previous, &next));
+    }
+
+    #[test]
+    fn test_audio_settings_changed_detects_cast_setting_change() {
+        let previous = Config::default();
+        let mut next = previous.clone();
+        next.cast.allow_transcode_fallback = !next.cast.allow_transcode_fallback;
+
+        assert!(audio_settings_changed(&previous, &next));
+    }
+}

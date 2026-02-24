@@ -504,3 +504,418 @@ pub(crate) fn resolve_playlist_header_divider_from_x(
     }
     -1
 }
+
+#[cfg(test)]
+mod tests {
+    use std::rc::Rc;
+
+    use slint::{Model, ModelRc, VecModel};
+
+    use crate::config::PlaylistColumnConfig;
+
+    use super::{
+        apply_column_order_keys, clamp_width_for_visible_column,
+        default_album_art_column_width_bounds, is_album_art_builtin_column,
+        playlist_column_key_at_visible_index, playlist_column_width_bounds,
+        playlist_column_width_bounds_with_album_art, playlist_column_widths_from_model,
+        reorder_visible_playlist_columns, resolve_playlist_header_column_from_x,
+        resolve_playlist_header_divider_from_x, resolve_playlist_header_gap_from_x,
+        sanitize_playlist_columns, visible_playlist_column_kinds, ColumnWidthBounds,
+    };
+
+    #[test]
+    fn test_reorder_visible_playlist_columns_preserves_hidden_slot_layout() {
+        let columns = vec![
+            PlaylistColumnConfig {
+                name: "Track #".to_string(),
+                format: "{track_number}".to_string(),
+                enabled: true,
+                custom: false,
+            },
+            PlaylistColumnConfig {
+                name: "Hidden Custom".to_string(),
+                format: "{foo}".to_string(),
+                enabled: false,
+                custom: true,
+            },
+            PlaylistColumnConfig {
+                name: "Title".to_string(),
+                format: "{title}".to_string(),
+                enabled: true,
+                custom: false,
+            },
+            PlaylistColumnConfig {
+                name: "Artist".to_string(),
+                format: "{artist}".to_string(),
+                enabled: true,
+                custom: false,
+            },
+        ];
+
+        let reordered = reorder_visible_playlist_columns(&columns, 0, 2);
+        assert_eq!(reordered.len(), columns.len());
+        assert_eq!(reordered[1], columns[1]);
+        let visible_formats: Vec<String> = reordered
+            .iter()
+            .filter(|column| column.enabled)
+            .map(|column| column.format.clone())
+            .collect();
+        assert_eq!(
+            visible_formats,
+            vec![
+                "{title}".to_string(),
+                "{artist}".to_string(),
+                "{track_number}".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn test_apply_column_order_keys_prioritizes_saved_order_and_appends_unknowns() {
+        let columns = vec![
+            PlaylistColumnConfig {
+                name: "Title".to_string(),
+                format: "{title}".to_string(),
+                enabled: true,
+                custom: false,
+            },
+            PlaylistColumnConfig {
+                name: "Artist".to_string(),
+                format: "{artist}".to_string(),
+                enabled: true,
+                custom: false,
+            },
+            PlaylistColumnConfig {
+                name: "Mood".to_string(),
+                format: "{mood}".to_string(),
+                enabled: true,
+                custom: true,
+            },
+        ];
+        let order = vec![
+            "custom:Mood|{mood}".to_string(),
+            "{title}".to_string(),
+            "{missing}".to_string(),
+        ];
+
+        let applied = apply_column_order_keys(&columns, &order);
+        let applied_formats: Vec<String> =
+            applied.iter().map(|column| column.format.clone()).collect();
+        assert_eq!(
+            applied_formats,
+            vec![
+                "{mood}".to_string(),
+                "{title}".to_string(),
+                "{artist}".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn test_playlist_column_key_at_visible_index_ignores_hidden_columns() {
+        let columns = vec![
+            PlaylistColumnConfig {
+                name: "Hidden".to_string(),
+                format: "{hidden}".to_string(),
+                enabled: false,
+                custom: false,
+            },
+            PlaylistColumnConfig {
+                name: "Title".to_string(),
+                format: "{title}".to_string(),
+                enabled: true,
+                custom: false,
+            },
+            PlaylistColumnConfig {
+                name: "Mood".to_string(),
+                format: "{mood}".to_string(),
+                enabled: true,
+                custom: true,
+            },
+        ];
+
+        assert_eq!(
+            playlist_column_key_at_visible_index(&columns, 0).as_deref(),
+            Some("{title}")
+        );
+        assert_eq!(
+            playlist_column_key_at_visible_index(&columns, 1).as_deref(),
+            Some("custom:Mood|{mood}")
+        );
+        assert_eq!(playlist_column_key_at_visible_index(&columns, 2), None);
+    }
+
+    #[test]
+    fn test_playlist_column_width_bounds_for_track_custom_and_album_art_columns() {
+        let track_column = PlaylistColumnConfig {
+            name: "Track #".to_string(),
+            format: "{track_number}".to_string(),
+            enabled: true,
+            custom: false,
+        };
+        let album_art_column = PlaylistColumnConfig {
+            name: "Album Art".to_string(),
+            format: "{album_art}".to_string(),
+            enabled: true,
+            custom: false,
+        };
+        let custom_column = PlaylistColumnConfig {
+            name: "Energy".to_string(),
+            format: "{energy}".to_string(),
+            enabled: true,
+            custom: true,
+        };
+
+        let track_bounds = playlist_column_width_bounds(&track_column);
+        let album_art_bounds = playlist_column_width_bounds(&album_art_column);
+        let custom_bounds = playlist_column_width_bounds(&custom_column);
+
+        assert_eq!((track_bounds.min_px, track_bounds.max_px), (52, 90));
+        assert_eq!(
+            (album_art_bounds.min_px, album_art_bounds.max_px),
+            (16, 480)
+        );
+        assert_eq!((custom_bounds.min_px, custom_bounds.max_px), (110, 340));
+    }
+
+    #[test]
+    fn test_playlist_column_width_bounds_use_custom_album_art_limits() {
+        let album_art_column = PlaylistColumnConfig {
+            name: "Album Art".to_string(),
+            format: "{album_art}".to_string(),
+            enabled: true,
+            custom: false,
+        };
+        let bounds = playlist_column_width_bounds_with_album_art(
+            &album_art_column,
+            ColumnWidthBounds {
+                min_px: 24,
+                max_px: 512,
+            },
+        );
+        assert_eq!((bounds.min_px, bounds.max_px), (24, 512));
+    }
+
+    #[test]
+    fn test_is_album_art_builtin_column_requires_builtin_marker() {
+        let builtin_album_art = PlaylistColumnConfig {
+            name: "Album Art".to_string(),
+            format: "{album_art}".to_string(),
+            enabled: true,
+            custom: false,
+        };
+        let custom_album_art = PlaylistColumnConfig {
+            name: "Album Art".to_string(),
+            format: "{album_art}".to_string(),
+            enabled: true,
+            custom: true,
+        };
+        let title_column = PlaylistColumnConfig {
+            name: "Title".to_string(),
+            format: "{title}".to_string(),
+            enabled: true,
+            custom: false,
+        };
+
+        assert!(is_album_art_builtin_column(&builtin_album_art));
+        assert!(!is_album_art_builtin_column(&custom_album_art));
+        assert!(!is_album_art_builtin_column(&title_column));
+    }
+
+    #[test]
+    fn test_clamp_width_for_visible_column_respects_column_profile_bounds() {
+        let columns = vec![
+            PlaylistColumnConfig {
+                name: "Track #".to_string(),
+                format: "{track_number}".to_string(),
+                enabled: true,
+                custom: false,
+            },
+            PlaylistColumnConfig {
+                name: "Album Art".to_string(),
+                format: "{album_art}".to_string(),
+                enabled: true,
+                custom: false,
+            },
+            PlaylistColumnConfig {
+                name: "Title".to_string(),
+                format: "{title}".to_string(),
+                enabled: true,
+                custom: false,
+            },
+        ];
+        let album_art_bounds = default_album_art_column_width_bounds();
+
+        assert_eq!(
+            clamp_width_for_visible_column(&columns, 0, 5, album_art_bounds),
+            Some(52)
+        );
+        assert_eq!(
+            clamp_width_for_visible_column(&columns, 0, 500, album_art_bounds),
+            Some(90)
+        );
+        assert_eq!(
+            clamp_width_for_visible_column(&columns, 1, 8, album_art_bounds),
+            Some(16)
+        );
+        assert_eq!(
+            clamp_width_for_visible_column(&columns, 1, 640, album_art_bounds),
+            Some(480)
+        );
+        assert_eq!(
+            clamp_width_for_visible_column(&columns, 2, 120, album_art_bounds),
+            Some(140)
+        );
+        assert_eq!(
+            clamp_width_for_visible_column(&columns, 2, 720, album_art_bounds),
+            Some(440)
+        );
+    }
+
+    #[test]
+    fn test_sanitize_playlist_columns_restores_builtins_and_preserves_custom() {
+        let custom = PlaylistColumnConfig {
+            name: "Album & Year".to_string(),
+            format: "{album} ({year})".to_string(),
+            enabled: true,
+            custom: true,
+        };
+        let input_columns = vec![
+            PlaylistColumnConfig {
+                name: "Artist".to_string(),
+                format: "{artist}".to_string(),
+                enabled: false,
+                custom: false,
+            },
+            custom.clone(),
+        ];
+
+        let sanitized = sanitize_playlist_columns(&input_columns);
+        assert!(sanitized.iter().any(|column| column.format == "{title}"));
+        assert!(sanitized.iter().any(|column| column.format == "{artist}"));
+        assert!(sanitized
+            .iter()
+            .any(|column| !column.custom && column.format == "{album_art}"));
+        assert!(sanitized.iter().any(|column| column == &custom));
+        assert!(sanitized.iter().any(|column| column.enabled));
+    }
+
+    #[test]
+    fn test_visible_playlist_column_kinds_marks_builtin_album_art_only() {
+        let columns = vec![
+            PlaylistColumnConfig {
+                name: "Title".to_string(),
+                format: "{title}".to_string(),
+                enabled: true,
+                custom: false,
+            },
+            PlaylistColumnConfig {
+                name: "Album Art".to_string(),
+                format: "{album_art}".to_string(),
+                enabled: true,
+                custom: false,
+            },
+            PlaylistColumnConfig {
+                name: "Custom Art".to_string(),
+                format: "{album_art}".to_string(),
+                enabled: true,
+                custom: true,
+            },
+        ];
+
+        assert_eq!(visible_playlist_column_kinds(&columns), vec![0, 1, 0]);
+    }
+
+    #[test]
+    fn test_sanitize_playlist_columns_preserves_existing_builtin_order() {
+        let input_columns = vec![
+            PlaylistColumnConfig {
+                name: "Track #".to_string(),
+                format: "{track_number}".to_string(),
+                enabled: true,
+                custom: false,
+            },
+            PlaylistColumnConfig {
+                name: "Title".to_string(),
+                format: "{title}".to_string(),
+                enabled: true,
+                custom: false,
+            },
+            PlaylistColumnConfig {
+                name: "Artist".to_string(),
+                format: "{artist}".to_string(),
+                enabled: true,
+                custom: false,
+            },
+            PlaylistColumnConfig {
+                name: "Album".to_string(),
+                format: "{album}".to_string(),
+                enabled: true,
+                custom: false,
+            },
+        ];
+
+        let sanitized = sanitize_playlist_columns(&input_columns);
+        let visible_order: Vec<String> = sanitized
+            .iter()
+            .filter(|column| column.enabled)
+            .map(|column| column.format.clone())
+            .collect();
+        assert_eq!(
+            visible_order,
+            vec![
+                "{track_number}".to_string(),
+                "{title}".to_string(),
+                "{artist}".to_string(),
+                "{album}".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn test_resolve_playlist_header_column_from_x_uses_variable_widths() {
+        let widths = vec![72, 184, 136];
+        assert_eq!(resolve_playlist_header_column_from_x(-1, &widths), -1);
+        assert_eq!(resolve_playlist_header_column_from_x(0, &widths), 0);
+        assert_eq!(resolve_playlist_header_column_from_x(71, &widths), 0);
+        assert_eq!(resolve_playlist_header_column_from_x(72, &widths), -1);
+        assert_eq!(resolve_playlist_header_column_from_x(82, &widths), 1);
+        assert_eq!(resolve_playlist_header_column_from_x(266, &widths), -1);
+        assert_eq!(resolve_playlist_header_column_from_x(276, &widths), 2);
+    }
+
+    #[test]
+    fn test_resolve_playlist_header_gap_from_x_tracks_real_column_edges() {
+        let widths = vec![72, 184, 136];
+        assert_eq!(resolve_playlist_header_gap_from_x(-5, &widths), 0);
+        assert_eq!(resolve_playlist_header_gap_from_x(0, &widths), 0);
+        assert_eq!(resolve_playlist_header_gap_from_x(35, &widths), 0);
+        assert_eq!(resolve_playlist_header_gap_from_x(36, &widths), 1);
+        assert_eq!(resolve_playlist_header_gap_from_x(81, &widths), 1);
+        assert_eq!(resolve_playlist_header_gap_from_x(266, &widths), 2);
+        assert_eq!(resolve_playlist_header_gap_from_x(500, &widths), 3);
+    }
+
+    #[test]
+    fn test_resolve_playlist_header_divider_from_x_hits_column_boundaries() {
+        let widths = vec![72, 184, 136];
+        assert_eq!(resolve_playlist_header_divider_from_x(72, &widths, 2), 0);
+        assert_eq!(resolve_playlist_header_divider_from_x(265, &widths, 2), 1);
+        assert_eq!(resolve_playlist_header_divider_from_x(411, &widths, 2), 2);
+        assert_eq!(resolve_playlist_header_divider_from_x(268, &widths, 1), -1);
+    }
+
+    #[test]
+    fn test_playlist_column_width_rendering_matches_runtime_width_model() {
+        let model: ModelRc<i32> = ModelRc::from(Rc::new(VecModel::from(vec![72, 184, 136])));
+        let extracted = playlist_column_widths_from_model(model.clone());
+        assert_eq!(extracted, vec![72, 184, 136]);
+
+        let divider_idx = resolve_playlist_header_divider_from_x(267, &extracted, 2);
+        assert_eq!(divider_idx, 1);
+        let gap_idx = resolve_playlist_header_gap_from_x(267, &extracted);
+        assert_eq!(gap_idx, 2);
+
+        assert_eq!(model.row_count(), extracted.len());
+    }
+}

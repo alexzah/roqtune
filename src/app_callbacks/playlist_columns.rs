@@ -14,6 +14,17 @@ use crate::{
     AppWindow,
 };
 
+pub(crate) fn should_apply_custom_column_delete(
+    confirm_dialog_visible: bool,
+    pending_index: i32,
+    requested_index: usize,
+) -> bool {
+    if !confirm_dialog_visible {
+        return false;
+    }
+    pending_index >= 0 && pending_index as usize == requested_index
+}
+
 pub(crate) fn register_playlist_column_callbacks(ui: &AppWindow, shared_state: &AppSharedState) {
     let bus_sender_clone = shared_state.bus_sender.clone();
     ui.on_playlist_columns_viewport_resized(move |width_px| {
@@ -389,7 +400,7 @@ pub(crate) fn register_playlist_column_callbacks(ui: &AppWindow, shared_state: &
     ui.on_delete_custom_playlist_column(move |column_index| {
         let column_idx = column_index.max(0) as usize;
         if let Some(ui) = shared_state_clone.ui_handles.ui_handle.upgrade() {
-            if !crate::should_apply_custom_column_delete(
+            if !should_apply_custom_column_delete(
                 ui.get_show_delete_custom_column_confirm(),
                 ui.get_delete_custom_column_index(),
                 column_idx,
@@ -544,4 +555,17 @@ pub(crate) fn register_playlist_column_callbacks(ui: &AppWindow, shared_state: &
             )),
         ));
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::should_apply_custom_column_delete;
+
+    #[test]
+    fn test_should_apply_custom_column_delete_requires_matching_confirmation_state() {
+        assert!(!should_apply_custom_column_delete(false, 3, 3));
+        assert!(!should_apply_custom_column_delete(true, -1, 0));
+        assert!(!should_apply_custom_column_delete(true, 1, 0));
+        assert!(should_apply_custom_column_delete(true, 2, 2));
+    }
 }

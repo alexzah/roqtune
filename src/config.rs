@@ -403,7 +403,7 @@ pub fn default_playlist_columns() -> Vec<PlaylistColumnConfig> {
 mod tests {
     use super::{
         default_playlist_columns, BufferingConfig, Config, IntegrationBackendKind, LayoutConfig,
-        ResamplerQuality, UiPlaybackOrder, UiRepeatMode,
+        ResamplerQuality, UiConfig, UiPlaybackOrder, UiRepeatMode,
     };
 
     #[test]
@@ -675,5 +675,21 @@ decoder_request_chunk_ms = 1500
         let parsed: Wrapper =
             toml::from_str(&serialized).expect("backend kind enum should deserialize from toml");
         assert_eq!(parsed, value);
+    }
+
+    #[test]
+    fn test_sanitize_config_clamps_and_orders_album_art_width_bounds() {
+        let input = Config {
+            ui: UiConfig {
+                playlist_album_art_column_min_width_px: 900,
+                playlist_album_art_column_max_width_px: 20,
+                ..Config::default().ui
+            },
+            ..Config::default()
+        };
+
+        let sanitized = crate::sanitize_config(input);
+        assert_eq!(sanitized.ui.playlist_album_art_column_min_width_px, 24);
+        assert_eq!(sanitized.ui.playlist_album_art_column_max_width_px, 512);
     }
 }

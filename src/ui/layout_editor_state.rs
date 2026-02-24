@@ -754,3 +754,127 @@ pub(crate) fn apply_layout_to_ui(
     apply_button_cluster_views_to_ui(ui, &metrics, config);
     apply_viewer_panel_views_to_ui(ui, &metrics, config);
 }
+
+#[cfg(test)]
+mod tests {
+    use std::{any::Any, rc::Rc};
+
+    use slint::{Model, ModelRc, ModelTracker, VecModel};
+
+    use super::{
+        default_button_cluster_actions_by_index, quantize_splitter_ratio_to_precision,
+        sidebar_width_from_window, update_or_replace_vec_model,
+    };
+
+    #[test]
+    fn test_update_or_replace_vec_model_reuses_existing_vec_model_when_len_matches() {
+        let current: ModelRc<i32> = ModelRc::from(Rc::new(VecModel::from(vec![1, 2])));
+        let original_ptr = current
+            .as_any()
+            .downcast_ref::<VecModel<i32>>()
+            .expect("VecModel expected") as *const VecModel<i32>;
+
+        let updated = update_or_replace_vec_model(current.clone(), vec![9, 8]);
+        let updated_model = updated
+            .as_any()
+            .downcast_ref::<VecModel<i32>>()
+            .expect("VecModel expected");
+        let updated_ptr = updated_model as *const VecModel<i32>;
+
+        assert_eq!(original_ptr, updated_ptr);
+        assert_eq!(updated_model.row_count(), 2);
+        assert_eq!(updated_model.row_data(0), Some(9));
+        assert_eq!(updated_model.row_data(1), Some(8));
+    }
+
+    #[test]
+    fn test_update_or_replace_vec_model_reuses_existing_vec_model_when_len_changes() {
+        let current: ModelRc<i32> = ModelRc::from(Rc::new(VecModel::from(vec![1, 2])));
+        let original_ptr = current
+            .as_any()
+            .downcast_ref::<VecModel<i32>>()
+            .expect("VecModel expected") as *const VecModel<i32>;
+
+        let updated = update_or_replace_vec_model(current.clone(), vec![7, 6, 5]);
+        let updated_model = updated
+            .as_any()
+            .downcast_ref::<VecModel<i32>>()
+            .expect("VecModel expected");
+        let updated_ptr = updated_model as *const VecModel<i32>;
+
+        assert_eq!(original_ptr, updated_ptr);
+        assert_eq!(updated_model.row_count(), 3);
+        assert_eq!(updated_model.row_data(0), Some(7));
+        assert_eq!(updated_model.row_data(1), Some(6));
+        assert_eq!(updated_model.row_data(2), Some(5));
+    }
+
+    #[test]
+    fn test_update_or_replace_vec_model_falls_back_to_vec_model_for_non_vec_model_inputs() {
+        struct StaticModel {
+            values: Vec<i32>,
+        }
+
+        impl Model for StaticModel {
+            type Data = i32;
+
+            fn row_count(&self) -> usize {
+                self.values.len()
+            }
+
+            fn row_data(&self, row: usize) -> Option<Self::Data> {
+                self.values.get(row).copied()
+            }
+
+            fn model_tracker(&self) -> &dyn ModelTracker {
+                &()
+            }
+
+            fn as_any(&self) -> &dyn Any {
+                self
+            }
+        }
+
+        let current: ModelRc<i32> = ModelRc::new(StaticModel { values: vec![1, 2] });
+        assert!(current.as_any().downcast_ref::<VecModel<i32>>().is_none());
+
+        let updated = update_or_replace_vec_model(current, vec![4, 3]);
+        let updated_model = updated
+            .as_any()
+            .downcast_ref::<VecModel<i32>>()
+            .expect("VecModel expected after fallback creation");
+        assert_eq!(updated_model.row_count(), 2);
+        assert_eq!(updated_model.row_data(0), Some(4));
+        assert_eq!(updated_model.row_data(1), Some(3));
+    }
+
+    #[test]
+    fn test_quantize_splitter_ratio_to_precision_rounds_to_two_decimals() {
+        assert_eq!(quantize_splitter_ratio_to_precision(0.1234), 0.12);
+        assert_eq!(quantize_splitter_ratio_to_precision(0.1251), 0.13);
+        assert_eq!(quantize_splitter_ratio_to_precision(0.9999), 1.0);
+    }
+
+    #[test]
+    fn test_quantize_splitter_ratio_to_precision_keeps_non_finite_values() {
+        assert!(quantize_splitter_ratio_to_precision(f32::INFINITY).is_infinite());
+        assert!(quantize_splitter_ratio_to_precision(f32::NEG_INFINITY).is_infinite());
+        assert!(quantize_splitter_ratio_to_precision(f32::NAN).is_nan());
+    }
+
+    #[test]
+    fn test_sidebar_width_from_window_is_responsive_and_clamped() {
+        assert_eq!(sidebar_width_from_window(600), 180);
+        assert_eq!(sidebar_width_from_window(900), 216);
+        assert_eq!(sidebar_width_from_window(2_000), 300);
+    }
+
+    #[test]
+    fn test_default_utility_button_cluster_preset_excludes_layout_editor_action() {
+        assert_eq!(
+            default_button_cluster_actions_by_index(2),
+            vec![7, 8, 11, 10],
+            "Utility preset should not include layout editor by default"
+        );
+    }
+}

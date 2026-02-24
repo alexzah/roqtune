@@ -574,3 +574,383 @@ pub fn hydrate_ui_columns_from_layout(config: &mut Config) {
         config.ui.layout.playlist_album_art_column_max_width_px;
     config.ui.playlist_columns = config.ui.layout.playlist_columns.clone();
 }
+
+#[cfg(test)]
+mod tests {
+    use std::{
+        path::PathBuf,
+        time::{SystemTime, UNIX_EPOCH},
+    };
+
+    use crate::{config::Config, layout::LayoutConfig};
+
+    use super::{
+        load_layout_file, load_system_layout_template, serialize_config_with_preserved_comments,
+        serialize_layout_with_preserved_comments, system_layout_template_text,
+    };
+
+    fn unique_temp_directory(test_name: &str) -> PathBuf {
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system clock should be after UNIX_EPOCH")
+            .as_nanos();
+        std::env::temp_dir().join(format!(
+            "roqtune_{}_{}_{}",
+            test_name,
+            std::process::id(),
+            nanos
+        ))
+    }
+
+    #[test]
+    fn test_serialize_config_with_preserved_comments_keeps_existing_comments() {
+        let existing = r#"
+# top comment
+[output]
+# output comment
+output_device_name = ""
+output_device_auto = true
+channel_count = 2
+sample_rate_khz = 44100
+bits_per_sample = 24
+channel_count_auto = true
+sample_rate_auto = true
+bits_per_sample_auto = true
+
+[ui]
+# ui comment
+show_layout_edit_intro = true
+playlist_album_art_column_min_width_px = 16
+playlist_album_art_column_max_width_px = 480
+window_width = 900
+window_height = 650
+volume = 1.0
+button_cluster_instances = []
+
+[[ui.playlist_columns]]
+name = "Title"
+format = "{title}"
+enabled = true
+custom = false
+
+[buffering]
+# buffering comment
+player_low_watermark_ms = 12000
+player_target_buffer_ms = 24000
+player_request_interval_ms = 120
+decoder_request_chunk_ms = 1500
+"#;
+
+        let mut config = Config::default();
+        config.output.output_device_name = "My Device".to_string();
+        config.ui.volume = 0.55;
+
+        let serialized = serialize_config_with_preserved_comments(existing, &config)
+            .expect("comment-preserving serialization should succeed");
+
+        assert!(serialized.contains("# top comment"));
+        assert!(serialized.contains("# output comment"));
+        assert!(serialized.contains("# ui comment"));
+        assert!(serialized.contains("# buffering comment"));
+        assert!(serialized.contains("output_device_name = \"My Device\""));
+        assert!(serialized.contains("volume = 0.55"));
+        assert!(
+            !serialized.contains("button_cluster_instances"),
+            "layout-owned button cluster settings should not be persisted in config.toml"
+        );
+    }
+
+    #[test]
+    fn test_serialize_config_with_preserved_comments_rejects_invalid_toml() {
+        let invalid = "[output\noutput_device_auto = true";
+        let config = Config::default();
+        let result = serialize_config_with_preserved_comments(invalid, &config);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_serialize_config_with_preserved_comments_keeps_system_template_comments() {
+        let existing = include_str!("../config/config.system.toml");
+        let mut config: Config =
+            toml::from_str(existing).expect("system config template should parse");
+        config.ui.show_layout_edit_intro = false;
+
+        let serialized = serialize_config_with_preserved_comments(existing, &config)
+            .expect("comment-preserving serialization should succeed");
+
+        assert!(serialized.contains("# roqtune system config template"));
+        assert!(serialized.contains("# ADVANCED USERS ONLY"));
+        assert!(serialized.contains("# Playback volume (0.0 .. 1.0)."));
+        assert!(serialized.contains("show_layout_edit_intro = false"));
+    }
+
+    #[test]
+    fn test_serialize_config_with_preserved_comments_strips_layout_owned_ui_keys() {
+        let existing = include_str!("../config/config.system.toml");
+        let mut config: Config =
+            toml::from_str(existing).expect("system config template should parse");
+        config.ui.layout.button_cluster_instances =
+            vec![crate::config::ButtonClusterInstanceConfig {
+                leaf_id: "n8".to_string(),
+                actions: vec![1, 2, 3],
+            }];
+
+        let serialized = serialize_config_with_preserved_comments(existing, &config)
+            .expect("comment-preserving serialization should succeed");
+
+        assert!(
+            !serialized.contains("button_cluster_instances"),
+            "button cluster settings should not be persisted in config.toml.\nserialized=\n{}",
+            serialized
+        );
+        assert!(
+            !serialized.contains("[[ui.playlist_columns]]"),
+            "playlist columns should not be persisted in config.toml"
+        );
+        assert!(
+            !serialized.contains("playlist_album_art_column_min_width_px"),
+            "playlist album art width fields should not be persisted in config.toml"
+        );
+        assert!(
+            !serialized.contains("playlist_album_art_column_max_width_px"),
+            "playlist album art width fields should not be persisted in config.toml"
+        );
+        assert!(
+            !serialized.contains("viewer_panel_instances"),
+            "viewer panel settings should not be persisted in config.toml"
+        );
+        let parsed_back: toml_edit::DocumentMut = serialized
+            .parse()
+            .expect("serialized config should remain valid TOML");
+        assert!(parsed_back
+            .get("ui")
+            .and_then(|item| item.as_table())
+            .and_then(|table| table.get("button_cluster_instances"))
+            .is_none());
+        assert!(parsed_back
+            .get("ui")
+            .and_then(|item| item.as_table())
+            .and_then(|table| table.get("playlist_columns"))
+            .is_none());
+        assert!(parsed_back
+            .get("ui")
+            .and_then(|item| item.as_table())
+            .and_then(|table| table.get("viewer_panel_instances"))
+            .is_none());
+    }
+
+    #[test]
+    fn test_serialize_layout_with_preserved_comments_keeps_existing_comments() {
+        let existing = r#"
+# layout top comment
+version = 1
+
+# album art width comment
+playlist_album_art_column_min_width_px = 16
+playlist_album_art_column_max_width_px = 480
+
+[[playlist_columns]]
+name = "Title"
+format = "{title}"
+enabled = true
+custom = false
+
+[root]
+# root comment
+node_type = "leaf"
+id = "l1"
+panel = "track_list"
+"#;
+        let mut layout: LayoutConfig =
+            toml::from_str(existing).expect("existing layout should parse");
+        layout.playlist_album_art_column_max_width_px = 512;
+        layout.button_cluster_instances = vec![crate::config::ButtonClusterInstanceConfig {
+            leaf_id: "n8".to_string(),
+            actions: vec![1, 2, 3],
+        }];
+
+        let serialized = serialize_layout_with_preserved_comments(existing, &layout)
+            .expect("comment-preserving layout serialization should succeed");
+
+        assert!(serialized.contains("# layout top comment"));
+        assert!(serialized.contains("# album art width comment"));
+        assert!(serialized.contains("# root comment"));
+        assert!(serialized.contains("playlist_album_art_column_max_width_px = 512"));
+        assert!(serialized.contains("[[button_cluster_instances]]"));
+    }
+
+    #[test]
+    fn test_serialize_layout_with_preserved_comments_rejects_invalid_toml() {
+        let invalid = "[root\nnode_type = \"leaf\"";
+        let layout = LayoutConfig::default();
+        let result = serialize_layout_with_preserved_comments(invalid, &layout);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_serialize_layout_with_preserved_comments_keeps_system_template_comments() {
+        let existing = include_str!("../config/layout.system.toml");
+        let mut layout: LayoutConfig =
+            toml::from_str(existing).expect("layout system template should parse");
+        layout.playlist_album_art_column_min_width_px = 24;
+
+        let serialized = serialize_layout_with_preserved_comments(existing, &layout)
+            .expect("comment-preserving layout serialization should succeed");
+
+        assert!(serialized.contains("# roqtune layout system template"));
+        assert!(serialized.contains("# Node conventions:"));
+        assert!(serialized.contains("playlist_album_art_column_min_width_px = 24"));
+    }
+
+    #[test]
+    fn test_serialize_layout_with_preserved_comments_keeps_unknown_keys() {
+        let existing = r#"
+version = 1
+custom_layout_flag = "keep-me"
+
+[root]
+node_type = "leaf"
+id = "l1"
+panel = "track_list"
+"#;
+        let layout = LayoutConfig::default();
+
+        let serialized = serialize_layout_with_preserved_comments(existing, &layout)
+            .expect("comment-preserving layout serialization should succeed");
+        assert!(serialized.contains("custom_layout_flag = \"keep-me\""));
+    }
+
+    #[test]
+    fn test_load_system_layout_template_matches_checked_in_template() {
+        let parsed_from_template: LayoutConfig = toml::from_str(system_layout_template_text())
+            .expect("layout system template should parse");
+        let loaded = load_system_layout_template();
+        assert_eq!(loaded, parsed_from_template);
+    }
+
+    #[test]
+    fn test_load_layout_file_falls_back_to_system_template_when_missing() {
+        let temp_dir = unique_temp_directory("layout_missing_fallback");
+        std::fs::create_dir_all(&temp_dir).expect("temp dir should be created");
+        let missing_path = temp_dir.join("missing-layout.toml");
+        let loaded = load_layout_file(&missing_path);
+        assert_eq!(loaded, load_system_layout_template());
+        let _ = std::fs::remove_dir_all(temp_dir);
+    }
+
+    #[test]
+    fn test_load_layout_file_falls_back_to_system_template_when_invalid() {
+        let temp_dir = unique_temp_directory("layout_invalid_fallback");
+        std::fs::create_dir_all(&temp_dir).expect("temp dir should be created");
+        let invalid_path = temp_dir.join("layout.toml");
+        std::fs::write(&invalid_path, "[root\nnode_type = \"leaf\"")
+            .expect("invalid layout file should be written");
+        let loaded = load_layout_file(&invalid_path);
+        assert_eq!(loaded, load_system_layout_template());
+        let _ = std::fs::remove_dir_all(temp_dir);
+    }
+
+    #[test]
+    fn test_serialize_config_with_preserved_comments_keeps_unknown_keys() {
+        let existing = r#"
+[output]
+output_device_name = ""
+output_device_auto = true
+channel_count = 2
+sample_rate_khz = 44100
+bits_per_sample = 24
+channel_count_auto = true
+sample_rate_auto = true
+bits_per_sample_auto = true
+
+[ui]
+show_layout_edit_intro = true
+show_tooltips = true
+window_width = 900
+window_height = 650
+volume = 1.0
+
+[library]
+folders = []
+online_metadata_enabled = false
+online_metadata_prompt_pending = true
+artist_image_cache_ttl_days = 30
+artist_image_cache_max_size_mb = 256
+custom_library_key = "keep-me"
+
+[buffering]
+player_low_watermark_ms = 12000
+player_target_buffer_ms = 24000
+player_request_interval_ms = 120
+decoder_request_chunk_ms = 1500
+"#;
+        let config = Config::default();
+
+        let serialized = serialize_config_with_preserved_comments(existing, &config)
+            .expect("comment-preserving config serialization should succeed");
+        assert!(serialized.contains("custom_library_key = \"keep-me\""));
+    }
+
+    #[test]
+    fn test_serialize_config_with_preserved_comments_persists_integrations_backends() {
+        let existing = r#"
+[output]
+output_device_name = ""
+output_device_auto = true
+channel_count = 2
+sample_rate_khz = 44100
+bits_per_sample = 24
+channel_count_auto = true
+sample_rate_auto = true
+bits_per_sample_auto = true
+
+[cast]
+allow_transcode_fallback = true
+
+[ui]
+show_layout_edit_intro = true
+show_tooltips = true
+auto_scroll_to_playing_track = true
+dark_mode = true
+window_width = 900
+window_height = 650
+volume = 0.8
+playback_order = "default"
+repeat_mode = "off"
+
+[library]
+folders = []
+online_metadata_enabled = false
+online_metadata_prompt_pending = true
+artist_image_cache_ttl_days = 30
+artist_image_cache_max_size_mb = 512
+
+[buffering]
+player_low_watermark_ms = 1500
+player_target_buffer_ms = 12000
+player_request_interval_ms = 120
+decoder_request_chunk_ms = 1000
+
+[integrations]
+backends = []
+"#;
+        let mut config = Config::default();
+        config.integrations.backends = vec![crate::config::BackendProfileConfig {
+            profile_id: "opensubsonic-default".to_string(),
+            backend_kind: crate::config::IntegrationBackendKind::OpenSubsonic,
+            display_name: "OpenSubsonic".to_string(),
+            endpoint: "https://music.example.com".to_string(),
+            username: "alice".to_string(),
+            enabled: true,
+        }];
+
+        let serialized = serialize_config_with_preserved_comments(existing, &config)
+            .expect("integration backend should serialize");
+        assert!(serialized.contains("[[integrations.backends]]"));
+        assert!(serialized.contains("profile_id = \"opensubsonic-default\""));
+        assert!(serialized.contains("backend_kind = \"open_subsonic\""));
+        assert!(serialized.contains("endpoint = \"https://music.example.com\""));
+        assert!(serialized.contains("username = \"alice\""));
+        assert!(serialized.contains("enabled = true"));
+    }
+}
