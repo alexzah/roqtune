@@ -60,12 +60,20 @@ Detailed installation and packaging instructions live in [`INSTALL.md`](INSTALL.
 The app is organized into cooperating runtime components connected through an event bus (`tokio::sync::broadcast`):
 
 - `src/protocol.rs`: shared message protocol for all components.
-- `src/main.rs`: startup, wiring, Slint callback bindings, and runtime coordination.
-- `src/playlist_manager.rs`: playlist edits, playback sequencing, and decode-cache intent.
-- `src/audio_decoder.rs`: decode + seek + resample pipeline.
-- `src/audio_player.rs`: output stream, queue management, and playback progress.
-- `src/ui_manager.rs`: applies bus events to UI state and metadata/cover-art updates.
+- `src/main.rs`: binary entrypoint and top-level module wiring.
+- `src/app_runtime.rs`: startup/config bootstrap and runtime initialization.
+- `src/app_bootstrap/services.rs`: background worker/service spawning.
+- `src/app_callbacks/*`: Slint callback registration by feature area.
+- `src/runtime/audio_runtime_reactor.rs`: runtime config/device event coordination.
+- `src/audio/*`: decode, playback, output probing, and output option selection.
+- `src/playlist/*`: playlist data model and playlist orchestration.
+- `src/library/*`: library scanning/indexing and enrichment.
+- `src/metadata/*`: tag parsing and metadata orchestration.
+- `src/integration/*`: backend/integration management (including OpenSubsonic).
+- `src/cast/*`: cast manager and cast playback control.
+- `src/ui_manager.rs`: bus-to-UI state synchronization and UI-side orchestration.
 - `src/layout.rs`: layout tree model and edit operations.
+- `src/config.rs` + `src/config_persistence.rs`: config model and comment-preserving persistence.
 - `src/db_manager.rs`: SQLite persistence for playlists, library index/cache data, and UI metadata.
 
 ## Data and Config Files
@@ -75,8 +83,14 @@ The app is organized into cooperating runtime components connected through an ev
 - Config file: `<config_dir>/roqtune/config.toml`
 - UI Layout file: `<config_dir>/roqtune/layout.toml`
 - App-state database (SQLite 3): `<data_dir>/roqtune/roqtune.db`
-- Cover art cache: `<cache_dir>/roqtune/covers/`
-- Artist enrichment image cache: `<cache_dir>/roqtune/library_enrichment/images/`
+- Cover art cache root: `<cache_dir>/roqtune/covers/`
+  - Originals: `<cache_dir>/roqtune/covers/original/`
+  - List thumbs: `<cache_dir>/roqtune/covers/thumbs/<max_edge_px>/`
+  - Detail previews: `<cache_dir>/roqtune/covers/detail/<max_edge_px>/`
+- Artist image cache root: `<cache_dir>/roqtune/library_enrichment/`
+  - Originals: `<cache_dir>/roqtune/library_enrichment/images/`
+  - List thumbs: `<cache_dir>/roqtune/library_enrichment/thumbs/<max_edge_px>/`
+  - Detail previews: `<cache_dir>/roqtune/library_enrichment/detail/<max_edge_px>/`
 - Output probe cache: `<cache_dir>/roqtune/output_probe_cache.json`
 
 Common Linux defaults:

@@ -878,7 +878,8 @@ Check Settings -> OpenSubsonic status and re-save credentials if needed.",
                                     msg
                                 );
                             }
-                            if active.consecutive_decode_errors > MAX_CONSECUTIVE_FRAME_DECODE_ERRORS
+                            if active.consecutive_decode_errors
+                                > MAX_CONSECUTIVE_FRAME_DECODE_ERRORS
                             {
                                 error!(
                                     "DecodeWorker: too many consecutive decode errors while reading {}. Giving up on track.",
@@ -960,7 +961,10 @@ Check Settings -> OpenSubsonic status and re-save credentials if needed.",
                             active.consecutive_decode_errors = 0;
                         }
                         Err(e) => {
-                            error!("DecodeWorker: Failed to re-create decoder after reset: {}", e);
+                            error!(
+                                "DecodeWorker: Failed to re-create decoder after reset: {}",
+                                e
+                            );
                             exhausted_input = true;
                         }
                     }
