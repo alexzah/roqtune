@@ -23,6 +23,7 @@ mod playlist;
 #[path = "playlist/playlist_manager.rs"]
 mod playlist_manager;
 mod protocol;
+mod protocol_utils;
 mod runtime;
 mod runtime_config;
 mod ui;

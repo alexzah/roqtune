@@ -1630,7 +1630,9 @@ impl LibraryManager {
                     Message::Config(protocol::ConfigMessage::ConfigChanged(changes)) => {
                         for change in changes {
                             if let protocol::ConfigDeltaEntry::Library(library) = change {
-                                self.library_folders = library.folders;
+                                if let Some(folders) = library.folders {
+                                    self.library_folders = folders;
+                                }
                             }
                         }
                     }

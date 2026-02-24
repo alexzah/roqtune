@@ -6,8 +6,9 @@
 use std::path::PathBuf;
 
 use crate::config::{
-    BufferingConfig, CastConfig, IntegrationsConfig, LibraryConfig, OutputConfig, UiConfig,
+    BackendProfileConfig, PlaylistColumnConfig, ResamplerQuality, UiPlaybackOrder, UiRepeatMode,
 };
+use crate::layout::LayoutConfig;
 
 /// Repeat behavior applied when navigating beyond the current track.
 #[derive(Debug, Clone, Copy, PartialEq, serde::Deserialize, serde::Serialize)]
@@ -949,12 +950,75 @@ pub struct TrackMetadataSummary {
 #[derive(Debug, Clone)]
 #[allow(dead_code)]
 pub enum ConfigDeltaEntry {
-    Output(OutputConfig),
-    Cast(CastConfig),
-    Ui(UiConfig),
-    Library(LibraryConfig),
-    Buffering(BufferingConfig),
-    Integrations(IntegrationsConfig),
+    Output(OutputConfigDelta),
+    Cast(CastConfigDelta),
+    Ui(UiConfigDelta),
+    Library(LibraryConfigDelta),
+    Buffering(BufferingConfigDelta),
+    Integrations(IntegrationsConfigDelta),
+}
+
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct OutputConfigDelta {
+    pub output_device_name: Option<String>,
+    pub output_device_auto: Option<bool>,
+    pub channel_count: Option<u16>,
+    pub sample_rate_khz: Option<u32>,
+    pub bits_per_sample: Option<u16>,
+    pub channel_count_auto: Option<bool>,
+    pub sample_rate_auto: Option<bool>,
+    pub bits_per_sample_auto: Option<bool>,
+    pub resampler_quality: Option<ResamplerQuality>,
+    pub dither_on_bitdepth_reduce: Option<bool>,
+    pub downmix_higher_channel_tracks: Option<bool>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct CastConfigDelta {
+    pub allow_transcode_fallback: Option<bool>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct UiConfigDelta {
+    pub show_layout_edit_intro: Option<bool>,
+    pub show_tooltips: Option<bool>,
+    pub auto_scroll_to_playing_track: Option<bool>,
+    pub dark_mode: Option<bool>,
+    pub playlist_album_art_column_min_width_px: Option<u32>,
+    pub playlist_album_art_column_max_width_px: Option<u32>,
+    pub layout: Option<LayoutConfig>,
+    pub playlist_columns: Option<Vec<PlaylistColumnConfig>>,
+    pub window_width: Option<u32>,
+    pub window_height: Option<u32>,
+    pub volume: Option<f32>,
+    pub playback_order: Option<UiPlaybackOrder>,
+    pub repeat_mode: Option<UiRepeatMode>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct LibraryConfigDelta {
+    pub folders: Option<Vec<String>>,
+    pub online_metadata_enabled: Option<bool>,
+    pub online_metadata_prompt_pending: Option<bool>,
+    pub list_image_max_edge_px: Option<u32>,
+    pub cover_art_cache_max_size_mb: Option<u32>,
+    pub cover_art_memory_cache_max_size_mb: Option<u32>,
+    pub artist_image_memory_cache_max_size_mb: Option<u32>,
+    pub artist_image_cache_ttl_days: Option<u32>,
+    pub artist_image_cache_max_size_mb: Option<u32>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct BufferingConfigDelta {
+    pub player_low_watermark_ms: Option<u32>,
+    pub player_target_buffer_ms: Option<u32>,
+    pub player_request_interval_ms: Option<u32>,
+    pub decoder_request_chunk_ms: Option<u32>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct IntegrationsConfigDelta {
+    pub backends: Option<Vec<BackendProfileConfig>>,
 }
 
 /// Runtime configuration updates and hardware notifications.

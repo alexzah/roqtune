@@ -338,6 +338,47 @@ Check Settings -> OpenSubsonic status and re-save credentials if needed.",
         }
     }
 
+    fn apply_output_config_delta(&mut self, output: &protocol::OutputConfigDelta) {
+        let next_target_sample_rate = output.sample_rate_khz.unwrap_or(self.target_sample_rate);
+        let next_target_channels = output.channel_count.unwrap_or(self.target_channels);
+        let next_target_bits_per_sample = output
+            .bits_per_sample
+            .unwrap_or(self.target_bits_per_sample);
+        let next_resampler_quality = output.resampler_quality.unwrap_or(self.resampler_quality);
+        let next_dither_on_bitdepth_reduce = output
+            .dither_on_bitdepth_reduce
+            .unwrap_or(self.dither_on_bitdepth_reduce);
+        let next_downmix_higher_channel_tracks = output
+            .downmix_higher_channel_tracks
+            .unwrap_or(self.downmix_higher_channel_tracks);
+
+        let audio_processing_changed = self.target_sample_rate != next_target_sample_rate
+            || self.target_channels != next_target_channels
+            || self.target_bits_per_sample != next_target_bits_per_sample
+            || self.resampler_quality != next_resampler_quality
+            || self.dither_on_bitdepth_reduce != next_dither_on_bitdepth_reduce
+            || self.downmix_higher_channel_tracks != next_downmix_higher_channel_tracks;
+
+        self.target_sample_rate = next_target_sample_rate;
+        self.target_channels = next_target_channels;
+        self.target_bits_per_sample = next_target_bits_per_sample;
+        self.resampler_quality = next_resampler_quality;
+        self.dither_on_bitdepth_reduce = next_dither_on_bitdepth_reduce;
+        self.downmix_higher_channel_tracks = next_downmix_higher_channel_tracks;
+
+        if audio_processing_changed {
+            self.resampler = None;
+            self.resampler_flushed = false;
+            self.resample_buffer.clear();
+        }
+    }
+
+    fn apply_buffering_config_delta(&mut self, buffering: &protocol::BufferingConfigDelta) {
+        if let Some(chunk_ms) = buffering.decoder_request_chunk_ms {
+            self.decoder_request_chunk_ms = chunk_ms.max(1);
+        }
+    }
+
     fn handle_work_item(&mut self, item: DecodeWorkItem) {
         match item {
             DecodeWorkItem::Stop { generation } => {
@@ -392,15 +433,13 @@ Check Settings -> OpenSubsonic status and re-save credentials if needed.",
                 self.decode_requested_samples(requested_samples);
             }
             DecodeWorkItem::ConfigChanged(changes) => {
-                let mut output_update: Option<crate::config::OutputConfig> = None;
-                let mut buffering_update: Option<BufferingConfig> = None;
                 for change in changes {
                     match change {
                         protocol::ConfigDeltaEntry::Output(output) => {
-                            output_update = Some(output);
+                            self.apply_output_config_delta(&output);
                         }
                         protocol::ConfigDeltaEntry::Buffering(buffering) => {
-                            buffering_update = Some(buffering);
+                            self.apply_buffering_config_delta(&buffering);
                         }
                         protocol::ConfigDeltaEntry::Cast(_)
                         | protocol::ConfigDeltaEntry::Ui(_)
@@ -408,7 +447,6 @@ Check Settings -> OpenSubsonic status and re-save credentials if needed.",
                         | protocol::ConfigDeltaEntry::Integrations(_) => {}
                     }
                 }
-                self.apply_decode_config(output_update.as_ref(), buffering_update.as_ref());
             }
             DecodeWorkItem::RuntimeOutputSampleRateChanged { sample_rate_hz } => {
                 self.target_sample_rate = sample_rate_hz.max(8_000);

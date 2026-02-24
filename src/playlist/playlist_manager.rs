@@ -764,8 +764,11 @@ impl PlaylistManager {
         true
     }
 
-    fn update_runtime_policy_from_output_config(&mut self, output: &OutputConfig) {
-        self.sample_rate_auto_enabled = output.sample_rate_auto;
+    fn update_runtime_policy_from_output_delta(&mut self, output: &protocol::OutputConfigDelta) {
+        let Some(sample_rate_auto) = output.sample_rate_auto else {
+            return;
+        };
+        self.sample_rate_auto_enabled = sample_rate_auto;
         if !self.sample_rate_auto_enabled {
             self.pending_rate_switch = None;
             self.pending_rate_switch_play_immediately = false;
@@ -779,6 +782,39 @@ impl PlaylistManager {
             UiPlaybackOrder::Random => protocol::PlaybackOrder::Random,
         };
         let next_repeat_mode = match ui.repeat_mode {
+            UiRepeatMode::Off => protocol::RepeatMode::Off,
+            UiRepeatMode::Playlist => protocol::RepeatMode::Playlist,
+            UiRepeatMode::Track => protocol::RepeatMode::Track,
+        };
+
+        let changed =
+            self.playback_order != next_playback_order || self.repeat_mode != next_repeat_mode;
+        self.playback_order = next_playback_order;
+        self.repeat_mode = next_repeat_mode;
+        self.editing_playlist
+            .set_playback_order(next_playback_order);
+        self.editing_playlist.set_repeat_mode(next_repeat_mode);
+        self.playback_playlist
+            .set_playback_order(next_playback_order);
+        self.playback_playlist.set_repeat_mode(next_repeat_mode);
+        changed
+    }
+
+    fn restore_playback_preferences_from_ui_delta(&mut self, ui: &protocol::UiConfigDelta) -> bool {
+        let next_playback_order = match ui.playback_order.unwrap_or(match self.playback_order {
+            protocol::PlaybackOrder::Default => UiPlaybackOrder::Default,
+            protocol::PlaybackOrder::Shuffle => UiPlaybackOrder::Shuffle,
+            protocol::PlaybackOrder::Random => UiPlaybackOrder::Random,
+        }) {
+            UiPlaybackOrder::Default => protocol::PlaybackOrder::Default,
+            UiPlaybackOrder::Shuffle => protocol::PlaybackOrder::Shuffle,
+            UiPlaybackOrder::Random => protocol::PlaybackOrder::Random,
+        };
+        let next_repeat_mode = match ui.repeat_mode.unwrap_or(match self.repeat_mode {
+            protocol::RepeatMode::Off => UiRepeatMode::Off,
+            protocol::RepeatMode::Playlist => UiRepeatMode::Playlist,
+            protocol::RepeatMode::Track => UiRepeatMode::Track,
+        }) {
             UiRepeatMode::Off => protocol::RepeatMode::Off,
             UiRepeatMode::Playlist => protocol::RepeatMode::Playlist,
             UiRepeatMode::Track => protocol::RepeatMode::Track,
@@ -1583,12 +1619,12 @@ impl PlaylistManager {
                         for change in changes {
                             match change {
                                 protocol::ConfigDeltaEntry::Output(output) => {
-                                    self.update_runtime_policy_from_output_config(&output);
+                                    self.update_runtime_policy_from_output_delta(&output);
                                 }
                                 protocol::ConfigDeltaEntry::Ui(ui) => {
                                     if !self.playback_preferences_restored_from_config {
                                         playback_changed =
-                                            self.restore_playback_preferences_from_ui_config(&ui);
+                                            self.restore_playback_preferences_from_ui_delta(&ui);
                                         self.playback_preferences_restored_from_config = true;
                                     }
                                 }
@@ -4604,7 +4640,21 @@ mod tests {
         config.output.sample_rate_khz = 192_000;
         harness.send(protocol::Message::Config(
             protocol::ConfigMessage::ConfigChanged(vec![protocol::ConfigDeltaEntry::Output(
-                config.output,
+                protocol::OutputConfigDelta {
+                    output_device_name: Some(config.output.output_device_name),
+                    output_device_auto: Some(config.output.output_device_auto),
+                    channel_count: Some(config.output.channel_count),
+                    sample_rate_khz: Some(config.output.sample_rate_khz),
+                    bits_per_sample: Some(config.output.bits_per_sample),
+                    channel_count_auto: Some(config.output.channel_count_auto),
+                    sample_rate_auto: Some(config.output.sample_rate_auto),
+                    bits_per_sample_auto: Some(config.output.bits_per_sample_auto),
+                    resampler_quality: Some(config.output.resampler_quality),
+                    dither_on_bitdepth_reduce: Some(config.output.dither_on_bitdepth_reduce),
+                    downmix_higher_channel_tracks: Some(
+                        config.output.downmix_higher_channel_tracks,
+                    ),
+                },
             )]),
         ));
 
@@ -4632,7 +4682,13 @@ mod tests {
         later.ui.playback_order = UiPlaybackOrder::Random;
         later.ui.repeat_mode = UiRepeatMode::Playlist;
         harness.send(protocol::Message::Config(
-            protocol::ConfigMessage::ConfigChanged(vec![protocol::ConfigDeltaEntry::Ui(later.ui)]),
+            protocol::ConfigMessage::ConfigChanged(vec![protocol::ConfigDeltaEntry::Ui(
+                protocol::UiConfigDelta {
+                    playback_order: Some(later.ui.playback_order),
+                    repeat_mode: Some(later.ui.repeat_mode),
+                    ..Default::default()
+                },
+            )]),
         ));
         harness.drain_messages();
 

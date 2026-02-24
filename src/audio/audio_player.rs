@@ -1240,15 +1240,15 @@ impl AudioPlayer {
                         }
                     }
                     Message::Config(ConfigMessage::ConfigChanged(changes)) => {
-                        let mut latest_output: Option<crate::config::OutputConfig> = None;
-                        let mut latest_buffering: Option<crate::config::BufferingConfig> = None;
+                        let mut latest_output = crate::protocol::OutputConfigDelta::default();
+                        let mut latest_buffering = crate::protocol::BufferingConfigDelta::default();
                         for change in changes {
                             match change {
                                 crate::protocol::ConfigDeltaEntry::Output(output) => {
-                                    latest_output = Some(output);
+                                    latest_output.merge_from(output);
                                 }
                                 crate::protocol::ConfigDeltaEntry::Buffering(buffering) => {
-                                    latest_buffering = Some(buffering);
+                                    latest_buffering.merge_from(buffering);
                                 }
                                 crate::protocol::ConfigDeltaEntry::Cast(_)
                                 | crate::protocol::ConfigDeltaEntry::Ui(_)
@@ -1256,25 +1256,55 @@ impl AudioPlayer {
                                 | crate::protocol::ConfigDeltaEntry::Integrations(_) => {}
                             }
                         }
-                        if let Some(buffering) = latest_buffering {
-                            let low_watermark_ms = buffering.player_low_watermark_ms as usize;
-                            let target_buffer_ms = (buffering.player_target_buffer_ms as usize)
+                        if !latest_buffering.is_empty() {
+                            let low_watermark_ms = latest_buffering
+                                .player_low_watermark_ms
+                                .map(|value| value as usize)
+                                .unwrap_or_else(|| {
+                                    self.buffer_low_watermark_ms.load(Ordering::Relaxed)
+                                });
+                            let target_buffer_ms = latest_buffering
+                                .player_target_buffer_ms
+                                .map(|value| value as usize)
+                                .unwrap_or_else(|| self.buffer_target_ms.load(Ordering::Relaxed))
                                 .max(low_watermark_ms.saturating_add(500));
+                            let request_interval_ms = latest_buffering
+                                .player_request_interval_ms
+                                .map(|value| value.max(20) as usize)
+                                .unwrap_or_else(|| {
+                                    self.buffer_request_interval_ms.load(Ordering::Relaxed)
+                                });
+
                             self.buffer_low_watermark_ms
                                 .store(low_watermark_ms, Ordering::Relaxed);
                             self.buffer_target_ms
                                 .store(target_buffer_ms, Ordering::Relaxed);
-                            self.buffer_request_interval_ms.store(
-                                buffering.player_request_interval_ms.max(20) as usize,
-                                Ordering::Relaxed,
-                            );
+                            self.buffer_request_interval_ms
+                                .store(request_interval_ms, Ordering::Relaxed);
                         }
-                        let Some(output) = latest_output else {
+                        if let Some(downmix) = latest_output.downmix_higher_channel_tracks {
+                            self.downmix_higher_channel_tracks = downmix;
+                        }
+                        if latest_output.is_empty() {
                             continue;
-                        };
-                        self.downmix_higher_channel_tracks = output.downmix_higher_channel_tracks;
-                        let next_output_signature =
-                            Self::output_signature_from_output_config(&output);
+                        }
+                        let mut next_output_signature = self.current_output_signature();
+                        if let Some(device_name) = latest_output.output_device_name.as_deref() {
+                            next_output_signature.device_name =
+                                Self::canonicalize_requested_device_name(device_name);
+                        }
+                        if let Some(sample_rate_hz) = latest_output.sample_rate_khz {
+                            next_output_signature.sample_rate_hz = sample_rate_hz.max(8_000);
+                        }
+                        if let Some(channel_count) = latest_output.channel_count {
+                            next_output_signature.channel_count = channel_count.max(1);
+                        }
+                        if let Some(bits_per_sample) = latest_output.bits_per_sample {
+                            next_output_signature.bits_per_sample = bits_per_sample.max(8);
+                        }
+                        if let Some(dither) = latest_output.dither_on_bitdepth_reduce {
+                            next_output_signature.dither_on_bitdepth_reduce = dither;
+                        }
                         if self.last_output_signature.as_ref() != Some(&next_output_signature) {
                             let previous_sample_rate =
                                 self.target_sample_rate.load(Ordering::Relaxed);

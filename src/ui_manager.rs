@@ -8547,8 +8547,8 @@ impl UiManager {
 
     fn apply_ui_library_config_updates(
         &mut self,
-        ui_update: Option<config::UiConfig>,
-        library_update: Option<config::LibraryConfig>,
+        ui_update: Option<protocol::UiConfigDelta>,
+        library_update: Option<protocol::LibraryConfigDelta>,
     ) {
         if ui_update.is_none() && library_update.is_none() {
             return;
@@ -8572,14 +8572,27 @@ impl UiManager {
         let mut online_metadata_prompt_changed = false;
 
         if let Some(library) = library_update {
-            self.library_online_metadata_enabled = library.online_metadata_enabled;
-            self.library_online_metadata_prompt_pending = library.online_metadata_prompt_pending;
-            self.list_image_max_edge_px = library.list_image_max_edge_px;
-            self.cover_art_cache_max_size_mb = library.cover_art_cache_max_size_mb;
-            self.artist_image_cache_max_size_mb = library.artist_image_cache_max_size_mb;
-            self.cover_art_memory_cache_max_size_mb = library.cover_art_memory_cache_max_size_mb;
-            self.artist_image_memory_cache_max_size_mb =
-                library.artist_image_memory_cache_max_size_mb;
+            if let Some(value) = library.online_metadata_enabled {
+                self.library_online_metadata_enabled = value;
+            }
+            if let Some(value) = library.online_metadata_prompt_pending {
+                self.library_online_metadata_prompt_pending = value;
+            }
+            if let Some(value) = library.list_image_max_edge_px {
+                self.list_image_max_edge_px = value;
+            }
+            if let Some(value) = library.cover_art_cache_max_size_mb {
+                self.cover_art_cache_max_size_mb = value;
+            }
+            if let Some(value) = library.artist_image_cache_max_size_mb {
+                self.artist_image_cache_max_size_mb = value;
+            }
+            if let Some(value) = library.cover_art_memory_cache_max_size_mb {
+                self.cover_art_memory_cache_max_size_mb = value;
+            }
+            if let Some(value) = library.artist_image_memory_cache_max_size_mb {
+                self.artist_image_memory_cache_max_size_mb = value;
+            }
 
             list_image_max_edge_changed =
                 previous_list_image_max_edge_px != self.list_image_max_edge_px;
@@ -8656,63 +8669,91 @@ impl UiManager {
         let mut playlist_columns_changed = false;
         let mut album_art_column_width_limits_changed = false;
         if let Some(ui_config) = ui_update {
-            self.auto_scroll_to_playing_track = ui_config.auto_scroll_to_playing_track;
-            self.playlist_columns = ui_config.playlist_columns.clone();
-            self.album_art_column_min_width_px = ui_config.playlist_album_art_column_min_width_px;
-            self.album_art_column_max_width_px = ui_config.playlist_album_art_column_max_width_px;
+            let has_playlist_columns_patch = ui_config.playlist_columns.is_some();
+            let has_layout_patch = ui_config.layout.is_some();
+            let has_album_art_min_patch =
+                ui_config.playlist_album_art_column_min_width_px.is_some();
+            let has_album_art_max_patch =
+                ui_config.playlist_album_art_column_max_width_px.is_some();
+            if let Some(auto_scroll_to_playing_track) = ui_config.auto_scroll_to_playing_track {
+                self.auto_scroll_to_playing_track = auto_scroll_to_playing_track;
+            }
+            if let Some(playlist_columns) = ui_config.playlist_columns {
+                self.playlist_columns = playlist_columns;
+            }
+            if let Some(album_art_column_min_width_px) =
+                ui_config.playlist_album_art_column_min_width_px
+            {
+                self.album_art_column_min_width_px = album_art_column_min_width_px;
+            }
+            if let Some(album_art_column_max_width_px) =
+                ui_config.playlist_album_art_column_max_width_px
+            {
+                self.album_art_column_max_width_px = album_art_column_max_width_px;
+            }
             let valid_column_keys: HashSet<String> = self
                 .playlist_columns
                 .iter()
                 .map(Self::playlist_column_key)
                 .collect();
-            self.apply_layout_column_width_overrides(
-                &ui_config.layout.playlist_column_width_overrides,
-            );
+            if let Some(layout) = ui_config.layout {
+                self.apply_layout_column_width_overrides(&layout.playlist_column_width_overrides);
+            }
             self.playlist_column_target_widths_px
                 .retain(|key, _| valid_column_keys.contains(key));
-            self.refresh_playlist_column_content_targets();
-            self.apply_playlist_column_layout();
-            let playlist_columns = self.playlist_columns.clone();
+            let playlist_layout_affected = has_playlist_columns_patch
+                || has_layout_patch
+                || has_album_art_min_patch
+                || has_album_art_max_patch;
+            if playlist_layout_affected {
+                self.refresh_playlist_column_content_targets();
+                self.apply_playlist_column_layout();
+                let playlist_columns = self.playlist_columns.clone();
 
-            let visible_headers: Vec<slint::SharedString> = playlist_columns
-                .iter()
-                .filter(|column| column.enabled)
-                .map(|column| column.name.as_str().into())
-                .collect();
-            let visible_kinds = Self::visible_playlist_column_kinds(&playlist_columns);
-            let menu_labels: Vec<slint::SharedString> = playlist_columns
-                .iter()
-                .map(|column| column.name.as_str().into())
-                .collect();
-            let menu_checked: Vec<bool> = playlist_columns
-                .iter()
-                .map(|column| column.enabled)
-                .collect();
-            let menu_is_custom: Vec<bool> = playlist_columns
-                .iter()
-                .map(|column| column.custom)
-                .collect();
-            let _ = self.ui.upgrade_in_event_loop(move |ui| {
-                ui.set_playlist_visible_column_headers(ModelRc::from(Rc::new(VecModel::from(
-                    visible_headers,
-                ))));
-                ui.set_playlist_visible_column_kinds(ModelRc::from(Rc::new(VecModel::from(
-                    visible_kinds,
-                ))));
-                ui.set_playlist_column_menu_labels(ModelRc::from(Rc::new(VecModel::from(
-                    menu_labels,
-                ))));
-                ui.set_playlist_column_menu_checked(ModelRc::from(Rc::new(VecModel::from(
-                    menu_checked,
-                ))));
-                ui.set_playlist_column_menu_is_custom(ModelRc::from(Rc::new(VecModel::from(
-                    menu_is_custom,
-                ))));
-            });
-            playlist_columns_changed = previous_playlist_columns != self.playlist_columns;
-            album_art_column_width_limits_changed = previous_album_art_column_min_width_px
-                != self.album_art_column_min_width_px
-                || previous_album_art_column_max_width_px != self.album_art_column_max_width_px;
+                let visible_headers: Vec<slint::SharedString> = playlist_columns
+                    .iter()
+                    .filter(|column| column.enabled)
+                    .map(|column| column.name.as_str().into())
+                    .collect();
+                let visible_kinds = Self::visible_playlist_column_kinds(&playlist_columns);
+                let menu_labels: Vec<slint::SharedString> = playlist_columns
+                    .iter()
+                    .map(|column| column.name.as_str().into())
+                    .collect();
+                let menu_checked: Vec<bool> = playlist_columns
+                    .iter()
+                    .map(|column| column.enabled)
+                    .collect();
+                let menu_is_custom: Vec<bool> = playlist_columns
+                    .iter()
+                    .map(|column| column.custom)
+                    .collect();
+                let _ = self.ui.upgrade_in_event_loop(move |ui| {
+                    ui.set_playlist_visible_column_headers(ModelRc::from(Rc::new(VecModel::from(
+                        visible_headers,
+                    ))));
+                    ui.set_playlist_visible_column_kinds(ModelRc::from(Rc::new(VecModel::from(
+                        visible_kinds,
+                    ))));
+                    ui.set_playlist_column_menu_labels(ModelRc::from(Rc::new(VecModel::from(
+                        menu_labels,
+                    ))));
+                    ui.set_playlist_column_menu_checked(ModelRc::from(Rc::new(VecModel::from(
+                        menu_checked,
+                    ))));
+                    ui.set_playlist_column_menu_is_custom(ModelRc::from(Rc::new(VecModel::from(
+                        menu_is_custom,
+                    ))));
+                });
+            }
+            if has_playlist_columns_patch {
+                playlist_columns_changed = previous_playlist_columns != self.playlist_columns;
+            }
+            if has_album_art_min_patch || has_album_art_max_patch {
+                album_art_column_width_limits_changed = previous_album_art_column_min_width_px
+                    != self.album_art_column_min_width_px
+                    || previous_album_art_column_max_width_px != self.album_art_column_max_width_px;
+            }
         }
 
         let refresh_library_ui = list_image_max_edge_changed
@@ -10069,15 +10110,15 @@ impl UiManager {
                         protocol::Message::Config(protocol::ConfigMessage::ConfigChanged(
                             changes,
                         )) => {
-                            let mut ui_update = None;
-                            let mut library_update = None;
+                            let mut ui_update = protocol::UiConfigDelta::default();
+                            let mut library_update = protocol::LibraryConfigDelta::default();
                             for change in changes {
                                 match change {
                                     protocol::ConfigDeltaEntry::Ui(ui) => {
-                                        ui_update = Some(ui);
+                                        ui_update.merge_from(ui);
                                     }
                                     protocol::ConfigDeltaEntry::Library(library) => {
-                                        library_update = Some(library);
+                                        library_update.merge_from(library);
                                     }
                                     protocol::ConfigDeltaEntry::Output(_)
                                     | protocol::ConfigDeltaEntry::Cast(_)
@@ -10085,7 +10126,10 @@ impl UiManager {
                                     | protocol::ConfigDeltaEntry::Integrations(_) => {}
                                 }
                             }
-                            self.apply_ui_library_config_updates(ui_update, library_update);
+                            self.apply_ui_library_config_updates(
+                                (!ui_update.is_empty()).then_some(ui_update),
+                                (!library_update.is_empty()).then_some(library_update),
+                            );
                         }
                         protocol::Message::Playlist(
                             protocol::PlaylistMessage::PlaylistViewportChanged {

@@ -148,6 +148,8 @@ pub struct LibraryEnrichmentManager {
     bus_producer: Sender<Message>,
     db_manager: DbManager,
     online_metadata_enabled: bool,
+    list_image_max_edge_px: u32,
+    cover_art_cache_max_size_mb: u32,
     artist_image_cache_ttl_days: u32,
     artist_image_cache_max_size_mb: u32,
     queued_attempts: HashMap<LibraryEnrichmentEntity, LibraryEnrichmentAttemptKind>,
@@ -181,6 +183,8 @@ impl LibraryEnrichmentManager {
             bus_producer,
             db_manager,
             online_metadata_enabled: initial_library_config.online_metadata_enabled,
+            list_image_max_edge_px: initial_library_config.list_image_max_edge_px,
+            cover_art_cache_max_size_mb: initial_library_config.cover_art_cache_max_size_mb,
             artist_image_cache_ttl_days: initial_library_config.artist_image_cache_ttl_days,
             artist_image_cache_max_size_mb: initial_library_config.artist_image_cache_max_size_mb,
             queued_attempts: HashMap::new(),
@@ -210,12 +214,14 @@ impl LibraryEnrichmentManager {
 
     fn apply_library_config(&mut self, library: &crate::config::LibraryConfig) {
         self.online_metadata_enabled = library.online_metadata_enabled;
+        self.list_image_max_edge_px = library.list_image_max_edge_px;
+        self.cover_art_cache_max_size_mb = library.cover_art_cache_max_size_mb;
         self.artist_image_cache_ttl_days = library.artist_image_cache_ttl_days;
         self.artist_image_cache_max_size_mb = library.artist_image_cache_max_size_mb;
         image_pipeline::configure_runtime_limits(
-            library.list_image_max_edge_px,
-            library.cover_art_cache_max_size_mb,
-            library.artist_image_cache_max_size_mb,
+            self.list_image_max_edge_px,
+            self.cover_art_cache_max_size_mb,
+            self.artist_image_cache_max_size_mb,
         );
         if !self.online_metadata_enabled {
             self.queued_attempts.clear();
@@ -226,6 +232,58 @@ impl LibraryEnrichmentManager {
         }
         self.prune_enrichment_cache();
         self.prune_artist_image_cache_by_size();
+    }
+
+    fn apply_library_config_delta(&mut self, library: &crate::protocol::LibraryConfigDelta) {
+        let previous_list_image_max_edge_px = self.list_image_max_edge_px;
+        let previous_cover_art_cache_max_size_mb = self.cover_art_cache_max_size_mb;
+        let previous_artist_image_cache_max_size_mb = self.artist_image_cache_max_size_mb;
+        let previous_online_metadata_enabled = self.online_metadata_enabled;
+
+        if let Some(value) = library.online_metadata_enabled {
+            self.online_metadata_enabled = value;
+        }
+        if let Some(value) = library.list_image_max_edge_px {
+            self.list_image_max_edge_px = value;
+        }
+        if let Some(value) = library.cover_art_cache_max_size_mb {
+            self.cover_art_cache_max_size_mb = value;
+        }
+        if let Some(value) = library.artist_image_cache_ttl_days {
+            self.artist_image_cache_ttl_days = value;
+        }
+        if let Some(value) = library.artist_image_cache_max_size_mb {
+            self.artist_image_cache_max_size_mb = value;
+        }
+
+        let runtime_limits_changed = previous_list_image_max_edge_px != self.list_image_max_edge_px
+            || previous_cover_art_cache_max_size_mb != self.cover_art_cache_max_size_mb
+            || previous_artist_image_cache_max_size_mb != self.artist_image_cache_max_size_mb;
+
+        if runtime_limits_changed {
+            image_pipeline::configure_runtime_limits(
+                self.list_image_max_edge_px,
+                self.cover_art_cache_max_size_mb,
+                self.artist_image_cache_max_size_mb,
+            );
+        }
+
+        if previous_online_metadata_enabled && !self.online_metadata_enabled {
+            self.queued_attempts.clear();
+            self.detail_queue.clear();
+            self.visible_artist_queue.clear();
+            self.background_artist_queue.clear();
+            self.deferred_not_before.clear();
+        }
+
+        if library.artist_image_cache_ttl_days.is_some()
+            || library.online_metadata_enabled.is_some()
+        {
+            self.prune_enrichment_cache();
+        }
+        if runtime_limits_changed || library.artist_image_cache_ttl_days.is_some() {
+            self.prune_artist_image_cache_by_size();
+        }
     }
 
     fn source_entity_label(entity: &LibraryEnrichmentEntity) -> String {
@@ -3528,16 +3586,16 @@ impl LibraryEnrichmentManager {
     fn handle_bus_message(&mut self, message: Message) {
         match message {
             Message::Config(crate::protocol::ConfigMessage::ConfigChanged(changes)) => {
-                let mut library_update: Option<crate::config::LibraryConfig> = None;
+                let mut library_update = crate::protocol::LibraryConfigDelta::default();
                 for change in changes {
                     if let crate::protocol::ConfigDeltaEntry::Library(library) = change {
-                        library_update = Some(library);
+                        library_update.merge_from(library);
                     }
                 }
-                let Some(library) = library_update else {
+                if library_update.is_empty() {
                     return;
-                };
-                self.apply_library_config(&library);
+                }
+                self.apply_library_config_delta(&library_update);
             }
             Message::Library(LibraryMessage::RequestEnrichment { entity, priority }) => {
                 let attempt_kind = match priority {

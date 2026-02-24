@@ -2046,7 +2046,9 @@ impl CastManager {
             Message::Config(crate::protocol::ConfigMessage::ConfigChanged(changes)) => {
                 for change in changes {
                     if let crate::protocol::ConfigDeltaEntry::Cast(cast) = change {
-                        self.allow_transcode_fallback = cast.allow_transcode_fallback;
+                        if let Some(allow_transcode_fallback) = cast.allow_transcode_fallback {
+                            self.allow_transcode_fallback = allow_transcode_fallback;
+                        }
                     }
                 }
             }

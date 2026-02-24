@@ -2,11 +2,15 @@
 
 use std::sync::{Arc, Mutex};
 
+use log::debug;
 use tokio::sync::broadcast;
 
 use crate::{
     config::{CastConfig, Config, OutputConfig},
-    protocol::{ConfigDeltaEntry, ConfigMessage, Message},
+    protocol::{
+        BufferingConfigDelta, CastConfigDelta, ConfigDeltaEntry, ConfigMessage,
+        IntegrationsConfigDelta, LibraryConfigDelta, Message, OutputConfigDelta, UiConfigDelta,
+    },
 };
 
 #[derive(Debug, Clone, Default)]
@@ -89,23 +93,167 @@ pub fn audio_settings_changed(previous: &Config, next: &Config) -> bool {
 /// Computes config delta entries between two config snapshots.
 pub fn config_delta_entries(previous: &Config, next: &Config) -> Vec<ConfigDeltaEntry> {
     let mut deltas = Vec::new();
-    if previous.output != next.output {
-        deltas.push(ConfigDeltaEntry::Output(next.output.clone()));
+    let mut output = OutputConfigDelta::default();
+    if previous.output.output_device_name != next.output.output_device_name {
+        output.output_device_name = Some(next.output.output_device_name.clone());
     }
-    if previous.cast != next.cast {
-        deltas.push(ConfigDeltaEntry::Cast(next.cast.clone()));
+    if previous.output.output_device_auto != next.output.output_device_auto {
+        output.output_device_auto = Some(next.output.output_device_auto);
     }
-    if previous.ui != next.ui {
-        deltas.push(ConfigDeltaEntry::Ui(next.ui.clone()));
+    if previous.output.channel_count != next.output.channel_count {
+        output.channel_count = Some(next.output.channel_count);
     }
-    if previous.library != next.library {
-        deltas.push(ConfigDeltaEntry::Library(next.library.clone()));
+    if previous.output.sample_rate_khz != next.output.sample_rate_khz {
+        output.sample_rate_khz = Some(next.output.sample_rate_khz);
     }
-    if previous.buffering != next.buffering {
-        deltas.push(ConfigDeltaEntry::Buffering(next.buffering.clone()));
+    if previous.output.bits_per_sample != next.output.bits_per_sample {
+        output.bits_per_sample = Some(next.output.bits_per_sample);
     }
-    if previous.integrations != next.integrations {
-        deltas.push(ConfigDeltaEntry::Integrations(next.integrations.clone()));
+    if previous.output.channel_count_auto != next.output.channel_count_auto {
+        output.channel_count_auto = Some(next.output.channel_count_auto);
+    }
+    if previous.output.sample_rate_auto != next.output.sample_rate_auto {
+        output.sample_rate_auto = Some(next.output.sample_rate_auto);
+    }
+    if previous.output.bits_per_sample_auto != next.output.bits_per_sample_auto {
+        output.bits_per_sample_auto = Some(next.output.bits_per_sample_auto);
+    }
+    if previous.output.resampler_quality != next.output.resampler_quality {
+        output.resampler_quality = Some(next.output.resampler_quality);
+    }
+    if previous.output.dither_on_bitdepth_reduce != next.output.dither_on_bitdepth_reduce {
+        output.dither_on_bitdepth_reduce = Some(next.output.dither_on_bitdepth_reduce);
+    }
+    if previous.output.downmix_higher_channel_tracks != next.output.downmix_higher_channel_tracks {
+        output.downmix_higher_channel_tracks = Some(next.output.downmix_higher_channel_tracks);
+    }
+    if !output.is_empty() {
+        deltas.push(ConfigDeltaEntry::Output(output));
+    }
+
+    let mut cast = CastConfigDelta::default();
+    if previous.cast.allow_transcode_fallback != next.cast.allow_transcode_fallback {
+        cast.allow_transcode_fallback = Some(next.cast.allow_transcode_fallback);
+    }
+    if !cast.is_empty() {
+        deltas.push(ConfigDeltaEntry::Cast(cast));
+    }
+
+    let mut ui = UiConfigDelta::default();
+    if previous.ui.show_layout_edit_intro != next.ui.show_layout_edit_intro {
+        ui.show_layout_edit_intro = Some(next.ui.show_layout_edit_intro);
+    }
+    if previous.ui.show_tooltips != next.ui.show_tooltips {
+        ui.show_tooltips = Some(next.ui.show_tooltips);
+    }
+    if previous.ui.auto_scroll_to_playing_track != next.ui.auto_scroll_to_playing_track {
+        ui.auto_scroll_to_playing_track = Some(next.ui.auto_scroll_to_playing_track);
+    }
+    if previous.ui.dark_mode != next.ui.dark_mode {
+        ui.dark_mode = Some(next.ui.dark_mode);
+    }
+    if previous.ui.playlist_album_art_column_min_width_px
+        != next.ui.playlist_album_art_column_min_width_px
+    {
+        ui.playlist_album_art_column_min_width_px =
+            Some(next.ui.playlist_album_art_column_min_width_px);
+    }
+    if previous.ui.playlist_album_art_column_max_width_px
+        != next.ui.playlist_album_art_column_max_width_px
+    {
+        ui.playlist_album_art_column_max_width_px =
+            Some(next.ui.playlist_album_art_column_max_width_px);
+    }
+    if previous.ui.layout != next.ui.layout {
+        ui.layout = Some(next.ui.layout.clone());
+    }
+    if previous.ui.playlist_columns != next.ui.playlist_columns {
+        ui.playlist_columns = Some(next.ui.playlist_columns.clone());
+    }
+    if previous.ui.window_width != next.ui.window_width {
+        ui.window_width = Some(next.ui.window_width);
+    }
+    if previous.ui.window_height != next.ui.window_height {
+        ui.window_height = Some(next.ui.window_height);
+    }
+    if previous.ui.volume != next.ui.volume {
+        ui.volume = Some(next.ui.volume);
+    }
+    if previous.ui.playback_order != next.ui.playback_order {
+        ui.playback_order = Some(next.ui.playback_order);
+    }
+    if previous.ui.repeat_mode != next.ui.repeat_mode {
+        ui.repeat_mode = Some(next.ui.repeat_mode);
+    }
+    if !ui.is_empty() {
+        deltas.push(ConfigDeltaEntry::Ui(ui));
+    }
+
+    let mut library = LibraryConfigDelta::default();
+    if previous.library.folders != next.library.folders {
+        library.folders = Some(next.library.folders.clone());
+    }
+    if previous.library.online_metadata_enabled != next.library.online_metadata_enabled {
+        library.online_metadata_enabled = Some(next.library.online_metadata_enabled);
+    }
+    if previous.library.online_metadata_prompt_pending
+        != next.library.online_metadata_prompt_pending
+    {
+        library.online_metadata_prompt_pending = Some(next.library.online_metadata_prompt_pending);
+    }
+    if previous.library.list_image_max_edge_px != next.library.list_image_max_edge_px {
+        library.list_image_max_edge_px = Some(next.library.list_image_max_edge_px);
+    }
+    if previous.library.cover_art_cache_max_size_mb != next.library.cover_art_cache_max_size_mb {
+        library.cover_art_cache_max_size_mb = Some(next.library.cover_art_cache_max_size_mb);
+    }
+    if previous.library.cover_art_memory_cache_max_size_mb
+        != next.library.cover_art_memory_cache_max_size_mb
+    {
+        library.cover_art_memory_cache_max_size_mb =
+            Some(next.library.cover_art_memory_cache_max_size_mb);
+    }
+    if previous.library.artist_image_memory_cache_max_size_mb
+        != next.library.artist_image_memory_cache_max_size_mb
+    {
+        library.artist_image_memory_cache_max_size_mb =
+            Some(next.library.artist_image_memory_cache_max_size_mb);
+    }
+    if previous.library.artist_image_cache_ttl_days != next.library.artist_image_cache_ttl_days {
+        library.artist_image_cache_ttl_days = Some(next.library.artist_image_cache_ttl_days);
+    }
+    if previous.library.artist_image_cache_max_size_mb
+        != next.library.artist_image_cache_max_size_mb
+    {
+        library.artist_image_cache_max_size_mb = Some(next.library.artist_image_cache_max_size_mb);
+    }
+    if !library.is_empty() {
+        deltas.push(ConfigDeltaEntry::Library(library));
+    }
+
+    let mut buffering = BufferingConfigDelta::default();
+    if previous.buffering.player_low_watermark_ms != next.buffering.player_low_watermark_ms {
+        buffering.player_low_watermark_ms = Some(next.buffering.player_low_watermark_ms);
+    }
+    if previous.buffering.player_target_buffer_ms != next.buffering.player_target_buffer_ms {
+        buffering.player_target_buffer_ms = Some(next.buffering.player_target_buffer_ms);
+    }
+    if previous.buffering.player_request_interval_ms != next.buffering.player_request_interval_ms {
+        buffering.player_request_interval_ms = Some(next.buffering.player_request_interval_ms);
+    }
+    if previous.buffering.decoder_request_chunk_ms != next.buffering.decoder_request_chunk_ms {
+        buffering.decoder_request_chunk_ms = Some(next.buffering.decoder_request_chunk_ms);
+    }
+    if !buffering.is_empty() {
+        deltas.push(ConfigDeltaEntry::Buffering(buffering));
+    }
+
+    let mut integrations = IntegrationsConfigDelta::default();
+    if previous.integrations.backends != next.integrations.backends {
+        integrations.backends = Some(next.integrations.backends.clone());
+    }
+    if !integrations.is_empty() {
+        deltas.push(ConfigDeltaEntry::Integrations(integrations));
     }
     deltas
 }
@@ -127,6 +275,11 @@ pub fn publish_runtime_config_delta(
     if deltas.is_empty() {
         return false;
     }
+    debug!(
+        "Publishing ConfigChanged with {} delta entry(ies): {:?}",
+        deltas.len(),
+        deltas
+    );
     let _ = bus_sender.send(Message::Config(ConfigMessage::ConfigChanged(deltas)));
     true
 }
