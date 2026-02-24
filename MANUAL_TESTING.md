@@ -218,6 +218,20 @@ This checklist is intended to cover all currently user-verifiable app functional
 - [ ] Session password prompt submit path connects using session-only credential.
 - [ ] Session password prompt cancel path disconnects and updates status.
 
+## Favorites / Likes
+
+- [ ] Library root list shows `Favorites` with count.
+- [ ] Entering `Favorites` shows exactly 3 rows: `Favorite Tracks`, `Favorite Artists`, `Favorite Albums`.
+- [ ] Heart toggle works from library list rows for tracks/artists/albums.
+- [ ] Heart toggle works from playlist rows when `Favorite` playlist column is enabled.
+- [ ] Heart toggle works for remote playlist tracks that are not in the local library index.
+- [ ] Now-playing `Favorite` control button is disabled when there is no current track context.
+- [ ] Now-playing `Favorite` control button is enabled for playing and paused current-track context.
+- [ ] Favorite state persists across restart for local tracks/artists/albums.
+- [ ] OpenSubsonic: connect/sync initially populates track favorites from server.
+- [ ] OpenSubsonic: local track favorite/unfavorite pushes to server when online.
+- [ ] OpenSubsonic: remote write failures keep local state and are retried on next connect/sync.
+
 ## Cast Features (Optional)
 
 - [ ] Open cast menu.

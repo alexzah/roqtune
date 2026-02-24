@@ -37,7 +37,7 @@ pub(crate) fn register_layout_editor_callbacks(ui: &AppWindow, shared_state: &Ap
 
     let shared_state_clone = shared_state.clone();
     ui.on_add_control_cluster_button(move |leaf_id, action_id| {
-        if leaf_id.trim().is_empty() || !(1..=11).contains(&action_id) {
+        if leaf_id.trim().is_empty() || !(1..=12).contains(&action_id) {
             return;
         }
         let (next_config, workspace_width_px, workspace_height_px) = {

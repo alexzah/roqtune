@@ -73,6 +73,18 @@ pub fn register_bus_forwarding_callbacks(ui: &AppWindow, context: BusForwardingC
     });
 
     let bus_sender_clone = bus_sender.clone();
+    ui.on_toggle_favorite_for_library_row(move |row_index| {
+        if row_index < 0 {
+            return;
+        }
+        let _ = bus_sender_clone.send(Message::Library(
+            protocol::LibraryMessage::ToggleFavoriteForLibraryRow {
+                row_index: row_index as usize,
+            },
+        ));
+    });
+
+    let bus_sender_clone = bus_sender.clone();
     ui.on_library_prepare_add_to_playlists(move || {
         let _ = bus_sender_clone.send(Message::Library(
             protocol::LibraryMessage::PrepareAddToPlaylists,
@@ -272,6 +284,25 @@ pub fn register_bus_forwarding_callbacks(ui: &AppWindow, context: BusForwardingC
         let _ = bus_sender_clone.send(Message::Playlist(PlaylistMessage::PlayTrackByViewIndex(
             index as usize,
         )));
+    });
+
+    let bus_sender_clone = bus_sender.clone();
+    ui.on_toggle_favorite_for_playlist_row(move |row_index| {
+        if row_index < 0 {
+            return;
+        }
+        let _ = bus_sender_clone.send(Message::Library(
+            protocol::LibraryMessage::ToggleFavoriteForPlaylistRow {
+                view_row: row_index as usize,
+            },
+        ));
+    });
+
+    let bus_sender_clone = bus_sender.clone();
+    ui.on_toggle_favorite_now_playing(move || {
+        let _ = bus_sender_clone.send(Message::Library(
+            protocol::LibraryMessage::ToggleFavoriteNowPlaying,
+        ));
     });
 
     let bus_sender_clone = bus_sender.clone();

@@ -97,7 +97,7 @@ fn sanitize_button_actions(actions: &[i32]) -> Vec<i32> {
     actions
         .iter()
         .copied()
-        .filter(|action| (1..=11).contains(action))
+        .filter(|action| (1..=12).contains(action))
         .collect()
 }
 

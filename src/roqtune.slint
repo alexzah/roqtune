@@ -350,8 +350,8 @@ export component AppWindow inherits Window {
     in-out property <int> collection_mode: 0; // 0: Playlist, 1: Library
     property <int> playlist-visible-row-count: 1;
     property <int> library-visible-row-count: 1;
-    in-out property <int> library_root_index: 0; // 0: Tracks, 1: Artists, 2: Albums, 3: Genres, 4: Decades
-    in-out property <[int]> library_root_counts: [0, 0, 0, 0, 0];
+    in-out property <int> library_root_index: 0; // 0: Tracks, 1: Artists, 2: Albums, 3: Genres, 4: Decades, 5: Favorites
+    in-out property <[int]> library_root_counts: [0, 0, 0, 0, 0, 0];
     in-out property <bool> library_can_go_back: false;
     in-out property <bool> library_scan_in_progress: false;
     in-out property <string> library_view_title: "Tracks";
@@ -607,6 +607,7 @@ export component AppWindow inherits Window {
         if action-id == 9 { return "Layout Editor"; }
         if action-id == 10 { return "Settings"; }
         if action-id == 11 { return "Cast"; }
+        if action-id == 12 { return "Favorite"; }
         return "Unknown";
     }
 
@@ -676,6 +677,8 @@ export component AppWindow inherits Window {
                         cast-connecting: root.cast_connecting;
                         collection-mode: root.collection_mode;
                         layout-edit-mode: root.layout_edit_mode;
+                        has-current-track-context: root.has_current_track_context;
+                        now-playing-favorited: root.now_playing_favorited;
                         action-invoked(action-id) => {
                             if (action-id == 1 && root.collection_mode == 0) {
                                 root.show_settings_menu = false;
@@ -724,6 +727,9 @@ export component AppWindow inherits Window {
                                     max(8px, cluster-panel.y_px * 1px + cluster-panel.height_px * 1px + 4px)
                                 );
                                 root.cast_refresh_devices();
+                            }
+                            if (action-id == 12) {
+                                root.toggle_favorite_now_playing();
                             }
                         }
                         request-add-menu(cluster-leaf-id) => {
@@ -947,7 +953,7 @@ export component AppWindow inherits Window {
 
                         VerticalLayout {
                             spacing: 2px;
-                            for root-label[index] in ["Tracks", "Artists", "Albums", "Genres", "Decades"] : Rectangle {
+                            for root-label[index] in ["Tracks", "Artists", "Albums", "Genres", "Decades", "Favorites"] : Rectangle {
                                 property <int> root-count: index < root.library_root_counts.length ? root.library_root_counts[index] : 0;
                                 height: 24px;
                                 border-radius: 2px;
@@ -1595,6 +1601,24 @@ export component AppWindow inherits Window {
                                             root.deselect_all();
                                             return;
                                         }
+                                        let content-mouse-x-px = floor(
+                                            (
+                                                self.mouse-x
+                                                    - root.playlist-columns-band-offset-x
+                                                    - track-list.viewport-x
+                                            ) / 1px
+                                        );
+                                        let hovered-column = content-mouse-x-px >= 0
+                                            ? root.playlist_header_column_at(content-mouse-x-px)
+                                            : -1;
+                                        if (hovered-column >= 0
+                                                && hovered-column < root.playlist_visible_column_kinds.length
+                                                && root.playlist_visible_column_kinds[hovered-column] == 2) {
+                                            root.toggle_favorite_for_playlist_row(self.hovered-row);
+                                            root.pressed-index = -1;
+                                            root.hover-index = -1;
+                                            return;
+                                        }
                                         root.pressed-index = self.hovered-row;
                                         root.press-y = self.mouse-y;
                                         root.filter-blocked-shown = false;
@@ -1988,6 +2012,10 @@ export component AppWindow inherits Window {
                                 library-list-row-ta := TouchArea {
                                     pointer-event(event) => {
                                         if (event.kind == PointerEventKind.down && event.button == PointerEventButton.left) {
+                                            if (item.favoritable && self.mouse-x >= self.width - 30px) {
+                                                root.toggle_favorite_for_library_row(row);
+                                                return;
+                                            }
                                             root.show_library_context_menu = false;
                                             root.show_playlist_track_context_menu = false;
                                             root.sidebar_has_focus = false;
@@ -3984,7 +4012,8 @@ export component AppWindow inherits Window {
                             "Repeat",
                             "Layout Editor",
                             "Settings",
-                            "Cast"
+                            "Cast",
+                            "Favorite"
                         ];
                         current-index <=> root.control_cluster_add_option_index;
                     }
@@ -5510,6 +5539,8 @@ export component AppWindow inherits Window {
     in-out property <string> subsonic_session_prompt_status: "";
     in-out property <bool> cast_connected: false;
     in-out property <bool> cast_connecting: false;
+    in-out property <bool> has_current_track_context: false;
+    in-out property <bool> now_playing_favorited: false;
     in-out property <string> cast_connection_label: "Not Connected";
     in-out property <[string]> cast_device_names: [];
     in-out property <[string]> cast_device_ids: [];
@@ -5589,6 +5620,7 @@ export component AppWindow inherits Window {
     callback library_back();
     callback library_select_list_item(int, bool, bool, bool);
     callback library_item_activated(int);
+    callback toggle_favorite_for_library_row(int);
     callback library_prepare_add_to_playlists();
     callback library_toggle_add_to_playlist(int);
     callback library_confirm_add_to_playlists();
@@ -5621,6 +5653,8 @@ export component AppWindow inherits Window {
     callback on_drag_move(int);
     callback on_drag_end(int, bool);
     callback playlist_item_double_click(int);
+    callback toggle_favorite_for_playlist_row(int);
+    callback toggle_favorite_now_playing();
     callback playback_order_changed(int);
     callback toggle_repeat();
     callback seek-to(float); // Position between 0.0 and 1.0

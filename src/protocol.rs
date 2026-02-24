@@ -289,6 +289,7 @@ pub enum LibraryMessage {
     },
     RequestScan,
     RequestRootCounts,
+    RequestFavoritesSnapshot,
     #[allow(dead_code)]
     RequestTracks,
     #[allow(dead_code)]
@@ -326,6 +327,17 @@ pub enum LibraryMessage {
         limit: usize,
         query: String,
     },
+    ToggleFavorite {
+        entity: FavoriteEntityRef,
+        desired: Option<bool>,
+    },
+    ToggleFavoriteForLibraryRow {
+        row_index: usize,
+    },
+    ToggleFavoriteForPlaylistRow {
+        view_row: usize,
+    },
+    ToggleFavoriteNowPlaying,
     RequestEnrichment {
         entity: LibraryEnrichmentEntity,
         priority: LibraryEnrichmentPriority,
@@ -362,6 +374,7 @@ pub enum LibraryMessage {
         albums: usize,
         genres: usize,
         decades: usize,
+        favorites: usize,
     },
     TracksResult(Vec<LibraryTrack>),
     ArtistsResult(Vec<LibraryArtist>),
@@ -395,6 +408,13 @@ pub enum LibraryMessage {
         request_id: u64,
         total: usize,
         entries: Vec<LibraryEntryPayload>,
+    },
+    FavoritesSnapshot {
+        items: Vec<FavoriteEntityRef>,
+    },
+    FavoriteStateChanged {
+        entity: FavoriteEntityRef,
+        favorited: bool,
     },
     EnrichmentResult(LibraryEnrichmentPayload),
     EnrichmentCacheCleared {
@@ -599,6 +619,35 @@ pub struct LibraryTrack {
     pub track_number: String,
 }
 
+/// Favorites entity kind supported by local persistence and integrations.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum FavoriteEntityKind {
+    Track,
+    Artist,
+    Album,
+}
+
+/// Canonical favorite entity identity and display metadata.
+#[derive(Debug, Clone, serde::Deserialize, serde::Serialize)]
+pub struct FavoriteEntityRef {
+    pub kind: FavoriteEntityKind,
+    pub entity_key: String,
+    pub display_primary: String,
+    pub display_secondary: String,
+    pub track_path: Option<PathBuf>,
+    pub remote_profile_id: Option<String>,
+    pub remote_item_id: Option<String>,
+}
+
+/// Favorites root category row payload.
+#[derive(Debug, Clone)]
+pub struct FavoriteCategory {
+    pub kind: FavoriteEntityKind,
+    pub title: String,
+    pub count: usize,
+}
+
 /// Paged library query selector.
 #[derive(Debug, Clone)]
 pub enum LibraryViewQuery {
@@ -607,6 +656,10 @@ pub enum LibraryViewQuery {
     Albums,
     Genres,
     Decades,
+    FavoritesRoot,
+    FavoriteTracks,
+    FavoriteArtists,
+    FavoriteAlbums,
     GlobalSearch,
     ArtistDetail { artist: String },
     AlbumDetail { album: String, album_artist: String },
@@ -653,6 +706,7 @@ pub enum LibraryEntryPayload {
     Album(LibraryAlbum),
     Genre(LibraryGenre),
     Decade(LibraryDecade),
+    FavoriteCategory(FavoriteCategory),
 }
 
 /// Technical metadata emitted for the currently active track.
@@ -998,6 +1052,16 @@ pub enum IntegrationMessage {
         profile_id: String,
         playlists: Vec<RemotePlaylistSnapshot>,
     },
+    OpenSubsonicFavoriteTracksUpdated {
+        profile_id: String,
+        tracks: Vec<LibraryTrack>,
+    },
+    PushOpenSubsonicTrackFavoriteUpdate {
+        profile_id: String,
+        song_id: String,
+        favorited: bool,
+        entity_key: String,
+    },
     PushOpenSubsonicPlaylistUpdate {
         profile_id: String,
         remote_playlist_id: String,
@@ -1019,6 +1083,13 @@ pub enum IntegrationMessage {
         profile_id: String,
         local_playlist_id: String,
         remote_playlist_id: Option<String>,
+        success: bool,
+        error: Option<String>,
+    },
+    OpenSubsonicTrackFavoriteUpdateResult {
+        profile_id: String,
+        entity_key: String,
+        favorited: bool,
         success: bool,
         error: Option<String>,
     },

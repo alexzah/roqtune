@@ -131,5 +131,22 @@ export component LibraryRow inherits Rectangle {
                 colorize: root.dark ? #9fc3eb : #2d5f98;
             }
         }
+
+        if root.data.favoritable : Rectangle {
+            width: 18px;
+            height: 18px;
+            y: (parent.height - self.height) / 2;
+            Image {
+                source: root.data.favorited ? AppIcons.heart-filled : AppIcons.heart;
+                width: 14px;
+                height: 14px;
+                x: (parent.width - self.width) / 2;
+                y: (parent.height - self.height) / 2;
+                image-fit: contain;
+                colorize: root.data.favorited
+                    ? (root.dark ? #ff91a8 : #d63a5f)
+                    : (root.dark ? #a4aab4 : #7a8795);
+            }
+        }
     }
 }
