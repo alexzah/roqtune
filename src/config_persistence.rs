@@ -296,6 +296,13 @@ fn write_config_to_document(document: &mut DocumentMut, previous: &Config, confi
         );
         set_table_scalar_if_changed(
             library,
+            "image_memory_cache_ttl_secs",
+            i64::from(previous.library.image_memory_cache_ttl_secs),
+            i64::from(config.library.image_memory_cache_ttl_secs),
+            value,
+        );
+        set_table_scalar_if_changed(
+            library,
             "artist_image_cache_ttl_days",
             i64::from(previous.library.artist_image_cache_ttl_days),
             i64::from(config.library.artist_image_cache_ttl_days),

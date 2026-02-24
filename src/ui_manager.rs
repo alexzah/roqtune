@@ -154,6 +154,7 @@ pub struct UiManager {
     last_message_at: Instant,
     last_progress_at: Option<Instant>,
     last_health_log_at: Instant,
+    last_image_cache_ttl_sweep_at: Instant,
     collection_mode: i32,
     library_view_stack: Vec<LibraryViewState>,
     library_entries: Vec<LibraryEntry>,
@@ -184,6 +185,7 @@ pub struct UiManager {
     artist_image_cache_max_size_mb: u32,
     cover_art_memory_cache_max_size_mb: u32,
     artist_image_memory_cache_max_size_mb: u32,
+    image_memory_cache_ttl_secs: u32,
     pending_list_image_requests:
         HashSet<(PathBuf, protocol::UiImageKind, protocol::UiImageVariant)>,
     library_artist_prefetch_first_row: usize,
@@ -436,6 +438,7 @@ const LIBRARY_PAGE_FETCH_LIMIT: usize = 512;
 const REMOTE_TRACK_UNAVAILABLE_TITLE: &str = "Remote track unavailable";
 const PLAYLIST_COLUMN_SPACING_PX: u32 = 10;
 const DEFAULT_IMAGE_MEMORY_CACHE_MAX_BYTES: u64 = 50 * 1024 * 1024;
+const IMAGE_MEMORY_CACHE_SWEEP_INTERVAL: Duration = Duration::from_secs(1);
 const DETAIL_VIEWER_RENDER_MAX_EDGE_PX: u32 = 512;
 const DETAIL_VIEWER_CONVERT_THRESHOLD_PX: u32 = 1024;
 const DETAIL_COMPACT_RENDER_MAX_EDGE_PX: u32 = 384;
@@ -447,7 +450,7 @@ static ARTIST_IMAGE_MEMORY_CACHE_BUDGET_BYTES: AtomicU64 =
 
 #[derive(Default)]
 struct PathImageCache {
-    entries: HashMap<PathBuf, (Image, u64)>,
+    entries: HashMap<PathBuf, (Image, u64, Instant)>,
     lru: VecDeque<PathBuf>,
     total_bytes: u64,
 }
@@ -461,27 +464,64 @@ impl PathImageCache {
     }
 
     fn get(&mut self, path: &PathBuf) -> Option<Image> {
-        let cached = self.entries.get(path).map(|(image, _)| image.clone())?;
+        let cached = self.entries.get_mut(path).map(|(image, _, last_access)| {
+            *last_access = Instant::now();
+            image.clone()
+        })?;
         self.touch_lru(path);
         Some(cached)
     }
 
     fn insert(&mut self, path: PathBuf, image: Image, approx_bytes: u64, max_bytes: u64) {
-        if let Some((_, existing_bytes)) = self.entries.remove(&path) {
+        if let Some((_, existing_bytes, _)) = self.entries.remove(&path) {
             self.total_bytes = self.total_bytes.saturating_sub(existing_bytes);
         }
         self.touch_lru(&path);
         self.total_bytes = self.total_bytes.saturating_add(approx_bytes);
-        self.entries.insert(path, (image, approx_bytes));
+        self.entries
+            .insert(path, (image, approx_bytes, Instant::now()));
 
         while self.total_bytes > max_bytes || self.entries.len() > IMAGE_CACHE_MAX_ENTRIES {
             let Some(evicted_path) = self.lru.pop_front() else {
                 break;
             };
-            if let Some((_, bytes)) = self.entries.remove(&evicted_path) {
+            if let Some((_, bytes, _)) = self.entries.remove(&evicted_path) {
                 self.total_bytes = self.total_bytes.saturating_sub(bytes);
             }
         }
+    }
+
+    fn evict_expired(
+        &mut self,
+        now: Instant,
+        ttl: Duration,
+        protected_paths: &HashSet<PathBuf>,
+    ) -> usize {
+        let expired_paths: Vec<PathBuf> = self
+            .lru
+            .iter()
+            .filter_map(|path| {
+                if protected_paths.contains(path) {
+                    return None;
+                }
+                self.entries.get(path).and_then(|(_, _, last_access)| {
+                    (now.saturating_duration_since(*last_access) >= ttl).then_some(path.clone())
+                })
+            })
+            .collect();
+        if expired_paths.is_empty() {
+            return 0;
+        }
+
+        let mut evicted = 0usize;
+        for path in expired_paths {
+            if let Some((_, bytes, _)) = self.entries.remove(&path) {
+                self.total_bytes = self.total_bytes.saturating_sub(bytes);
+                evicted = evicted.saturating_add(1);
+            }
+        }
+        self.lru.retain(|path| self.entries.contains_key(path));
+        evicted
     }
 
     fn clear(&mut self) {
@@ -1653,6 +1693,8 @@ impl UiManager {
             .layout
             .playlist_column_width_overrides
             .clone();
+        let initial_image_memory_cache_ttl_secs =
+            initial_library_config.image_memory_cache_ttl_secs.max(1);
 
         let mut manager = Self {
             ui: ui.clone(),
@@ -1726,6 +1768,7 @@ impl UiManager {
             last_message_at: Instant::now(),
             last_progress_at: None,
             last_health_log_at: Instant::now(),
+            last_image_cache_ttl_sweep_at: Instant::now(),
             collection_mode: COLLECTION_MODE_PLAYLIST,
             library_view_stack: vec![LibraryViewState::TracksRoot],
             library_entries: Vec::new(),
@@ -1757,6 +1800,7 @@ impl UiManager {
             artist_image_memory_cache_max_size_mb: initial_library_config
                 .artist_image_memory_cache_max_size_mb
                 .max(1),
+            image_memory_cache_ttl_secs: initial_image_memory_cache_ttl_secs,
             pending_list_image_requests: HashSet::new(),
             library_artist_prefetch_first_row: 0,
             library_artist_prefetch_row_count: 0,
@@ -6242,6 +6286,7 @@ impl UiManager {
     }
 
     fn on_enrichment_prefetch_tick(&mut self) {
+        self.maybe_evict_stale_image_cache();
         if !self.library_online_metadata_enabled || self.collection_mode != COLLECTION_MODE_LIBRARY
         {
             self.replace_prefetch_queue_if_changed(Vec::new());
@@ -6263,6 +6308,247 @@ impl UiManager {
         } else {
             self.prefetch_artist_enrichment_window(0, 0);
         }
+    }
+
+    fn image_memory_cache_ttl_duration(&self) -> Duration {
+        Duration::from_secs(u64::from(self.image_memory_cache_ttl_secs.max(1)))
+    }
+
+    fn list_thumbnail_path_if_present_for_kind(
+        source_path: &Path,
+        kind: protocol::UiImageKind,
+        max_edge_px: u32,
+    ) -> Option<PathBuf> {
+        let managed_kind = Self::managed_kind_for_ui_kind(kind);
+        image_pipeline::list_thumbnail_path_if_present(managed_kind, source_path, max_edge_px)
+    }
+
+    fn protect_detail_header_image_path(
+        source_path: &Path,
+        kind: protocol::UiImageKind,
+        protected_cover_paths: &mut HashSet<PathBuf>,
+        protected_artist_paths: &mut HashSet<PathBuf>,
+    ) {
+        let detail_path = Self::detail_render_path(
+            source_path,
+            kind,
+            DETAIL_COMPACT_RENDER_MAX_EDGE_PX,
+            DETAIL_COMPACT_RENDER_MAX_EDGE_PX,
+        );
+        match kind {
+            protocol::UiImageKind::CoverArt => {
+                protected_cover_paths.insert(source_path.to_path_buf());
+                protected_cover_paths.insert(detail_path);
+            }
+            protocol::UiImageKind::ArtistImage => {
+                protected_artist_paths.insert(source_path.to_path_buf());
+                protected_artist_paths.insert(detail_path);
+            }
+        }
+    }
+
+    fn collect_visible_playlist_cover_thumbnail_paths(
+        &self,
+        protected_cover_paths: &mut HashSet<PathBuf>,
+    ) {
+        if self.collection_mode != COLLECTION_MODE_PLAYLIST || !self.is_album_art_column_visible() {
+            return;
+        }
+        let total_rows = if self.view_indices.is_empty() {
+            self.track_paths.len()
+        } else {
+            self.view_indices.len()
+        };
+        let (start, end) = self.playlist_cover_decode_window(total_rows);
+        for view_row in start..end {
+            let Some(source_index) = self.map_view_to_source_index(view_row) else {
+                continue;
+            };
+            let Some(Some(source_path)) = self.track_cover_art_paths.get(source_index) else {
+                continue;
+            };
+            if let Some(thumbnail_path) = Self::list_thumbnail_path_if_present_for_kind(
+                source_path.as_path(),
+                protocol::UiImageKind::CoverArt,
+                self.list_image_max_edge_px,
+            ) {
+                protected_cover_paths.insert(thumbnail_path);
+            }
+        }
+    }
+
+    fn collect_visible_library_thumbnail_paths(
+        &self,
+        protected_cover_paths: &mut HashSet<PathBuf>,
+        protected_artist_paths: &mut HashSet<PathBuf>,
+    ) {
+        if self.collection_mode != COLLECTION_MODE_LIBRARY || self.library_view_indices.is_empty() {
+            return;
+        }
+
+        let view = self.current_library_view();
+        let compact_track_row_view = matches!(
+            &view,
+            LibraryViewState::AlbumDetail { .. } | LibraryViewState::ArtistDetail { .. }
+        );
+        let detail_header_visible = compact_track_row_view;
+        let (cover_decode_start, cover_decode_end) =
+            self.library_cover_decode_window(self.library_view_indices.len());
+        let (row_start, row_end) = if detail_header_visible {
+            (0usize, self.library_view_indices.len())
+        } else {
+            (cover_decode_start, cover_decode_end)
+        };
+        for row_index in row_start..row_end {
+            let Some(source_index) = self.library_view_indices.get(row_index).copied() else {
+                continue;
+            };
+            let Some(entry) = self.library_entries.get(source_index) else {
+                continue;
+            };
+            let resolve_cover_art = matches!(entry, LibraryEntry::Artist(_))
+                || detail_header_visible
+                || (row_index >= cover_decode_start && row_index < cover_decode_end);
+            if !resolve_cover_art {
+                continue;
+            }
+            match entry {
+                LibraryEntry::Track(track) => {
+                    if compact_track_row_view {
+                        continue;
+                    }
+                    let Some(Some(source_path)) = self.library_cover_art_paths.get(&track.path)
+                    else {
+                        continue;
+                    };
+                    if let Some(thumbnail_path) = Self::list_thumbnail_path_if_present_for_kind(
+                        source_path.as_path(),
+                        protocol::UiImageKind::CoverArt,
+                        self.list_image_max_edge_px,
+                    ) {
+                        protected_cover_paths.insert(thumbnail_path);
+                    }
+                }
+                LibraryEntry::Artist(artist) => {
+                    let Some(source_path) = self.artist_enrichment_image_path(&artist.artist)
+                    else {
+                        continue;
+                    };
+                    if let Some(thumbnail_path) = Self::list_thumbnail_path_if_present_for_kind(
+                        source_path.as_path(),
+                        protocol::UiImageKind::ArtistImage,
+                        self.list_image_max_edge_px,
+                    ) {
+                        protected_artist_paths.insert(thumbnail_path);
+                    }
+                }
+                LibraryEntry::Album(album) => {
+                    let Some(track_path) = album.representative_track_path.as_ref() else {
+                        continue;
+                    };
+                    let Some(Some(source_path)) = self.library_cover_art_paths.get(track_path)
+                    else {
+                        continue;
+                    };
+                    if let Some(thumbnail_path) = Self::list_thumbnail_path_if_present_for_kind(
+                        source_path.as_path(),
+                        protocol::UiImageKind::CoverArt,
+                        self.list_image_max_edge_px,
+                    ) {
+                        protected_cover_paths.insert(thumbnail_path);
+                    }
+                }
+                LibraryEntry::Genre(_)
+                | LibraryEntry::Decade(_)
+                | LibraryEntry::FavoriteCategory(_) => {}
+            }
+        }
+
+        let mut detail_header_art_path = if matches!(&view, LibraryViewState::AlbumDetail { .. }) {
+            self.library_entries.iter().find_map(|entry| {
+                if let LibraryEntry::Track(track) = entry {
+                    self.library_cover_art_paths
+                        .get(&track.path)
+                        .and_then(|cached| cached.clone())
+                } else {
+                    None
+                }
+            })
+        } else {
+            None
+        };
+        if let Some(entity) = Self::detail_enrichment_entity_for_view(&view) {
+            if let Some(payload) = self.library_enrichment.get(&entity) {
+                if payload.status == protocol::LibraryEnrichmentStatus::Ready
+                    && matches!(entity, protocol::LibraryEnrichmentEntity::Artist { .. })
+                {
+                    detail_header_art_path = payload
+                        .image_path
+                        .as_ref()
+                        .filter(|path| path.exists())
+                        .cloned();
+                }
+            }
+        }
+        let Some(detail_header_art_path) = detail_header_art_path else {
+            return;
+        };
+        let detail_header_image_kind = if matches!(&view, LibraryViewState::ArtistDetail { .. }) {
+            protocol::UiImageKind::ArtistImage
+        } else {
+            protocol::UiImageKind::CoverArt
+        };
+        Self::protect_detail_header_image_path(
+            detail_header_art_path.as_path(),
+            detail_header_image_kind,
+            protected_cover_paths,
+            protected_artist_paths,
+        );
+    }
+
+    fn visible_image_cache_protection_paths(&self) -> (HashSet<PathBuf>, HashSet<PathBuf>) {
+        let mut protected_cover_paths = HashSet::new();
+        let mut protected_artist_paths = HashSet::new();
+        self.collect_visible_playlist_cover_thumbnail_paths(&mut protected_cover_paths);
+        self.collect_visible_library_thumbnail_paths(
+            &mut protected_cover_paths,
+            &mut protected_artist_paths,
+        );
+        (protected_cover_paths, protected_artist_paths)
+    }
+
+    fn maybe_evict_stale_image_cache(&mut self) {
+        let now = Instant::now();
+        if now.duration_since(self.last_image_cache_ttl_sweep_at)
+            < IMAGE_MEMORY_CACHE_SWEEP_INTERVAL
+        {
+            return;
+        }
+        self.last_image_cache_ttl_sweep_at = now;
+        let ttl = self.image_memory_cache_ttl_duration();
+        let (protected_cover_paths, protected_artist_paths) =
+            self.visible_image_cache_protection_paths();
+        let _ = self.ui.upgrade_in_event_loop(move |_| {
+            let cover_evicted = TRACK_ROW_COVER_ART_IMAGE_CACHE.with(|cache| {
+                cache
+                    .borrow_mut()
+                    .evict_expired(now, ttl, &protected_cover_paths)
+            });
+            let artist_evicted = TRACK_ROW_ARTIST_IMAGE_CACHE.with(|cache| {
+                cache
+                    .borrow_mut()
+                    .evict_expired(now, ttl, &protected_artist_paths)
+            });
+            debug!(
+                "UiManager image cache TTL sweep: evicted_total={} (cover={}, artist={}), protected=(cover={}, artist={}), ttl_secs={}",
+                cover_evicted.saturating_add(artist_evicted),
+                cover_evicted,
+                artist_evicted,
+                protected_cover_paths.len(),
+                protected_artist_paths.len(),
+                ttl.as_secs()
+            );
+        });
     }
 
     fn refresh_visible_artist_rows(&mut self, artist_name: &str) -> bool {
@@ -8560,6 +8846,7 @@ impl UiManager {
         let previous_cover_art_memory_cache_max_size_mb = self.cover_art_memory_cache_max_size_mb;
         let previous_artist_image_memory_cache_max_size_mb =
             self.artist_image_memory_cache_max_size_mb;
+        let previous_image_memory_cache_ttl_secs = self.image_memory_cache_ttl_secs;
         let previous_library_online_metadata_enabled = self.library_online_metadata_enabled;
         let previous_library_online_metadata_prompt_pending =
             self.library_online_metadata_prompt_pending;
@@ -8593,6 +8880,9 @@ impl UiManager {
             if let Some(value) = library.artist_image_memory_cache_max_size_mb {
                 self.artist_image_memory_cache_max_size_mb = value;
             }
+            if let Some(value) = library.image_memory_cache_ttl_secs {
+                self.image_memory_cache_ttl_secs = value.max(1);
+            }
 
             list_image_max_edge_changed =
                 previous_list_image_max_edge_px != self.list_image_max_edge_px;
@@ -8604,6 +8894,8 @@ impl UiManager {
                 != self.cover_art_memory_cache_max_size_mb;
             let artist_image_memory_budget_changed = previous_artist_image_memory_cache_max_size_mb
                 != self.artist_image_memory_cache_max_size_mb;
+            let image_memory_cache_ttl_changed =
+                previous_image_memory_cache_ttl_secs != self.image_memory_cache_ttl_secs;
             online_metadata_enabled_changed =
                 previous_library_online_metadata_enabled != self.library_online_metadata_enabled;
             online_metadata_prompt_changed = previous_library_online_metadata_prompt_pending
@@ -8630,6 +8922,10 @@ impl UiManager {
                     image_pipeline::mb_to_bytes(self.artist_image_memory_cache_max_size_mb),
                     Ordering::Relaxed,
                 );
+            }
+            if image_memory_cache_ttl_changed {
+                self.last_image_cache_ttl_sweep_at =
+                    Instant::now() - IMAGE_MEMORY_CACHE_SWEEP_INTERVAL;
             }
             if list_image_max_edge_changed {
                 TRACK_ROW_COVER_ART_IMAGE_CACHE.with(|cache| {
@@ -10207,8 +10503,9 @@ impl UiManager {
 mod tests {
     use super::{
         fit_column_widths_deterministic, ColumnWidthProfile, CoverArtLookupRequest,
-        DeterministicColumnLayoutSpec, LibraryEntry, LibraryViewState, PlaylistColumnClass,
-        PlaylistSortDirection, TrackMetadata, UiManager, ENRICHMENT_FAILED_ATTEMPT_CAP,
+        DeterministicColumnLayoutSpec, LibraryEntry, LibraryViewState, PathImageCache,
+        PlaylistColumnClass, PlaylistSortDirection, TrackMetadata, UiManager,
+        ENRICHMENT_FAILED_ATTEMPT_CAP,
     };
     use crate::{config::PlaylistColumnConfig, protocol};
     use std::collections::{HashMap, HashSet};
@@ -10311,6 +10608,44 @@ mod tests {
         let first = rx.recv().expect("expected first request");
         let latest = UiManager::coalesce_cover_art_requests(first, &rx);
         assert_eq!(latest.track_path, None);
+    }
+
+    #[test]
+    fn test_path_image_cache_evict_expired_removes_unprotected_entries() {
+        let mut cache = PathImageCache::default();
+        let path_a = PathBuf::from("/tmp/a.png");
+        let path_b = PathBuf::from("/tmp/b.png");
+        cache.insert(path_a.clone(), slint::Image::default(), 32, 1024);
+        cache.insert(path_b.clone(), slint::Image::default(), 48, 1024);
+
+        let evicted = cache.evict_expired(
+            Instant::now() + Duration::from_secs(1),
+            Duration::ZERO,
+            &HashSet::new(),
+        );
+        assert_eq!(evicted, 2);
+        assert!(cache.entries.is_empty());
+        assert!(cache.lru.is_empty());
+        assert_eq!(cache.total_bytes, 0);
+    }
+
+    #[test]
+    fn test_path_image_cache_evict_expired_keeps_protected_entries() {
+        let mut cache = PathImageCache::default();
+        let protected = PathBuf::from("/tmp/protected.png");
+        let evictable = PathBuf::from("/tmp/evictable.png");
+        cache.insert(protected.clone(), slint::Image::default(), 32, 1024);
+        cache.insert(evictable.clone(), slint::Image::default(), 48, 1024);
+        let protected_paths = HashSet::from([protected.clone()]);
+
+        let evicted = cache.evict_expired(
+            Instant::now() + Duration::from_secs(1),
+            Duration::ZERO,
+            &protected_paths,
+        );
+        assert_eq!(evicted, 1);
+        assert!(cache.entries.contains_key(&protected));
+        assert!(!cache.entries.contains_key(&evictable));
     }
 
     #[test]

@@ -367,6 +367,8 @@ pub(crate) fn sanitize_config(config: Config) -> Config {
         .library
         .artist_image_memory_cache_max_size_mb
         .clamp(8, 2048);
+    let clamped_image_memory_cache_ttl_secs =
+        config.library.image_memory_cache_ttl_secs.clamp(1, 3600);
     let clamped_artist_image_cache_max_size_mb = config
         .library
         .artist_image_cache_max_size_mb
@@ -429,6 +431,7 @@ pub(crate) fn sanitize_config(config: Config) -> Config {
             cover_art_cache_max_size_mb: clamped_cover_art_cache_max_size_mb,
             cover_art_memory_cache_max_size_mb: clamped_cover_art_memory_cache_max_size_mb,
             artist_image_memory_cache_max_size_mb: clamped_artist_image_memory_cache_max_size_mb,
+            image_memory_cache_ttl_secs: clamped_image_memory_cache_ttl_secs,
             artist_image_cache_ttl_days: clamped_artist_image_cache_ttl_days,
             artist_image_cache_max_size_mb: clamped_artist_image_cache_max_size_mb,
         },

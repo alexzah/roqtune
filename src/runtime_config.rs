@@ -219,6 +219,9 @@ pub fn config_delta_entries(previous: &Config, next: &Config) -> Vec<ConfigDelta
         library.artist_image_memory_cache_max_size_mb =
             Some(next.library.artist_image_memory_cache_max_size_mb);
     }
+    if previous.library.image_memory_cache_ttl_secs != next.library.image_memory_cache_ttl_secs {
+        library.image_memory_cache_ttl_secs = Some(next.library.image_memory_cache_ttl_secs);
+    }
     if previous.library.artist_image_cache_ttl_days != next.library.artist_image_cache_ttl_days {
         library.artist_image_cache_ttl_days = Some(next.library.artist_image_cache_ttl_days);
     }
@@ -317,9 +320,9 @@ pub fn config_diff_is_runtime_sample_rate_only(previous: &Config, next: &Config)
 
 #[cfg(test)]
 mod tests {
-    use crate::config::Config;
+    use crate::{config::Config, protocol::ConfigDeltaEntry};
 
-    use super::{audio_settings_changed, output_preferences_changed};
+    use super::{audio_settings_changed, config_delta_entries, output_preferences_changed};
 
     #[test]
     fn test_output_preferences_changed_detects_output_changes() {
@@ -354,5 +357,24 @@ mod tests {
         next.cast.allow_transcode_fallback = !next.cast.allow_transcode_fallback;
 
         assert!(audio_settings_changed(&previous, &next));
+    }
+
+    #[test]
+    fn test_config_delta_entries_include_image_memory_cache_ttl_secs() {
+        let previous = Config::default();
+        let mut next = previous.clone();
+        next.library.image_memory_cache_ttl_secs =
+            next.library.image_memory_cache_ttl_secs.saturating_add(1);
+
+        let deltas = config_delta_entries(&previous, &next);
+        assert!(
+            deltas.iter().any(|delta| matches!(
+                delta,
+                ConfigDeltaEntry::Library(library)
+                    if library.image_memory_cache_ttl_secs
+                        == Some(next.library.image_memory_cache_ttl_secs)
+            )),
+            "expected library delta with image_memory_cache_ttl_secs"
+        );
     }
 }

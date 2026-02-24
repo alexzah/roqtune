@@ -141,6 +141,8 @@ pub struct LibraryConfig {
     pub cover_art_memory_cache_max_size_mb: u32,
     #[serde(default = "default_artist_image_memory_cache_max_size_mb")]
     pub artist_image_memory_cache_max_size_mb: u32,
+    #[serde(default = "default_image_memory_cache_ttl_secs")]
+    pub image_memory_cache_ttl_secs: u32,
     #[serde(default = "default_artist_image_cache_ttl_days")]
     pub artist_image_cache_ttl_days: u32,
     #[serde(default = "default_artist_image_cache_max_size_mb")]
@@ -275,6 +277,7 @@ impl Default for LibraryConfig {
             cover_art_cache_max_size_mb: default_cover_art_cache_max_size_mb(),
             cover_art_memory_cache_max_size_mb: default_cover_art_memory_cache_max_size_mb(),
             artist_image_memory_cache_max_size_mb: default_artist_image_memory_cache_max_size_mb(),
+            image_memory_cache_ttl_secs: default_image_memory_cache_ttl_secs(),
             artist_image_cache_ttl_days: default_artist_image_cache_ttl_days(),
             artist_image_cache_max_size_mb: default_artist_image_cache_max_size_mb(),
         }
@@ -315,6 +318,10 @@ fn default_volume() -> f32 {
 
 fn default_artist_image_cache_ttl_days() -> u32 {
     30
+}
+
+fn default_image_memory_cache_ttl_secs() -> u32 {
+    20
 }
 
 fn default_list_image_max_edge_px() -> u32 {
@@ -449,6 +456,7 @@ mod tests {
         assert_eq!(config.library.cover_art_cache_max_size_mb, 512);
         assert_eq!(config.library.cover_art_memory_cache_max_size_mb, 50);
         assert_eq!(config.library.artist_image_memory_cache_max_size_mb, 50);
+        assert_eq!(config.library.image_memory_cache_ttl_secs, 20);
         assert_eq!(config.library.artist_image_cache_ttl_days, 30);
         assert_eq!(config.library.artist_image_cache_max_size_mb, 256);
         assert_eq!(config.buffering.player_low_watermark_ms, 12_000);
@@ -503,6 +511,7 @@ decoder_request_chunk_ms = 1500
         assert_eq!(parsed.library.cover_art_cache_max_size_mb, 512);
         assert_eq!(parsed.library.cover_art_memory_cache_max_size_mb, 50);
         assert_eq!(parsed.library.artist_image_memory_cache_max_size_mb, 50);
+        assert_eq!(parsed.library.image_memory_cache_ttl_secs, 20);
         assert_eq!(parsed.library.artist_image_cache_ttl_days, 30);
         assert_eq!(parsed.library.artist_image_cache_max_size_mb, 256);
         assert_eq!(
@@ -637,6 +646,10 @@ decoder_request_chunk_ms = 1500
         assert_eq!(
             parsed.library.artist_image_memory_cache_max_size_mb,
             defaults.library.artist_image_memory_cache_max_size_mb
+        );
+        assert_eq!(
+            parsed.library.image_memory_cache_ttl_secs,
+            defaults.library.image_memory_cache_ttl_secs
         );
         assert_eq!(
             parsed.library.artist_image_cache_ttl_days,

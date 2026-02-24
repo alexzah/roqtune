@@ -134,6 +134,7 @@ impl LibraryConfigDelta {
             && self.cover_art_cache_max_size_mb.is_none()
             && self.cover_art_memory_cache_max_size_mb.is_none()
             && self.artist_image_memory_cache_max_size_mb.is_none()
+            && self.image_memory_cache_ttl_secs.is_none()
             && self.artist_image_cache_ttl_days.is_none()
             && self.artist_image_cache_max_size_mb.is_none()
     }
@@ -160,6 +161,9 @@ impl LibraryConfigDelta {
         if newer.artist_image_memory_cache_max_size_mb.is_some() {
             self.artist_image_memory_cache_max_size_mb =
                 newer.artist_image_memory_cache_max_size_mb;
+        }
+        if newer.image_memory_cache_ttl_secs.is_some() {
+            self.image_memory_cache_ttl_secs = newer.image_memory_cache_ttl_secs;
         }
         if newer.artist_image_cache_ttl_days.is_some() {
             self.artist_image_cache_ttl_days = newer.artist_image_cache_ttl_days;
