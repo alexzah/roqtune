@@ -183,6 +183,37 @@ fn format_verified_rates_summary(rates: &[u32]) -> String {
     format!("Verified rates: {}", values)
 }
 
+/// Builds a non-blocking startup snapshot from persisted config only.
+///
+/// This intentionally avoids any CPAL/ALSA device enumeration or probing so the UI can
+/// initialize immediately using the user's prior settings. Runtime probing then refreshes
+/// these options asynchronously once audio services are up.
+pub(crate) fn bootstrap_output_settings_options(config: &Config) -> OutputSettingsOptions {
+    let configured_device_name = config.output.output_device_name.trim().to_string();
+    let configured_channel_count = config.output.channel_count.max(1);
+    let configured_sample_rate_hz = config.output.sample_rate_khz.max(8_000);
+    let configured_bits_per_sample = config.output.bits_per_sample.max(8);
+
+    let device_names = if configured_device_name.is_empty() {
+        Vec::new()
+    } else {
+        vec![configured_device_name.clone()]
+    };
+
+    OutputSettingsOptions {
+        device_names,
+        auto_device_name: configured_device_name,
+        channel_values: vec![configured_channel_count],
+        sample_rate_values: vec![configured_sample_rate_hz],
+        bits_per_sample_values: vec![configured_bits_per_sample],
+        verified_sample_rate_values: Vec::new(),
+        verified_sample_rates_summary: "Verified rates: (pending probe)".to_string(),
+        auto_channel_value: configured_channel_count,
+        auto_sample_rate_value: configured_sample_rate_hz,
+        auto_bits_per_sample_value: configured_bits_per_sample,
+    }
+}
+
 /// Returns a stable, deduplicated snapshot of output device names from a host.
 pub(crate) fn snapshot_output_device_names(host: &cpal::Host) -> Vec<String> {
     let mut device_names = Vec::new();
@@ -377,9 +408,9 @@ mod tests {
     };
 
     use super::{
-        choose_preferred_u16, choose_preferred_u32, resolve_runtime_config,
-        select_manual_output_option_index_u32, select_output_option_index_string,
-        select_output_option_index_u16,
+        bootstrap_output_settings_options, choose_preferred_u16, choose_preferred_u32,
+        resolve_runtime_config, select_manual_output_option_index_u32,
+        select_output_option_index_string, select_output_option_index_u16,
     };
 
     #[test]
@@ -501,5 +532,32 @@ mod tests {
         let runtime = resolve_runtime_config(&persisted, &options, Some(&runtime_override));
         assert_eq!(runtime.output.sample_rate_khz, 96_000);
         assert_eq!(persisted.output.sample_rate_khz, 44_100);
+    }
+
+    #[test]
+    fn test_bootstrap_output_settings_options_uses_persisted_values_without_probe() {
+        let config = Config {
+            output: OutputConfig {
+                output_device_name: "default".to_string(),
+                output_device_auto: true,
+                channel_count: 2,
+                sample_rate_khz: 192_000,
+                bits_per_sample: 32,
+                ..Config::default().output
+            },
+            ..Config::default()
+        };
+
+        let bootstrap = bootstrap_output_settings_options(&config);
+        assert_eq!(bootstrap.device_names, vec!["default".to_string()]);
+        assert_eq!(bootstrap.auto_device_name, "default".to_string());
+        assert_eq!(bootstrap.channel_values, vec![2]);
+        assert_eq!(bootstrap.sample_rate_values, vec![192_000]);
+        assert_eq!(bootstrap.bits_per_sample_values, vec![32]);
+        assert!(bootstrap.verified_sample_rate_values.is_empty());
+        assert_eq!(
+            bootstrap.verified_sample_rates_summary,
+            "Verified rates: (pending probe)".to_string()
+        );
     }
 }

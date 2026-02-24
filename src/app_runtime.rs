@@ -31,7 +31,7 @@ use crate::{
         find_opensubsonic_backend, keyring_unavailable_error, opensubsonic_profile_snapshot,
         resolve_opensubsonic_password, OpenSubsonicPasswordResolution, OPENSUBSONIC_PROFILE_ID,
     },
-    output_option_selection::{detect_output_settings_options, snapshot_output_device_names},
+    output_option_selection::bootstrap_output_settings_options,
     protocol::{
         CastMessage, ConfigMessage, IntegrationMessage, Message, PlaybackMessage, PlaylistMessage,
     },
@@ -111,7 +111,9 @@ impl AppRuntime {
         config.ui.layout = load_layout_file(&layout_file);
         hydrate_ui_columns_from_layout(&mut config);
         let config = crate::sanitize_config(config);
-        let initial_output_options = detect_output_settings_options(&config);
+        // Use a config-only snapshot so startup never blocks on hardware probe.
+        // Full device capability probing is refreshed asynchronously at runtime.
+        let initial_output_options = bootstrap_output_settings_options(&config);
         let runtime_output_override = Arc::new(Mutex::new(RuntimeOutputOverride::default()));
         let runtime_override_snapshot = {
             let state = runtime_output_override
@@ -153,9 +155,8 @@ impl AppRuntime {
 
         let config_state = Arc::new(Mutex::new(config.clone()));
         let output_options = Arc::new(Mutex::new(initial_output_options.clone()));
-        let output_device_inventory = Arc::new(Mutex::new(snapshot_output_device_names(
-            &cpal::default_host(),
-        )));
+        // Start empty so the first runtime inventory snapshot always registers as a change.
+        let output_device_inventory = Arc::new(Mutex::new(Vec::new()));
         let layout_workspace_size = Arc::new(Mutex::new((
             initial_workspace_width_px,
             initial_workspace_height_px,
