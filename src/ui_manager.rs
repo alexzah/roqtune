@@ -1887,7 +1887,7 @@ impl UiManager {
         let since_last_progress_ms = self
             .last_progress_at
             .map(|last| now.duration_since(last).as_millis() as u64);
-        info!(
+        trace!(
             "UiManager health: processed={}, lagged={}, playback_active={}, since_last_message_ms={}, since_last_progress_ms={:?}",
             self.processed_message_count,
             self.lagged_message_count,
@@ -6552,7 +6552,7 @@ impl UiManager {
                     .borrow_mut()
                     .evict_expired(now, ttl, &protected_artist_paths)
             });
-            debug!(
+            trace!(
                 "UiManager image cache TTL sweep: evicted_total={} (cover={}, artist={}), protected=(cover={}, artist={}), ttl_secs={}",
                 cover_evicted.saturating_add(artist_evicted),
                 cover_evicted,
