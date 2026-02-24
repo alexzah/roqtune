@@ -445,4 +445,67 @@ pub(crate) fn register_settings_ui_callbacks(ui: &AppWindow, shared_state: &AppS
             );
         },
     );
+
+    let config_state_clone = shared_state.config_state.clone();
+    let layout_workspace_size_clone = shared_state.ui_handles.layout_workspace_size.clone();
+    let ui_handle_clone = shared_state.ui_handles.ui_handle.clone();
+    ui.on_window_resized(move |width_px, height_px| {
+        let width = (width_px.max(600) as u32).min(10_000);
+        let height = (height_px.max(400) as u32).min(10_000);
+        let workspace_width_px = width.max(1);
+        let workspace_height_px = height.max(1);
+        {
+            let mut workspace_size = layout_workspace_size_clone
+                .lock()
+                .expect("layout workspace size lock poisoned");
+            *workspace_size = (workspace_width_px, workspace_height_px);
+        }
+        let config_snapshot = {
+            let mut state = config_state_clone
+                .lock()
+                .expect("config state lock poisoned");
+            if state.ui.window_width != width || state.ui.window_height != height {
+                state.ui.window_width = width;
+                state.ui.window_height = height;
+            }
+            state.clone()
+        };
+        if let Some(ui) = ui_handle_clone.upgrade() {
+            ui.set_sidebar_width_px(crate::sidebar_width_from_window(width));
+            crate::apply_layout_to_ui(
+                &ui,
+                &config_snapshot,
+                workspace_width_px,
+                workspace_height_px,
+            );
+        }
+    });
+
+    let config_state_clone = shared_state.config_state.clone();
+    let layout_workspace_size_clone = shared_state.ui_handles.layout_workspace_size.clone();
+    let ui_handle_clone = shared_state.ui_handles.ui_handle.clone();
+    ui.on_layout_workspace_resized(move |width_px, height_px| {
+        let workspace_width_px = width_px.max(1) as u32;
+        let workspace_height_px = height_px.max(1) as u32;
+        {
+            let mut workspace_size = layout_workspace_size_clone
+                .lock()
+                .expect("layout workspace size lock poisoned");
+            *workspace_size = (workspace_width_px, workspace_height_px);
+        }
+        let config_snapshot = {
+            let state = config_state_clone
+                .lock()
+                .expect("config state lock poisoned");
+            state.clone()
+        };
+        if let Some(ui) = ui_handle_clone.upgrade() {
+            crate::apply_layout_to_ui(
+                &ui,
+                &config_snapshot,
+                workspace_width_px,
+                workspace_height_px,
+            );
+        }
+    });
 }
