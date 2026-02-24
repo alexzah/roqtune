@@ -1509,7 +1509,11 @@ pub struct CastManager {
 
 impl CastManager {
     /// Creates a cast manager bound to the shared bus.
-    pub fn new(bus_consumer: Receiver<Message>, bus_producer: Sender<Message>) -> Self {
+    pub fn new(
+        bus_consumer: Receiver<Message>,
+        bus_producer: Sender<Message>,
+        initial_cast_config: crate::config::CastConfig,
+    ) -> Self {
         let stream_server = CastStreamServer::new().expect("cast stream server should start");
         let transcode_cache_dir = dirs::cache_dir()
             .unwrap_or_else(std::env::temp_dir)
@@ -1522,7 +1526,7 @@ impl CastManager {
             devices: Vec::new(),
             connected_device: None,
             session: None,
-            allow_transcode_fallback: false,
+            allow_transcode_fallback: initial_cast_config.allow_transcode_fallback,
             transcode_cache_dir,
             current_track_id: None,
             current_track_source_path: None,
@@ -2039,9 +2043,6 @@ impl CastManager {
 
     fn handle_message(&mut self, message: Message) {
         match message {
-            Message::Config(crate::protocol::ConfigMessage::ConfigLoaded(config)) => {
-                self.allow_transcode_fallback = config.cast.allow_transcode_fallback;
-            }
             Message::Config(crate::protocol::ConfigMessage::ConfigChanged(changes)) => {
                 for change in changes {
                     if let crate::protocol::ConfigDeltaEntry::Cast(cast) = change {

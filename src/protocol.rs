@@ -6,7 +6,7 @@
 use std::path::PathBuf;
 
 use crate::config::{
-    BufferingConfig, CastConfig, Config, IntegrationsConfig, LibraryConfig, OutputConfig, UiConfig,
+    BufferingConfig, CastConfig, IntegrationsConfig, LibraryConfig, OutputConfig, UiConfig,
 };
 
 /// Repeat behavior applied when navigating beyond the current track.
@@ -961,7 +961,6 @@ pub enum ConfigDeltaEntry {
 #[derive(Debug, Clone)]
 #[allow(clippy::large_enum_variant)]
 pub enum ConfigMessage {
-    ConfigLoaded(Config),
     ConfigChanged(Vec<ConfigDeltaEntry>),
     RuntimeOutputSampleRateChanged { sample_rate_hz: u32 },
     AudioDeviceOpened { stream_info: OutputStreamInfo },

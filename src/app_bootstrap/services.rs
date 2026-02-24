@@ -12,6 +12,7 @@ use crate::{
     audio_decoder::AudioDecoder,
     audio_player::AudioPlayer,
     cast_manager::CastManager,
+    config,
     db_manager::DbManager,
     integration_manager::IntegrationManager,
     library_enrichment_manager::LibraryEnrichmentManager,
@@ -31,10 +32,16 @@ pub struct BackgroundServicesConfig {
     pub bus_sender: broadcast::Sender<Message>,
     /// Weak handle used by the UI manager thread to update Slint models.
     pub ui_handle: slint::Weak<AppWindow>,
-    /// Initial online-metadata toggle persisted in config.
-    pub initial_online_metadata_enabled: bool,
-    /// Whether the online-metadata consent prompt still needs to be shown.
-    pub initial_online_metadata_prompt_pending: bool,
+    /// Initial output config snapshot used to seed runtime services before any config deltas.
+    pub initial_output_config: config::OutputConfig,
+    /// Initial cast config snapshot used to seed runtime services before any config deltas.
+    pub initial_cast_config: config::CastConfig,
+    /// Initial UI config snapshot used to seed `UiManager` before any bus config messages.
+    pub initial_ui_config: config::UiConfig,
+    /// Initial library config snapshot used to seed `UiManager` before any bus config messages.
+    pub initial_library_config: config::LibraryConfig,
+    /// Initial buffering config snapshot used to seed runtime services before any config deltas.
+    pub initial_buffering_config: config::BufferingConfig,
     /// Channel carrying batched playlist import requests.
     pub playlist_bulk_import_rx: Receiver<protocol::PlaylistBulkImportRequest>,
     /// Progress producer forwarded into the library manager.
@@ -57,11 +64,17 @@ fn panic_payload_to_string(payload: &(dyn Any + Send)) -> String {
 
 /// Spawns all long-lived background services and wires their bus subscriptions.
 pub fn spawn_background_services(config: BackgroundServicesConfig) {
+    // Startup config is injected via constructors for config-dependent services.
+    // `ConfigChanged` carries in-flight deltas only; there is no `ConfigLoaded`
+    // bootstrap bus message, which avoids startup ordering races.
     let BackgroundServicesConfig {
         bus_sender,
         ui_handle,
-        initial_online_metadata_enabled,
-        initial_online_metadata_prompt_pending,
+        initial_output_config,
+        initial_cast_config,
+        initial_ui_config,
+        initial_library_config,
+        initial_buffering_config,
         playlist_bulk_import_rx,
         library_scan_progress_tx,
         library_scan_progress_rx,
@@ -80,6 +93,8 @@ pub fn spawn_background_services(config: BackgroundServicesConfig) {
 
     let playlist_manager_bus_receiver = bus_sender.subscribe();
     let playlist_manager_bus_sender = bus_sender.clone();
+    let playlist_initial_output_config = initial_output_config.clone();
+    let playlist_initial_ui_config = initial_ui_config.clone();
     thread::spawn(move || {
         let db_manager = DbManager::new().expect("Failed to initialize database");
         let mut playlist_manager = PlaylistManager::new(
@@ -88,12 +103,15 @@ pub fn spawn_background_services(config: BackgroundServicesConfig) {
             playlist_manager_bus_sender,
             db_manager,
             playlist_bulk_import_rx,
+            playlist_initial_output_config,
+            playlist_initial_ui_config,
         );
         playlist_manager.run();
     });
 
     let library_manager_bus_receiver = bus_sender.subscribe();
     let library_manager_bus_sender = bus_sender.clone();
+    let library_initial_config = initial_library_config.clone();
     thread::spawn(move || {
         let db_manager = DbManager::new().expect("Failed to initialize database");
         let mut library_manager = LibraryManager::new(
@@ -101,18 +119,21 @@ pub fn spawn_background_services(config: BackgroundServicesConfig) {
             library_manager_bus_sender,
             db_manager,
             library_scan_progress_tx,
+            library_initial_config,
         );
         library_manager.run();
     });
 
     let enrichment_manager_bus_receiver = bus_sender.subscribe();
     let enrichment_manager_bus_sender = bus_sender.clone();
+    let enrichment_initial_config = initial_library_config.clone();
     thread::spawn(move || {
         let db_manager = DbManager::new().expect("Failed to initialize database");
         let mut enrichment_manager = LibraryEnrichmentManager::new(
             enrichment_manager_bus_receiver,
             enrichment_manager_bus_sender,
             db_manager,
+            enrichment_initial_config,
         );
         enrichment_manager.run();
     });
@@ -139,8 +160,13 @@ pub fn spawn_background_services(config: BackgroundServicesConfig) {
 
     let cast_manager_bus_receiver = bus_sender.subscribe();
     let cast_manager_bus_sender = bus_sender.clone();
+    let cast_initial_config = initial_cast_config.clone();
     thread::spawn(move || {
-        let mut cast_manager = CastManager::new(cast_manager_bus_receiver, cast_manager_bus_sender);
+        let mut cast_manager = CastManager::new(
+            cast_manager_bus_receiver,
+            cast_manager_bus_sender,
+            cast_initial_config,
+        );
         cast_manager.run();
     });
 
@@ -151,8 +177,8 @@ pub fn spawn_background_services(config: BackgroundServicesConfig) {
                 ui_handle,
                 ui_manager_bus_sender.subscribe(),
                 ui_manager_bus_sender.clone(),
-                initial_online_metadata_enabled,
-                initial_online_metadata_prompt_pending,
+                initial_ui_config,
+                initial_library_config,
                 library_scan_progress_rx,
             );
             ui_manager.run();
@@ -167,8 +193,15 @@ pub fn spawn_background_services(config: BackgroundServicesConfig) {
 
     let decoder_bus_sender = bus_sender.clone();
     let decoder_bus_receiver = bus_sender.subscribe();
+    let decoder_initial_output_config = initial_output_config.clone();
+    let decoder_initial_buffering_config = initial_buffering_config.clone();
     thread::spawn(move || {
-        let mut audio_decoder = AudioDecoder::new(decoder_bus_receiver, decoder_bus_sender);
+        let mut audio_decoder = AudioDecoder::new(
+            decoder_bus_receiver,
+            decoder_bus_sender,
+            decoder_initial_output_config,
+            decoder_initial_buffering_config,
+        );
         audio_decoder.run();
     });
 
@@ -184,8 +217,15 @@ pub fn spawn_background_services(config: BackgroundServicesConfig) {
 
     let player_bus_sender = bus_sender.clone();
     let player_bus_receiver = bus_sender.subscribe();
+    let player_initial_output_config = initial_output_config;
+    let player_initial_buffering_config = initial_buffering_config;
     thread::spawn(move || {
-        let mut audio_player = AudioPlayer::new(player_bus_receiver, player_bus_sender);
+        let mut audio_player = AudioPlayer::new(
+            player_bus_receiver,
+            player_bus_sender,
+            player_initial_output_config,
+            player_initial_buffering_config,
+        );
         audio_player.run();
     });
 }

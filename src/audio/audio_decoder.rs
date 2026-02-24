@@ -4,7 +4,7 @@
 //! decode worker thread that performs file decode, optional seek, resampling,
 //! and packet emission.
 
-use crate::config::{BufferingConfig, Config, ResamplerQuality};
+use crate::config::{BufferingConfig, OutputConfig, ResamplerQuality};
 use crate::integration_uri::{parse_opensubsonic_track_uri, OpenSubsonicTrackLocator};
 use crate::protocol::{
     self, AudioMessage, AudioPacket, ConfigMessage, IntegrationMessage, Message, TrackIdentifier,
@@ -53,7 +53,6 @@ enum DecodeWorkItem {
     Stop {
         generation: u64,
     },
-    ConfigLoaded(Config),
     ConfigChanged(Vec<protocol::ConfigDeltaEntry>),
     RuntimeOutputSampleRateChanged {
         sample_rate_hz: u32,
@@ -113,8 +112,10 @@ impl DecodeWorker {
         bus_sender: Sender<Message>,
         work_receiver: MpscReceiver<DecodeWorkItem>,
         decode_request_inflight: Arc<AtomicBool>,
+        initial_output_config: OutputConfig,
+        initial_buffering_config: BufferingConfig,
     ) -> Self {
-        Self {
+        let mut worker = Self {
             bus_sender,
             work_receiver,
             decode_request_inflight,
@@ -134,7 +135,12 @@ impl DecodeWorker {
             decoder_request_chunk_ms: BufferingConfig::default().decoder_request_chunk_ms,
             decode_generation: 0,
             opensubsonic_passwords: HashMap::new(),
-        }
+        };
+        worker.apply_decode_config(
+            Some(&initial_output_config),
+            Some(&initial_buffering_config),
+        );
+        worker
     }
 
     fn should_bootstrap_decode(tracks: &[TrackIdentifier]) -> bool {
@@ -384,9 +390,6 @@ Check Settings -> OpenSubsonic status and re-save credentials if needed.",
                     return;
                 }
                 self.decode_requested_samples(requested_samples);
-            }
-            DecodeWorkItem::ConfigLoaded(config) => {
-                self.apply_decode_config(Some(&config.output), Some(&config.buffering));
             }
             DecodeWorkItem::ConfigChanged(changes) => {
                 let mut output_update: Option<crate::config::OutputConfig> = None;
@@ -1322,7 +1325,12 @@ pub struct AudioDecoder {
 
 impl AudioDecoder {
     /// Creates the decoder and spawns its dedicated decode worker thread.
-    pub fn new(bus_receiver: Receiver<Message>, bus_sender: Sender<Message>) -> Self {
+    pub fn new(
+        bus_receiver: Receiver<Message>,
+        bus_sender: Sender<Message>,
+        initial_output_config: OutputConfig,
+        initial_buffering_config: BufferingConfig,
+    ) -> Self {
         let (worker_sender, worker_receiver) = mpsc::channel(128);
         let mut audio_decoder = Self {
             bus_receiver,
@@ -1331,7 +1339,11 @@ impl AudioDecoder {
             decode_request_inflight: Arc::new(AtomicBool::new(false)),
             decode_generation: 0,
         };
-        audio_decoder.spawn_decode_worker(worker_receiver);
+        audio_decoder.spawn_decode_worker(
+            worker_receiver,
+            initial_output_config,
+            initial_buffering_config,
+        );
         audio_decoder
     }
 
@@ -1365,15 +1377,6 @@ impl AudioDecoder {
                         let _ = self
                             .worker_sender
                             .blocking_send(DecodeWorkItem::Stop { generation });
-                    }
-                    Message::Config(ConfigMessage::ConfigLoaded(config)) => {
-                        debug!(
-                            "AudioDecoder: Received full config load command: {:?}",
-                            config
-                        );
-                        self.worker_sender
-                            .blocking_send(DecodeWorkItem::ConfigLoaded(config))
-                            .unwrap();
                     }
                     Message::Config(ConfigMessage::ConfigChanged(changes)) => {
                         debug!("AudioDecoder: Received config delta command: {:?}", changes);
@@ -1475,12 +1478,22 @@ impl AudioDecoder {
         }
     }
 
-    fn spawn_decode_worker(&mut self, worker_receiver: MpscReceiver<DecodeWorkItem>) {
+    fn spawn_decode_worker(
+        &mut self,
+        worker_receiver: MpscReceiver<DecodeWorkItem>,
+        initial_output_config: OutputConfig,
+        initial_buffering_config: BufferingConfig,
+    ) {
         let bus_sender = self.bus_sender.clone();
         let decode_request_inflight = self.decode_request_inflight.clone();
         thread::spawn(move || {
-            let mut worker =
-                DecodeWorker::new(bus_sender.clone(), worker_receiver, decode_request_inflight);
+            let mut worker = DecodeWorker::new(
+                bus_sender.clone(),
+                worker_receiver,
+                decode_request_inflight,
+                initial_output_config,
+                initial_buffering_config,
+            );
             worker.run();
         });
     }
@@ -1489,6 +1502,7 @@ impl AudioDecoder {
 #[cfg(test)]
 mod tests {
     use super::{AudioDecoder, DecodeWorkItem, DecodeWorker};
+    use crate::config::{BufferingConfig, OutputConfig};
     use crate::integration_uri::OpenSubsonicTrackLocator;
     use crate::protocol::TrackIdentifier;
     use std::path::PathBuf;
@@ -1566,7 +1580,13 @@ mod tests {
     fn test_stale_stop_does_not_clear_active_generation_queue() {
         let (bus_sender, _) = broadcast::channel(8);
         let (_worker_tx, worker_rx) = mpsc::channel(8);
-        let mut worker = DecodeWorker::new(bus_sender, worker_rx, Arc::new(AtomicBool::new(false)));
+        let mut worker = DecodeWorker::new(
+            bus_sender,
+            worker_rx,
+            Arc::new(AtomicBool::new(false)),
+            OutputConfig::default(),
+            BufferingConfig::default(),
+        );
 
         worker.handle_work_item(DecodeWorkItem::DecodeTracks {
             tracks: vec![make_track("g2", false)],
@@ -1584,7 +1604,13 @@ mod tests {
     fn test_stale_decode_request_is_ignored() {
         let (bus_sender, _) = broadcast::channel(8);
         let (_worker_tx, worker_rx) = mpsc::channel(8);
-        let mut worker = DecodeWorker::new(bus_sender, worker_rx, Arc::new(AtomicBool::new(false)));
+        let mut worker = DecodeWorker::new(
+            bus_sender,
+            worker_rx,
+            Arc::new(AtomicBool::new(false)),
+            OutputConfig::default(),
+            BufferingConfig::default(),
+        );
 
         worker.handle_work_item(DecodeWorkItem::DecodeTracks {
             tracks: vec![make_track("g3", false)],
@@ -1604,7 +1630,13 @@ mod tests {
     fn test_new_generation_replaces_previous_pending_tracks() {
         let (bus_sender, _) = broadcast::channel(8);
         let (_worker_tx, worker_rx) = mpsc::channel(8);
-        let mut worker = DecodeWorker::new(bus_sender, worker_rx, Arc::new(AtomicBool::new(false)));
+        let mut worker = DecodeWorker::new(
+            bus_sender,
+            worker_rx,
+            Arc::new(AtomicBool::new(false)),
+            OutputConfig::default(),
+            BufferingConfig::default(),
+        );
 
         worker.handle_work_item(DecodeWorkItem::DecodeTracks {
             tracks: vec![make_track("old", false)],
@@ -1628,7 +1660,13 @@ mod tests {
     fn test_stop_clears_current_generation_state() {
         let (bus_sender, _) = broadcast::channel(8);
         let (_worker_tx, worker_rx) = mpsc::channel(8);
-        let mut worker = DecodeWorker::new(bus_sender, worker_rx, Arc::new(AtomicBool::new(false)));
+        let mut worker = DecodeWorker::new(
+            bus_sender,
+            worker_rx,
+            Arc::new(AtomicBool::new(false)),
+            OutputConfig::default(),
+            BufferingConfig::default(),
+        );
 
         worker.handle_work_item(DecodeWorkItem::DecodeTracks {
             tracks: vec![make_track("active", false)],
@@ -1680,7 +1718,13 @@ mod tests {
         let (bus_sender, _) = broadcast::channel(8);
         let (_worker_tx, worker_rx) = mpsc::channel(8);
         let inflight = Arc::new(AtomicBool::new(true));
-        let mut worker = DecodeWorker::new(bus_sender, worker_rx, inflight.clone());
+        let mut worker = DecodeWorker::new(
+            bus_sender,
+            worker_rx,
+            inflight.clone(),
+            OutputConfig::default(),
+            BufferingConfig::default(),
+        );
         worker.decode_generation = 2;
 
         worker.handle_work_item(DecodeWorkItem::RequestDecodeChunk {
@@ -1699,7 +1743,13 @@ mod tests {
         let samples = vec![0.3, 0.2, 0.1, 0.0, 0.2, 0.1];
         let (bus_sender, _) = broadcast::channel(8);
         let (_worker_tx, worker_rx) = mpsc::channel(8);
-        let mut worker = DecodeWorker::new(bus_sender, worker_rx, Arc::new(AtomicBool::new(false)));
+        let mut worker = DecodeWorker::new(
+            bus_sender,
+            worker_rx,
+            Arc::new(AtomicBool::new(false)),
+            OutputConfig::default(),
+            BufferingConfig::default(),
+        );
         worker.downmix_higher_channel_tracks = true;
         let transformed = worker.transform_channels(&samples, 6, 2);
 
@@ -1713,7 +1763,13 @@ mod tests {
         let samples = vec![0.3, 0.2, 0.1, 0.0, 0.2, 0.1];
         let (bus_sender, _) = broadcast::channel(8);
         let (_worker_tx, worker_rx) = mpsc::channel(8);
-        let mut worker = DecodeWorker::new(bus_sender, worker_rx, Arc::new(AtomicBool::new(false)));
+        let mut worker = DecodeWorker::new(
+            bus_sender,
+            worker_rx,
+            Arc::new(AtomicBool::new(false)),
+            OutputConfig::default(),
+            BufferingConfig::default(),
+        );
         worker.downmix_higher_channel_tracks = false;
         let transformed = worker.transform_channels(&samples, 6, 2);
 

@@ -514,6 +514,13 @@ impl FailedCoverPathCache {
         }
     }
 
+    fn remove(&mut self, path: &Path) {
+        if !self.paths.remove(path) {
+            return;
+        }
+        self.order.retain(|candidate| candidate != path);
+    }
+
     fn clear(&mut self) {
         self.paths.clear();
         self.order.clear();
@@ -844,6 +851,12 @@ impl UiManager {
         TRACK_ROW_COVER_ART_FAILED_PATHS.with(|failed| failed.borrow().contains(path))
     }
 
+    fn clear_failed_cover_path(path: &Path) {
+        TRACK_ROW_COVER_ART_FAILED_PATHS.with(|failed| {
+            failed.borrow_mut().remove(path);
+        });
+    }
+
     fn source_badge_for_track_path(path: &Path) -> String {
         if is_remote_track_path(path) {
             "opensubsonic".to_string()
@@ -1122,6 +1135,7 @@ impl UiManager {
                     return Some(migrated);
                 }
             }
+            Self::clear_failed_cover_path(&cache_path);
             return Some(cache_path);
         }
         None
@@ -1480,8 +1494,8 @@ impl UiManager {
         ui: slint::Weak<AppWindow>,
         bus_receiver: Receiver<protocol::Message>,
         bus_sender: Sender<protocol::Message>,
-        initial_online_metadata_enabled: bool,
-        initial_online_metadata_prompt_pending: bool,
+        initial_ui_config: config::UiConfig,
+        initial_library_config: config::LibraryConfig,
         library_scan_progress_rx: StdReceiver<protocol::LibraryMessage>,
     ) -> Self {
         let (cover_art_lookup_tx, cover_art_lookup_rx) = mpsc::channel::<CoverArtLookupRequest>();
@@ -1635,7 +1649,12 @@ impl UiManager {
             }
         });
 
-        Self {
+        let initial_layout_width_overrides = initial_ui_config
+            .layout
+            .playlist_column_width_overrides
+            .clone();
+
+        let mut manager = Self {
             ui: ui.clone(),
             bus_receiver,
             bus_sender,
@@ -1683,7 +1702,7 @@ impl UiManager {
             cast_transcode_output_metadata: None,
             cast_device_ids: Vec::new(),
             cast_device_names: Vec::new(),
-            playlist_columns: config::default_playlist_columns(),
+            playlist_columns: initial_ui_config.playlist_columns.clone(),
             playlist_column_content_targets_px: Vec::new(),
             playlist_column_target_widths_px: HashMap::new(),
             playlist_column_widths_px: Vec::new(),
@@ -1691,13 +1710,13 @@ impl UiManager {
             playlist_columns_available_width_px: 0,
             playlist_columns_content_width_px: 0,
             playlist_row_height_px: BASE_ROW_HEIGHT_PX,
-            album_art_column_min_width_px: config::default_playlist_album_art_column_min_width_px(),
-            album_art_column_max_width_px: config::default_playlist_album_art_column_max_width_px(),
+            album_art_column_min_width_px: initial_ui_config.playlist_album_art_column_min_width_px,
+            album_art_column_max_width_px: initial_ui_config.playlist_album_art_column_max_width_px,
             filter_sort_column_key: None,
             filter_sort_direction: None,
             filter_search_query: String::new(),
             filter_search_visible: false,
-            auto_scroll_to_playing_track: true,
+            auto_scroll_to_playing_track: initial_ui_config.auto_scroll_to_playing_track,
             playlist_prefetch_first_row: 0,
             playlist_prefetch_row_count: 0,
             playlist_scroll_center_token: 0,
@@ -1724,13 +1743,20 @@ impl UiManager {
             library_enrichment_not_found_not_before: HashMap::new(),
             library_enrichment_failed_attempt_counts: HashMap::new(),
             library_last_detail_enrichment_entity: None,
-            library_online_metadata_enabled: initial_online_metadata_enabled,
-            library_online_metadata_prompt_pending: initial_online_metadata_prompt_pending,
-            list_image_max_edge_px: image_pipeline::runtime_list_image_max_edge_px(),
-            cover_art_cache_max_size_mb: 512,
-            artist_image_cache_max_size_mb: 256,
-            cover_art_memory_cache_max_size_mb: 50,
-            artist_image_memory_cache_max_size_mb: 50,
+            library_online_metadata_enabled: initial_library_config.online_metadata_enabled,
+            library_online_metadata_prompt_pending: initial_library_config
+                .online_metadata_prompt_pending,
+            list_image_max_edge_px: initial_library_config.list_image_max_edge_px.max(1),
+            cover_art_cache_max_size_mb: initial_library_config.cover_art_cache_max_size_mb.max(1),
+            artist_image_cache_max_size_mb: initial_library_config
+                .artist_image_cache_max_size_mb
+                .max(1),
+            cover_art_memory_cache_max_size_mb: initial_library_config
+                .cover_art_memory_cache_max_size_mb
+                .max(1),
+            artist_image_memory_cache_max_size_mb: initial_library_config
+                .artist_image_memory_cache_max_size_mb
+                .max(1),
             pending_list_image_requests: HashSet::new(),
             library_artist_prefetch_first_row: 0,
             library_artist_prefetch_row_count: 0,
@@ -1767,7 +1793,13 @@ impl UiManager {
             properties_dialog_visible: false,
             properties_busy: false,
             properties_error_text: String::new(),
-        }
+        };
+        // Seed column-width overrides from startup layout so playlist rendering does not depend on
+        // racing the asynchronous `ConfigLoaded` bus message.
+        manager.apply_layout_column_width_overrides(&initial_layout_width_overrides);
+        manager.refresh_playlist_column_content_targets();
+        manager.apply_playlist_column_layout();
+        manager
     }
 
     fn on_message_received(&mut self) {
@@ -2181,6 +2213,9 @@ impl UiManager {
             self.list_image_max_edge_px,
         );
         if thumb_path.is_some() {
+            if let Some(path) = thumb_path.as_ref() {
+                Self::clear_failed_cover_path(path);
+            }
             return thumb_path;
         }
         self.queue_list_thumbnail_prepare(source_path, kind, protocol::UiImageVariant::ListThumb);
@@ -2255,7 +2290,7 @@ impl UiManager {
         path: &Path,
         kind: protocol::UiImageKind,
     ) -> Option<Image> {
-        if Self::failed_cover_path(path) {
+        if Self::failed_cover_path(path) && !path.exists() {
             return None;
         }
 
@@ -2269,11 +2304,13 @@ impl UiManager {
             }
         };
         if let Some(cached) = cached {
+            Self::clear_failed_cover_path(path);
             return Some(cached);
         }
 
         match Image::load_from_path(path) {
             Ok(image) => {
+                Self::clear_failed_cover_path(path);
                 let approx_bytes = Self::approximate_cover_art_size_bytes(path);
                 let cache_budget = Self::image_cache_budget_bytes(kind);
                 match kind {
@@ -10028,14 +10065,6 @@ impl UiManager {
                                     ui.set_display_genre("".into());
                                 }
                             });
-                        }
-                        protocol::Message::Config(protocol::ConfigMessage::ConfigLoaded(
-                            config,
-                        )) => {
-                            self.apply_ui_library_config_updates(
-                                Some(config.ui),
-                                Some(config.library),
-                            );
                         }
                         protocol::Message::Config(protocol::ConfigMessage::ConfigChanged(
                             changes,

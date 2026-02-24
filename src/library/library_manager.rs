@@ -55,12 +55,13 @@ impl LibraryManager {
         bus_producer: Sender<Message>,
         db_manager: DbManager,
         scan_progress_tx: SyncSender<LibraryMessage>,
+        initial_library_config: crate::config::LibraryConfig,
     ) -> Self {
         Self {
             bus_consumer,
             bus_producer,
             db_manager,
-            library_folders: Vec::new(),
+            library_folders: initial_library_config.folders,
             scan_progress_tx,
             playback_active: false,
             remote_tracks_by_profile: HashMap::new(),
@@ -1626,9 +1627,6 @@ impl LibraryManager {
         loop {
             match self.bus_consumer.blocking_recv() {
                 Ok(message) => match message {
-                    Message::Config(protocol::ConfigMessage::ConfigLoaded(config)) => {
-                        self.library_folders = config.library.folders;
-                    }
                     Message::Config(protocol::ConfigMessage::ConfigChanged(changes)) => {
                         for change in changes {
                             if let protocol::ConfigDeltaEntry::Library(library) = change {

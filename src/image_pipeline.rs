@@ -27,10 +27,6 @@ pub enum ManagedImageKind {
     ArtistImage,
 }
 
-pub fn runtime_list_image_max_edge_px() -> u32 {
-    LIST_IMAGE_MAX_EDGE_PX.load(Ordering::Relaxed)
-}
-
 pub fn runtime_cover_disk_budget_bytes() -> u64 {
     COVER_DISK_BUDGET_BYTES.load(Ordering::Relaxed)
 }

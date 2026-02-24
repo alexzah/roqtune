@@ -168,6 +168,7 @@ impl LibraryEnrichmentManager {
         bus_consumer: Receiver<Message>,
         bus_producer: Sender<Message>,
         db_manager: DbManager,
+        initial_library_config: crate::config::LibraryConfig,
     ) -> Self {
         let http_client = ureq::AgentBuilder::new()
             .timeout_connect(Duration::from_secs(5))
@@ -175,13 +176,13 @@ impl LibraryEnrichmentManager {
             .timeout_write(Duration::from_secs(7))
             .build();
 
-        Self {
+        let mut manager = Self {
             bus_consumer,
             bus_producer,
             db_manager,
-            online_metadata_enabled: false,
-            artist_image_cache_ttl_days: 30,
-            artist_image_cache_max_size_mb: 256,
+            online_metadata_enabled: initial_library_config.online_metadata_enabled,
+            artist_image_cache_ttl_days: initial_library_config.artist_image_cache_ttl_days,
+            artist_image_cache_max_size_mb: initial_library_config.artist_image_cache_max_size_mb,
             queued_attempts: HashMap::new(),
             detail_queue: VecDeque::new(),
             visible_artist_queue: VecDeque::new(),
@@ -195,7 +196,9 @@ impl LibraryEnrichmentManager {
                     .allow_burst(NonZeroU32::new(1).expect("non-zero limiter burst")),
             ),
             http_client,
-        }
+        };
+        manager.apply_library_config(&initial_library_config);
+        manager
     }
 
     fn now_unix_ms() -> i64 {
@@ -203,6 +206,26 @@ impl LibraryEnrichmentManager {
             .duration_since(UNIX_EPOCH)
             .map(|duration| duration.as_millis() as i64)
             .unwrap_or(0)
+    }
+
+    fn apply_library_config(&mut self, library: &crate::config::LibraryConfig) {
+        self.online_metadata_enabled = library.online_metadata_enabled;
+        self.artist_image_cache_ttl_days = library.artist_image_cache_ttl_days;
+        self.artist_image_cache_max_size_mb = library.artist_image_cache_max_size_mb;
+        image_pipeline::configure_runtime_limits(
+            library.list_image_max_edge_px,
+            library.cover_art_cache_max_size_mb,
+            library.artist_image_cache_max_size_mb,
+        );
+        if !self.online_metadata_enabled {
+            self.queued_attempts.clear();
+            self.detail_queue.clear();
+            self.visible_artist_queue.clear();
+            self.background_artist_queue.clear();
+            self.deferred_not_before.clear();
+        }
+        self.prune_enrichment_cache();
+        self.prune_artist_image_cache_by_size();
     }
 
     fn source_entity_label(entity: &LibraryEnrichmentEntity) -> String {
@@ -3504,25 +3527,6 @@ impl LibraryEnrichmentManager {
 
     fn handle_bus_message(&mut self, message: Message) {
         match message {
-            Message::Config(crate::protocol::ConfigMessage::ConfigLoaded(config)) => {
-                self.online_metadata_enabled = config.library.online_metadata_enabled;
-                self.artist_image_cache_ttl_days = config.library.artist_image_cache_ttl_days;
-                self.artist_image_cache_max_size_mb = config.library.artist_image_cache_max_size_mb;
-                image_pipeline::configure_runtime_limits(
-                    config.library.list_image_max_edge_px,
-                    config.library.cover_art_cache_max_size_mb,
-                    config.library.artist_image_cache_max_size_mb,
-                );
-                if !self.online_metadata_enabled {
-                    self.queued_attempts.clear();
-                    self.detail_queue.clear();
-                    self.visible_artist_queue.clear();
-                    self.background_artist_queue.clear();
-                    self.deferred_not_before.clear();
-                }
-                self.prune_enrichment_cache();
-                self.prune_artist_image_cache_by_size();
-            }
             Message::Config(crate::protocol::ConfigMessage::ConfigChanged(changes)) => {
                 let mut library_update: Option<crate::config::LibraryConfig> = None;
                 for change in changes {
@@ -3533,23 +3537,7 @@ impl LibraryEnrichmentManager {
                 let Some(library) = library_update else {
                     return;
                 };
-                self.online_metadata_enabled = library.online_metadata_enabled;
-                self.artist_image_cache_ttl_days = library.artist_image_cache_ttl_days;
-                self.artist_image_cache_max_size_mb = library.artist_image_cache_max_size_mb;
-                image_pipeline::configure_runtime_limits(
-                    library.list_image_max_edge_px,
-                    library.cover_art_cache_max_size_mb,
-                    library.artist_image_cache_max_size_mb,
-                );
-                if !self.online_metadata_enabled {
-                    self.queued_attempts.clear();
-                    self.detail_queue.clear();
-                    self.visible_artist_queue.clear();
-                    self.background_artist_queue.clear();
-                    self.deferred_not_before.clear();
-                }
-                self.prune_enrichment_cache();
-                self.prune_artist_image_cache_by_size();
+                self.apply_library_config(&library);
             }
             Message::Library(LibraryMessage::RequestEnrichment { entity, priority }) => {
                 let attempt_kind = match priority {

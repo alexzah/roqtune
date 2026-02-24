@@ -84,8 +84,10 @@ impl PlaylistManager {
         bus_producer: Sender<protocol::Message>,
         db_manager: DbManager,
         bulk_import_rx: StdReceiver<protocol::PlaylistBulkImportRequest>,
+        initial_output_config: OutputConfig,
+        initial_ui_config: UiConfig,
     ) -> Self {
-        Self {
+        let mut manager = Self {
             editing_playlist: playlist.clone(),
             active_playlist_id: String::new(),
             playback_playlist: playlist,
@@ -107,7 +109,7 @@ impl PlaylistManager {
             pending_rate_switch_play_immediately: false,
             current_output_rate_hz: None,
             verified_output_rates: Vec::new(),
-            sample_rate_auto_enabled: true,
+            sample_rate_auto_enabled: initial_output_config.sample_rate_auto,
             max_num_cached_tracks: 2,
             current_track_duration_ms: 0,
             current_elapsed_ms: 0,
@@ -115,14 +117,16 @@ impl PlaylistManager {
             started_track_id: None,
             track_list_undo_stack: Vec::new(),
             track_list_redo_stack: Vec::new(),
-            playback_preferences_restored_from_config: false,
+            playback_preferences_restored_from_config: true,
             pending_mixed_detach: None,
             suppress_remote_writeback: false,
             last_remote_writeback_signature: HashMap::new(),
             remote_track_metadata_by_path: HashMap::new(),
             backend_connection_states: HashMap::new(),
             unavailable_track_ids: HashSet::new(),
-        }
+        };
+        manager.restore_playback_preferences_from_ui_config(&initial_ui_config);
+        manager
     }
 
     fn playback_playlist_id(&self) -> Option<String> {
@@ -1573,23 +1577,6 @@ impl PlaylistManager {
                         self.broadcast_playlist_changed();
                         self.broadcast_selection_changed();
                     }
-                    protocol::Message::Config(protocol::ConfigMessage::ConfigLoaded(config)) => {
-                        let previous_sample_rate_auto = self.sample_rate_auto_enabled;
-                        self.update_runtime_policy_from_output_config(&config.output);
-                        if !self.playback_preferences_restored_from_config {
-                            let playback_changed =
-                                self.restore_playback_preferences_from_ui_config(&config.ui);
-                            self.playback_preferences_restored_from_config = true;
-                            if playback_changed {
-                                self.broadcast_playlist_changed();
-                            }
-                        }
-                        if self.playback_playlist.is_playing()
-                            && previous_sample_rate_auto != self.sample_rate_auto_enabled
-                        {
-                            self.cache_tracks(false);
-                        }
-                    }
                     protocol::Message::Config(protocol::ConfigMessage::ConfigChanged(changes)) => {
                         let previous_sample_rate_auto = self.sample_rate_auto_enabled;
                         let mut playback_changed = false;
@@ -2973,6 +2960,10 @@ mod tests {
 
     impl PlaylistManagerHarness {
         fn new() -> Self {
+            Self::new_with_initial_config(Config::default())
+        }
+
+        fn new_with_initial_config(initial_config: Config) -> Self {
             let (bus_sender, _) = broadcast::channel(4096);
             let manager_bus_sender = bus_sender.clone();
             let manager_receiver = bus_sender.subscribe();
@@ -2987,6 +2978,8 @@ mod tests {
                     manager_bus_sender,
                     db_manager,
                     bulk_import_rx,
+                    initial_config.output,
+                    initial_config.ui,
                 );
                 manager.run();
             });
@@ -4629,25 +4622,10 @@ mod tests {
 
     #[test]
     fn test_config_changed_restores_playback_preferences_only_once() {
-        let mut harness = PlaylistManagerHarness::new();
-        harness.drain_messages();
-
         let mut initial = Config::default();
         initial.ui.playback_order = UiPlaybackOrder::Shuffle;
         initial.ui.repeat_mode = UiRepeatMode::Track;
-        harness.send(protocol::Message::Config(
-            protocol::ConfigMessage::ConfigLoaded(initial),
-        ));
-        let _ = wait_for_message(&mut harness.receiver, Duration::from_secs(1), |message| {
-            matches!(
-                message,
-                protocol::Message::Playlist(protocol::PlaylistMessage::PlaylistIndicesChanged {
-                    playback_order: protocol::PlaybackOrder::Shuffle,
-                    repeat_mode: protocol::RepeatMode::Track,
-                    ..
-                })
-            )
-        });
+        let mut harness = PlaylistManagerHarness::new_with_initial_config(initial);
         harness.drain_messages();
 
         let mut later = Config::default();
@@ -4809,6 +4787,8 @@ mod tests {
             bus_sender,
             db_manager,
             bulk_import_rx,
+            OutputConfig::default(),
+            UiConfig::default(),
         );
         (manager, receiver)
     }

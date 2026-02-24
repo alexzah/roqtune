@@ -316,8 +316,11 @@ impl AppRuntime {
         spawn_background_services(BackgroundServicesConfig {
             bus_sender: bus_sender.clone(),
             ui_handle: ui.as_weak().clone(),
-            initial_online_metadata_enabled: config.library.online_metadata_enabled,
-            initial_online_metadata_prompt_pending: config.library.online_metadata_prompt_pending,
+            initial_output_config: runtime_config.output.clone(),
+            initial_cast_config: runtime_config.cast.clone(),
+            initial_ui_config: runtime_config.ui.clone(),
+            initial_library_config: runtime_config.library.clone(),
+            initial_buffering_config: runtime_config.buffering.clone(),
             playlist_bulk_import_rx,
             library_scan_progress_tx,
             library_scan_progress_rx,
@@ -343,9 +346,6 @@ impl AppRuntime {
 
         // Playlist columns are global layout state from `layout.toml`; startup must not request
         // playlist-scoped column ordering.
-        let _ = bus_sender.send(Message::Config(ConfigMessage::ConfigLoaded(
-            runtime_config.clone(),
-        )));
         let _ = bus_sender.send(Message::Config(
             ConfigMessage::OutputDeviceCapabilitiesChanged {
                 verified_sample_rates: initial_output_options.verified_sample_rate_values.clone(),

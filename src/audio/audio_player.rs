@@ -7,6 +7,7 @@ use crate::protocol::{
     AudioMessage, AudioPacket, ChannelTransformKind, ConfigMessage, Message, OutputPathInfo,
     OutputSampleFormat, OutputStreamInfo, PlaybackMessage, TrackStarted,
 };
+use crate::{config::BufferingConfig, config::OutputConfig};
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use log::{debug, error, warn};
 use std::{
@@ -111,15 +112,13 @@ impl AudioPlayer {
         Some(trimmed.to_string())
     }
 
-    fn output_signature_from_config(config: &crate::config::Config) -> OutputConfigSignature {
+    fn output_signature_from_output_config(output: &OutputConfig) -> OutputConfigSignature {
         OutputConfigSignature {
-            device_name: Self::canonicalize_requested_device_name(
-                &config.output.output_device_name,
-            ),
-            sample_rate_hz: config.output.sample_rate_khz.max(8_000),
-            channel_count: config.output.channel_count.max(1),
-            bits_per_sample: config.output.bits_per_sample.max(8),
-            dither_on_bitdepth_reduce: config.output.dither_on_bitdepth_reduce,
+            device_name: Self::canonicalize_requested_device_name(&output.output_device_name),
+            sample_rate_hz: output.sample_rate_khz.max(8_000),
+            channel_count: output.channel_count.max(1),
+            bits_per_sample: output.bits_per_sample.max(8),
+            dither_on_bitdepth_reduce: output.dither_on_bitdepth_reduce,
         }
     }
 
@@ -350,7 +349,12 @@ impl AudioPlayer {
     }
 
     /// Creates an audio player, initializes output device, and spawns helper threads.
-    pub fn new(bus_receiver: Receiver<Message>, bus_sender: Sender<Message>) -> Self {
+    pub fn new(
+        bus_receiver: Receiver<Message>,
+        bus_sender: Sender<Message>,
+        initial_output_config: OutputConfig,
+        initial_buffering_config: BufferingConfig,
+    ) -> Self {
         let is_playing = Arc::new(AtomicBool::new(false));
         let current_track_position = Arc::new(AtomicUsize::new(0));
         let cached_track_indices = Arc::new(Mutex::new(HashMap::new()));
@@ -360,13 +364,23 @@ impl AudioPlayer {
         let current_track_offset_ms = Arc::new(AtomicUsize::new(0));
         let queue_start_position = Arc::new(AtomicUsize::new(0));
         let queue_end_position = Arc::new(AtomicUsize::new(0));
-        let target_sample_rate = Arc::new(AtomicUsize::new(44100));
-        let target_channels = Arc::new(AtomicUsize::new(2));
-        let target_output_device_name = Arc::new(Mutex::new(None));
+        let output_signature = Self::output_signature_from_output_config(&initial_output_config);
+        let target_sample_rate =
+            Arc::new(AtomicUsize::new(output_signature.sample_rate_hz as usize));
+        let target_channels = Arc::new(AtomicUsize::new(output_signature.channel_count as usize));
+        let target_output_device_name = Arc::new(Mutex::new(output_signature.device_name.clone()));
         let volume = Arc::new(AtomicU32::new(1.0f32.to_bits()));
-        let buffer_low_watermark_ms = Arc::new(AtomicUsize::new(12_000));
-        let buffer_target_ms = Arc::new(AtomicUsize::new(24_000));
-        let buffer_request_interval_ms = Arc::new(AtomicUsize::new(120));
+        let buffer_low_watermark_ms = Arc::new(AtomicUsize::new(
+            initial_buffering_config.player_low_watermark_ms as usize,
+        ));
+        let buffer_target_ms = Arc::new(AtomicUsize::new(
+            (initial_buffering_config.player_target_buffer_ms as usize).max(
+                (initial_buffering_config.player_low_watermark_ms as usize).saturating_add(500),
+            ),
+        ));
+        let buffer_request_interval_ms = Arc::new(AtomicUsize::new(
+            initial_buffering_config.player_request_interval_ms.max(20) as usize,
+        ));
 
         let mut player = Self {
             bus_receiver,
@@ -385,9 +399,9 @@ impl AudioPlayer {
             cached_supported_output_configs: Vec::new(),
             target_sample_rate: target_sample_rate.clone(),
             target_channels: target_channels.clone(),
-            target_bits_per_sample: 24,
-            dither_on_bitdepth_reduce: true,
-            downmix_higher_channel_tracks: true,
+            target_bits_per_sample: output_signature.bits_per_sample,
+            dither_on_bitdepth_reduce: output_signature.dither_on_bitdepth_reduce,
+            downmix_higher_channel_tracks: initial_output_config.downmix_higher_channel_tracks,
             target_output_device_name,
             output_stream_info: Arc::new(Mutex::new(None)),
             current_track_id: current_track_id.clone(),
@@ -1193,71 +1207,6 @@ impl AudioPlayer {
                         *self.current_metadata.lock().unwrap() = None;
                         debug!("AudioPlayer: Cache cleared");
                     }
-                    Message::Config(ConfigMessage::ConfigLoaded(config)) => {
-                        let low_watermark_ms = config.buffering.player_low_watermark_ms as usize;
-                        let target_buffer_ms = (config.buffering.player_target_buffer_ms as usize)
-                            .max(low_watermark_ms.saturating_add(500));
-                        self.buffer_low_watermark_ms
-                            .store(low_watermark_ms, Ordering::Relaxed);
-                        self.buffer_target_ms
-                            .store(target_buffer_ms, Ordering::Relaxed);
-                        self.buffer_request_interval_ms.store(
-                            config.buffering.player_request_interval_ms.max(20) as usize,
-                            Ordering::Relaxed,
-                        );
-                        self.downmix_higher_channel_tracks =
-                            config.output.downmix_higher_channel_tracks;
-                        let next_output_signature = Self::output_signature_from_config(&config);
-                        if self.last_output_signature.as_ref() != Some(&next_output_signature) {
-                            let previous_sample_rate =
-                                self.target_sample_rate.load(Ordering::Relaxed);
-                            let previous_channels = self.target_channels.load(Ordering::Relaxed);
-                            let previous_bits_per_sample = self.target_bits_per_sample;
-                            let previous_dither = self.dither_on_bitdepth_reduce;
-                            let previous_device_name =
-                                self.target_output_device_name.lock().unwrap().clone();
-
-                            self.target_sample_rate.store(
-                                next_output_signature.sample_rate_hz as usize,
-                                Ordering::Relaxed,
-                            );
-                            self.target_channels.store(
-                                next_output_signature.channel_count as usize,
-                                Ordering::Relaxed,
-                            );
-                            self.target_bits_per_sample = next_output_signature.bits_per_sample;
-                            self.dither_on_bitdepth_reduce =
-                                next_output_signature.dither_on_bitdepth_reduce;
-                            *self.target_output_device_name.lock().unwrap() =
-                                next_output_signature.device_name.clone();
-
-                            if self.setup_audio_device() {
-                                if self.stream.is_some() {
-                                    self.stream = None;
-                                    self.create_stream();
-                                }
-                                self.last_output_signature = Some(next_output_signature);
-                                if let Some(metadata) =
-                                    self.current_metadata.lock().unwrap().clone()
-                                {
-                                    self.emit_output_path_for_metadata(&metadata);
-                                }
-                            } else {
-                                self.target_sample_rate
-                                    .store(previous_sample_rate, Ordering::Relaxed);
-                                self.target_channels
-                                    .store(previous_channels, Ordering::Relaxed);
-                                self.target_bits_per_sample = previous_bits_per_sample;
-                                self.dither_on_bitdepth_reduce = previous_dither;
-                                *self.target_output_device_name.lock().unwrap() =
-                                    previous_device_name;
-                            }
-                        } else {
-                            debug!(
-                                "AudioPlayer: Skipping audio device reinit because output signature is unchanged"
-                            );
-                        }
-                    }
                     Message::Audio(AudioMessage::StopDecoding) => {
                         self.decode_bootstrap_pending
                             .store(false, Ordering::Relaxed);
@@ -1324,13 +1273,8 @@ impl AudioPlayer {
                             continue;
                         };
                         self.downmix_higher_channel_tracks = output.downmix_higher_channel_tracks;
-                        let next_output_signature = OutputConfigSignature {
-                            sample_rate_hz: output.sample_rate_khz,
-                            channel_count: output.channel_count,
-                            bits_per_sample: output.bits_per_sample,
-                            dither_on_bitdepth_reduce: output.dither_on_bitdepth_reduce,
-                            device_name: Some(output.output_device_name),
-                        };
+                        let next_output_signature =
+                            Self::output_signature_from_output_config(&output);
                         if self.last_output_signature.as_ref() != Some(&next_output_signature) {
                             let previous_sample_rate =
                                 self.target_sample_rate.load(Ordering::Relaxed);
@@ -1401,7 +1345,7 @@ impl AudioPlayer {
 #[cfg(test)]
 mod tests {
     use super::{AudioPlayer, AudioQueueEntry, TrackHeader};
-    use crate::config::Config;
+    use crate::config::{BufferingConfig, Config, OutputConfig};
     use crate::protocol::{AudioPacket, Message, PlaybackMessage, TechnicalMetadata};
     use std::collections::{HashMap, VecDeque};
     use std::sync::{
@@ -1463,7 +1407,7 @@ mod tests {
         let mut config = Config::default();
         config.output.output_device_name = "   ".to_string();
 
-        let signature = AudioPlayer::output_signature_from_config(&config);
+        let signature = AudioPlayer::output_signature_from_output_config(&config.output);
         assert_eq!(signature.device_name, None);
     }
 
@@ -1475,7 +1419,7 @@ mod tests {
         config.output.channel_count = 0;
         config.output.bits_per_sample = 4;
 
-        let signature = AudioPlayer::output_signature_from_config(&config);
+        let signature = AudioPlayer::output_signature_from_output_config(&config.output);
         assert_eq!(signature.device_name.as_deref(), Some("Speakers"));
         assert_eq!(signature.sample_rate_hz, 8_000);
         assert_eq!(signature.channel_count, 1);
@@ -1487,7 +1431,7 @@ mod tests {
         let mut config = Config::default();
         config.output.output_device_name = "default".to_string();
 
-        let signature = AudioPlayer::output_signature_from_config(&config);
+        let signature = AudioPlayer::output_signature_from_output_config(&config.output);
         assert_eq!(signature.device_name, None);
     }
 
@@ -1575,7 +1519,12 @@ mod tests {
     #[test]
     fn test_play_immediately_waits_for_first_samples_before_starting() {
         let (bus_sender, bus_receiver) = broadcast::channel(32);
-        let mut player = AudioPlayer::new(bus_receiver, bus_sender);
+        let mut player = AudioPlayer::new(
+            bus_receiver,
+            bus_sender,
+            OutputConfig::default(),
+            BufferingConfig::default(),
+        );
         let metadata = TechnicalMetadata {
             format: "FLAC".to_string(),
             bitrate_kbps: 900,
@@ -1609,7 +1558,12 @@ mod tests {
     #[test]
     fn test_footer_clears_pending_immediate_start_without_samples() {
         let (bus_sender, bus_receiver) = broadcast::channel(32);
-        let mut player = AudioPlayer::new(bus_receiver, bus_sender);
+        let mut player = AudioPlayer::new(
+            bus_receiver,
+            bus_sender,
+            OutputConfig::default(),
+            BufferingConfig::default(),
+        );
         let metadata = TechnicalMetadata {
             format: "MP3".to_string(),
             bitrate_kbps: 320,
