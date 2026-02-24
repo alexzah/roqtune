@@ -666,9 +666,9 @@ export component AppWindow inherits Window {
                 background: root.theme_surface_bg;
                 property <length> content-height: min(32px, parent.height);
                 HorizontalLayout {
-                    x: 8px;
+                    x: 0px;
                     y: (parent.height - self.height) / 2;
-                    width: max(0px, parent.width - 16px);
+                    width: parent.width;
                     height: parent.content-height;
                     padding-left: 8px;
                     padding-right: 8px;
