@@ -79,7 +79,11 @@ pub(crate) use ui::layout_editor_state::*;
 pub(crate) use ui::playlist_columns::*;
 use ui_manager::UiState;
 
-slint::include_modules!();
+#[allow(missing_docs)]
+mod slint_generated {
+    slint::include_modules!();
+}
+pub(crate) use slint_generated::*;
 
 const PLAYLIST_COLUMN_SPACING_PX: i32 = 10;
 const PLAYLIST_COLUMN_PREVIEW_THROTTLE_INTERVAL: Duration = Duration::from_millis(16);
