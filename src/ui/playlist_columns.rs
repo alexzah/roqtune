@@ -1,0 +1,506 @@
+use std::{
+    collections::{HashMap, HashSet},
+    rc::Rc,
+};
+
+use slint::{Model, ModelRc, VecModel};
+
+use crate::{
+    config::{self, PlaylistColumnConfig, UiConfig},
+    layout::{LayoutConfig, PlaylistColumnWidthOverrideConfig},
+    AppWindow,
+};
+
+pub(crate) fn normalize_column_format(format: &str) -> String {
+    format.trim().to_ascii_lowercase()
+}
+
+pub(crate) fn is_album_art_builtin_column(column: &PlaylistColumnConfig) -> bool {
+    !column.custom && normalize_column_format(&column.format) == "{album_art}"
+}
+
+pub(crate) fn playlist_column_kind(column: &PlaylistColumnConfig) -> i32 {
+    if is_album_art_builtin_column(column) {
+        crate::PLAYLIST_COLUMN_KIND_ALBUM_ART
+    } else {
+        crate::PLAYLIST_COLUMN_KIND_TEXT
+    }
+}
+
+pub(crate) fn visible_playlist_column_kinds(columns: &[PlaylistColumnConfig]) -> Vec<i32> {
+    columns
+        .iter()
+        .filter(|column| column.enabled)
+        .map(playlist_column_kind)
+        .collect()
+}
+
+pub(crate) fn sanitize_playlist_columns(
+    columns: &[PlaylistColumnConfig],
+) -> Vec<PlaylistColumnConfig> {
+    let default_columns = config::default_playlist_columns();
+    let mut seen_builtin_keys: HashSet<String> = HashSet::new();
+    let mut seen_custom_keys: HashSet<String> = HashSet::new();
+    let mut merged_columns: Vec<PlaylistColumnConfig> = Vec::new();
+
+    let mut default_name_by_key: HashMap<String, String> = HashMap::new();
+    for default_column in &default_columns {
+        default_name_by_key.insert(
+            normalize_column_format(&default_column.format),
+            default_column.name.clone(),
+        );
+    }
+
+    for column in columns {
+        let trimmed_name = column.name.trim();
+        let trimmed_format = column.format.trim();
+        if trimmed_name.is_empty() || trimmed_format.is_empty() {
+            continue;
+        }
+
+        if column.custom {
+            let custom_key = format!("{}|{}", trimmed_name, trimmed_format);
+            if seen_custom_keys.insert(custom_key) {
+                merged_columns.push(PlaylistColumnConfig {
+                    name: trimmed_name.to_string(),
+                    format: trimmed_format.to_string(),
+                    enabled: column.enabled,
+                    custom: true,
+                });
+            }
+        } else {
+            let builtin_key = normalize_column_format(trimmed_format);
+            if default_name_by_key.contains_key(&builtin_key)
+                && seen_builtin_keys.insert(builtin_key.clone())
+            {
+                let builtin_name = default_name_by_key
+                    .get(&builtin_key)
+                    .cloned()
+                    .unwrap_or_else(|| trimmed_name.to_string());
+                merged_columns.push(PlaylistColumnConfig {
+                    name: builtin_name,
+                    format: trimmed_format.to_string(),
+                    enabled: column.enabled,
+                    custom: false,
+                });
+            }
+        }
+    }
+
+    for default_column in default_columns {
+        let key = normalize_column_format(&default_column.format);
+        if !seen_builtin_keys.contains(&key) {
+            merged_columns.push(default_column);
+        }
+    }
+
+    if merged_columns.iter().all(|column| !column.enabled) {
+        if let Some(first_column) = merged_columns.first_mut() {
+            first_column.enabled = true;
+        }
+    }
+
+    merged_columns
+}
+
+pub(crate) fn playlist_column_key(column: &PlaylistColumnConfig) -> String {
+    if column.custom {
+        format!("custom:{}|{}", column.name.trim(), column.format.trim())
+    } else {
+        normalize_column_format(&column.format)
+    }
+}
+
+pub(crate) fn playlist_column_order_keys(columns: &[PlaylistColumnConfig]) -> Vec<String> {
+    columns.iter().map(playlist_column_key).collect()
+}
+
+#[derive(Clone, Copy)]
+pub(crate) struct ColumnWidthBounds {
+    pub(crate) min_px: i32,
+    pub(crate) max_px: i32,
+}
+
+pub(crate) fn album_art_column_width_bounds(ui: &UiConfig) -> ColumnWidthBounds {
+    ColumnWidthBounds {
+        min_px: ui.playlist_album_art_column_min_width_px as i32,
+        max_px: ui.playlist_album_art_column_max_width_px as i32,
+    }
+}
+
+#[cfg(test)]
+pub(crate) fn default_album_art_column_width_bounds() -> ColumnWidthBounds {
+    ColumnWidthBounds {
+        min_px: config::default_playlist_album_art_column_min_width_px() as i32,
+        max_px: config::default_playlist_album_art_column_max_width_px() as i32,
+    }
+}
+
+pub(crate) fn playlist_column_width_bounds_with_album_art(
+    column: &PlaylistColumnConfig,
+    album_art_bounds: ColumnWidthBounds,
+) -> ColumnWidthBounds {
+    if is_album_art_builtin_column(column) {
+        return album_art_bounds;
+    }
+
+    let normalized_format = column.format.trim().to_ascii_lowercase();
+    let normalized_name = column.name.trim().to_ascii_lowercase();
+
+    if normalized_format == "{track}"
+        || normalized_format == "{track_number}"
+        || normalized_format == "{tracknumber}"
+        || normalized_name == "track #"
+        || normalized_name == "track"
+    {
+        return ColumnWidthBounds {
+            min_px: 52,
+            max_px: 90,
+        };
+    }
+
+    if normalized_format == "{disc}" || normalized_format == "{disc_number}" {
+        return ColumnWidthBounds {
+            min_px: 50,
+            max_px: 84,
+        };
+    }
+
+    if normalized_format == "{year}" || normalized_format == "{date}" || normalized_name == "year" {
+        return ColumnWidthBounds {
+            min_px: 64,
+            max_px: 104,
+        };
+    }
+
+    if normalized_format == "{title}" || normalized_name == "title" {
+        return ColumnWidthBounds {
+            min_px: 140,
+            max_px: 440,
+        };
+    }
+
+    if normalized_format == "{artist}"
+        || normalized_format == "{album_artist}"
+        || normalized_format == "{albumartist}"
+        || normalized_name == "artist"
+        || normalized_name == "album artist"
+    {
+        return ColumnWidthBounds {
+            min_px: 120,
+            max_px: 320,
+        };
+    }
+
+    if normalized_format == "{album}" || normalized_name == "album" {
+        return ColumnWidthBounds {
+            min_px: 140,
+            max_px: 360,
+        };
+    }
+
+    if normalized_format == "{genre}" || normalized_name == "genre" {
+        return ColumnWidthBounds {
+            min_px: 100,
+            max_px: 210,
+        };
+    }
+
+    if normalized_name == "duration"
+        || normalized_name == "time"
+        || normalized_format == "{duration}"
+    {
+        return ColumnWidthBounds {
+            min_px: 78,
+            max_px: 120,
+        };
+    }
+
+    if column.custom {
+        return ColumnWidthBounds {
+            min_px: 110,
+            max_px: 340,
+        };
+    }
+
+    ColumnWidthBounds {
+        min_px: 100,
+        max_px: 300,
+    }
+}
+
+#[cfg(test)]
+pub(crate) fn playlist_column_width_bounds(column: &PlaylistColumnConfig) -> ColumnWidthBounds {
+    playlist_column_width_bounds_with_album_art(column, default_album_art_column_width_bounds())
+}
+
+pub(crate) fn playlist_column_bounds_at_visible_index(
+    columns: &[PlaylistColumnConfig],
+    visible_index: usize,
+    album_art_bounds: ColumnWidthBounds,
+) -> Option<ColumnWidthBounds> {
+    columns
+        .iter()
+        .filter(|column| column.enabled)
+        .nth(visible_index)
+        .map(|column| playlist_column_width_bounds_with_album_art(column, album_art_bounds))
+}
+
+pub(crate) fn playlist_column_key_at_visible_index(
+    columns: &[PlaylistColumnConfig],
+    visible_index: usize,
+) -> Option<String> {
+    columns
+        .iter()
+        .filter(|column| column.enabled)
+        .nth(visible_index)
+        .map(playlist_column_key)
+}
+
+pub(crate) fn clamp_width_for_visible_column(
+    columns: &[PlaylistColumnConfig],
+    visible_index: usize,
+    width_px: i32,
+    album_art_bounds: ColumnWidthBounds,
+) -> Option<i32> {
+    let bounds = playlist_column_bounds_at_visible_index(columns, visible_index, album_art_bounds)?;
+    Some(width_px.clamp(bounds.min_px, bounds.max_px.max(bounds.min_px)))
+}
+
+pub(crate) fn apply_playlist_columns_to_ui(ui: &AppWindow, config: &crate::config::Config) {
+    let visible_headers: Vec<slint::SharedString> = config
+        .ui
+        .playlist_columns
+        .iter()
+        .filter(|column| column.enabled)
+        .map(|column| column.name.as_str().into())
+        .collect();
+    let menu_labels: Vec<slint::SharedString> = config
+        .ui
+        .playlist_columns
+        .iter()
+        .map(|column| column.name.as_str().into())
+        .collect();
+    let menu_checked: Vec<bool> = config
+        .ui
+        .playlist_columns
+        .iter()
+        .map(|column| column.enabled)
+        .collect();
+    let menu_is_custom: Vec<bool> = config
+        .ui
+        .playlist_columns
+        .iter()
+        .map(|column| column.custom)
+        .collect();
+    let visible_kinds = visible_playlist_column_kinds(&config.ui.playlist_columns);
+
+    ui.set_playlist_visible_column_headers(ModelRc::from(Rc::new(VecModel::from(visible_headers))));
+    ui.set_playlist_visible_column_kinds(ModelRc::from(Rc::new(VecModel::from(visible_kinds))));
+    ui.set_playlist_column_menu_labels(ModelRc::from(Rc::new(VecModel::from(menu_labels))));
+    ui.set_playlist_column_menu_checked(ModelRc::from(Rc::new(VecModel::from(menu_checked))));
+    ui.set_playlist_column_menu_is_custom(ModelRc::from(Rc::new(VecModel::from(menu_is_custom))));
+}
+
+pub(crate) fn sanitize_layout_column_width_overrides(
+    overrides: &[PlaylistColumnWidthOverrideConfig],
+    columns: &[PlaylistColumnConfig],
+    album_art_bounds: ColumnWidthBounds,
+) -> Vec<PlaylistColumnWidthOverrideConfig> {
+    let mut bounds_by_key: HashMap<String, ColumnWidthBounds> =
+        HashMap::with_capacity(columns.len());
+    for column in columns {
+        bounds_by_key.insert(
+            playlist_column_key(column),
+            playlist_column_width_bounds_with_album_art(column, album_art_bounds),
+        );
+    }
+
+    let mut seen_keys = HashSet::new();
+    let mut sanitized = Vec::new();
+    for override_item in overrides {
+        let key = override_item.column_key.trim();
+        if key.is_empty() || !seen_keys.insert(key.to_string()) {
+            continue;
+        }
+        let Some(bounds) = bounds_by_key.get(key) else {
+            continue;
+        };
+        let clamped_width_px = (override_item.width_px as i32)
+            .clamp(bounds.min_px, bounds.max_px.max(bounds.min_px))
+            as u32;
+        sanitized.push(PlaylistColumnWidthOverrideConfig {
+            column_key: key.to_string(),
+            width_px: clamped_width_px,
+        });
+    }
+    sanitized
+}
+
+pub(crate) fn upsert_layout_column_width_override(
+    layout: &mut LayoutConfig,
+    column_key: &str,
+    width_px: u32,
+) {
+    if let Some(existing) = layout
+        .playlist_column_width_overrides
+        .iter_mut()
+        .find(|entry| entry.column_key == column_key)
+    {
+        existing.width_px = width_px;
+        return;
+    }
+    layout
+        .playlist_column_width_overrides
+        .push(PlaylistColumnWidthOverrideConfig {
+            column_key: column_key.to_string(),
+            width_px,
+        });
+}
+
+pub(crate) fn clear_layout_column_width_override(layout: &mut LayoutConfig, column_key: &str) {
+    layout
+        .playlist_column_width_overrides
+        .retain(|entry| entry.column_key != column_key);
+}
+
+pub(crate) fn reorder_visible_playlist_columns(
+    columns: &[PlaylistColumnConfig],
+    from_visible_index: usize,
+    to_visible_index: usize,
+) -> Vec<PlaylistColumnConfig> {
+    let visible_count = columns.iter().filter(|column| column.enabled).count();
+    if visible_count < 2
+        || from_visible_index >= visible_count
+        || to_visible_index >= visible_count
+        || from_visible_index == to_visible_index
+    {
+        return columns.to_vec();
+    }
+
+    let mut visible_columns: Vec<PlaylistColumnConfig> = columns
+        .iter()
+        .filter(|column| column.enabled)
+        .cloned()
+        .collect();
+    let moved_column = visible_columns.remove(from_visible_index);
+    visible_columns.insert(to_visible_index, moved_column);
+
+    let mut visible_iter = visible_columns.into_iter();
+    let mut reordered = Vec::with_capacity(columns.len());
+    for column in columns {
+        if column.enabled {
+            if let Some(next_visible) = visible_iter.next() {
+                reordered.push(next_visible);
+            }
+        } else {
+            reordered.push(column.clone());
+        }
+    }
+    reordered
+}
+
+pub(crate) fn apply_column_order_keys(
+    columns: &[PlaylistColumnConfig],
+    column_order_keys: &[String],
+) -> Vec<PlaylistColumnConfig> {
+    if column_order_keys.is_empty() {
+        return columns.to_vec();
+    }
+
+    let mut remaining: Vec<PlaylistColumnConfig> = columns.to_vec();
+    let mut reordered: Vec<PlaylistColumnConfig> = Vec::with_capacity(columns.len());
+
+    for key in column_order_keys {
+        if let Some(index) = remaining
+            .iter()
+            .position(|column| playlist_column_key(column) == *key)
+        {
+            reordered.push(remaining.remove(index));
+        }
+    }
+
+    reordered.extend(remaining);
+    reordered
+}
+
+pub(crate) fn playlist_column_widths_from_model(widths_model: ModelRc<i32>) -> Vec<i32> {
+    (0..widths_model.row_count())
+        .filter_map(|index| widths_model.row_data(index))
+        .collect()
+}
+
+pub(crate) fn resolve_playlist_header_column_from_x(mouse_x_px: i32, widths_px: &[i32]) -> i32 {
+    if mouse_x_px < 0 {
+        return -1;
+    }
+    let mut start_px: i32 = 0;
+    for (index, width_px) in widths_px.iter().enumerate() {
+        let column_width = (*width_px).max(0);
+        let end_px = start_px.saturating_add(column_width);
+        if mouse_x_px >= start_px && mouse_x_px < end_px {
+            return index as i32;
+        }
+        let next_start = end_px.saturating_add(crate::PLAYLIST_COLUMN_SPACING_PX);
+        if mouse_x_px < next_start {
+            return -1;
+        }
+        start_px = next_start;
+    }
+    -1
+}
+
+pub(crate) fn resolve_playlist_header_gap_from_x(mouse_x_px: i32, widths_px: &[i32]) -> i32 {
+    if widths_px.is_empty() {
+        return -1;
+    }
+    if mouse_x_px < 0 {
+        return 0;
+    }
+
+    let mut start_px: i32 = 0;
+    for (index, width_px) in widths_px.iter().enumerate() {
+        let column_width = (*width_px).max(0);
+        let end_px = start_px.saturating_add(column_width);
+        let midpoint_px = start_px.saturating_add(column_width / 2);
+
+        if mouse_x_px < start_px {
+            return index as i32;
+        }
+        if mouse_x_px < end_px {
+            return if mouse_x_px < midpoint_px {
+                index as i32
+            } else {
+                index as i32 + 1
+            };
+        }
+
+        let next_start = end_px.saturating_add(crate::PLAYLIST_COLUMN_SPACING_PX);
+        if mouse_x_px < next_start {
+            return index as i32 + 1;
+        }
+        start_px = next_start;
+    }
+    widths_px.len() as i32
+}
+
+pub(crate) fn resolve_playlist_header_divider_from_x(
+    mouse_x_px: i32,
+    widths_px: &[i32],
+    hit_tolerance_px: i32,
+) -> i32 {
+    if mouse_x_px < 0 || widths_px.is_empty() {
+        return -1;
+    }
+    let tolerance = hit_tolerance_px.max(1);
+    let mut start_px: i32 = 0;
+    for (index, width_px) in widths_px.iter().enumerate() {
+        let column_width = (*width_px).max(0);
+        let end_px = start_px.saturating_add(column_width);
+        if (mouse_x_px - end_px).abs() <= tolerance {
+            return index as i32;
+        }
+        start_px = end_px.saturating_add(crate::PLAYLIST_COLUMN_SPACING_PX);
+    }
+    -1
+}

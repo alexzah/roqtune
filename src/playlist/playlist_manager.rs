@@ -2816,10 +2816,10 @@ impl PlaylistManager {
             .desired_output_rate_for_track(&first_track)
             .or(self.current_output_rate_hz);
         if let Some(desired_first_rate) = desired_first_rate {
-            if self.current_output_rate_hz != Some(desired_first_rate) {
-                if self.request_runtime_output_rate_switch(desired_first_rate, play_immediately) {
-                    return;
-                }
+            if self.current_output_rate_hz != Some(desired_first_rate)
+                && self.request_runtime_output_rate_switch(desired_first_rate, play_immediately)
+            {
+                return;
             }
         }
 

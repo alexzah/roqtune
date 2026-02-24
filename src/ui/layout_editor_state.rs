@@ -1,0 +1,756 @@
+use std::{
+    collections::{HashMap, HashSet},
+    rc::Rc,
+    sync::{Arc, Mutex},
+};
+
+use slint::{Model, ModelRc, VecModel};
+
+use crate::{
+    config::{ButtonClusterInstanceConfig, Config, UiConfig},
+    layout::{
+        self, compute_tree_layout_metrics, sanitize_layout_config, LayoutConfig, LayoutNode,
+        LayoutPanelKind, ViewerPanelDisplayPriority, ViewerPanelImageSource,
+        ViewerPanelInstanceConfig, ViewerPanelMetadataSource, SPLITTER_THICKNESS_PX,
+    },
+    AppWindow, LayoutAlbumArtViewerPanelModel, LayoutButtonClusterPanelModel,
+    LayoutMetadataViewerPanelModel, LayoutSplitterModel, IMPORT_CLUSTER_PRESET,
+    TRANSPORT_CLUSTER_PRESET, UTILITY_CLUSTER_PRESET,
+};
+
+fn collect_button_cluster_leaf_ids(node: &LayoutNode, out: &mut Vec<String>) {
+    match node {
+        LayoutNode::Leaf { id, panel } => {
+            if *panel == LayoutPanelKind::ButtonCluster {
+                out.push(id.clone());
+            }
+        }
+        LayoutNode::Split { first, second, .. } => {
+            collect_button_cluster_leaf_ids(first, out);
+            collect_button_cluster_leaf_ids(second, out);
+        }
+        LayoutNode::Empty => {}
+    }
+}
+
+fn collect_viewer_panel_leaf_ids(node: &LayoutNode, out: &mut Vec<String>) {
+    match node {
+        LayoutNode::Leaf { id, panel } => {
+            if *panel == LayoutPanelKind::MetadataViewer
+                || *panel == LayoutPanelKind::AlbumArtViewer
+            {
+                out.push(id.clone());
+            }
+        }
+        LayoutNode::Split { first, second, .. } => {
+            collect_viewer_panel_leaf_ids(first, out);
+            collect_viewer_panel_leaf_ids(second, out);
+        }
+        LayoutNode::Empty => {}
+    }
+}
+
+fn button_cluster_leaf_ids(layout: &LayoutConfig) -> Vec<String> {
+    let mut ids = Vec::new();
+    collect_button_cluster_leaf_ids(&layout.root, &mut ids);
+    ids
+}
+
+fn viewer_panel_leaf_ids(layout: &LayoutConfig) -> Vec<String> {
+    let mut ids = Vec::new();
+    collect_viewer_panel_leaf_ids(&layout.root, &mut ids);
+    ids
+}
+
+fn collect_all_leaf_ids(node: &LayoutNode, out: &mut Vec<String>) {
+    match node {
+        LayoutNode::Leaf { id, .. } => out.push(id.clone()),
+        LayoutNode::Split { first, second, .. } => {
+            collect_all_leaf_ids(first, out);
+            collect_all_leaf_ids(second, out);
+        }
+        LayoutNode::Empty => {}
+    }
+}
+
+fn layout_leaf_ids(layout: &LayoutConfig) -> Vec<String> {
+    let mut ids = Vec::new();
+    collect_all_leaf_ids(&layout.root, &mut ids);
+    ids
+}
+
+pub(crate) fn newly_added_leaf_ids(
+    previous_layout: &LayoutConfig,
+    next_layout: &LayoutConfig,
+) -> Vec<String> {
+    let previous_ids: HashSet<String> = layout_leaf_ids(previous_layout).into_iter().collect();
+    layout_leaf_ids(next_layout)
+        .into_iter()
+        .filter(|id| !previous_ids.contains(id))
+        .collect()
+}
+
+fn sanitize_button_actions(actions: &[i32]) -> Vec<i32> {
+    actions
+        .iter()
+        .copied()
+        .filter(|action| (1..=11).contains(action))
+        .collect()
+}
+
+pub(crate) fn default_button_cluster_actions_by_index(index: usize) -> Vec<i32> {
+    match index {
+        0 => IMPORT_CLUSTER_PRESET.to_vec(),
+        1 => TRANSPORT_CLUSTER_PRESET.to_vec(),
+        2 => UTILITY_CLUSTER_PRESET.to_vec(),
+        _ => Vec::new(),
+    }
+}
+
+pub(crate) fn sanitize_button_cluster_instances(
+    layout: &LayoutConfig,
+    instances: &[ButtonClusterInstanceConfig],
+) -> Vec<ButtonClusterInstanceConfig> {
+    let leaf_ids = button_cluster_leaf_ids(layout);
+    let had_existing_instances = !instances.is_empty();
+    let mut actions_by_leaf: HashMap<&str, Vec<i32>> = HashMap::new();
+    for instance in instances {
+        let leaf_id = instance.leaf_id.trim();
+        if leaf_id.is_empty() {
+            continue;
+        }
+        actions_by_leaf.insert(leaf_id, sanitize_button_actions(&instance.actions));
+    }
+
+    leaf_ids
+        .iter()
+        .enumerate()
+        .map(|(index, leaf_id)| ButtonClusterInstanceConfig {
+            leaf_id: leaf_id.clone(),
+            actions: actions_by_leaf
+                .get(leaf_id.as_str())
+                .cloned()
+                .unwrap_or_else(|| {
+                    if had_existing_instances {
+                        Vec::new()
+                    } else {
+                        default_button_cluster_actions_by_index(index)
+                    }
+                }),
+        })
+        .collect()
+}
+
+pub(crate) fn sanitize_viewer_panel_instances(
+    layout: &LayoutConfig,
+    instances: &[ViewerPanelInstanceConfig],
+) -> Vec<ViewerPanelInstanceConfig> {
+    let leaf_ids = viewer_panel_leaf_ids(layout);
+    let mut priority_by_leaf: HashMap<&str, ViewerPanelDisplayPriority> = HashMap::new();
+    let mut metadata_source_by_leaf: HashMap<&str, ViewerPanelMetadataSource> = HashMap::new();
+    let mut image_source_by_leaf: HashMap<&str, ViewerPanelImageSource> = HashMap::new();
+    for instance in instances {
+        let leaf_id = instance.leaf_id.trim();
+        if leaf_id.is_empty() {
+            continue;
+        }
+        priority_by_leaf.insert(leaf_id, instance.display_priority);
+        metadata_source_by_leaf.insert(leaf_id, instance.metadata_source);
+        image_source_by_leaf.insert(leaf_id, instance.image_source);
+    }
+
+    leaf_ids
+        .into_iter()
+        .map(|leaf_id| ViewerPanelInstanceConfig {
+            display_priority: priority_by_leaf
+                .get(leaf_id.as_str())
+                .copied()
+                .unwrap_or_default(),
+            metadata_source: metadata_source_by_leaf
+                .get(leaf_id.as_str())
+                .copied()
+                .unwrap_or_default(),
+            image_source: image_source_by_leaf
+                .get(leaf_id.as_str())
+                .copied()
+                .unwrap_or_default(),
+            leaf_id,
+        })
+        .collect()
+}
+
+pub(crate) fn sidebar_width_from_window(window_width_px: u32) -> i32 {
+    let proportional = ((window_width_px as f32) * 0.24).round() as u32;
+    proportional.clamp(180, 300) as i32
+}
+
+pub(crate) fn workspace_size_snapshot(workspace_size: &Arc<Mutex<(u32, u32)>>) -> (u32, u32) {
+    let (width, height) = *workspace_size
+        .lock()
+        .expect("layout workspace size lock poisoned");
+    (width.max(1), height.max(1))
+}
+
+pub(crate) fn quantize_splitter_ratio_to_precision(ratio: f32) -> f32 {
+    if !ratio.is_finite() {
+        return ratio;
+    }
+    (ratio * 100.0).round() / 100.0
+}
+
+pub(crate) fn layout_panel_options() -> Vec<slint::SharedString> {
+    vec![
+        "None".into(),
+        "Button Cluster".into(),
+        "Transport Button Cluster".into(),
+        "Utility Button Cluster".into(),
+        "Volume Slider".into(),
+        "Seek Bar".into(),
+        "Playlist Switcher".into(),
+        "Track List".into(),
+        "Metadata Viewer".into(),
+        "Image Metadata Viewer".into(),
+        "Spacer".into(),
+        "Status Bar".into(),
+        "Import Button Cluster".into(),
+    ]
+}
+
+pub(crate) fn resolve_layout_panel_selection(
+    panel_code: i32,
+) -> (LayoutPanelKind, Option<Vec<i32>>) {
+    if panel_code == LayoutPanelKind::TransportButtonCluster.to_code() {
+        return (
+            LayoutPanelKind::ButtonCluster,
+            Some(TRANSPORT_CLUSTER_PRESET.to_vec()),
+        );
+    }
+    if panel_code == LayoutPanelKind::UtilityButtonCluster.to_code() {
+        return (
+            LayoutPanelKind::ButtonCluster,
+            Some(UTILITY_CLUSTER_PRESET.to_vec()),
+        );
+    }
+    if panel_code == LayoutPanelKind::ImportButtonCluster.to_code() {
+        return (
+            LayoutPanelKind::ButtonCluster,
+            Some(IMPORT_CLUSTER_PRESET.to_vec()),
+        );
+    }
+    (LayoutPanelKind::from_code(panel_code), None)
+}
+
+pub(crate) fn button_cluster_actions_for_leaf(
+    instances: &[ButtonClusterInstanceConfig],
+    leaf_id: &str,
+) -> Vec<i32> {
+    instances
+        .iter()
+        .find(|instance| instance.leaf_id == leaf_id)
+        .map(|instance| instance.actions.clone())
+        .unwrap_or_default()
+}
+
+pub(crate) fn upsert_button_cluster_actions_for_leaf(
+    instances: &mut Vec<ButtonClusterInstanceConfig>,
+    leaf_id: &str,
+    actions: Vec<i32>,
+) {
+    if let Some(existing) = instances
+        .iter_mut()
+        .find(|instance| instance.leaf_id == leaf_id)
+    {
+        existing.actions = sanitize_button_actions(&actions);
+        return;
+    }
+    instances.push(ButtonClusterInstanceConfig {
+        leaf_id: leaf_id.to_string(),
+        actions: sanitize_button_actions(&actions),
+    });
+}
+
+pub(crate) fn remove_button_cluster_instance_for_leaf(
+    instances: &mut Vec<ButtonClusterInstanceConfig>,
+    leaf_id: &str,
+) {
+    instances.retain(|instance| instance.leaf_id != leaf_id);
+}
+
+pub(crate) fn upsert_viewer_panel_display_priority_for_leaf(
+    instances: &mut Vec<ViewerPanelInstanceConfig>,
+    leaf_id: &str,
+    display_priority: ViewerPanelDisplayPriority,
+) {
+    if let Some(existing) = instances
+        .iter_mut()
+        .find(|instance| instance.leaf_id == leaf_id)
+    {
+        existing.display_priority = display_priority;
+        return;
+    }
+    instances.push(ViewerPanelInstanceConfig {
+        leaf_id: leaf_id.to_string(),
+        display_priority,
+        metadata_source: ViewerPanelMetadataSource::default(),
+        image_source: ViewerPanelImageSource::default(),
+    });
+}
+
+pub(crate) fn upsert_viewer_panel_metadata_source_for_leaf(
+    instances: &mut Vec<ViewerPanelInstanceConfig>,
+    leaf_id: &str,
+    metadata_source: ViewerPanelMetadataSource,
+) {
+    if let Some(existing) = instances
+        .iter_mut()
+        .find(|instance| instance.leaf_id == leaf_id)
+    {
+        existing.metadata_source = metadata_source;
+        return;
+    }
+    instances.push(ViewerPanelInstanceConfig {
+        leaf_id: leaf_id.to_string(),
+        display_priority: ViewerPanelDisplayPriority::default(),
+        metadata_source,
+        image_source: ViewerPanelImageSource::default(),
+    });
+}
+
+pub(crate) fn upsert_viewer_panel_image_source_for_leaf(
+    instances: &mut Vec<ViewerPanelInstanceConfig>,
+    leaf_id: &str,
+    image_source: ViewerPanelImageSource,
+) {
+    if let Some(existing) = instances
+        .iter_mut()
+        .find(|instance| instance.leaf_id == leaf_id)
+    {
+        existing.image_source = image_source;
+        return;
+    }
+    instances.push(ViewerPanelInstanceConfig {
+        leaf_id: leaf_id.to_string(),
+        display_priority: ViewerPanelDisplayPriority::default(),
+        metadata_source: ViewerPanelMetadataSource::default(),
+        image_source,
+    });
+}
+
+pub(crate) fn apply_control_cluster_menu_actions_for_leaf(
+    ui: &AppWindow,
+    config: &Config,
+    leaf_id: &str,
+) {
+    let actions =
+        button_cluster_actions_for_leaf(&config.ui.layout.button_cluster_instances, leaf_id);
+    ui.set_control_cluster_menu_actions(ModelRc::from(Rc::new(VecModel::from(actions))));
+}
+
+fn apply_button_cluster_views_to_ui(
+    ui: &AppWindow,
+    metrics: &layout::TreeLayoutMetrics,
+    config: &Config,
+) {
+    let views: Vec<LayoutButtonClusterPanelModel> = metrics
+        .leaves
+        .iter()
+        .filter(|leaf| leaf.panel == LayoutPanelKind::ButtonCluster)
+        .map(|leaf| LayoutButtonClusterPanelModel {
+            leaf_id: leaf.id.clone().into(),
+            x_px: leaf.x,
+            y_px: leaf.y,
+            width_px: leaf.width,
+            height_px: leaf.height,
+            visible: true,
+            actions: ModelRc::from(Rc::new(VecModel::from(button_cluster_actions_for_leaf(
+                &config.ui.layout.button_cluster_instances,
+                &leaf.id,
+            )))),
+        })
+        .collect();
+    ui.set_layout_button_cluster_panels(ModelRc::from(Rc::new(VecModel::from(views))));
+}
+
+pub(crate) fn viewer_panel_display_priority_to_code(priority: ViewerPanelDisplayPriority) -> i32 {
+    match priority {
+        ViewerPanelDisplayPriority::Default => 0,
+        ViewerPanelDisplayPriority::PreferSelection => 1,
+        ViewerPanelDisplayPriority::PreferNowPlaying => 2,
+        ViewerPanelDisplayPriority::SelectionOnly => 3,
+        ViewerPanelDisplayPriority::NowPlayingOnly => 4,
+    }
+}
+
+pub(crate) fn viewer_panel_display_priority_from_code(priority: i32) -> ViewerPanelDisplayPriority {
+    match priority {
+        1 => ViewerPanelDisplayPriority::PreferSelection,
+        2 => ViewerPanelDisplayPriority::PreferNowPlaying,
+        3 => ViewerPanelDisplayPriority::SelectionOnly,
+        4 => ViewerPanelDisplayPriority::NowPlayingOnly,
+        _ => ViewerPanelDisplayPriority::Default,
+    }
+}
+
+pub(crate) fn viewer_panel_metadata_source_to_code(source: ViewerPanelMetadataSource) -> i32 {
+    match source {
+        ViewerPanelMetadataSource::Track => 0,
+        ViewerPanelMetadataSource::AlbumDescription => 1,
+        ViewerPanelMetadataSource::ArtistBio => 2,
+    }
+}
+
+pub(crate) fn viewer_panel_metadata_source_from_code(source: i32) -> ViewerPanelMetadataSource {
+    match source {
+        1 => ViewerPanelMetadataSource::AlbumDescription,
+        2 => ViewerPanelMetadataSource::ArtistBio,
+        _ => ViewerPanelMetadataSource::Track,
+    }
+}
+
+pub(crate) fn viewer_panel_image_source_to_code(source: ViewerPanelImageSource) -> i32 {
+    match source {
+        ViewerPanelImageSource::AlbumArt => 0,
+        ViewerPanelImageSource::ArtistImage => 1,
+    }
+}
+
+pub(crate) fn viewer_panel_image_source_from_code(source: i32) -> ViewerPanelImageSource {
+    match source {
+        1 => ViewerPanelImageSource::ArtistImage,
+        _ => ViewerPanelImageSource::AlbumArt,
+    }
+}
+
+fn viewer_panel_instance_for_leaf<'a>(
+    instances: &'a [ViewerPanelInstanceConfig],
+    leaf_id: &str,
+) -> Option<&'a ViewerPanelInstanceConfig> {
+    instances
+        .iter()
+        .find(|instance| instance.leaf_id == leaf_id)
+}
+
+pub(crate) fn viewer_panel_display_priority_for_leaf(
+    instances: &[ViewerPanelInstanceConfig],
+    leaf_id: &str,
+) -> ViewerPanelDisplayPriority {
+    viewer_panel_instance_for_leaf(instances, leaf_id)
+        .map(|instance| instance.display_priority)
+        .unwrap_or_default()
+}
+
+pub(crate) fn viewer_panel_metadata_source_for_leaf(
+    instances: &[ViewerPanelInstanceConfig],
+    leaf_id: &str,
+) -> ViewerPanelMetadataSource {
+    viewer_panel_instance_for_leaf(instances, leaf_id)
+        .map(|instance| instance.metadata_source)
+        .unwrap_or_default()
+}
+
+pub(crate) fn viewer_panel_image_source_for_leaf(
+    instances: &[ViewerPanelInstanceConfig],
+    leaf_id: &str,
+) -> ViewerPanelImageSource {
+    viewer_panel_instance_for_leaf(instances, leaf_id)
+        .map(|instance| instance.image_source)
+        .unwrap_or_default()
+}
+
+fn apply_viewer_panel_views_to_ui(
+    ui: &AppWindow,
+    metrics: &layout::TreeLayoutMetrics,
+    config: &Config,
+) {
+    let default_display_title = ui.get_display_title();
+    let default_display_artist = ui.get_display_artist();
+    let default_display_album = ui.get_display_album();
+    let default_display_date = ui.get_display_date();
+    let default_display_genre = ui.get_display_genre();
+    let default_art_source = ui.get_current_cover_art();
+    let default_has_art = ui.get_current_cover_art_available();
+    let existing_metadata_by_leaf: HashMap<String, LayoutMetadataViewerPanelModel> = ui
+        .get_layout_metadata_viewer_panels()
+        .iter()
+        .map(|panel| (panel.leaf_id.to_string(), panel))
+        .collect();
+    let existing_album_art_by_leaf: HashMap<String, LayoutAlbumArtViewerPanelModel> = ui
+        .get_layout_album_art_viewer_panels()
+        .iter()
+        .map(|panel| (panel.leaf_id.to_string(), panel))
+        .collect();
+
+    let metadata_views: Vec<LayoutMetadataViewerPanelModel> = metrics
+        .leaves
+        .iter()
+        .filter(|leaf| leaf.panel == LayoutPanelKind::MetadataViewer)
+        .map(|leaf| {
+            let display_priority =
+                viewer_panel_display_priority_to_code(viewer_panel_display_priority_for_leaf(
+                    &config.ui.layout.viewer_panel_instances,
+                    &leaf.id,
+                ));
+            let metadata_source =
+                viewer_panel_metadata_source_to_code(viewer_panel_metadata_source_for_leaf(
+                    &config.ui.layout.viewer_panel_instances,
+                    &leaf.id,
+                ));
+            if let Some(existing) = existing_metadata_by_leaf.get(&leaf.id) {
+                return LayoutMetadataViewerPanelModel {
+                    leaf_id: leaf.id.clone().into(),
+                    x_px: leaf.x,
+                    y_px: leaf.y,
+                    width_px: leaf.width,
+                    height_px: leaf.height,
+                    visible: true,
+                    display_priority,
+                    metadata_source,
+                    display_title: existing.display_title.clone(),
+                    display_artist: existing.display_artist.clone(),
+                    display_album: existing.display_album.clone(),
+                    display_date: existing.display_date.clone(),
+                    display_genre: existing.display_genre.clone(),
+                };
+            }
+            LayoutMetadataViewerPanelModel {
+                leaf_id: leaf.id.clone().into(),
+                x_px: leaf.x,
+                y_px: leaf.y,
+                width_px: leaf.width,
+                height_px: leaf.height,
+                visible: true,
+                display_priority,
+                metadata_source,
+                display_title: default_display_title.clone(),
+                display_artist: default_display_artist.clone(),
+                display_album: default_display_album.clone(),
+                display_date: default_display_date.clone(),
+                display_genre: default_display_genre.clone(),
+            }
+        })
+        .collect();
+
+    let album_art_views: Vec<LayoutAlbumArtViewerPanelModel> = metrics
+        .leaves
+        .iter()
+        .filter(|leaf| leaf.panel == LayoutPanelKind::AlbumArtViewer)
+        .map(|leaf| {
+            let display_priority =
+                viewer_panel_display_priority_to_code(viewer_panel_display_priority_for_leaf(
+                    &config.ui.layout.viewer_panel_instances,
+                    &leaf.id,
+                ));
+            let image_source =
+                viewer_panel_image_source_to_code(viewer_panel_image_source_for_leaf(
+                    &config.ui.layout.viewer_panel_instances,
+                    &leaf.id,
+                ));
+            if let Some(existing) = existing_album_art_by_leaf.get(&leaf.id) {
+                return LayoutAlbumArtViewerPanelModel {
+                    leaf_id: leaf.id.clone().into(),
+                    x_px: leaf.x,
+                    y_px: leaf.y,
+                    width_px: leaf.width,
+                    height_px: leaf.height,
+                    visible: true,
+                    display_priority,
+                    image_source,
+                    art_source: existing.art_source.clone(),
+                    has_art: existing.has_art,
+                };
+            }
+            LayoutAlbumArtViewerPanelModel {
+                leaf_id: leaf.id.clone().into(),
+                x_px: leaf.x,
+                y_px: leaf.y,
+                width_px: leaf.width,
+                height_px: leaf.height,
+                visible: true,
+                display_priority,
+                image_source,
+                art_source: default_art_source.clone(),
+                has_art: default_has_art,
+            }
+        })
+        .collect();
+
+    ui.set_layout_metadata_viewer_panels(ModelRc::from(Rc::new(VecModel::from(metadata_views))));
+    ui.set_layout_album_art_viewer_panels(ModelRc::from(Rc::new(VecModel::from(album_art_views))));
+}
+
+pub(crate) fn with_updated_layout(previous: &Config, layout: LayoutConfig) -> Config {
+    crate::sanitize_config(Config {
+        output: previous.output.clone(),
+        cast: previous.cast.clone(),
+        ui: UiConfig {
+            show_layout_edit_intro: previous.ui.show_layout_edit_intro,
+            show_tooltips: previous.ui.show_tooltips,
+            auto_scroll_to_playing_track: previous.ui.auto_scroll_to_playing_track,
+            dark_mode: previous.ui.dark_mode,
+            playlist_album_art_column_min_width_px: previous
+                .ui
+                .playlist_album_art_column_min_width_px,
+            playlist_album_art_column_max_width_px: previous
+                .ui
+                .playlist_album_art_column_max_width_px,
+            layout,
+            playlist_columns: previous.ui.playlist_columns.clone(),
+            window_width: previous.ui.window_width,
+            window_height: previous.ui.window_height,
+            volume: previous.ui.volume,
+            playback_order: previous.ui.playback_order,
+            repeat_mode: previous.ui.repeat_mode,
+        },
+        library: previous.library.clone(),
+        buffering: previous.buffering.clone(),
+        integrations: previous.integrations.clone(),
+    })
+}
+
+pub(crate) fn push_layout_snapshot(stack: &Arc<Mutex<Vec<LayoutConfig>>>, layout: &LayoutConfig) {
+    let mut stack = stack.lock().expect("layout history stack lock poisoned");
+    stack.push(layout.clone());
+    if stack.len() > 128 {
+        let overflow = stack.len() - 128;
+        stack.drain(0..overflow);
+    }
+}
+
+fn clear_layout_snapshot_stack(stack: &Arc<Mutex<Vec<LayoutConfig>>>) {
+    stack
+        .lock()
+        .expect("layout history stack lock poisoned")
+        .clear();
+}
+
+pub(crate) fn push_layout_undo_snapshot(
+    undo_stack: &Arc<Mutex<Vec<LayoutConfig>>>,
+    redo_stack: &Arc<Mutex<Vec<LayoutConfig>>>,
+    layout: &LayoutConfig,
+) {
+    push_layout_snapshot(undo_stack, layout);
+    clear_layout_snapshot_stack(redo_stack);
+}
+
+pub(crate) fn pop_layout_snapshot(stack: &Arc<Mutex<Vec<LayoutConfig>>>) -> Option<LayoutConfig> {
+    stack
+        .lock()
+        .expect("layout history stack lock poisoned")
+        .pop()
+}
+
+pub(crate) fn update_or_replace_vec_model<T: Clone + 'static>(
+    current_model: ModelRc<T>,
+    next_values: Vec<T>,
+) -> ModelRc<T> {
+    if let Some(vec_model) = current_model.as_any().downcast_ref::<VecModel<T>>() {
+        if vec_model.row_count() == next_values.len() {
+            for (index, value) in next_values.into_iter().enumerate() {
+                vec_model.set_row_data(index, value);
+            }
+        } else {
+            vec_model.set_vec(next_values);
+        }
+        current_model
+    } else {
+        ModelRc::from(Rc::new(VecModel::from(next_values)))
+    }
+}
+
+pub(crate) fn apply_layout_to_ui(
+    ui: &AppWindow,
+    config: &Config,
+    workspace_width_px: u32,
+    workspace_height_px: u32,
+) {
+    let sanitized_layout =
+        sanitize_layout_config(&config.ui.layout, workspace_width_px, workspace_height_px);
+    let splitter_thickness_px = if ui.get_layout_edit_mode() {
+        SPLITTER_THICKNESS_PX
+    } else {
+        0
+    };
+    let metrics = compute_tree_layout_metrics(
+        &sanitized_layout,
+        workspace_width_px,
+        workspace_height_px,
+        splitter_thickness_px,
+    );
+
+    let leaf_ids: Vec<slint::SharedString> = metrics
+        .leaves
+        .iter()
+        .map(|leaf| leaf.id.clone().into())
+        .collect();
+    let region_panel_codes: Vec<i32> = metrics
+        .leaves
+        .iter()
+        .map(|leaf| leaf.panel.to_code())
+        .collect();
+    let region_x: Vec<i32> = metrics.leaves.iter().map(|leaf| leaf.x).collect();
+    let region_y: Vec<i32> = metrics.leaves.iter().map(|leaf| leaf.y).collect();
+    let region_widths: Vec<i32> = metrics.leaves.iter().map(|leaf| leaf.width).collect();
+    let region_heights: Vec<i32> = metrics.leaves.iter().map(|leaf| leaf.height).collect();
+    let region_visible: Vec<bool> = vec![true; metrics.leaves.len()];
+
+    let selected_leaf_index = sanitized_layout
+        .selected_leaf_id
+        .as_ref()
+        .and_then(|selected| metrics.leaves.iter().position(|leaf| &leaf.id == selected))
+        .map(|index| index as i32)
+        .unwrap_or(-1);
+
+    let splitter_model: Vec<LayoutSplitterModel> = metrics
+        .splitters
+        .iter()
+        .map(|splitter| LayoutSplitterModel {
+            id: splitter.id.clone().into(),
+            axis: splitter.axis.to_code(),
+            x_px: splitter.x,
+            y_px: splitter.y,
+            width_px: splitter.width,
+            height_px: splitter.height,
+            ratio: splitter.ratio,
+            min_ratio: splitter.min_ratio,
+            max_ratio: splitter.max_ratio,
+            track_start_px: splitter.track_start_px,
+            track_length_px: splitter.track_length_px,
+        })
+        .collect();
+
+    ui.set_layout_leaf_ids(update_or_replace_vec_model(
+        ui.get_layout_leaf_ids(),
+        leaf_ids,
+    ));
+    ui.set_layout_region_panel_kinds(update_or_replace_vec_model(
+        ui.get_layout_region_panel_kinds(),
+        region_panel_codes,
+    ));
+    ui.set_layout_region_x_px(update_or_replace_vec_model(
+        ui.get_layout_region_x_px(),
+        region_x,
+    ));
+    ui.set_layout_region_y_px(update_or_replace_vec_model(
+        ui.get_layout_region_y_px(),
+        region_y,
+    ));
+    ui.set_layout_region_width_px(update_or_replace_vec_model(
+        ui.get_layout_region_width_px(),
+        region_widths,
+    ));
+    ui.set_layout_region_height_px(update_or_replace_vec_model(
+        ui.get_layout_region_height_px(),
+        region_heights,
+    ));
+    ui.set_layout_region_visible(update_or_replace_vec_model(
+        ui.get_layout_region_visible(),
+        region_visible,
+    ));
+    ui.set_layout_splitters(update_or_replace_vec_model(
+        ui.get_layout_splitters(),
+        splitter_model,
+    ));
+    ui.set_layout_selected_leaf_index(selected_leaf_index);
+    apply_button_cluster_views_to_ui(ui, &metrics, config);
+    apply_viewer_panel_views_to_ui(ui, &metrics, config);
+}
