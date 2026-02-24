@@ -2132,24 +2132,41 @@ impl UiManager {
             return;
         }
         self.pending_list_image_requests.insert(request_key.clone());
-        let _ = self.list_image_prepare_tx.send(ListImagePrepareRequest {
-            source_path: request_key.0,
-            kind,
-            variant,
-            max_edge_px: self.list_image_max_edge_px,
-        });
+        if self
+            .list_image_prepare_tx
+            .send(ListImagePrepareRequest {
+                source_path: request_key.0.clone(),
+                kind,
+                variant,
+                max_edge_px: self.list_image_max_edge_px,
+            })
+            .is_err()
+        {
+            self.pending_list_image_requests.remove(&request_key);
+            warn!(
+                "Failed queuing list image prepare request for {}",
+                source_path.display()
+            );
+        }
     }
 
     fn queue_embedded_cover_art_prepare(&mut self, track_path: &Path) {
         if is_remote_track_path(track_path) {
             return;
         }
-        let _ = self
+        if self
             .embedded_cover_art_prepare_tx
             .send(EmbeddedCoverArtPrepareRequest {
                 track_path: track_path.to_path_buf(),
                 max_edge_px: self.list_image_max_edge_px,
-            });
+            })
+            .is_err()
+        {
+            warn!(
+                "Failed queuing embedded cover art prepare request for {}",
+                track_path.display()
+            );
+        }
     }
 
     fn list_thumbnail_path_if_ready(
@@ -4452,6 +4469,16 @@ impl UiManager {
             &mut self.filter_search_query,
             &mut self.filter_search_visible,
         );
+    }
+
+    fn reset_playlist_cover_art_state(
+        track_cover_art_missing_tracks: &mut HashSet<PathBuf>,
+        folder_cover_art_paths: &mut HashMap<PathBuf, Option<PathBuf>>,
+    ) {
+        track_cover_art_missing_tracks.clear();
+        // Keep successful folder resolutions, but drop negative cache entries so
+        // transient startup failures can be retried on the next resolve pass.
+        folder_cover_art_paths.retain(|_, path| path.is_some());
     }
 
     fn is_filter_applied(&self) -> bool {
@@ -9294,6 +9321,10 @@ impl UiManager {
                             // with no active read-only filter/search view state.
                             self.reset_filter_state();
                             self.close_library_search();
+                            Self::reset_playlist_cover_art_state(
+                                &mut self.track_cover_art_missing_tracks,
+                                &mut self.folder_cover_art_paths,
+                            );
                             self.selection_anchor_track_id = None;
                             self.track_ids.clear();
                             self.track_paths.clear();
@@ -10107,6 +10138,7 @@ mod tests {
         PlaylistSortDirection, TrackMetadata, UiManager, ENRICHMENT_FAILED_ATTEMPT_CAP,
     };
     use crate::{config::PlaylistColumnConfig, protocol};
+    use std::collections::{HashMap, HashSet};
     use std::path::PathBuf;
     use std::sync::mpsc;
     use std::time::{Duration, Instant};
@@ -10226,6 +10258,30 @@ mod tests {
         assert!(sort_direction.is_none());
         assert!(search_query.is_empty());
         assert!(!search_visible);
+    }
+
+    #[test]
+    fn test_reset_playlist_cover_art_state_clears_missing_and_negative_folder_cache() {
+        let mut missing_tracks = HashSet::from([
+            PathBuf::from("/music/a/track1.mp3"),
+            PathBuf::from("/music/b/track2.mp3"),
+        ]);
+        let mut folder_cover_cache = HashMap::from([
+            (PathBuf::from("/music/a"), None),
+            (
+                PathBuf::from("/music/b"),
+                Some(PathBuf::from("/music/b/cover.jpg")),
+            ),
+        ]);
+
+        UiManager::reset_playlist_cover_art_state(&mut missing_tracks, &mut folder_cover_cache);
+
+        assert!(missing_tracks.is_empty());
+        assert_eq!(folder_cover_cache.len(), 1);
+        assert_eq!(
+            folder_cover_cache.get(&PathBuf::from("/music/b")),
+            Some(&Some(PathBuf::from("/music/b/cover.jpg")))
+        );
     }
 
     #[test]
