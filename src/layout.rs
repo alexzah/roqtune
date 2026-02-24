@@ -284,7 +284,8 @@ pub struct LayoutConfig {
     pub playlist_album_art_column_min_width_px: u32,
     /// Built-in Album Art playlist-column width maximum.
     pub playlist_album_art_column_max_width_px: u32,
-    /// Ordered playlist column list (built-ins + custom columns).
+    /// Ordered playlist column list (built-ins + custom columns), shared by all playlists.
+    /// Do not reintroduce per-playlist column ordering from playlist storage.
     pub playlist_columns: Vec<PlaylistColumnConfig>,
     /// Global playlist column width overrides.
     pub playlist_column_width_overrides: Vec<PlaylistColumnWidthOverrideConfig>,

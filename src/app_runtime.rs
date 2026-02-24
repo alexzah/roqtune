@@ -340,9 +340,8 @@ impl AppRuntime {
             playback_session_active: Arc::clone(&playback_session_active),
         });
 
-        let _ = bus_sender.send(Message::Playlist(
-            PlaylistMessage::RequestActivePlaylistColumnOrder,
-        ));
+        // Playlist columns are global layout state from `layout.toml`; startup must not request
+        // playlist-scoped column ordering.
         let _ = bus_sender.send(Message::Config(ConfigMessage::ConfigLoaded(
             runtime_config.clone(),
         )));

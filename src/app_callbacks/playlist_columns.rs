@@ -30,6 +30,8 @@ pub(crate) fn should_apply_custom_column_delete(
 
 /// Registers playlist-header and column-settings callbacks on the root app component.
 pub(crate) fn register_playlist_column_callbacks(ui: &AppWindow, shared_state: &AppSharedState) {
+    // Playlist columns are globally owned by `layout.toml` and intentionally shared across all
+    // playlists. Do not add per-playlist column-order bus messages from this callback module.
     let bus_sender_clone = shared_state.bus_sender.clone();
     ui.on_playlist_columns_viewport_resized(move |width_px| {
         let clamped_width = width_px.max(0) as u32;
@@ -312,11 +314,6 @@ pub(crate) fn register_playlist_column_callbacks(ui: &AppWindow, shared_state: &
             &shared_state_clone.persistence_paths.config_file,
         );
         publish_runtime_from_state(&shared_state_clone, &next_config);
-        let _ = shared_state_clone.bus_sender.send(Message::Playlist(
-            PlaylistMessage::SetActivePlaylistColumnOrder(crate::playlist_column_order_keys(
-                &next_config.ui.playlist_columns,
-            )),
-        ));
     });
 
     let shared_state_clone = shared_state.clone();
@@ -393,11 +390,6 @@ pub(crate) fn register_playlist_column_callbacks(ui: &AppWindow, shared_state: &
             &shared_state_clone.persistence_paths.config_file,
         );
         publish_runtime_from_state(&shared_state_clone, &next_config);
-        let _ = shared_state_clone.bus_sender.send(Message::Playlist(
-            PlaylistMessage::SetActivePlaylistColumnOrder(crate::playlist_column_order_keys(
-                &next_config.ui.playlist_columns,
-            )),
-        ));
     });
 
     let shared_state_clone = shared_state.clone();
@@ -476,11 +468,6 @@ pub(crate) fn register_playlist_column_callbacks(ui: &AppWindow, shared_state: &
             &shared_state_clone.persistence_paths.config_file,
         );
         publish_runtime_from_state(&shared_state_clone, &next_config);
-        let _ = shared_state_clone.bus_sender.send(Message::Playlist(
-            PlaylistMessage::SetActivePlaylistColumnOrder(crate::playlist_column_order_keys(
-                &next_config.ui.playlist_columns,
-            )),
-        ));
     });
 
     let shared_state_clone = shared_state.clone();
@@ -553,11 +540,6 @@ pub(crate) fn register_playlist_column_callbacks(ui: &AppWindow, shared_state: &
             &shared_state_clone.persistence_paths.config_file,
         );
         publish_runtime_from_state(&shared_state_clone, &next_config);
-        let _ = shared_state_clone.bus_sender.send(Message::Playlist(
-            PlaylistMessage::SetActivePlaylistColumnOrder(crate::playlist_column_order_keys(
-                &next_config.ui.playlist_columns,
-            )),
-        ));
     });
 }
 

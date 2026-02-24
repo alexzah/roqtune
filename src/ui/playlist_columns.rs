@@ -128,11 +128,6 @@ pub(crate) fn playlist_column_key(column: &PlaylistColumnConfig) -> String {
     }
 }
 
-/// Returns stable keys for the given playlist column list.
-pub(crate) fn playlist_column_order_keys(columns: &[PlaylistColumnConfig]) -> Vec<String> {
-    columns.iter().map(playlist_column_key).collect()
-}
-
 #[derive(Clone, Copy)]
 /// Pixel bounds for a playlist column width.
 pub(crate) struct ColumnWidthBounds {
@@ -439,31 +434,6 @@ pub(crate) fn reorder_visible_playlist_columns(
     reordered
 }
 
-/// Applies a persisted column-order key list to a current column list.
-pub(crate) fn apply_column_order_keys(
-    columns: &[PlaylistColumnConfig],
-    column_order_keys: &[String],
-) -> Vec<PlaylistColumnConfig> {
-    if column_order_keys.is_empty() {
-        return columns.to_vec();
-    }
-
-    let mut remaining: Vec<PlaylistColumnConfig> = columns.to_vec();
-    let mut reordered: Vec<PlaylistColumnConfig> = Vec::with_capacity(columns.len());
-
-    for key in column_order_keys {
-        if let Some(index) = remaining
-            .iter()
-            .position(|column| playlist_column_key(column) == *key)
-        {
-            reordered.push(remaining.remove(index));
-        }
-    }
-
-    reordered.extend(remaining);
-    reordered
-}
-
 /// Extracts column widths from a Slint model into a plain vector.
 pub(crate) fn playlist_column_widths_from_model(widths_model: ModelRc<i32>) -> Vec<i32> {
     (0..widths_model.row_count())
@@ -558,14 +528,13 @@ mod tests {
     use crate::config::PlaylistColumnConfig;
 
     use super::{
-        apply_column_order_keys, clamp_width_for_visible_column,
-        default_album_art_column_width_bounds, is_album_art_builtin_column,
-        is_favorite_builtin_column, playlist_column_key_at_visible_index,
-        playlist_column_width_bounds, playlist_column_width_bounds_with_album_art,
-        playlist_column_widths_from_model, reorder_visible_playlist_columns,
-        resolve_playlist_header_column_from_x, resolve_playlist_header_divider_from_x,
-        resolve_playlist_header_gap_from_x, sanitize_playlist_columns,
-        visible_playlist_column_kinds, ColumnWidthBounds,
+        clamp_width_for_visible_column, default_album_art_column_width_bounds,
+        is_album_art_builtin_column, is_favorite_builtin_column,
+        playlist_column_key_at_visible_index, playlist_column_width_bounds,
+        playlist_column_width_bounds_with_album_art, playlist_column_widths_from_model,
+        reorder_visible_playlist_columns, resolve_playlist_header_column_from_x,
+        resolve_playlist_header_divider_from_x, resolve_playlist_header_gap_from_x,
+        sanitize_playlist_columns, visible_playlist_column_kinds, ColumnWidthBounds,
     };
 
     #[test]
@@ -611,47 +580,6 @@ mod tests {
                 "{title}".to_string(),
                 "{artist}".to_string(),
                 "{track_number}".to_string(),
-            ]
-        );
-    }
-
-    #[test]
-    fn test_apply_column_order_keys_prioritizes_saved_order_and_appends_unknowns() {
-        let columns = vec![
-            PlaylistColumnConfig {
-                name: "Title".to_string(),
-                format: "{title}".to_string(),
-                enabled: true,
-                custom: false,
-            },
-            PlaylistColumnConfig {
-                name: "Artist".to_string(),
-                format: "{artist}".to_string(),
-                enabled: true,
-                custom: false,
-            },
-            PlaylistColumnConfig {
-                name: "Mood".to_string(),
-                format: "{mood}".to_string(),
-                enabled: true,
-                custom: true,
-            },
-        ];
-        let order = vec![
-            "custom:Mood|{mood}".to_string(),
-            "{title}".to_string(),
-            "{missing}".to_string(),
-        ];
-
-        let applied = apply_column_order_keys(&columns, &order);
-        let applied_formats: Vec<String> =
-            applied.iter().map(|column| column.format.clone()).collect();
-        assert_eq!(
-            applied_formats,
-            vec![
-                "{mood}".to_string(),
-                "{title}".to_string(),
-                "{artist}".to_string(),
             ]
         );
     }

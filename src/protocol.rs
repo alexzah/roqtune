@@ -195,9 +195,6 @@ pub enum PlaylistMessage {
     PlaylistsRestored(Vec<PlaylistInfo>),
     OpenSubsonicSyncEligiblePlaylists(Vec<String>),
     ActivePlaylistChanged(String),
-    ActivePlaylistColumnOrder(Option<Vec<String>>),
-    SetActivePlaylistColumnOrder(Vec<String>),
-    RequestActivePlaylistColumnOrder,
     SetActivePlaylistColumnWidthOverride {
         column_key: String,
         width_px: u32,
