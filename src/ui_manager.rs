@@ -164,6 +164,8 @@ pub struct UiManager {
     /// index == source index (identity).  Library queues are built in view
     /// order so next/prev follows the visible row sequence.
     library_view_indices: Vec<usize>,
+    /// Library model row indices currently expected to hold decoded row art.
+    library_rows_with_album_art: HashSet<usize>,
     library_selected_indices: Vec<usize>,
     library_selection_anchor: Option<usize>,
     library_root_counts: [usize; 6],
@@ -529,6 +531,11 @@ impl PathImageCache {
         self.lru.clear();
         self.total_bytes = 0;
     }
+
+    fn shrink_to_fit(&mut self) {
+        self.entries.shrink_to_fit();
+        self.lru.shrink_to_fit();
+    }
 }
 
 #[derive(Default)]
@@ -564,6 +571,11 @@ impl FailedCoverPathCache {
     fn clear(&mut self) {
         self.paths.clear();
         self.order.clear();
+    }
+
+    fn shrink_to_fit(&mut self) {
+        self.paths.shrink_to_fit();
+        self.order.shrink_to_fit();
     }
 }
 
@@ -1773,6 +1785,7 @@ impl UiManager {
             library_view_stack: vec![LibraryViewState::TracksRoot],
             library_entries: Vec::new(),
             library_view_indices: Vec::new(),
+            library_rows_with_album_art: HashSet::new(),
             library_selected_indices: Vec::new(),
             library_selection_anchor: None,
             library_root_counts: [0; 6],
@@ -6391,14 +6404,14 @@ impl UiManager {
             &view,
             LibraryViewState::AlbumDetail { .. } | LibraryViewState::ArtistDetail { .. }
         );
-        let detail_header_visible = compact_track_row_view;
         let (cover_decode_start, cover_decode_end) =
             self.library_cover_decode_window(self.library_view_indices.len());
-        let (row_start, row_end) = if detail_header_visible {
-            (0usize, self.library_view_indices.len())
-        } else {
-            (cover_decode_start, cover_decode_end)
-        };
+        let (row_start, row_end) = Self::library_cover_decode_row_range(
+            &view,
+            self.library_view_indices.len(),
+            cover_decode_start,
+            cover_decode_end,
+        );
         for row_index in row_start..row_end {
             let Some(source_index) = self.library_view_indices.get(row_index).copied() else {
                 continue;
@@ -6407,7 +6420,7 @@ impl UiManager {
                 continue;
             };
             let resolve_cover_art = matches!(entry, LibraryEntry::Artist(_))
-                || detail_header_visible
+                || compact_track_row_view
                 || (row_index >= cover_decode_start && row_index < cover_decode_end);
             if !resolve_cover_art {
                 continue;
@@ -6611,6 +6624,7 @@ impl UiManager {
 
     fn refresh_visible_library_cover_art_rows(&mut self) -> bool {
         if self.collection_mode != COLLECTION_MODE_LIBRARY || self.library_view_indices.is_empty() {
+            self.library_rows_with_album_art.clear();
             return false;
         }
 
@@ -6621,17 +6635,47 @@ impl UiManager {
         );
         let (cover_decode_start, cover_decode_end) =
             self.library_cover_decode_window(self.library_view_indices.len());
-        let (row_start, row_end) = if detail_header_visible {
-            (0usize, self.library_view_indices.len())
-        } else {
-            (cover_decode_start, cover_decode_end)
-        };
+        let (row_start, row_end) = Self::library_cover_decode_row_range(
+            &view,
+            self.library_view_indices.len(),
+            cover_decode_start,
+            cover_decode_end,
+        );
         if row_start >= row_end {
-            return false;
+            if self.library_rows_with_album_art.is_empty() {
+                return false;
+            }
+            let rows_to_clear: Vec<usize> = self.library_rows_with_album_art.drain().collect();
+            let had_rows_to_clear = !rows_to_clear.is_empty();
+            let _ = self.ui.upgrade_in_event_loop(move |ui| {
+                let current_model = ui.get_library_model();
+                let Some(vec_model) = current_model
+                    .as_any()
+                    .downcast_ref::<VecModel<LibraryRowData>>()
+                else {
+                    return;
+                };
+                for row_index in rows_to_clear {
+                    if row_index >= vec_model.row_count() {
+                        continue;
+                    }
+                    let Some(mut row_data) = vec_model.row_data(row_index) else {
+                        continue;
+                    };
+                    if !row_data.has_album_art {
+                        continue;
+                    }
+                    row_data.album_art = Image::default();
+                    row_data.has_album_art = false;
+                    vec_model.set_row_data(row_index, row_data);
+                }
+            });
+            return had_rows_to_clear;
         }
 
         let selected_set: HashSet<usize> = self.library_selected_indices.iter().copied().collect();
         let mut updates: Vec<(usize, LibraryRowPresentation)> = Vec::new();
+        let mut rows_with_art_in_window = HashSet::new();
 
         for row_index in row_start..row_end {
             let Some(source_index) = self.library_view_indices.get(row_index).copied() else {
@@ -6658,10 +6702,18 @@ impl UiManager {
             if presentation.cover_art_path.is_none() {
                 continue;
             }
+            rows_with_art_in_window.insert(row_index);
             updates.push((row_index, presentation));
         }
 
-        if updates.is_empty() {
+        let rows_to_clear: Vec<usize> = self
+            .library_rows_with_album_art
+            .difference(&rows_with_art_in_window)
+            .copied()
+            .collect();
+        self.library_rows_with_album_art = rows_with_art_in_window;
+
+        if updates.is_empty() && rows_to_clear.is_empty() {
             return false;
         }
 
@@ -6679,6 +6731,20 @@ impl UiManager {
                     let row_data = UiManager::library_row_data_from_presentation(presentation);
                     vec_model.set_row_data(row_index, row_data);
                 }
+            }
+            for row_index in rows_to_clear {
+                if row_index >= vec_model.row_count() {
+                    continue;
+                }
+                let Some(mut row_data) = vec_model.row_data(row_index) else {
+                    continue;
+                };
+                if !row_data.has_album_art {
+                    continue;
+                }
+                row_data.album_art = Image::default();
+                row_data.has_album_art = false;
+                vec_model.set_row_data(row_index, row_data);
             }
         });
         true
@@ -7284,6 +7350,25 @@ impl UiManager {
         (start, end)
     }
 
+    fn library_cover_decode_row_range(
+        view: &LibraryViewState,
+        total_rows: usize,
+        cover_decode_start: usize,
+        cover_decode_end: usize,
+    ) -> (usize, usize) {
+        if matches!(
+            view,
+            LibraryViewState::AlbumDetail { .. } | LibraryViewState::ArtistDetail { .. }
+        ) {
+            (0usize, total_rows)
+        } else {
+            (
+                cover_decode_start.min(total_rows),
+                cover_decode_end.min(total_rows),
+            )
+        }
+    }
+
     fn sync_library_ui(&mut self) {
         let view = self.current_library_view();
         let (title, subtitle) = Self::library_view_labels(&view);
@@ -7296,7 +7381,7 @@ impl UiManager {
         let root_index = self.current_library_root_index();
         let scan_in_progress = self.library_scan_in_progress;
         let status_text = self.library_status_text.clone();
-        let entries = self.library_entries.clone();
+        let entries = std::mem::take(&mut self.library_entries);
         self.library_view_indices = if matches!(view, LibraryViewState::GlobalSearch)
             && self.library_search_query.trim().is_empty()
         {
@@ -7467,6 +7552,11 @@ impl UiManager {
                 })
             })
             .collect();
+        self.library_rows_with_album_art = rows
+            .iter()
+            .enumerate()
+            .filter_map(|(row_index, row)| row.cover_art_path.as_ref().map(|_| row_index))
+            .collect();
         let mut scroll_restore_row: Option<i32> = None;
         if let Some(saved_row) = self.pending_library_scroll_restore_row {
             if !rows.is_empty() {
@@ -7545,6 +7635,7 @@ impl UiManager {
                 });
             });
         }
+        self.library_entries = entries;
         self.sync_library_search_state_to_ui();
         self.sync_properties_action_state();
     }
@@ -7564,8 +7655,7 @@ impl UiManager {
             self.update_library_playing_index();
             self.request_library_view_data();
         } else {
-            self.library_add_to_dialog_visible = false;
-            self.sync_library_add_to_playlist_ui();
+            self.release_hidden_library_memory();
         }
         self.update_display_for_active_collection();
         self.sync_library_ui();
@@ -7575,6 +7665,7 @@ impl UiManager {
     fn prepare_library_view_transition(&mut self) {
         self.library_entries.clear();
         self.library_view_indices.clear();
+        self.library_rows_with_album_art.clear();
         self.reset_library_page_state();
         self.library_artist_row_indices.clear();
         self.reset_library_selection();
@@ -7582,6 +7673,60 @@ impl UiManager {
         self.replace_prefetch_queue_if_changed(Vec::new());
         self.replace_background_queue_if_changed(Vec::new());
         self.sync_library_add_to_playlist_ui();
+    }
+
+    fn release_hidden_library_memory(&mut self) {
+        self.prepare_library_view_transition();
+        self.library_cover_art_paths.clear();
+        self.folder_cover_art_paths.clear();
+        self.library_enrichment.clear();
+        self.library_enrichment_pending.clear();
+        self.library_enrichment_last_request_at.clear();
+        self.library_enrichment_retry_counts.clear();
+        self.library_enrichment_retry_not_before.clear();
+        self.library_enrichment_not_found_not_before.clear();
+        self.library_enrichment_failed_attempt_counts.clear();
+        self.library_last_detail_enrichment_entity = None;
+        self.library_artist_prefetch_first_row = 0;
+        self.library_artist_prefetch_row_count = 0;
+
+        // Actively return large hidden-library capacities when switching back to playlist mode.
+        self.library_entries.shrink_to_fit();
+        self.library_view_indices.shrink_to_fit();
+        self.library_rows_with_album_art.shrink_to_fit();
+        self.library_selected_indices.shrink_to_fit();
+        self.library_cover_art_paths.shrink_to_fit();
+        self.folder_cover_art_paths.shrink_to_fit();
+        self.library_enrichment.shrink_to_fit();
+        self.library_enrichment_pending.shrink_to_fit();
+        self.library_enrichment_last_request_at.shrink_to_fit();
+        self.library_enrichment_retry_counts.shrink_to_fit();
+        self.library_enrichment_retry_not_before.shrink_to_fit();
+        self.library_enrichment_not_found_not_before.shrink_to_fit();
+        self.library_enrichment_failed_attempt_counts
+            .shrink_to_fit();
+        self.library_page_entries.shrink_to_fit();
+        self.library_page_query.shrink_to_fit();
+        self.library_artist_row_indices.shrink_to_fit();
+        self.library_last_prefetch_entities.shrink_to_fit();
+        self.library_last_background_entities.shrink_to_fit();
+        self.pending_list_image_requests.shrink_to_fit();
+
+        TRACK_ROW_COVER_ART_IMAGE_CACHE.with(|cache| {
+            let mut cache = cache.borrow_mut();
+            cache.clear();
+            cache.shrink_to_fit();
+        });
+        TRACK_ROW_ARTIST_IMAGE_CACHE.with(|cache| {
+            let mut cache = cache.borrow_mut();
+            cache.clear();
+            cache.shrink_to_fit();
+        });
+        TRACK_ROW_COVER_ART_FAILED_PATHS.with(|failed| {
+            let mut failed = failed.borrow_mut();
+            failed.clear();
+            failed.shrink_to_fit();
+        });
     }
 
     fn set_library_root_section(&mut self, section: i32) {
@@ -10646,6 +10791,36 @@ mod tests {
         assert_eq!(evicted, 1);
         assert!(cache.entries.contains_key(&protected));
         assert!(!cache.entries.contains_key(&evictable));
+    }
+
+    #[test]
+    fn test_library_cover_decode_row_range_uses_decode_window_for_root_view() {
+        let range =
+            UiManager::library_cover_decode_row_range(&LibraryViewState::TracksRoot, 400, 24, 72);
+        assert_eq!(range, (24, 72));
+    }
+
+    #[test]
+    fn test_library_cover_decode_row_range_uses_full_range_for_detail_views() {
+        let album_range = UiManager::library_cover_decode_row_range(
+            &LibraryViewState::AlbumDetail {
+                album: "Album".to_string(),
+                album_artist: "Artist".to_string(),
+            },
+            120,
+            16,
+            64,
+        );
+        let artist_range = UiManager::library_cover_decode_row_range(
+            &LibraryViewState::ArtistDetail {
+                artist: "Artist".to_string(),
+            },
+            85,
+            10,
+            20,
+        );
+        assert_eq!(album_range, (0, 120));
+        assert_eq!(artist_range, (0, 85));
     }
 
     #[test]
