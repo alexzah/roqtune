@@ -878,6 +878,21 @@ impl UiManager {
         )
     }
 
+    fn item_kind_for_favorite_category(kind: protocol::FavoriteEntityKind) -> i32 {
+        match kind {
+            protocol::FavoriteEntityKind::Track => LIBRARY_ITEM_KIND_SONG,
+            protocol::FavoriteEntityKind::Artist => LIBRARY_ITEM_KIND_ARTIST,
+            protocol::FavoriteEntityKind::Album => LIBRARY_ITEM_KIND_ALBUM,
+        }
+    }
+
+    fn library_view_supports_artist_enrichment_prefetch(view: &LibraryViewState) -> bool {
+        matches!(
+            view,
+            LibraryViewState::ArtistsRoot | LibraryViewState::FavoriteArtists
+        )
+    }
+
     fn favorite_entity_for_library_entry(
         &self,
         entry: &LibraryEntry,
@@ -6069,7 +6084,7 @@ impl UiManager {
     }
 
     fn prefetch_artist_enrichment_window(&mut self, first_row: usize, row_count: usize) {
-        if !matches!(self.current_library_view(), LibraryViewState::ArtistsRoot) {
+        if !Self::library_view_supports_artist_enrichment_prefetch(&self.current_library_view()) {
             self.retain_pending_detail_entity_only();
             self.replace_prefetch_queue_if_changed(Vec::new());
             self.replace_background_queue_if_changed(Vec::new());
@@ -6171,7 +6186,7 @@ impl UiManager {
         }
         self.maybe_retry_stalled_detail_enrichment();
 
-        if matches!(self.current_library_view(), LibraryViewState::ArtistsRoot) {
+        if Self::library_view_supports_artist_enrichment_prefetch(&self.current_library_view()) {
             let prefetch_row_count = if self.library_artist_prefetch_row_count == 0 {
                 LIBRARY_PREFETCH_FALLBACK_VISIBLE_ROWS
             } else {
@@ -6190,7 +6205,9 @@ impl UiManager {
         let view = self.current_library_view();
         if !matches!(
             view,
-            LibraryViewState::ArtistsRoot | LibraryViewState::GlobalSearch
+            LibraryViewState::ArtistsRoot
+                | LibraryViewState::FavoriteArtists
+                | LibraryViewState::GlobalSearch
         ) {
             return false;
         }
@@ -6884,7 +6901,7 @@ impl UiManager {
                 leading: String::new(),
                 primary: category.title.clone(),
                 secondary: format!("{} items", category.count),
-                item_kind: LIBRARY_ITEM_KIND_GENRE,
+                item_kind: Self::item_kind_for_favorite_category(category.kind),
                 cover_art_path: None,
                 source_badge: String::new(),
                 is_playing: false,
@@ -7122,8 +7139,8 @@ impl UiManager {
             })
             .map(|index| index as i32)
             .unwrap_or(-1);
-        let fetch_capable_view =
-            detail_entity.is_some() || matches!(view, LibraryViewState::ArtistsRoot);
+        let fetch_capable_view = detail_entity.is_some()
+            || Self::library_view_supports_artist_enrichment_prefetch(&view);
         let online_prompt_visible = self.collection_mode == COLLECTION_MODE_LIBRARY
             && fetch_capable_view
             && self.library_online_metadata_prompt_pending;
@@ -11166,6 +11183,37 @@ mod tests {
         assert!(!UiManager::is_sortable_playlist_column(&album_art));
         assert!(!UiManager::is_sortable_playlist_column(&favorite));
         assert!(UiManager::is_sortable_playlist_column(&title));
+    }
+
+    #[test]
+    fn test_item_kind_for_favorite_category_uses_entity_kind_specific_icons() {
+        assert_eq!(
+            UiManager::item_kind_for_favorite_category(protocol::FavoriteEntityKind::Track),
+            0
+        );
+        assert_eq!(
+            UiManager::item_kind_for_favorite_category(protocol::FavoriteEntityKind::Artist),
+            1
+        );
+        assert_eq!(
+            UiManager::item_kind_for_favorite_category(protocol::FavoriteEntityKind::Album),
+            2
+        );
+    }
+
+    #[test]
+    fn test_library_view_supports_artist_enrichment_prefetch_for_favorites_artists() {
+        assert!(UiManager::library_view_supports_artist_enrichment_prefetch(
+            &LibraryViewState::ArtistsRoot
+        ));
+        assert!(UiManager::library_view_supports_artist_enrichment_prefetch(
+            &LibraryViewState::FavoriteArtists
+        ));
+        assert!(
+            !UiManager::library_view_supports_artist_enrichment_prefetch(
+                &LibraryViewState::AlbumsRoot
+            )
+        );
     }
 
     #[test]

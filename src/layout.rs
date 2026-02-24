@@ -37,6 +37,12 @@ pub const PANEL_CODE_STATUS_BAR: i32 = 11;
 /// Stable panel kind code for `LayoutPanelKind::ImportButtonCluster`.
 pub const PANEL_CODE_IMPORT_BUTTON_CLUSTER: i32 = 12;
 
+const BUTTON_CLUSTER_BUTTON_SIZE_PX: u32 = 32;
+const BUTTON_CLUSTER_BUTTON_SPACING_PX: u32 = 8;
+const BUTTON_CLUSTER_HORIZONTAL_PADDING_PX: u32 = 16;
+const BUTTON_CLUSTER_PANEL_HEIGHT_PX: u32 = 32;
+const RELAXED_PANEL_MIN_EDGE_PX: u32 = 24;
+
 /// User-selectable panel kind assignable to a layout leaf.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Deserialize, serde::Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -101,22 +107,66 @@ impl LayoutPanelKind {
 
     fn min_size_px(self) -> (u32, u32) {
         match self {
-            Self::ButtonCluster => (32, 32),
-            Self::ImportButtonCluster => (32, 32),
-            Self::TransportButtonCluster => (180, 32),
-            Self::UtilityButtonCluster => (150, 32),
-            Self::VolumeSlider => (110, 26),
-            Self::SeekBar => (220, 32),
-            Self::PlaylistSwitcher => (140, 120),
-            Self::TrackList => (280, 120),
-            Self::MetadataViewer => (160, 80),
-            Self::AlbumArtViewer => (160, 120),
-            Self::StatusBar => (220, 20),
-            Self::Spacer => (24, 24),
+            Self::ButtonCluster
+            | Self::ImportButtonCluster
+            | Self::TransportButtonCluster
+            | Self::UtilityButtonCluster => button_cluster_panel_min_size_px(0),
+            Self::VolumeSlider
+            | Self::SeekBar
+            | Self::PlaylistSwitcher
+            | Self::TrackList
+            | Self::MetadataViewer
+            | Self::AlbumArtViewer
+            | Self::Spacer => (RELAXED_PANEL_MIN_EDGE_PX, RELAXED_PANEL_MIN_EDGE_PX),
+            Self::StatusBar => (RELAXED_PANEL_MIN_EDGE_PX, 20),
             Self::None => (0, 0),
-            Self::ControlBar => (420, 56),
-            Self::AlbumArtPane => (160, 120),
+            Self::ControlBar | Self::AlbumArtPane => {
+                (RELAXED_PANEL_MIN_EDGE_PX, RELAXED_PANEL_MIN_EDGE_PX)
+            }
         }
+    }
+}
+
+fn button_cluster_panel_min_size_px(action_count: usize) -> (u32, u32) {
+    let button_count = action_count.max(1) as u32;
+    let content_width = button_count
+        .saturating_mul(BUTTON_CLUSTER_BUTTON_SIZE_PX)
+        .saturating_add(button_count.saturating_sub(1) * BUTTON_CLUSTER_BUTTON_SPACING_PX);
+    (
+        content_width.saturating_add(BUTTON_CLUSTER_HORIZONTAL_PADDING_PX),
+        BUTTON_CLUSTER_PANEL_HEIGHT_PX,
+    )
+}
+
+fn build_button_cluster_action_count_map(layout: &LayoutConfig) -> HashMap<String, usize> {
+    let mut counts = HashMap::new();
+    for instance in &layout.button_cluster_instances {
+        let leaf_id = instance.leaf_id.trim();
+        if leaf_id.is_empty() {
+            continue;
+        }
+        counts.insert(leaf_id.to_string(), instance.actions.len());
+    }
+    counts
+}
+
+fn panel_min_size_for_leaf(
+    leaf_id: &str,
+    panel: LayoutPanelKind,
+    button_cluster_action_counts: &HashMap<String, usize>,
+) -> (u32, u32) {
+    match panel {
+        LayoutPanelKind::ButtonCluster
+        | LayoutPanelKind::ImportButtonCluster
+        | LayoutPanelKind::TransportButtonCluster
+        | LayoutPanelKind::UtilityButtonCluster => {
+            let action_count = button_cluster_action_counts
+                .get(leaf_id)
+                .copied()
+                .unwrap_or(0);
+            button_cluster_panel_min_size_px(action_count)
+        }
+        _ => panel.min_size_px(),
     }
 }
 
@@ -613,34 +663,38 @@ fn collect_ids(node: &LayoutNode, out: &mut HashSet<String>) {
     }
 }
 
-fn min_size_for_node(node: &LayoutNode, splitter_thickness_px: i32) -> (u32, u32) {
+fn min_size_for_node(
+    node: &LayoutNode,
+    splitter_thickness_px: i32,
+    button_cluster_action_counts: &HashMap<String, usize>,
+) -> (u32, u32) {
     match node {
         LayoutNode::Empty => (0, 0),
-        LayoutNode::Leaf { panel, .. } => panel.min_size_px(),
+        LayoutNode::Leaf { id, panel } => {
+            panel_min_size_for_leaf(id, *panel, button_cluster_action_counts)
+        }
         LayoutNode::Split {
             axis,
-            min_first_px,
-            min_second_px,
             first,
             second,
             ..
         } => {
-            let (first_min_w, first_min_h) = min_size_for_node(first, splitter_thickness_px);
-            let (second_min_w, second_min_h) = min_size_for_node(second, splitter_thickness_px);
+            let (first_min_w, first_min_h) =
+                min_size_for_node(first, splitter_thickness_px, button_cluster_action_counts);
+            let (second_min_w, second_min_h) =
+                min_size_for_node(second, splitter_thickness_px, button_cluster_action_counts);
             let splitter = splitter_thickness_px.max(0) as u32;
             match axis {
                 SplitAxis::Vertical => (
                     first_min_w
-                        .max(*min_first_px)
-                        .saturating_add(second_min_w.max(*min_second_px))
+                        .saturating_add(second_min_w)
                         .saturating_add(splitter),
                     first_min_h.max(second_min_h),
                 ),
                 SplitAxis::Horizontal => (
                     first_min_w.max(second_min_w),
                     first_min_h
-                        .max(*min_first_px)
-                        .saturating_add(second_min_h.max(*min_second_px))
+                        .saturating_add(second_min_h)
                         .saturating_add(splitter),
                 ),
             }
@@ -739,12 +793,12 @@ fn normalize_node(
                 },
                 axis,
                 ratio: if ratio.is_finite() {
-                    ratio.clamp(0.05, 0.95)
+                    ratio.clamp(0.0, 1.0)
                 } else {
                     0.5
                 },
-                min_first_px: min_first_px.max(16),
-                min_second_px: min_second_px.max(16),
+                min_first_px,
+                min_second_px,
                 first: Box::new(first),
                 second: Box::new(second),
             };
@@ -860,8 +914,8 @@ fn split_leaf_mut(
                 id: id_gen.next_id("s"),
                 axis,
                 ratio: 0.5,
-                min_first_px: 24,
-                min_second_px: 24,
+                min_first_px: 0,
+                min_second_px: 0,
                 first: Box::new(existing),
                 second: Box::new(new_sibling),
             };
@@ -924,7 +978,7 @@ fn set_split_ratio_mut(node: &mut LayoutNode, split_id: &str, ratio: f32) -> boo
         } => {
             if id == split_id {
                 *split_ratio = if ratio.is_finite() {
-                    ratio.clamp(0.01, 0.99)
+                    ratio.clamp(0.0, 1.0)
                 } else {
                     *split_ratio
                 };
@@ -1025,6 +1079,7 @@ fn layout_node_recursive(
     rect: Rect,
     selected_leaf_id: Option<&str>,
     splitter_thickness_px: i32,
+    button_cluster_action_counts: &HashMap<String, usize>,
     out: &mut TreeLayoutMetrics,
 ) {
     match node {
@@ -1050,19 +1105,20 @@ fn layout_node_recursive(
             id,
             axis,
             ratio,
-            min_first_px,
-            min_second_px,
             first,
             second,
+            ..
         } => {
-            let (first_min_w, first_min_h) = min_size_for_node(first, splitter_thickness_px);
-            let (second_min_w, second_min_h) = min_size_for_node(second, splitter_thickness_px);
+            let (first_min_w, first_min_h) =
+                min_size_for_node(first, splitter_thickness_px, button_cluster_action_counts);
+            let (second_min_w, second_min_h) =
+                min_size_for_node(second, splitter_thickness_px, button_cluster_action_counts);
             let splitter = splitter_thickness_px.max(0);
             match axis {
                 SplitAxis::Vertical => {
                     let total = (rect.width - splitter).max(0);
-                    let min_first = first_min_w.max(*min_first_px) as i32;
-                    let min_second = second_min_w.max(*min_second_px) as i32;
+                    let min_first = first_min_w as i32;
+                    let min_second = second_min_w as i32;
                     let (effective_ratio, first_w, second_w) =
                         clamp_ratio(*ratio, total, min_first, min_second);
                     let split_x = rect.x + first_w;
@@ -1099,6 +1155,7 @@ fn layout_node_recursive(
                         },
                         selected_leaf_id,
                         splitter_thickness_px,
+                        button_cluster_action_counts,
                         out,
                     );
                     layout_node_recursive(
@@ -1111,13 +1168,14 @@ fn layout_node_recursive(
                         },
                         selected_leaf_id,
                         splitter_thickness_px,
+                        button_cluster_action_counts,
                         out,
                     );
                 }
                 SplitAxis::Horizontal => {
                     let total = (rect.height - splitter).max(0);
-                    let min_first = first_min_h.max(*min_first_px) as i32;
-                    let min_second = second_min_h.max(*min_second_px) as i32;
+                    let min_first = first_min_h as i32;
+                    let min_second = second_min_h as i32;
                     let (effective_ratio, first_h, second_h) =
                         clamp_ratio(*ratio, total, min_first, min_second);
                     let split_y = rect.y + first_h;
@@ -1154,6 +1212,7 @@ fn layout_node_recursive(
                         },
                         selected_leaf_id,
                         splitter_thickness_px,
+                        button_cluster_action_counts,
                         out,
                     );
                     layout_node_recursive(
@@ -1166,6 +1225,7 @@ fn layout_node_recursive(
                         },
                         selected_leaf_id,
                         splitter_thickness_px,
+                        button_cluster_action_counts,
                         out,
                     );
                 }
@@ -1182,6 +1242,7 @@ pub fn compute_tree_layout_metrics(
     splitter_thickness_px: i32,
 ) -> TreeLayoutMetrics {
     let mut out = TreeLayoutMetrics::default();
+    let button_cluster_action_counts = build_button_cluster_action_count_map(layout);
     let rect = Rect {
         x: 0,
         y: 0,
@@ -1193,6 +1254,7 @@ pub fn compute_tree_layout_metrics(
         rect,
         layout.selected_leaf_id.as_deref(),
         splitter_thickness_px,
+        &button_cluster_action_counts,
         &mut out,
     );
     out
@@ -1225,6 +1287,91 @@ mod tests {
             }
             _ => None,
         }
+    }
+
+    #[test]
+    fn button_cluster_min_size_tracks_configured_action_count() {
+        let config = LayoutConfig {
+            version: LAYOUT_VERSION,
+            playlist_album_art_column_min_width_px:
+                crate::config::default_playlist_album_art_column_min_width_px(),
+            playlist_album_art_column_max_width_px:
+                crate::config::default_playlist_album_art_column_max_width_px(),
+            playlist_columns: crate::config::default_playlist_columns(),
+            playlist_column_width_overrides: Vec::new(),
+            button_cluster_instances: vec![crate::config::ButtonClusterInstanceConfig {
+                leaf_id: "cluster".to_string(),
+                actions: vec![1, 2, 3, 4],
+            }],
+            viewer_panel_instances: Vec::new(),
+            root: LayoutNode::Split {
+                id: "split".to_string(),
+                axis: SplitAxis::Vertical,
+                ratio: 0.1,
+                min_first_px: 0,
+                min_second_px: 0,
+                first: Box::new(LayoutNode::Leaf {
+                    id: "cluster".to_string(),
+                    panel: LayoutPanelKind::ButtonCluster,
+                }),
+                second: Box::new(LayoutNode::Leaf {
+                    id: "spacer".to_string(),
+                    panel: LayoutPanelKind::Spacer,
+                }),
+            },
+            selected_leaf_id: None,
+        };
+
+        let metrics = compute_tree_layout_metrics(&config, 420, 120, SPLITTER_THICKNESS_PX);
+        let cluster_leaf = metrics
+            .leaves
+            .iter()
+            .find(|leaf| leaf.id == "cluster")
+            .expect("cluster leaf should exist");
+
+        // 4 buttons * 32 + 3 gaps * 8 + 16 horizontal padding.
+        assert!(cluster_leaf.width >= 168);
+        assert!(cluster_leaf.height >= 32);
+    }
+
+    #[test]
+    fn split_level_minimums_do_not_override_panel_adaptive_minimums() {
+        let config = LayoutConfig {
+            version: LAYOUT_VERSION,
+            playlist_album_art_column_min_width_px:
+                crate::config::default_playlist_album_art_column_min_width_px(),
+            playlist_album_art_column_max_width_px:
+                crate::config::default_playlist_album_art_column_max_width_px(),
+            playlist_columns: crate::config::default_playlist_columns(),
+            playlist_column_width_overrides: Vec::new(),
+            button_cluster_instances: Vec::new(),
+            viewer_panel_instances: Vec::new(),
+            root: LayoutNode::Split {
+                id: "split".to_string(),
+                axis: SplitAxis::Vertical,
+                ratio: 0.5,
+                min_first_px: 500,
+                min_second_px: 500,
+                first: Box::new(LayoutNode::Leaf {
+                    id: "left".to_string(),
+                    panel: LayoutPanelKind::Spacer,
+                }),
+                second: Box::new(LayoutNode::Leaf {
+                    id: "right".to_string(),
+                    panel: LayoutPanelKind::Spacer,
+                }),
+            },
+            selected_leaf_id: None,
+        };
+
+        let metrics = compute_tree_layout_metrics(&config, 360, 120, SPLITTER_THICKNESS_PX);
+        let splitter = metrics
+            .splitters
+            .first()
+            .expect("splitter should exist for split layout");
+
+        assert!(splitter.min_ratio < 0.25);
+        assert!(splitter.max_ratio > 0.75);
     }
 
     #[test]
