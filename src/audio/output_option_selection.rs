@@ -83,7 +83,7 @@ pub(crate) fn resolve_runtime_config(
 ) -> Config {
     let mut runtime = config.clone();
     if runtime.output.output_device_auto {
-        runtime.output.output_device_name = output_options.auto_device_name.clone();
+        runtime.output.output_device_name = "default".to_string();
     }
     if runtime.output.channel_count_auto {
         runtime.output.channel_count = output_options.auto_channel_value;
@@ -508,7 +508,7 @@ mod tests {
         assert_eq!(runtime.output.channel_count, 2);
         assert_eq!(runtime.output.sample_rate_khz, 96_000);
         assert_eq!(runtime.output.bits_per_sample, 24);
-        assert_eq!(runtime.output.output_device_name, "Device B");
+        assert_eq!(runtime.output.output_device_name, "default");
     }
 
     #[test]

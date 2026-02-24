@@ -282,7 +282,11 @@ fn add_library_folders_to_config_and_scan(
 /// Sanitizes loaded config values and normalizes derived fields into safe runtime ranges.
 pub(crate) fn sanitize_config(config: Config) -> Config {
     let sanitized_playlist_columns = sanitize_playlist_columns(&config.ui.playlist_columns);
-    let output_device_name = config.output.output_device_name.trim().to_string();
+    let output_device_name = if config.output.output_device_auto {
+        "default".to_string()
+    } else {
+        config.output.output_device_name.trim().to_string()
+    };
     let clamped_channels = config.output.channel_count.clamp(1, 8);
     let clamped_sample_rate_hz = config.output.sample_rate_khz.clamp(8_000, 192_000);
     let clamped_bits = config.output.bits_per_sample.clamp(8, 32);

@@ -323,7 +323,7 @@ pub(crate) fn register_settings_ui_callbacks(ui: &AppWindow, shared_state: &AppS
             let next_config = crate::sanitize_config(Config {
                 output: OutputConfig {
                     output_device_name: if output_device_auto {
-                        String::new()
+                        "default".to_string()
                     } else {
                         output_device_name
                     },
