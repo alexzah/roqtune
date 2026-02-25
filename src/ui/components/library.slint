@@ -1,24 +1,23 @@
-import { Palette } from "std-widgets.slint";
 import { LibraryRowData } from "../types.slint";
 import { AppIcons } from "../icons.slint";
+import { AppPalette } from "../theme_palette.slint";
 
 export component LibraryRow inherits Rectangle {
     in property <LibraryRowData> data;
     in property <bool> is-hover;
-    private property <bool> dark: Palette.color-scheme == ColorScheme.dark;
 
     height: 34px;
     property <brush> idle-background: root.data.selected
-        ? (root.dark ? #2f3f56 : #d8e6f8)
+        ? AppPalette.selection-bg
         : root.data.is_playing
-            ? (root.dark ? #203345 : #d1e2f7)
+            ? AppPalette.accent-soft-bg
         : transparent;
     background: is-hover
         ? root.data.selected
-            ? (root.dark ? #394c67 : #cbddf2)
+            ? AppPalette.selection-border.mix(AppPalette.selection-bg, 0.6)
             : root.data.is_playing
-                ? (root.dark ? #2a4258 : #c4d9f1)
-                : (root.dark ? #333 : #e5edf7)
+                ? AppPalette.accent-soft-border.mix(AppPalette.accent-soft-bg, 0.6)
+                : AppPalette.control-hover-bg
         : root.idle-background;
     border-radius: 2px;
 
@@ -31,7 +30,7 @@ export component LibraryRow inherits Rectangle {
             width: 28px;
             Text {
                 text: root.data.leading;
-                color: root.dark ? #8fa7c6 : #42658d;
+                color: AppPalette.text-secondary;
                 font-size: 11px;
                 horizontal-alignment: right;
                 vertical-alignment: center;
@@ -43,8 +42,8 @@ export component LibraryRow inherits Rectangle {
             height: 24px;
             border-radius: 2px;
             border-width: 1px;
-            border-color: root.dark ? #3a3a3a : #c8d1dc;
-            background: root.dark ? #1f1f1f : #f4f7fb;
+            border-color: AppPalette.border;
+            background: AppPalette.panel-bg-elevated;
 
             if root.data.has_album_art : Image {
                 width: parent.width;
@@ -65,7 +64,7 @@ export component LibraryRow inherits Rectangle {
                 x: (parent.width - self.width) / 2;
                 y: (parent.height - self.height) / 2;
                 image-fit: contain;
-                colorize: root.dark ? #8fa7c6 : #42658d;
+                colorize: AppPalette.text-secondary;
             }
         }
 
@@ -81,16 +80,16 @@ export component LibraryRow inherits Rectangle {
                     height: 10px;
                     y: (parent.height - self.height) / 2;
                     image-fit: contain;
-                    colorize: root.dark ? #8fb8ff : #2d5f98;
+                    colorize: AppPalette.accent;
                 }
 
                 Text {
                     text: root.data.primary;
                     color: root.data.selected
-                        ? (root.dark ? #ececec : #203142)
+                        ? AppPalette.text-primary
                         : root.data.is_playing
-                            ? (root.dark ? #d7e9ff : #245077)
-                            : (root.dark ? #ddd : #243444);
+                            ? AppPalette.accent
+                            : AppPalette.text-primary;
                     font-size: 12px;
                     overflow: elide;
                     horizontal-alignment: left;
@@ -101,10 +100,10 @@ export component LibraryRow inherits Rectangle {
             Text {
                 text: root.data.secondary;
                 color: root.data.selected
-                    ? (root.dark ? #bcc7d8 : #4f667f)
+                    ? AppPalette.text-secondary
                     : root.data.is_playing
-                        ? (root.dark ? #9eb6d3 : #436588)
-                        : (root.dark ? #888 : #647385);
+                        ? AppPalette.text-secondary
+                        : AppPalette.text-muted;
                 font-size: 11px;
                 overflow: elide;
                 horizontal-alignment: left;
@@ -117,8 +116,8 @@ export component LibraryRow inherits Rectangle {
             height: 18px;
             border-radius: 9px;
             border-width: 1px;
-            border-color: root.dark ? #3f5470 : #b4cde8;
-            background: root.dark ? #1f3248 : #e2eefb;
+            border-color: AppPalette.accent-soft-border;
+            background: AppPalette.accent-soft-bg;
             y: (parent.height - self.height) / 2;
 
             Image {
@@ -128,7 +127,7 @@ export component LibraryRow inherits Rectangle {
                 x: (parent.width - self.width) / 2;
                 y: (parent.height - self.height) / 2;
                 image-fit: contain;
-                colorize: root.dark ? #9fc3eb : #2d5f98;
+                colorize: AppPalette.accent;
             }
         }
 
@@ -144,8 +143,8 @@ export component LibraryRow inherits Rectangle {
                 y: (parent.height - self.height) / 2;
                 image-fit: contain;
                 colorize: root.data.favorited
-                    ? (root.dark ? #ff91a8 : #d63a5f)
-                    : (root.dark ? #a4aab4 : #7a8795);
+                    ? AppPalette.danger
+                    : AppPalette.text-muted;
             }
         }
     }

@@ -30,6 +30,29 @@ fn shared_string_model_to_vec(model: ModelRc<slint::SharedString>) -> Vec<String
         .collect()
 }
 
+fn set_custom_color_draft_preview_colors(ui: &AppWindow) {
+    let draft_values = shared_string_model_to_vec(ui.get_settings_custom_color_draft_values());
+    let saved_values = shared_string_model_to_vec(ui.get_settings_custom_color_values());
+    let preview_len = draft_values.len().max(saved_values.len());
+    let fallback_color = slint::Color::from_rgb_u8(42, 109, 239);
+    let previews: Vec<slint::Color> = (0..preview_len)
+        .map(|index| {
+            draft_values
+                .get(index)
+                .and_then(|value| crate::theme::parse_slint_color(value))
+                .or_else(|| {
+                    saved_values
+                        .get(index)
+                        .and_then(|value| crate::theme::parse_slint_color(value))
+                })
+                .unwrap_or(fallback_color)
+        })
+        .collect();
+    ui.set_settings_custom_color_draft_preview_colors(ModelRc::from(Rc::new(VecModel::from(
+        previews,
+    ))));
+}
+
 fn set_custom_color_draft_value(ui: &AppWindow, index: usize, value: String) {
     let mut draft_values = shared_string_model_to_vec(ui.get_settings_custom_color_draft_values());
     if index >= draft_values.len() {
@@ -41,6 +64,7 @@ fn set_custom_color_draft_value(ui: &AppWindow, index: usize, value: String) {
         .map(slint::SharedString::from)
         .collect();
     ui.set_settings_custom_color_draft_values(ModelRc::from(Rc::new(VecModel::from(next_values))));
+    set_custom_color_draft_preview_colors(ui);
 }
 
 /// Registers callbacks that mutate persisted settings and runtime audio/UI state.
@@ -241,6 +265,13 @@ pub(crate) fn register_settings_ui_callbacks(ui: &AppWindow, shared_state: &AppS
         let index = component_index.max(0) as usize;
         if let Some(ui) = ui_handle_clone.upgrade() {
             set_custom_color_draft_value(&ui, index, value.to_string());
+        }
+    });
+
+    let ui_handle_clone = shared_state.ui_handles.ui_handle.clone();
+    ui.on_settings_refresh_custom_color_previews(move || {
+        if let Some(ui) = ui_handle_clone.upgrade() {
+            set_custom_color_draft_preview_colors(&ui);
         }
     });
 

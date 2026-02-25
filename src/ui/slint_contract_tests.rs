@@ -236,8 +236,10 @@ mod tests {
         );
         assert!(
             menu_ui.contains("source: AppIcons.close;")
-                && menu_ui.contains("colorize: delete-column-ta.has-hover ? #ff5c5c : #db3f3f;"),
-            "Custom columns should render a red SVG delete icon"
+                && menu_ui.contains("colorize: delete-column-ta.has-hover")
+                && menu_ui.contains("? AppPalette.danger")
+                && menu_ui.contains(": AppPalette.danger.mix(AppPalette.text-muted, 0.4);"),
+            "Custom columns should render a theme-danger SVG delete icon"
         );
         assert!(
             slint_ui.contains("show_delete_custom_column_confirm"),

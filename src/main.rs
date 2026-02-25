@@ -623,16 +623,24 @@ pub(crate) fn apply_config_to_ui(
     ui.set_settings_custom_color_labels(ModelRc::from(Rc::new(VecModel::from(
         custom_color_labels,
     ))));
-    let custom_color_values: Vec<slint::SharedString> =
-        custom_color_values_for_ui(&resolved_theme.colors)
-            .into_iter()
-            .map(|value| value.into())
-            .collect();
+    let custom_color_value_strings = custom_color_values_for_ui(&resolved_theme.colors);
+    let custom_color_preview_fallback = parse_theme_color(&resolved_theme.colors.accent);
+    let custom_color_preview_values: Vec<slint::Color> = custom_color_value_strings
+        .iter()
+        .map(|value| parse_slint_color(value).unwrap_or(custom_color_preview_fallback))
+        .collect();
+    let custom_color_values: Vec<slint::SharedString> = custom_color_value_strings
+        .into_iter()
+        .map(|value| value.into())
+        .collect();
     ui.set_settings_custom_color_values(ModelRc::from(Rc::new(VecModel::from(
         custom_color_values.clone(),
     ))));
     ui.set_settings_custom_color_draft_values(ModelRc::from(Rc::new(VecModel::from(
         custom_color_values,
+    ))));
+    ui.set_settings_custom_color_draft_preview_colors(ModelRc::from(Rc::new(VecModel::from(
+        custom_color_preview_values,
     ))));
     ui.set_show_custom_color_scheme_dialog(false);
     ui.set_show_custom_color_picker_dialog(false);

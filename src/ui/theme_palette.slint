@@ -1,0 +1,32 @@
+import { Palette } from "std-widgets.slint";
+
+export global AppPalette {
+    in-out property <ColorScheme> color-scheme <=> Palette.color-scheme;
+    in-out property <color> window-bg: #282828;
+    in-out property <color> panel-bg: #202020;
+    in-out property <color> panel-bg-alt: #252525;
+    in-out property <color> border: #3a3a3a;
+    in-out property <color> text-primary: #eeeeee;
+    in-out property <color> text-secondary: #aaaaaa;
+    in-out property <color> text-muted: #888888;
+    in-out property <color> accent: #2a6def;
+    in-out property <color> accent-on: #ffffff;
+    in-out property <color> warning: #d6b07a;
+    in-out property <color> danger: #db3f3f;
+    in-out property <color> success: #5da8ff;
+
+    out property <color> panel-bg-elevated: AppPalette.panel-bg-alt;
+    out property <color> overlay-scrim: AppPalette.color-scheme == ColorScheme.dark ? #00000088 : #0D1A2B33;
+    out property <color> separator: AppPalette.border.mix(AppPalette.panel-bg, 0.45);
+    out property <color> text-disabled: AppPalette.text-muted;
+    out property <color> accent-soft-bg: AppPalette.accent.mix(AppPalette.panel-bg, 0.72);
+    out property <color> accent-soft-border: AppPalette.accent.mix(AppPalette.border, 0.55);
+    out property <color> control-hover-bg: AppPalette.panel-bg-alt.mix(AppPalette.accent, 0.08);
+    out property <color> control-pressed-bg: AppPalette.panel-bg-alt.mix(AppPalette.accent, 0.16);
+    out property <color> selection-bg: AppPalette.panel-bg-alt.mix(AppPalette.accent, 0.20);
+    out property <color> selection-border: AppPalette.border.mix(AppPalette.accent, 0.45);
+    out property <color> tooltip-bg: AppPalette.panel-bg-elevated;
+    out property <color> tooltip-border: AppPalette.border;
+    out property <color> tooltip-text: AppPalette.text-primary;
+    out property <color> focus-ring: AppPalette.accent;
+}

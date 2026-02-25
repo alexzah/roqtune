@@ -1,4 +1,4 @@
-import { Palette } from "std-widgets.slint";
+import { AppPalette } from "../theme_palette.slint";
 
 export component StatusBar inherits Rectangle {
     in property <string> status-text: "";
@@ -11,9 +11,7 @@ export component StatusBar inherits Rectangle {
                 ? "Now Playing: " + root.status-text
                 : "Now Playing: " + root.status-text + " | " + root.selection-summary
         );
-    private property <bool> dark: Palette.color-scheme == ColorScheme.dark;
-
-    background: root.dark ? #1a1a1a : #e9eef5;
+    background: AppPalette.panel-bg-elevated;
 
     HorizontalLayout {
         padding-left: 12px;
@@ -22,7 +20,7 @@ export component StatusBar inherits Rectangle {
 
         Text {
             text: root.left-status-text;
-            color: root.dark ? #aaa : #516170;
+            color: AppPalette.text-secondary;
             font-size: 12px;
             vertical-alignment: center;
             overflow: elide;
@@ -31,7 +29,7 @@ export component StatusBar inherits Rectangle {
 
         Text {
             text: root.technical-info;
-            color: root.dark ? #777 : #6a7784;
+            color: AppPalette.text-muted;
             font-size: 11px;
             vertical-alignment: center;
             overflow: elide;
