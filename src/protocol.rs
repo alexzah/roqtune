@@ -948,6 +948,7 @@ pub struct TrackMetadataSummary {
 
 /// Runtime configuration updates and hardware notifications.
 #[derive(Debug, Clone)]
+#[allow(clippy::large_enum_variant)]
 #[allow(dead_code)]
 pub enum ConfigDeltaEntry {
     Output(OutputConfigDelta),
@@ -983,7 +984,6 @@ pub struct UiConfigDelta {
     pub show_layout_edit_intro: Option<bool>,
     pub show_tooltips: Option<bool>,
     pub auto_scroll_to_playing_track: Option<bool>,
-    pub dark_mode: Option<bool>,
     pub playlist_album_art_column_min_width_px: Option<u32>,
     pub playlist_album_art_column_max_width_px: Option<u32>,
     pub layout: Option<LayoutConfig>,

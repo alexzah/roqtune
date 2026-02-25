@@ -108,7 +108,15 @@ impl AppRuntime {
         let config_content = std::fs::read_to_string(config_file.clone()).unwrap();
         let mut config =
             crate::sanitize_config(toml::from_str::<Config>(&config_content).unwrap_or_default());
-        config.ui.layout = load_layout_file(&layout_file);
+        let layout_text = std::fs::read_to_string(&layout_file).ok();
+        let mut layout = load_layout_file(&layout_file);
+        let has_explicit_color_scheme = layout_text
+            .as_deref()
+            .is_some_and(|text| text.contains("color_scheme"));
+        if !has_explicit_color_scheme && config.ui.legacy_dark_mode == Some(false) {
+            layout.color_scheme = crate::theme::ROQTUNE_LIGHT_SCHEME_ID.to_string();
+        }
+        config.ui.layout = layout;
         hydrate_ui_columns_from_layout(&mut config);
         let config = crate::sanitize_config(config);
         // Use a config-only snapshot so startup never blocks on hardware probe.

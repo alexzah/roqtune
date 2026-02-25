@@ -182,7 +182,10 @@ This checklist is intended to cover all currently user-verifiable app functional
   - [ ] Show layout editing tutorial.
   - [ ] Show tooltips.
   - [ ] Auto scroll to playing track.
-  - [ ] Dark mode.
+- [ ] Appearance:
+  - [ ] Switch between built-in color scheme presets.
+  - [ ] Select `Custom`, edit component colors, save dialog, and apply settings.
+  - [ ] Confirm chosen scheme and custom values persist after restart.
 - [ ] Cancel closes dialog without applying pending changes.
 - [ ] Apply commits changes and updates runtime/UI state.
 

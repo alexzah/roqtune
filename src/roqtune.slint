@@ -21,6 +21,32 @@ import { AppIcons } from "ui/icons.slint";
 
 export global AppPalette {
     in-out property <ColorScheme> color-scheme <=> Palette.color-scheme;
+    in-out property <color> window-bg: #282828;
+    in-out property <color> panel-bg: #202020;
+    in-out property <color> panel-bg-alt: #252525;
+    in-out property <color> panel-bg-elevated: #262626;
+    in-out property <color> overlay-scrim: #00000088;
+    in-out property <color> border: #3a3a3a;
+    in-out property <color> separator: #333333;
+    in-out property <color> text-primary: #eeeeee;
+    in-out property <color> text-secondary: #aaaaaa;
+    in-out property <color> text-muted: #888888;
+    in-out property <color> text-disabled: #777777;
+    in-out property <color> accent: #2a6def;
+    in-out property <color> accent-on: #ffffff;
+    in-out property <color> accent-soft-bg: #1f3248;
+    in-out property <color> accent-soft-border: #3f5470;
+    in-out property <color> control-hover-bg: #2d2d2d;
+    in-out property <color> control-pressed-bg: #363636;
+    in-out property <color> selection-bg: #2f3f56;
+    in-out property <color> selection-border: #496180;
+    in-out property <color> tooltip-bg: #101010eb;
+    in-out property <color> tooltip-border: #4c4c4c;
+    in-out property <color> tooltip-text: #dedede;
+    in-out property <color> warning: #d6b07a;
+    in-out property <color> danger: #db3f3f;
+    in-out property <color> success: #5da8ff;
+    in-out property <color> focus-ring: #5da8ff;
 }
 
 export component AppWindow inherits Window {
@@ -30,14 +56,14 @@ export component AppWindow inherits Window {
     min-height: 400px;
     title: "roqtune";
     in-out property <bool> ui_dark_mode: true;
-    property <brush> theme_window_bg: root.ui_dark_mode ? #282828 : #eff3f9;
-    property <brush> theme_surface_bg: root.ui_dark_mode ? #202020 : #ffffff;
-    property <brush> theme_surface_alt_bg: root.ui_dark_mode ? #252525 : #eef3f9;
-    property <brush> theme_border: root.ui_dark_mode ? #3a3a3a : #c7d1dd;
-    property <brush> theme_separator: root.ui_dark_mode ? #333 : #d4dde8;
-    property <brush> theme_text_primary: root.ui_dark_mode ? #eee : #253444;
-    property <brush> theme_text_secondary: root.ui_dark_mode ? #aaa : #556576;
-    property <brush> theme_text_muted: root.ui_dark_mode ? #888 : #6c7a89;
+    property <brush> theme_window_bg: AppPalette.window-bg;
+    property <brush> theme_surface_bg: AppPalette.panel-bg;
+    property <brush> theme_surface_alt_bg: AppPalette.panel-bg-alt;
+    property <brush> theme_border: AppPalette.border;
+    property <brush> theme_separator: AppPalette.separator;
+    property <brush> theme_text_primary: AppPalette.text-primary;
+    property <brush> theme_text_secondary: AppPalette.text-secondary;
+    property <brush> theme_text_muted: AppPalette.text-muted;
     background: root.theme_window_bg;
 
     key-handler := FocusScope {
@@ -4747,18 +4773,18 @@ export component AppWindow inherits Window {
 
                             Rectangle {
                                 height: 32px;
-                                background: settings-theme-toggle-ta.has-hover
-                                    ? (root.ui_dark_mode ? #2d2d2d : #e9f0f8)
+                                background: settings-theme-picker-ta.has-hover
+                                    ? AppPalette.control-hover-bg
                                     : transparent;
                                 border-radius: 4px;
                                 HorizontalLayout {
                                     spacing: 10px;
-                                    theme-label-host := Rectangle {
+                                    color-scheme-label-host := Rectangle {
                                         width: settings-dialog-panel.label_column_width + 24px;
                                         height: parent.height;
                                         background: transparent;
                                         Text {
-                                            text: "Dark mode";
+                                            text: "Color Scheme";
                                             color: root.theme_text_primary;
                                             font-size: 12px;
                                             width: parent.width;
@@ -4767,7 +4793,7 @@ export component AppWindow inherits Window {
                                             horizontal-alignment: left;
                                         }
                                         settings-theme-label-tooltip-ta := TooltipHoverArea {
-                                            tooltip-text: "Switches the entire app between dark and light mode.";
+                                            tooltip-text: "Choose a preset UI theme. Select Custom to edit named color components.";
                                             tooltip_hover_changed(is-hovered, tooltip, anchor-x-px, anchor-y-px) => {
                                                 root.tooltip_hover_changed(is-hovered, tooltip, anchor-x-px, anchor-y-px);
                                             }
@@ -4777,27 +4803,80 @@ export component AppWindow inherits Window {
                                         width: settings-dialog-panel.control_max_width;
                                         height: parent.height;
                                         background: transparent;
-                                        settings-theme-toggle := Switch {
-                                            x: parent.width - self.width - 8px;
+                                        settings-theme-picker := ComboBox {
+                                            x: max(0px, parent.width - self.width - 8px);
                                             y: (parent.height - self.height) / 2;
-                                            width: 36px;
-                                            text: "";
-                                            checked <=> root.settings_dark_mode;
+                                            width: min(parent.width - 8px, 220px);
+                                            model: root.settings_color_scheme_options;
+                                            current-index <=> root.settings_color_scheme_index;
+                                            selected(_) => {
+                                                if (root.settings_color_scheme_index == root.settings_color_scheme_options.length - 1) {
+                                                    root.settings_custom_color_draft_values = root.settings_custom_color_values;
+                                                    root.show_custom_color_scheme_dialog = true;
+                                                }
+                                            }
                                         }
                                     }
                                     Rectangle { horizontal-stretch: 1; }
                                 }
-                                settings-theme-toggle-ta := TouchArea {
+                                settings-theme-picker-ta := TouchArea {
                                     changed has-hover => {
                                         root.tooltip_hover_changed(
                                             self.has-hover,
-                                            "Switches the entire app between dark and light mode.",
-                                            floor((theme-label-host.absolute-position.x + theme-label-host.width / 2) / 1px),
-                                            floor((theme-label-host.absolute-position.y + theme-label-host.height) / 1px)
+                                            "Choose a preset UI theme. Select Custom to edit named color components.",
+                                            floor((color-scheme-label-host.absolute-position.x + color-scheme-label-host.width / 2) / 1px),
+                                            floor((color-scheme-label-host.absolute-position.y + color-scheme-label-host.height) / 1px)
                                         );
                                     }
                                     clicked => {
-                                        settings-theme-toggle.checked = !settings-theme-toggle.checked;
+                                        if (root.settings_color_scheme_index == root.settings_color_scheme_options.length - 1) {
+                                            root.settings_custom_color_draft_values = root.settings_custom_color_values;
+                                            root.show_custom_color_scheme_dialog = true;
+                                        }
+                                    }
+                                }
+                            }
+
+                            if root.settings_color_scheme_index == root.settings_color_scheme_options.length - 1 : Rectangle {
+                                height: 32px;
+                                background: custom-theme-button-ta.has-hover
+                                    ? AppPalette.control-hover-bg
+                                    : transparent;
+                                border-radius: 4px;
+                                HorizontalLayout {
+                                    spacing: 10px;
+                                    Rectangle {
+                                        width: settings-dialog-panel.label_column_width + 24px;
+                                        height: parent.height;
+                                        Text {
+                                            text: "Custom Colors";
+                                            color: root.theme_text_primary;
+                                            font-size: 12px;
+                                            width: parent.width;
+                                            height: parent.height;
+                                            vertical-alignment: center;
+                                            horizontal-alignment: left;
+                                        }
+                                    }
+                                    Rectangle {
+                                        width: settings-dialog-panel.control_max_width;
+                                        height: parent.height;
+                                        Button {
+                                            text: "Edit Components...";
+                                            x: max(0px, parent.width - self.width - 8px);
+                                            y: (parent.height - self.height) / 2;
+                                            clicked => {
+                                                root.settings_custom_color_draft_values = root.settings_custom_color_values;
+                                                root.show_custom_color_scheme_dialog = true;
+                                            }
+                                        }
+                                    }
+                                    Rectangle { horizontal-stretch: 1; }
+                                }
+                                custom-theme-button-ta := TouchArea {
+                                    clicked => {
+                                        root.settings_custom_color_draft_values = root.settings_custom_color_values;
+                                        root.show_custom_color_scheme_dialog = true;
                                     }
                                 }
                             }
@@ -5455,12 +5534,13 @@ export component AppWindow inherits Window {
                             root.settings_show_layout_edit_tutorial,
                             root.settings_show_tooltips,
                             root.settings_auto_scroll_to_playing_track,
-                            root.settings_dark_mode,
                             root.settings_sample_rate_mode_index,
                             root.settings_resampler_quality_index,
                             root.settings_dither_on_bitdepth_reduce,
                             root.settings_downmix_higher_channel_tracks,
-                            root.settings_cast_allow_transcode_fallback
+                            root.settings_cast_allow_transcode_fallback,
+                            root.settings_color_scheme_index,
+                            root.settings_custom_color_values
                         );
                         root.show_settings_dialog = false;
                     }
@@ -5468,6 +5548,107 @@ export component AppWindow inherits Window {
             }
         }
     }
+    }
+
+    if root.show_custom_color_scheme_dialog : Rectangle {
+        z: 155;
+        background: AppPalette.overlay-scrim;
+        TouchArea {}
+
+        Rectangle {
+            width: min(700px, max(420px, root.width - 24px));
+            height: min(560px, max(260px, root.height - 24px));
+            x: max(0px, (parent.width - self.width) / 2);
+            y: max(0px, (parent.height - self.height) / 2);
+            background: AppPalette.panel-bg-elevated;
+            border-width: 1px;
+            border-color: AppPalette.border;
+            border-radius: 6px;
+
+            VerticalLayout {
+                padding: 14px;
+                spacing: 10px;
+
+                Text {
+                    text: "Custom Color Components";
+                    color: AppPalette.text-primary;
+                    font-size: 15px;
+                    font-weight: 700;
+                }
+
+                Text {
+                    text: "Set hex values per named component (for example #2A6DEF or #2A6DEFCC).";
+                    color: AppPalette.text-secondary;
+                    font-size: 11px;
+                }
+
+                Rectangle {
+                    horizontal-stretch: 1;
+                    vertical-stretch: 1;
+                    border-width: 1px;
+                    border-color: AppPalette.border;
+                    border-radius: 4px;
+                    background: AppPalette.panel-bg;
+
+                    ScrollView {
+                        width: parent.width;
+                        height: parent.height;
+                        VerticalLayout {
+                            padding: 8px;
+                            spacing: 6px;
+                            for label[i] in root.settings_custom_color_labels : HorizontalLayout {
+                                spacing: 8px;
+                                Rectangle {
+                                    width: 210px;
+                                    height: 30px;
+                                    Text {
+                                        text: label;
+                                        color: AppPalette.text-primary;
+                                        font-size: 12px;
+                                        vertical-alignment: center;
+                                        horizontal-alignment: left;
+                                        width: parent.width;
+                                        height: parent.height;
+                                    }
+                                }
+                                LineEdit {
+                                    width: 180px;
+                                    height: 30px;
+                                    text: i < root.settings_custom_color_draft_values.length
+                                        ? root.settings_custom_color_draft_values[i]
+                                        : "";
+                                    placeholder-text: "#RRGGBB";
+                                    edited => {
+                                        root.settings_custom_theme_color_draft_edited(i, self.text);
+                                    }
+                                }
+                                Rectangle { horizontal-stretch: 1; }
+                            }
+                        }
+                    }
+                }
+
+                HorizontalLayout {
+                    spacing: 10px;
+                    Rectangle { horizontal-stretch: 1; }
+                    Button {
+                        text: "Cancel";
+                        clicked => {
+                            root.show_custom_color_scheme_dialog = false;
+                            root.settings_custom_color_draft_values = root.settings_custom_color_values;
+                        }
+                    }
+                    Button {
+                        text: "Save";
+                        primary: true;
+                        clicked => {
+                            root.settings_custom_color_values = root.settings_custom_color_draft_values;
+                            root.show_custom_color_scheme_dialog = false;
+                        }
+                    }
+                }
+            }
+        }
     }
 
     if root.show_tooltip
@@ -5492,15 +5673,15 @@ export component AppWindow inherits Window {
         height: tooltip-text-block.preferred-height + 10px;
         border-radius: 4px;
         border-width: 1px;
-        border-color: #4c4c4c;
-        background: #101010eb;
+        border-color: AppPalette.tooltip-border;
+        background: AppPalette.tooltip-bg;
 
         tooltip-text-block := Text {
             x: 8px;
             y: 5px;
             width: max(0px, parent.width - 16px);
             text: root.tooltip_text;
-            color: #dedede;
+            color: AppPalette.tooltip-text;
             font-size: 11px;
             wrap: word-wrap;
             overflow: clip;
@@ -5600,7 +5781,12 @@ export component AppWindow inherits Window {
     in-out property <bool> settings_show_layout_edit_tutorial: true;
     in-out property <bool> settings_show_tooltips: true;
     in-out property <bool> settings_auto_scroll_to_playing_track: true;
-    in-out property <bool> settings_dark_mode: true;
+    in-out property <[string]> settings_color_scheme_options: [];
+    in-out property <int> settings_color_scheme_index: 0;
+    in-out property <[string]> settings_custom_color_labels: [];
+    in-out property <[string]> settings_custom_color_values: [];
+    in-out property <[string]> settings_custom_color_draft_values: [];
+    in-out property <bool> show_custom_color_scheme_dialog: false;
     in-out property <bool> settings_dither_on_bitdepth_reduce: true;
     in-out property <bool> settings_downmix_higher_channel_tracks: true;
     in-out property <bool> settings_cast_allow_transcode_fallback: false;
@@ -5759,5 +5945,6 @@ export component AppWindow inherits Window {
     callback cast_disconnect();
     callback open_external_url(string);
     callback tooltip_hover_changed(bool, string, int, int);
-    callback apply_settings(int, int, int, int, string, string, string, string, bool, bool, bool, bool, int, int, bool, bool, bool);
+    callback settings_custom_theme_color_draft_edited(int, string);
+    callback apply_settings(int, int, int, int, string, string, string, string, bool, bool, bool, int, int, bool, bool, bool, int, [string]);
 }

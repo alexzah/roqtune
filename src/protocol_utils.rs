@@ -68,7 +68,6 @@ impl UiConfigDelta {
         self.show_layout_edit_intro.is_none()
             && self.show_tooltips.is_none()
             && self.auto_scroll_to_playing_track.is_none()
-            && self.dark_mode.is_none()
             && self.playlist_album_art_column_min_width_px.is_none()
             && self.playlist_album_art_column_max_width_px.is_none()
             && self.layout.is_none()
@@ -89,9 +88,6 @@ impl UiConfigDelta {
         }
         if newer.auto_scroll_to_playing_track.is_some() {
             self.auto_scroll_to_playing_track = newer.auto_scroll_to_playing_track;
-        }
-        if newer.dark_mode.is_some() {
-            self.dark_mode = newer.dark_mode;
         }
         if newer.playlist_album_art_column_min_width_px.is_some() {
             self.playlist_album_art_column_min_width_px =

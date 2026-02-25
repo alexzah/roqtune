@@ -21,6 +21,46 @@ version = 1
 playlist_album_art_column_min_width_px = 16
 playlist_album_art_column_max_width_px = 480
 
+# Active UI color scheme preset.
+# Built-in options currently include:
+# - roqtune_dark
+# - roqtune_light
+# - solarized_dark
+# - solarized_light
+# - dracula_dark
+# - nord_dark
+# Use `custom` to activate [custom_colors] overrides below.
+color_scheme = "roqtune_dark"
+
+# Optional named color overrides used when `color_scheme = "custom"`.
+# [custom_colors]
+# window_bg = "#282828"
+# panel_bg = "#202020"
+# panel_bg_alt = "#252525"
+# panel_bg_elevated = "#262626"
+# overlay_scrim = "#00000088"
+# border = "#3A3A3A"
+# separator = "#333333"
+# text_primary = "#EEEEEE"
+# text_secondary = "#AAAAAA"
+# text_muted = "#888888"
+# text_disabled = "#777777"
+# accent = "#2A6DEF"
+# accent_on = "#FFFFFF"
+# accent_soft_bg = "#1F3248"
+# accent_soft_border = "#3F5470"
+# control_hover_bg = "#2D2D2D"
+# control_pressed_bg = "#363636"
+# selection_bg = "#2F3F56"
+# selection_border = "#496180"
+# tooltip_bg = "#101010EB"
+# tooltip_border = "#4C4C4C"
+# tooltip_text = "#DEDEDE"
+# warning = "#D6B07A"
+# danger = "#DB3F3F"
+# success = "#5DA8FF"
+# focus_ring = "#5DA8FF"
+
 # Playlist columns are ordered and rendered in this sequence.
 # Built-in columns should keep `custom = false`.
 # Custom user columns use `custom = true`.

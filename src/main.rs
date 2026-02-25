@@ -26,6 +26,7 @@ mod protocol;
 mod protocol_utils;
 mod runtime;
 mod runtime_config;
+mod theme;
 mod ui;
 mod ui_manager;
 
@@ -73,7 +74,11 @@ use output_option_selection::{
 };
 use protocol::Message;
 use runtime_config::{RuntimeAudioState, RuntimeOutputOverride};
-use slint::{language::ColorScheme, ComponentHandle, ModelRc, VecModel};
+use slint::{ComponentHandle, ModelRc, VecModel};
+use theme::{
+    custom_color_component_labels, custom_color_values_for_ui, parse_slint_color, resolve_theme,
+    scheme_index_for_id, scheme_picker_options,
+};
 use tokio::sync::broadcast;
 // Re-export shared UI helpers at crate root for callback modules that call through `crate::...`.
 pub(crate) use ui::layout_editor_state::*;
@@ -412,7 +417,7 @@ pub(crate) fn sanitize_config(config: Config) -> Config {
             show_layout_edit_intro: config.ui.show_layout_edit_intro,
             show_tooltips: config.ui.show_tooltips,
             auto_scroll_to_playing_track: config.ui.auto_scroll_to_playing_track,
-            dark_mode: config.ui.dark_mode,
+            legacy_dark_mode: config.ui.legacy_dark_mode,
             playlist_album_art_column_min_width_px: clamped_album_art_column_min_width_px,
             playlist_album_art_column_max_width_px: clamped_album_art_column_max_width_px,
             layout: sanitized_layout,
@@ -586,14 +591,66 @@ pub(crate) fn apply_config_to_ui(
     ui.set_settings_show_layout_edit_tutorial(config.ui.show_layout_edit_intro);
     ui.set_settings_show_tooltips(config.ui.show_tooltips);
     ui.set_settings_auto_scroll_to_playing_track(config.ui.auto_scroll_to_playing_track);
-    ui.set_ui_dark_mode(config.ui.dark_mode);
-    ui.set_settings_dark_mode(config.ui.dark_mode);
-    let color_scheme = if config.ui.dark_mode {
-        ColorScheme::Dark
-    } else {
-        ColorScheme::Light
+    let resolved_theme = resolve_theme(&config.ui.layout);
+    let parse_theme_color = |value: &str| {
+        parse_slint_color(value).unwrap_or_else(|| slint::Color::from_rgb_u8(0, 0, 0))
     };
-    ui.global::<AppPalette>().set_color_scheme(color_scheme);
+    let app_palette = ui.global::<AppPalette>();
+    app_palette.set_color_scheme(resolved_theme.mode.to_slint_color_scheme());
+    app_palette.set_window_bg(parse_theme_color(&resolved_theme.colors.window_bg));
+    app_palette.set_panel_bg(parse_theme_color(&resolved_theme.colors.panel_bg));
+    app_palette.set_panel_bg_alt(parse_theme_color(&resolved_theme.colors.panel_bg_alt));
+    app_palette.set_panel_bg_elevated(parse_theme_color(&resolved_theme.colors.panel_bg_elevated));
+    app_palette.set_overlay_scrim(parse_theme_color(&resolved_theme.colors.overlay_scrim));
+    app_palette.set_border(parse_theme_color(&resolved_theme.colors.border));
+    app_palette.set_separator(parse_theme_color(&resolved_theme.colors.separator));
+    app_palette.set_text_primary(parse_theme_color(&resolved_theme.colors.text_primary));
+    app_palette.set_text_secondary(parse_theme_color(&resolved_theme.colors.text_secondary));
+    app_palette.set_text_muted(parse_theme_color(&resolved_theme.colors.text_muted));
+    app_palette.set_text_disabled(parse_theme_color(&resolved_theme.colors.text_disabled));
+    app_palette.set_accent(parse_theme_color(&resolved_theme.colors.accent));
+    app_palette.set_accent_on(parse_theme_color(&resolved_theme.colors.accent_on));
+    app_palette.set_accent_soft_bg(parse_theme_color(&resolved_theme.colors.accent_soft_bg));
+    app_palette
+        .set_accent_soft_border(parse_theme_color(&resolved_theme.colors.accent_soft_border));
+    app_palette.set_control_hover_bg(parse_theme_color(&resolved_theme.colors.control_hover_bg));
+    app_palette
+        .set_control_pressed_bg(parse_theme_color(&resolved_theme.colors.control_pressed_bg));
+    app_palette.set_selection_bg(parse_theme_color(&resolved_theme.colors.selection_bg));
+    app_palette.set_selection_border(parse_theme_color(&resolved_theme.colors.selection_border));
+    app_palette.set_tooltip_bg(parse_theme_color(&resolved_theme.colors.tooltip_bg));
+    app_palette.set_tooltip_border(parse_theme_color(&resolved_theme.colors.tooltip_border));
+    app_palette.set_tooltip_text(parse_theme_color(&resolved_theme.colors.tooltip_text));
+    app_palette.set_warning(parse_theme_color(&resolved_theme.colors.warning));
+    app_palette.set_danger(parse_theme_color(&resolved_theme.colors.danger));
+    app_palette.set_success(parse_theme_color(&resolved_theme.colors.success));
+    app_palette.set_focus_ring(parse_theme_color(&resolved_theme.colors.focus_ring));
+    ui.set_ui_dark_mode(matches!(resolved_theme.mode, theme::ThemeSchemeMode::Dark));
+    let scheme_options: Vec<slint::SharedString> = scheme_picker_options()
+        .iter()
+        .map(|(_, label)| label.as_str().into())
+        .collect();
+    ui.set_settings_color_scheme_options(ModelRc::from(Rc::new(VecModel::from(scheme_options))));
+    ui.set_settings_color_scheme_index(scheme_index_for_id(&config.ui.layout.color_scheme));
+    let custom_color_labels: Vec<slint::SharedString> = custom_color_component_labels()
+        .into_iter()
+        .map(|label| label.into())
+        .collect();
+    ui.set_settings_custom_color_labels(ModelRc::from(Rc::new(VecModel::from(
+        custom_color_labels,
+    ))));
+    let custom_color_values: Vec<slint::SharedString> =
+        custom_color_values_for_ui(&resolved_theme.colors)
+            .into_iter()
+            .map(|value| value.into())
+            .collect();
+    ui.set_settings_custom_color_values(ModelRc::from(Rc::new(VecModel::from(
+        custom_color_values.clone(),
+    ))));
+    ui.set_settings_custom_color_draft_values(ModelRc::from(Rc::new(VecModel::from(
+        custom_color_values,
+    ))));
+    ui.set_show_custom_color_scheme_dialog(false);
     ui.set_settings_dither_on_bitdepth_reduce(config.output.dither_on_bitdepth_reduce);
     ui.set_settings_downmix_higher_channel_tracks(config.output.downmix_higher_channel_tracks);
     ui.set_settings_cast_allow_transcode_fallback(config.cast.allow_transcode_fallback);
