@@ -815,6 +815,13 @@ export component AppWindow inherits Window {
                     position-percentage: root.position-percentage;
                     elapsed-text: root.format-time(root.elapsed-ms);
                     total-text: root.format-time(root.total-ms);
+                    panel-bg: AppPalette.panel-bg;
+                    text-muted: AppPalette.text-muted;
+                    track-bg: AppPalette.separator;
+                    progress-bg: AppPalette.accent;
+                    handle-bg: AppPalette.text-primary;
+                    handle-border: AppPalette.border;
+                    handle-shadow: AppPalette.overlay-scrim;
                     seek-requested(next-pos) => { root.seek-to(next-pos); }
                 }
             }
@@ -1062,6 +1069,10 @@ export component AppWindow inherits Window {
                     y: parent.content-inset;
                     width: max(0px, parent.width - parent.content-inset * 2);
                     height: max(0px, parent.height - parent.content-inset * 2);
+                    text-primary: AppPalette.text-primary;
+                    text-secondary: AppPalette.text-secondary;
+                    text-muted: AppPalette.text-muted;
+                    text-disabled: AppPalette.text-disabled;
                     display-title: panel.display_title;
                     display-artist: panel.display_artist;
                     display-album: panel.display_album;
@@ -1086,6 +1097,13 @@ export component AppWindow inherits Window {
                     y: parent.content-inset;
                     width: max(0px, parent.width - parent.content-inset * 2);
                     height: max(0px, parent.height - parent.content-inset * 2);
+                    panel-bg: AppPalette.panel-bg-alt;
+                    frame-border: AppPalette.border;
+                    frame-bg: AppPalette.panel-bg-elevated;
+                    frame-inner-border: AppPalette.separator;
+                    frame-inner-bg: AppPalette.panel-bg-alt;
+                    placeholder-icon: AppPalette.text-muted;
+                    placeholder-text: AppPalette.text-disabled;
                     art-source: panel.art_source;
                     has-art: panel.has_art;
                 }
@@ -4773,9 +4791,7 @@ export component AppWindow inherits Window {
 
                             Rectangle {
                                 height: 32px;
-                                background: settings-theme-picker-ta.has-hover
-                                    ? AppPalette.control-hover-bg
-                                    : transparent;
+                                background: transparent;
                                 border-radius: 4px;
                                 HorizontalLayout {
                                     spacing: 10px;
@@ -4818,22 +4834,6 @@ export component AppWindow inherits Window {
                                         }
                                     }
                                     Rectangle { horizontal-stretch: 1; }
-                                }
-                                settings-theme-picker-ta := TouchArea {
-                                    changed has-hover => {
-                                        root.tooltip_hover_changed(
-                                            self.has-hover,
-                                            "Choose a preset UI theme. Select Custom to edit named color components.",
-                                            floor((color-scheme-label-host.absolute-position.x + color-scheme-label-host.width / 2) / 1px),
-                                            floor((color-scheme-label-host.absolute-position.y + color-scheme-label-host.height) / 1px)
-                                        );
-                                    }
-                                    clicked => {
-                                        if (root.settings_color_scheme_index == root.settings_color_scheme_options.length - 1) {
-                                            root.settings_custom_color_draft_values = root.settings_custom_color_values;
-                                            root.show_custom_color_scheme_dialog = true;
-                                        }
-                                    }
                                 }
                             }
 

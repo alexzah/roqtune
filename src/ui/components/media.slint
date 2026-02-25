@@ -121,6 +121,13 @@ export component SeekBarControl inherits Rectangle {
     in property <string> total-text: "0:00";
     callback seek-requested(float);
     private property <bool> dark: Palette.color-scheme == ColorScheme.dark;
+    in property <color> panel-bg: root.dark ? #242424 : #f3f6fb;
+    in property <color> text-muted: root.dark ? #888 : #5f6d7c;
+    in property <color> track-bg: root.dark ? #333 : #d1dae6;
+    in property <color> progress-bg: #2a6def;
+    in property <color> handle-bg: white;
+    in property <color> handle-border: root.dark ? #111111 : #4f6174;
+    in property <color> handle-shadow: root.dark ? #00000080 : #00000033;
     private property <bool> scrub-active: false;
     private property <float> scrub-position: max(0, min(1, root.position-percentage));
     private property <bool> pending-seek-active: false;
@@ -160,7 +167,7 @@ export component SeekBarControl inherits Rectangle {
         }
     }
 
-    background: root.dark ? #242424 : #f3f6fb;
+    background: root.panel-bg;
     HorizontalLayout {
         padding-left: root.side-padding;
         padding-right: root.side-padding;
@@ -170,7 +177,7 @@ export component SeekBarControl inherits Rectangle {
 
         elapsed-label := Text {
             text: root.elapsed-text;
-            color: root.dark ? #888 : #5f6d7c;
+            color: root.text-muted;
             font-size: root.time-font-size;
             vertical-alignment: center;
             horizontal-alignment: right;
@@ -180,14 +187,14 @@ export component SeekBarControl inherits Rectangle {
         seekbar := Rectangle {
             height: root.seek-height;
             border-radius: 3px;
-            background: root.dark ? #333 : #d1dae6;
+            background: root.track-bg;
             horizontal-stretch: 1;
             Rectangle {
                 x: 0;
                 y: 0;
                 width: seekbar.width * root.display-position;
                 height: parent.height;
-                background: #2a6def;
+                background: root.progress-bg;
                 border-radius: 3px;
                 animate width { duration: 150ms; easing: ease-out; }
             }
@@ -196,13 +203,13 @@ export component SeekBarControl inherits Rectangle {
                 height: root.handle-base-size;
                 x: (seekbar.width * root.display-position) - self.width / 2;
                 y: (parent.height - self.height) / 2;
-                background: white;
+                background: root.handle-bg;
                 border-radius: 6px;
                 border-width: 1px;
-                border-color: root.dark ? #111111 : #4f6174;
+                border-color: root.handle-border;
                 drop-shadow-offset-y: 1px;
                 drop-shadow-blur: 2px;
-                drop-shadow-color: root.dark ? #00000080 : #00000033;
+                drop-shadow-color: root.handle-shadow;
                 animate x { duration: 150ms; easing: ease-out; }
             }
             states [
@@ -247,7 +254,7 @@ export component SeekBarControl inherits Rectangle {
 
         total-label := Text {
             text: root.total-text;
-            color: root.dark ? #888 : #5f6d7c;
+            color: root.text-muted;
             font-size: root.time-font-size;
             vertical-alignment: center;
             horizontal-alignment: right;
@@ -270,6 +277,10 @@ export component MetadataViewer inherits Rectangle {
     private property <bool> dark: Palette.color-scheme == ColorScheme.dark;
     private property <bool> compact: root.width < 220px || root.height < 120px;
     private property <bool> dense: root.width < 170px || root.height < 90px;
+    in property <color> text-primary: root.dark ? #eee : #243444;
+    in property <color> text-secondary: root.dark ? #ccc : #4d5d6d;
+    in property <color> text-muted: root.dark ? #aaa : #627182;
+    in property <color> text-disabled: root.dark ? #7c7c7c : #6f7d8c;
     private property <length> title-font-size: root.dense ? 11px : root.compact ? 12px : 14px;
     private property <length> line-font-size: root.dense ? 10px : root.compact ? 11px : 13px;
     private property <length> minor-font-size: root.dense ? 9px : root.compact ? 10px : 11px;
@@ -282,7 +293,7 @@ export component MetadataViewer inherits Rectangle {
         spacing: root.block-spacing;
         if root.display-title != "" : Text {
             text: root.display-title;
-            color: root.dark ? #eee : #243444;
+            color: root.text-primary;
             font-size: root.title-font-size;
             font-weight: 700;
             wrap: root.compact ? no-wrap : word-wrap;
@@ -290,14 +301,14 @@ export component MetadataViewer inherits Rectangle {
         }
         if root.display-artist != "" : Text {
             text: root.display-artist;
-            color: root.dark ? #ccc : #4d5d6d;
+            color: root.text-secondary;
             font-size: root.line-font-size;
             wrap: root.dense ? no-wrap : word-wrap;
             overflow: elide;
         }
         if root.display-album != "" : Text {
             text: root.display-album;
-            color: root.dark ? #aaa : #627182;
+            color: root.text-muted;
             font-size: root.line-font-size;
             wrap: root.dense ? no-wrap : word-wrap;
             overflow: elide;
@@ -306,12 +317,12 @@ export component MetadataViewer inherits Rectangle {
             spacing: root.meta-spacing;
             if root.display-date != "" : Text {
                 text: root.display-date;
-                color: root.dark ? #888 : #6f7d8c;
+                color: root.text-muted;
                 font-size: root.minor-font-size;
             }
             if root.display-genre != "" : Text {
                 text: root.display-genre;
-                color: root.dark ? #888 : #6f7d8c;
+                color: root.text-muted;
                 font-size: root.minor-font-size;
                 horizontal-stretch: 1;
                 overflow: elide;
@@ -326,7 +337,7 @@ export component MetadataViewer inherits Rectangle {
 
         Text {
             text: "No track selected";
-            color: root.dark ? #7c7c7c : #6f7d8c;
+            color: root.text-disabled;
             font-size: root.compact ? 11px : 14px;
             font-weight: 600;
             horizontal-alignment: center;
@@ -339,6 +350,13 @@ export component AlbumArtViewer inherits Rectangle {
     in property <image> art-source;
     in property <bool> has-art: false;
     private property <bool> dark: Palette.color-scheme == ColorScheme.dark;
+    in property <color> panel-bg: root.dark ? #202020 : #f4f7fb;
+    in property <color> frame-border: root.dark ? #393939 : #c7d0db;
+    in property <color> frame-bg: root.dark ? #292929 : #ecf1f8;
+    in property <color> frame-inner-border: root.dark ? #454545 : #c1ccd9;
+    in property <color> frame-inner-bg: root.dark ? #2f2f2f : #e2eaf4;
+    in property <color> placeholder-icon: root.dark ? #8d8d8d : #6b7786;
+    in property <color> placeholder-text: root.dark ? #767676 : #6b7786;
     private property <bool> compact: root.width < 180px || root.height < 140px;
     private property <bool> dense: root.width < 130px || root.height < 100px;
     private property <length> placeholder-padding: root.dense ? 8px : root.compact ? 12px : 24px;
@@ -348,7 +366,7 @@ export component AlbumArtViewer inherits Rectangle {
     private property <bool> show-placeholder-label: root.width >= 120px && root.height >= 96px;
 
     vertical-stretch: 1;
-    background: root.dark ? #202020 : #f4f7fb;
+    background: root.panel-bg;
     border-radius: 4px;
 
     if root.has-art : Image {
@@ -368,8 +386,8 @@ export component AlbumArtViewer inherits Rectangle {
         y: (parent.height - self.height) / 2;
         border-radius: 6px;
         border-width: 1px;
-        border-color: root.dark ? #393939 : #c7d0db;
-        background: root.dark ? #292929 : #ecf1f8;
+        border-color: root.frame-border;
+        background: root.frame-bg;
 
         Rectangle {
             x: root.placeholder-inner-padding;
@@ -378,8 +396,8 @@ export component AlbumArtViewer inherits Rectangle {
             height: max(0px, parent.height - root.placeholder-inner-padding * 2);
             border-radius: 4px;
             border-width: 1px;
-            border-color: root.dark ? #454545 : #c1ccd9;
-            background: root.dark ? #2f2f2f : #e2eaf4;
+            border-color: root.frame-inner-border;
+            background: root.frame-inner-bg;
 
             VerticalLayout {
                 width: parent.width;
@@ -393,11 +411,11 @@ export component AlbumArtViewer inherits Rectangle {
                     height: root.placeholder-icon-size;
                     x: (parent.width - self.width) / 2;
                     image-fit: contain;
-                    colorize: root.dark ? #8d8d8d : #6b7786;
+                    colorize: root.placeholder-icon;
                 }
                 if root.show-placeholder-label : Text {
                     text: "No album art";
-                    color: root.dark ? #767676 : #6b7786;
+                    color: root.placeholder-text;
                     font-size: root.dense ? 9px : 11px;
                     horizontal-alignment: center;
                     vertical-alignment: center;
