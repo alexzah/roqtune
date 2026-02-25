@@ -12,7 +12,7 @@ pub const CUSTOM_COLOR_SCHEME_ID: &str = "custom";
 pub const ROQTUNE_LIGHT_SCHEME_ID: &str = "roqtune_light";
 
 /// Names shown in the custom color editor and persisted custom value order.
-pub const COLOR_COMPONENT_DEFINITIONS: [(&str, &str); 12] = [
+pub const COLOR_COMPONENT_DEFINITIONS: [(&str, &str); 15] = [
     ("window_bg", "Window Background"),
     ("panel_bg", "Panel Background"),
     ("panel_bg_alt", "Panel Background (Alt)"),
@@ -25,6 +25,9 @@ pub const COLOR_COMPONENT_DEFINITIONS: [(&str, &str); 12] = [
     ("warning", "Warning"),
     ("danger", "Danger"),
     ("success", "Success"),
+    ("control_hover_bg", "Control Hover Background"),
+    ("selection_bg", "Selection Background"),
+    ("selection_border", "Selection Border"),
 ];
 
 #[derive(Debug, Clone, Copy, serde::Deserialize, serde::Serialize, PartialEq, Eq)]
@@ -227,6 +230,9 @@ fn color_component_value(colors: &ThemeColorComponents, key: &str) -> String {
         "warning" => colors.warning.clone(),
         "danger" => colors.danger.clone(),
         "success" => colors.success.clone(),
+        "control_hover_bg" => colors.control_hover_bg.clone(),
+        "selection_bg" => colors.selection_bg.clone(),
+        "selection_border" => colors.selection_border.clone(),
         _ => String::new(),
     }
 }
@@ -246,6 +252,9 @@ fn set_color_component_value(colors: &mut ThemeColorComponents, key: &str, value
         "warning" => colors.warning = normalized,
         "danger" => colors.danger = normalized,
         "success" => colors.success = normalized,
+        "control_hover_bg" => colors.control_hover_bg = normalized,
+        "selection_bg" => colors.selection_bg = normalized,
+        "selection_border" => colors.selection_border = normalized,
         _ => {}
     }
 }
@@ -287,6 +296,15 @@ fn sanitize_color_components(
         warning: normalized_or_fallback(&candidate.warning, &fallback.warning),
         danger: normalized_or_fallback(&candidate.danger, &fallback.danger),
         success: normalized_or_fallback(&candidate.success, &fallback.success),
+        control_hover_bg: normalized_or_fallback(
+            &candidate.control_hover_bg,
+            &fallback.control_hover_bg,
+        ),
+        selection_bg: normalized_or_fallback(&candidate.selection_bg, &fallback.selection_bg),
+        selection_border: normalized_or_fallback(
+            &candidate.selection_border,
+            &fallback.selection_border,
+        ),
     }
 }
 

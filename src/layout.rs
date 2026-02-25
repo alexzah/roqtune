@@ -291,6 +291,12 @@ pub struct ThemeColorComponents {
     pub warning: String,
     pub danger: String,
     pub success: String,
+    #[serde(default)]
+    pub control_hover_bg: String,
+    #[serde(default)]
+    pub selection_bg: String,
+    #[serde(default)]
+    pub selection_border: String,
 }
 
 /// Persistent layout preferences.

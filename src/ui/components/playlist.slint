@@ -139,9 +139,7 @@ export component TrackRow inherits Rectangle {
     height: root.row-height;
     property <brush> idle-background: data.selected
         ? AppPalette.selection-bg
-        : root.is-playing
-            ? AppPalette.accent-soft-bg
-            : transparent;
+        : transparent;
     background: root.data.unavailable
         ? (data.selected
             ? AppPalette.panel-bg-alt
@@ -149,9 +147,7 @@ export component TrackRow inherits Rectangle {
         : is-hover
             ? data.selected
                 ? AppPalette.selection-border.mix(AppPalette.selection-bg, 0.6)
-                : root.is-playing
-                    ? AppPalette.accent-soft-border.mix(AppPalette.accent-soft-bg, 0.6)
-                    : AppPalette.control-hover-bg
+                : AppPalette.control-hover-bg
             : root.idle-background;
     animate background { duration: 100ms; }
     opacity: root.data.unavailable ? 0.68 : 1.0;
@@ -218,13 +214,9 @@ export component TrackRow inherits Rectangle {
                     ? AppPalette.text-disabled
                     : data.selected
                         ? AppPalette.text-primary
-                        : root.is-playing
-                            ? (index < root.headers.length && root.headers[index] == "Title")
-                                ? AppPalette.accent
-                                : AppPalette.text-secondary
-                            : (index < root.headers.length && root.headers[index] == "Title")
-                                ? AppPalette.text-primary
-                                : AppPalette.text-secondary;
+                        : (index < root.headers.length && root.headers[index] == "Title")
+                            ? AppPalette.text-primary
+                            : AppPalette.text-secondary;
                 font-size: 13px;
                 vertical-alignment: center;
                 overflow: elide;

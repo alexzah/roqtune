@@ -609,6 +609,9 @@ pub(crate) fn apply_config_to_ui(
     app_palette.set_warning(parse_theme_color(&resolved_theme.colors.warning));
     app_palette.set_danger(parse_theme_color(&resolved_theme.colors.danger));
     app_palette.set_success(parse_theme_color(&resolved_theme.colors.success));
+    app_palette.set_control_hover_bg(parse_theme_color(&resolved_theme.colors.control_hover_bg));
+    app_palette.set_selection_bg(parse_theme_color(&resolved_theme.colors.selection_bg));
+    app_palette.set_selection_border(parse_theme_color(&resolved_theme.colors.selection_border));
     ui.set_ui_dark_mode(matches!(resolved_theme.mode, theme::ThemeSchemeMode::Dark));
     let scheme_options: Vec<slint::SharedString> = scheme_picker_options()
         .iter()

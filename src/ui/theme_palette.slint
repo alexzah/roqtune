@@ -14,6 +14,9 @@ export global AppPalette {
     in-out property <color> warning: #d6b07a;
     in-out property <color> danger: #db3f3f;
     in-out property <color> success: #5da8ff;
+    in-out property <color> control-hover-bg: #2D323B;
+    in-out property <color> selection-bg: #343B47;
+    in-out property <color> selection-border: #50617A;
 
     out property <color> panel-bg-elevated: AppPalette.panel-bg-alt;
     out property <color> overlay-scrim: AppPalette.color-scheme == ColorScheme.dark ? #00000088 : #0D1A2B33;
@@ -21,10 +24,7 @@ export global AppPalette {
     out property <color> text-disabled: AppPalette.text-muted;
     out property <color> accent-soft-bg: AppPalette.accent.mix(AppPalette.panel-bg, 0.72);
     out property <color> accent-soft-border: AppPalette.accent.mix(AppPalette.border, 0.55);
-    out property <color> control-hover-bg: AppPalette.panel-bg-alt.mix(AppPalette.accent, 0.08);
     out property <color> control-pressed-bg: AppPalette.panel-bg-alt.mix(AppPalette.accent, 0.16);
-    out property <color> selection-bg: AppPalette.panel-bg-alt.mix(AppPalette.accent, 0.20);
-    out property <color> selection-border: AppPalette.border.mix(AppPalette.accent, 0.45);
     out property <color> tooltip-bg: AppPalette.panel-bg-elevated;
     out property <color> tooltip-border: AppPalette.border;
     out property <color> tooltip-text: AppPalette.text-primary;

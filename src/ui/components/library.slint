@@ -9,15 +9,11 @@ export component LibraryRow inherits Rectangle {
     height: 34px;
     property <brush> idle-background: root.data.selected
         ? AppPalette.selection-bg
-        : root.data.is_playing
-            ? AppPalette.accent-soft-bg
         : transparent;
     background: is-hover
         ? root.data.selected
             ? AppPalette.selection-border.mix(AppPalette.selection-bg, 0.6)
-            : root.data.is_playing
-                ? AppPalette.accent-soft-border.mix(AppPalette.accent-soft-bg, 0.6)
-                : AppPalette.control-hover-bg
+            : AppPalette.control-hover-bg
         : root.idle-background;
     border-radius: 2px;
 
@@ -87,9 +83,7 @@ export component LibraryRow inherits Rectangle {
                     text: root.data.primary;
                     color: root.data.selected
                         ? AppPalette.text-primary
-                        : root.data.is_playing
-                            ? AppPalette.accent
-                            : AppPalette.text-primary;
+                        : AppPalette.text-primary;
                     font-size: 12px;
                     overflow: elide;
                     horizontal-alignment: left;
@@ -101,9 +95,7 @@ export component LibraryRow inherits Rectangle {
                 text: root.data.secondary;
                 color: root.data.selected
                     ? AppPalette.text-secondary
-                    : root.data.is_playing
-                        ? AppPalette.text-secondary
-                        : AppPalette.text-muted;
+                    : AppPalette.text-muted;
                 font-size: 11px;
                 overflow: elide;
                 horizontal-alignment: left;
