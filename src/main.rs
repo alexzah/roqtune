@@ -600,31 +600,15 @@ pub(crate) fn apply_config_to_ui(
     app_palette.set_window_bg(parse_theme_color(&resolved_theme.colors.window_bg));
     app_palette.set_panel_bg(parse_theme_color(&resolved_theme.colors.panel_bg));
     app_palette.set_panel_bg_alt(parse_theme_color(&resolved_theme.colors.panel_bg_alt));
-    app_palette.set_panel_bg_elevated(parse_theme_color(&resolved_theme.colors.panel_bg_elevated));
-    app_palette.set_overlay_scrim(parse_theme_color(&resolved_theme.colors.overlay_scrim));
     app_palette.set_border(parse_theme_color(&resolved_theme.colors.border));
-    app_palette.set_separator(parse_theme_color(&resolved_theme.colors.separator));
     app_palette.set_text_primary(parse_theme_color(&resolved_theme.colors.text_primary));
     app_palette.set_text_secondary(parse_theme_color(&resolved_theme.colors.text_secondary));
     app_palette.set_text_muted(parse_theme_color(&resolved_theme.colors.text_muted));
-    app_palette.set_text_disabled(parse_theme_color(&resolved_theme.colors.text_disabled));
     app_palette.set_accent(parse_theme_color(&resolved_theme.colors.accent));
     app_palette.set_accent_on(parse_theme_color(&resolved_theme.colors.accent_on));
-    app_palette.set_accent_soft_bg(parse_theme_color(&resolved_theme.colors.accent_soft_bg));
-    app_palette
-        .set_accent_soft_border(parse_theme_color(&resolved_theme.colors.accent_soft_border));
-    app_palette.set_control_hover_bg(parse_theme_color(&resolved_theme.colors.control_hover_bg));
-    app_palette
-        .set_control_pressed_bg(parse_theme_color(&resolved_theme.colors.control_pressed_bg));
-    app_palette.set_selection_bg(parse_theme_color(&resolved_theme.colors.selection_bg));
-    app_palette.set_selection_border(parse_theme_color(&resolved_theme.colors.selection_border));
-    app_palette.set_tooltip_bg(parse_theme_color(&resolved_theme.colors.tooltip_bg));
-    app_palette.set_tooltip_border(parse_theme_color(&resolved_theme.colors.tooltip_border));
-    app_palette.set_tooltip_text(parse_theme_color(&resolved_theme.colors.tooltip_text));
     app_palette.set_warning(parse_theme_color(&resolved_theme.colors.warning));
     app_palette.set_danger(parse_theme_color(&resolved_theme.colors.danger));
     app_palette.set_success(parse_theme_color(&resolved_theme.colors.success));
-    app_palette.set_focus_ring(parse_theme_color(&resolved_theme.colors.focus_ring));
     ui.set_ui_dark_mode(matches!(resolved_theme.mode, theme::ThemeSchemeMode::Dark));
     let scheme_options: Vec<slint::SharedString> = scheme_picker_options()
         .iter()
@@ -651,6 +635,12 @@ pub(crate) fn apply_config_to_ui(
         custom_color_values,
     ))));
     ui.set_show_custom_color_scheme_dialog(false);
+    ui.set_show_custom_color_picker_dialog(false);
+    ui.set_settings_custom_color_picker_target_index(-1);
+    ui.set_settings_custom_color_picker_target_label("".into());
+    ui.set_settings_custom_color_picker_r(42.0);
+    ui.set_settings_custom_color_picker_g(109.0);
+    ui.set_settings_custom_color_picker_b(239.0);
     ui.set_settings_dither_on_bitdepth_reduce(config.output.dither_on_bitdepth_reduce);
     ui.set_settings_downmix_higher_channel_tracks(config.output.downmix_higher_channel_tracks);
     ui.set_settings_cast_allow_transcode_fallback(config.cast.allow_transcode_fallback);

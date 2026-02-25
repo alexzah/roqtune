@@ -1,4 +1,4 @@
-import { Button, ComboBox, VerticalBox, StandardTableView, ScrollView, LineEdit, ListView, Switch, Palette } from "std-widgets.slint";
+import { Button, ComboBox, VerticalBox, StandardTableView, ScrollView, LineEdit, ListView, Switch, Slider, Palette } from "std-widgets.slint";
 
 import {
     LayoutAlbumArtViewerPanelModel,
@@ -24,29 +24,29 @@ export global AppPalette {
     in-out property <color> window-bg: #282828;
     in-out property <color> panel-bg: #202020;
     in-out property <color> panel-bg-alt: #252525;
-    in-out property <color> panel-bg-elevated: #262626;
-    in-out property <color> overlay-scrim: #00000088;
     in-out property <color> border: #3a3a3a;
-    in-out property <color> separator: #333333;
     in-out property <color> text-primary: #eeeeee;
     in-out property <color> text-secondary: #aaaaaa;
     in-out property <color> text-muted: #888888;
-    in-out property <color> text-disabled: #777777;
     in-out property <color> accent: #2a6def;
     in-out property <color> accent-on: #ffffff;
-    in-out property <color> accent-soft-bg: #1f3248;
-    in-out property <color> accent-soft-border: #3f5470;
-    in-out property <color> control-hover-bg: #2d2d2d;
-    in-out property <color> control-pressed-bg: #363636;
-    in-out property <color> selection-bg: #2f3f56;
-    in-out property <color> selection-border: #496180;
-    in-out property <color> tooltip-bg: #101010eb;
-    in-out property <color> tooltip-border: #4c4c4c;
-    in-out property <color> tooltip-text: #dedede;
     in-out property <color> warning: #d6b07a;
     in-out property <color> danger: #db3f3f;
     in-out property <color> success: #5da8ff;
-    in-out property <color> focus-ring: #5da8ff;
+    out property <color> panel-bg-elevated: AppPalette.panel-bg-alt;
+    out property <color> overlay-scrim: AppPalette.color-scheme == ColorScheme.dark ? #00000088 : #0D1A2B33;
+    out property <color> separator: AppPalette.border.mix(AppPalette.panel-bg, 0.45);
+    out property <color> text-disabled: AppPalette.text-muted;
+    out property <color> accent-soft-bg: AppPalette.accent.mix(AppPalette.panel-bg, 0.72);
+    out property <color> accent-soft-border: AppPalette.accent.mix(AppPalette.border, 0.55);
+    out property <color> control-hover-bg: AppPalette.panel-bg-alt.mix(AppPalette.accent, 0.08);
+    out property <color> control-pressed-bg: AppPalette.panel-bg-alt.mix(AppPalette.accent, 0.16);
+    out property <color> selection-bg: AppPalette.panel-bg-alt.mix(AppPalette.accent, 0.20);
+    out property <color> selection-border: AppPalette.border.mix(AppPalette.accent, 0.45);
+    out property <color> tooltip-bg: AppPalette.panel-bg-elevated;
+    out property <color> tooltip-border: AppPalette.border;
+    out property <color> tooltip-text: AppPalette.text-primary;
+    out property <color> focus-ring: AppPalette.accent;
 }
 
 export component AppWindow inherits Window {
@@ -5577,7 +5577,7 @@ export component AppWindow inherits Window {
                 }
 
                 Text {
-                    text: "Set hex values per named component (for example #2A6DEF or #2A6DEFCC).";
+                    text: "Use Pick... for an interactive color editor, or type a hex color.";
                     color: AppPalette.text-secondary;
                     font-size: 11px;
                 }
@@ -5599,7 +5599,7 @@ export component AppWindow inherits Window {
                             for label[i] in root.settings_custom_color_labels : HorizontalLayout {
                                 spacing: 8px;
                                 Rectangle {
-                                    width: 210px;
+                                    width: 200px;
                                     height: 30px;
                                     Text {
                                         text: label;
@@ -5612,7 +5612,7 @@ export component AppWindow inherits Window {
                                     }
                                 }
                                 LineEdit {
-                                    width: 180px;
+                                    width: 150px;
                                     height: 30px;
                                     text: i < root.settings_custom_color_draft_values.length
                                         ? root.settings_custom_color_draft_values[i]
@@ -5620,6 +5620,20 @@ export component AppWindow inherits Window {
                                     placeholder-text: "#RRGGBB";
                                     edited => {
                                         root.settings_custom_theme_color_draft_edited(i, self.text);
+                                    }
+                                }
+                                Button {
+                                    text: "Pick...";
+                                    width: 74px;
+                                    height: 30px;
+                                    clicked => {
+                                        root.settings_open_custom_color_picker(
+                                            i,
+                                            label,
+                                            i < root.settings_custom_color_draft_values.length
+                                                ? root.settings_custom_color_draft_values[i]
+                                                : ""
+                                        );
                                     }
                                 }
                                 Rectangle { horizontal-stretch: 1; }
@@ -5635,6 +5649,7 @@ export component AppWindow inherits Window {
                         text: "Cancel";
                         clicked => {
                             root.show_custom_color_scheme_dialog = false;
+                            root.show_custom_color_picker_dialog = false;
                             root.settings_custom_color_draft_values = root.settings_custom_color_values;
                         }
                     }
@@ -5643,7 +5658,152 @@ export component AppWindow inherits Window {
                         primary: true;
                         clicked => {
                             root.settings_custom_color_values = root.settings_custom_color_draft_values;
+                            root.show_custom_color_picker_dialog = false;
                             root.show_custom_color_scheme_dialog = false;
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    if root.show_custom_color_picker_dialog : Rectangle {
+        z: 156;
+        background: #00000066;
+        TouchArea {}
+
+        Rectangle {
+            width: min(520px, max(340px, root.width - 40px));
+            height: min(360px, max(240px, root.height - 40px));
+            x: max(0px, (parent.width - self.width) / 2);
+            y: max(0px, (parent.height - self.height) / 2);
+            background: AppPalette.panel-bg-elevated;
+            border-width: 1px;
+            border-color: AppPalette.border;
+            border-radius: 6px;
+
+            VerticalLayout {
+                padding: 14px;
+                spacing: 10px;
+
+                Text {
+                    text: root.settings_custom_color_picker_target_label == ""
+                        ? "Pick Color"
+                        : "Pick Color: " + root.settings_custom_color_picker_target_label;
+                    color: AppPalette.text-primary;
+                    font-size: 14px;
+                    font-weight: 700;
+                }
+
+                Rectangle {
+                    height: 58px;
+                    border-width: 1px;
+                    border-color: AppPalette.border;
+                    border-radius: 5px;
+                    background: rgb(
+                        root.color-picker-channel(root.settings_custom_color_picker_r),
+                        root.color-picker-channel(root.settings_custom_color_picker_g),
+                        root.color-picker-channel(root.settings_custom_color_picker_b)
+                    );
+                }
+
+                HorizontalLayout {
+                    spacing: 8px;
+                    Text {
+                        width: 20px;
+                        text: "R";
+                        color: AppPalette.text-primary;
+                        vertical-alignment: center;
+                    }
+                    Slider {
+                        horizontal-stretch: 1;
+                        minimum: 0;
+                        maximum: 255;
+                        step: 1;
+                        value: root.settings_custom_color_picker_r;
+                        changed(next-value) => { root.settings_custom_color_picker_r = next-value; }
+                    }
+                    Text {
+                        width: 34px;
+                        text: root.color-picker-channel(root.settings_custom_color_picker_r);
+                        color: AppPalette.text-secondary;
+                        horizontal-alignment: right;
+                        vertical-alignment: center;
+                    }
+                }
+
+                HorizontalLayout {
+                    spacing: 8px;
+                    Text {
+                        width: 20px;
+                        text: "G";
+                        color: AppPalette.text-primary;
+                        vertical-alignment: center;
+                    }
+                    Slider {
+                        horizontal-stretch: 1;
+                        minimum: 0;
+                        maximum: 255;
+                        step: 1;
+                        value: root.settings_custom_color_picker_g;
+                        changed(next-value) => { root.settings_custom_color_picker_g = next-value; }
+                    }
+                    Text {
+                        width: 34px;
+                        text: root.color-picker-channel(root.settings_custom_color_picker_g);
+                        color: AppPalette.text-secondary;
+                        horizontal-alignment: right;
+                        vertical-alignment: center;
+                    }
+                }
+
+                HorizontalLayout {
+                    spacing: 8px;
+                    Text {
+                        width: 20px;
+                        text: "B";
+                        color: AppPalette.text-primary;
+                        vertical-alignment: center;
+                    }
+                    Slider {
+                        horizontal-stretch: 1;
+                        minimum: 0;
+                        maximum: 255;
+                        step: 1;
+                        value: root.settings_custom_color_picker_b;
+                        changed(next-value) => { root.settings_custom_color_picker_b = next-value; }
+                    }
+                    Text {
+                        width: 34px;
+                        text: root.color-picker-channel(root.settings_custom_color_picker_b);
+                        color: AppPalette.text-secondary;
+                        horizontal-alignment: right;
+                        vertical-alignment: center;
+                    }
+                }
+
+                Rectangle { vertical-stretch: 1; }
+
+                HorizontalLayout {
+                    spacing: 10px;
+                    Rectangle { horizontal-stretch: 1; }
+                    Button {
+                        text: "Cancel";
+                        clicked => {
+                            root.show_custom_color_picker_dialog = false;
+                        }
+                    }
+                    Button {
+                        text: "Apply";
+                        primary: true;
+                        clicked => {
+                            root.settings_apply_custom_color_picker(
+                                root.settings_custom_color_picker_target_index,
+                                root.color-picker-channel(root.settings_custom_color_picker_r),
+                                root.color-picker-channel(root.settings_custom_color_picker_g),
+                                root.color-picker-channel(root.settings_custom_color_picker_b)
+                            );
+                            root.show_custom_color_picker_dialog = false;
                         }
                     }
                 }
@@ -5787,6 +5947,12 @@ export component AppWindow inherits Window {
     in-out property <[string]> settings_custom_color_values: [];
     in-out property <[string]> settings_custom_color_draft_values: [];
     in-out property <bool> show_custom_color_scheme_dialog: false;
+    in-out property <bool> show_custom_color_picker_dialog: false;
+    in-out property <int> settings_custom_color_picker_target_index: -1;
+    in-out property <string> settings_custom_color_picker_target_label: "";
+    in-out property <float> settings_custom_color_picker_r: 42;
+    in-out property <float> settings_custom_color_picker_g: 109;
+    in-out property <float> settings_custom_color_picker_b: 239;
     in-out property <bool> settings_dither_on_bitdepth_reduce: true;
     in-out property <bool> settings_downmix_higher_channel_tracks: true;
     in-out property <bool> settings_cast_allow_transcode_fallback: false;
@@ -5820,6 +5986,17 @@ export component AppWindow inherits Window {
     
     pure function format-time-range(elapsed: int, total: int) -> string {
         return root.format-time(elapsed) + " / " + root.format-time(total);
+    }
+
+    pure function color-picker-channel(value: float) -> int {
+        let rounded = floor(value + 0.5);
+        if rounded < 0 {
+            return 0;
+        }
+        if rounded > 255 {
+            return 255;
+        }
+        return rounded;
     }
 
     // Callback declarations
@@ -5946,5 +6123,7 @@ export component AppWindow inherits Window {
     callback open_external_url(string);
     callback tooltip_hover_changed(bool, string, int, int);
     callback settings_custom_theme_color_draft_edited(int, string);
+    callback settings_open_custom_color_picker(int, string, string);
+    callback settings_apply_custom_color_picker(int, int, int, int);
     callback apply_settings(int, int, int, int, string, string, string, string, bool, bool, bool, int, int, bool, bool, bool, int, [string]);
 }
