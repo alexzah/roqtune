@@ -482,14 +482,11 @@ export component AppWindow inherits Window {
     property <int> panel_kind_spacer: 10;
     property <int> panel_kind_status_bar: 11;
     property <int> panel_kind_import_button_cluster: 12;
-    property <int> panel_preset_text_track_details_now_playing: 101;
-    property <int> panel_preset_text_track_details_selection: 102;
-    property <int> panel_preset_text_album_description: 103;
-    property <int> panel_preset_text_artist_bio: 104;
-    property <int> panel_preset_image_album_art_now_playing: 111;
-    property <int> panel_preset_image_album_art_selection: 112;
-    property <int> panel_preset_image_artist_image_now_playing: 113;
-    property <int> panel_preset_image_artist_image_selection: 114;
+    property <int> panel_preset_text_track_details: 101;
+    property <int> panel_preset_text_album_description: 102;
+    property <int> panel_preset_text_artist_bio: 103;
+    property <int> panel_preset_image_album_art: 111;
+    property <int> panel_preset_image_artist_image: 112;
     in-out property <[string]> layout_panel_options: [];
     in-out property <int> layout_editor_replace_panel_kind: root.panel_kind_none;
     in-out property <int> layout_editor_split_panel_kind: root.panel_kind_spacer;
@@ -530,16 +527,13 @@ export component AppWindow inherits Window {
         "Utility Controls",
         "",
         "Text Panel",
-        "Track Details (Now Playing)",
-        "Track Details (Selection)",
+        "Track Details",
         "Album Description",
         "Artist Bio",
         "",
         "Image Panel",
-        "Album Art (Now Playing)",
-        "Album Art (Selection)",
-        "Artist Image (Now Playing)",
-        "Artist Image (Selection)"
+        "Album Art",
+        "Artist Image"
     ];
     property <[int]> layout_replace_preset_codes: [
         -1,
@@ -548,16 +542,13 @@ export component AppWindow inherits Window {
         root.panel_kind_utility_button_cluster,
         -2,
         -3,
-        root.panel_preset_text_track_details_now_playing,
-        root.panel_preset_text_track_details_selection,
+        root.panel_preset_text_track_details,
         root.panel_preset_text_album_description,
         root.panel_preset_text_artist_bio,
         -4,
         -5,
-        root.panel_preset_image_album_art_now_playing,
-        root.panel_preset_image_album_art_selection,
-        root.panel_preset_image_artist_image_now_playing,
-        root.panel_preset_image_artist_image_selection
+        root.panel_preset_image_album_art,
+        root.panel_preset_image_artist_image
     ];
     in-out property <[LayoutSplitterModel]> layout_splitters: [];
     in-out property <int> layout_active_splitter_index: -1;
@@ -2440,7 +2431,7 @@ export component AppWindow inherits Window {
                             root.layout_select_leaf(leaf-id);
                             root.show_layout_splitter_context_menu = false;
                             root.layout_leaf_context_menu_x = min(root.width - 430px, max(8px, parent.x + self.mouse-x + 6px));
-                            root.layout_leaf_context_menu_y = min(root.height - 280px, max(8px, parent.y + self.mouse-y + 6px));
+                            root.layout_leaf_context_menu_y = min(max(8px, root.height - 372px), max(8px, parent.y + self.mouse-y + 6px));
                             root.show_layout_leaf_replace_submenu = false;
                             root.layout_leaf_replace_submenu_hover = false;
                             root.show_layout_leaf_panels_submenu = false;
@@ -3096,17 +3087,17 @@ export component AppWindow inherits Window {
                 x: (root.layout_leaf_context_menu_x + parent.x + parent.width + 4px + self.width <= root.width - 8px) ? parent.width + 4px : -self.width - 4px;
                 y: 32px;
                 width: 252px;
-                height: min(220px, root.layout_panel_submenu_labels.length * 24px + 12px);
+                height: max(
+                    24px,
+                    min(
+                        min(220px, root.layout_panel_submenu_labels.length * 24px + 12px),
+                        root.height - root.layout_leaf_context_menu_y - 54px
+                    )
+                );
                 border-radius: 6px;
                 background: AppPalette.panel-bg-elevated;
                 border-width: 1px;
                 border-color: AppPalette.border;
-
-                panels-submenu-hover-ta := TouchArea {
-                    changed has-hover => {
-                        root.layout_leaf_panels_submenu_hover = self.has-hover;
-                    }
-                }
 
                 VerticalLayout {
                     padding: 6px;
@@ -3161,17 +3152,17 @@ export component AppWindow inherits Window {
                 x: (root.layout_leaf_context_menu_x + parent.x + parent.width + 4px + self.width <= root.width - 8px) ? parent.width + 4px : -self.width - 4px;
                 y: 58px;
                 width: 252px;
-                height: min(300px, root.layout_replace_preset_labels.length * 24px + 12px);
+                height: max(
+                    24px,
+                    min(
+                        min(300px, root.layout_replace_preset_labels.length * 24px + 12px),
+                        root.height - root.layout_leaf_context_menu_y - 72px
+                    )
+                );
                 border-radius: 6px;
                 background: AppPalette.panel-bg-elevated;
                 border-width: 1px;
                 border-color: AppPalette.border;
-
-                presets-submenu-hover-ta := TouchArea {
-                    changed has-hover => {
-                        root.layout_leaf_presets_submenu_hover = self.has-hover;
-                    }
-                }
 
                 VerticalLayout {
                     padding: 6px;
@@ -3193,8 +3184,9 @@ export component AppWindow inherits Window {
                                 background: self.is-header ? transparent : (preset-option-ta.has-hover ? AppPalette.control-hover-bg : transparent);
                                 Text {
                                     text: preset-option;
-                                    color: parent.is-header ? AppPalette.text-muted : AppPalette.text-primary;
-                                    font-size: parent.is-header ? 11px : 12px;
+                                    color: parent.is-header ? AppPalette.text-primary : AppPalette.text-primary;
+                                    font-size: parent.is-header ? 12px : 12px;
+                                    font-weight: parent.is-header ? 700 : 400;
                                     x: parent.is-header ? 8px : 18px;
                                     width: max(0px, parent.width - 20px);
                                     overflow: elide;

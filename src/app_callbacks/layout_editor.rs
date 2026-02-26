@@ -669,6 +669,7 @@ pub(crate) fn register_layout_editor_callbacks(ui: &AppWindow, shared_state: &Ap
             &next,
             &shared_state_clone.persistence_paths.config_file,
         );
+        publish_runtime_from_state(&shared_state_clone, &next);
         if let Some(ui) = shared_state_clone.ui_handles.ui_handle.upgrade() {
             crate::apply_layout_to_ui(&ui, &next, workspace_width_px, workspace_height_px);
         }
@@ -735,6 +736,7 @@ pub(crate) fn register_layout_editor_callbacks(ui: &AppWindow, shared_state: &Ap
             &next,
             &shared_state_clone.persistence_paths.config_file,
         );
+        publish_runtime_from_state(&shared_state_clone, &next);
         if let Some(ui) = shared_state_clone.ui_handles.ui_handle.upgrade() {
             crate::apply_layout_to_ui(&ui, &next, workspace_width_px, workspace_height_px);
         }
@@ -775,6 +777,7 @@ pub(crate) fn register_layout_editor_callbacks(ui: &AppWindow, shared_state: &Ap
             &next,
             &shared_state_clone.persistence_paths.config_file,
         );
+        publish_runtime_from_state(&shared_state_clone, &next);
         if let Some(ui) = shared_state_clone.ui_handles.ui_handle.upgrade() {
             crate::apply_layout_to_ui(&ui, &next, workspace_width_px, workspace_height_px);
         }
@@ -823,6 +826,7 @@ pub(crate) fn register_layout_editor_callbacks(ui: &AppWindow, shared_state: &Ap
             &next,
             &shared_state_clone.persistence_paths.config_file,
         );
+        publish_runtime_from_state(&shared_state_clone, &next);
         if let Some(ui) = shared_state_clone.ui_handles.ui_handle.upgrade() {
             crate::apply_layout_to_ui(&ui, &next, workspace_width_px, workspace_height_px);
         }

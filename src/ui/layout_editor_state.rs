@@ -21,22 +21,16 @@ use crate::{
     IMPORT_CLUSTER_PRESET, TRANSPORT_CLUSTER_PRESET, UTILITY_CLUSTER_PRESET,
 };
 
-/// Text-panel preset code: track details bound to now-playing context.
-pub(crate) const PANEL_PRESET_TEXT_TRACK_DETAILS_NOW_PLAYING: i32 = 101;
-/// Text-panel preset code: track details bound to current selection context.
-pub(crate) const PANEL_PRESET_TEXT_TRACK_DETAILS_SELECTION: i32 = 102;
+/// Text-panel preset code: track details sourced from track metadata.
+pub(crate) const PANEL_PRESET_TEXT_TRACK_DETAILS: i32 = 101;
 /// Text-panel preset code: album description view.
-pub(crate) const PANEL_PRESET_TEXT_ALBUM_DESCRIPTION: i32 = 103;
+pub(crate) const PANEL_PRESET_TEXT_ALBUM_DESCRIPTION: i32 = 102;
 /// Text-panel preset code: artist biography view.
-pub(crate) const PANEL_PRESET_TEXT_ARTIST_BIO: i32 = 104;
-/// Image-panel preset code: album art bound to now-playing context.
-pub(crate) const PANEL_PRESET_IMAGE_ALBUM_ART_NOW_PLAYING: i32 = 111;
-/// Image-panel preset code: album art bound to current selection context.
-pub(crate) const PANEL_PRESET_IMAGE_ALBUM_ART_SELECTION: i32 = 112;
-/// Image-panel preset code: artist image bound to now-playing context.
-pub(crate) const PANEL_PRESET_IMAGE_ARTIST_IMAGE_NOW_PLAYING: i32 = 113;
-/// Image-panel preset code: artist image bound to current selection context.
-pub(crate) const PANEL_PRESET_IMAGE_ARTIST_IMAGE_SELECTION: i32 = 114;
+pub(crate) const PANEL_PRESET_TEXT_ARTIST_BIO: i32 = 103;
+/// Image-panel preset code: album art source.
+pub(crate) const PANEL_PRESET_IMAGE_ALBUM_ART: i32 = 111;
+/// Image-panel preset code: artist image source.
+pub(crate) const PANEL_PRESET_IMAGE_ARTIST_IMAGE: i32 = 112;
 
 fn collect_button_cluster_leaf_ids(node: &LayoutNode, out: &mut Vec<String>) {
     match node {
@@ -322,8 +316,7 @@ pub(crate) fn resolve_layout_panel_selection(
     }
     if matches!(
         panel_code,
-        PANEL_PRESET_TEXT_TRACK_DETAILS_NOW_PLAYING
-            | PANEL_PRESET_TEXT_TRACK_DETAILS_SELECTION
+        PANEL_PRESET_TEXT_TRACK_DETAILS
             | PANEL_PRESET_TEXT_ALBUM_DESCRIPTION
             | PANEL_PRESET_TEXT_ARTIST_BIO
     ) {
@@ -331,10 +324,7 @@ pub(crate) fn resolve_layout_panel_selection(
     }
     if matches!(
         panel_code,
-        PANEL_PRESET_IMAGE_ALBUM_ART_NOW_PLAYING
-            | PANEL_PRESET_IMAGE_ALBUM_ART_SELECTION
-            | PANEL_PRESET_IMAGE_ARTIST_IMAGE_NOW_PLAYING
-            | PANEL_PRESET_IMAGE_ARTIST_IMAGE_SELECTION
+        PANEL_PRESET_IMAGE_ALBUM_ART | PANEL_PRESET_IMAGE_ARTIST_IMAGE
     ) {
         return (LayoutPanelKind::AlbumArtViewer, None);
     }
@@ -363,28 +353,11 @@ pub(crate) fn apply_layout_panel_selection_preset_to_leaf(
 
     if panel == LayoutPanelKind::MetadataViewer {
         match panel_code {
-            PANEL_PRESET_TEXT_TRACK_DETAILS_NOW_PLAYING => {
+            PANEL_PRESET_TEXT_TRACK_DETAILS => {
                 upsert_metadata_viewer_panel_display_priority_for_leaf(
                     &mut layout.metadata_viewer_panel_instances,
                     leaf_id,
-                    ViewerPanelDisplayPriority::NowPlayingOnly,
-                );
-                upsert_metadata_viewer_panel_metadata_source_for_leaf(
-                    &mut layout.metadata_viewer_panel_instances,
-                    leaf_id,
-                    ViewerPanelMetadataSource::Track,
-                );
-                upsert_metadata_viewer_panel_text_format_for_leaf(
-                    &mut layout.metadata_viewer_panel_instances,
-                    leaf_id,
-                    crate::text_template::DEFAULT_METADATA_PANEL_TEMPLATE.to_string(),
-                );
-            }
-            PANEL_PRESET_TEXT_TRACK_DETAILS_SELECTION => {
-                upsert_metadata_viewer_panel_display_priority_for_leaf(
-                    &mut layout.metadata_viewer_panel_instances,
-                    leaf_id,
-                    ViewerPanelDisplayPriority::SelectionOnly,
+                    ViewerPanelDisplayPriority::Default,
                 );
                 upsert_metadata_viewer_panel_metadata_source_for_leaf(
                     &mut layout.metadata_viewer_panel_instances,
@@ -401,7 +374,7 @@ pub(crate) fn apply_layout_panel_selection_preset_to_leaf(
                 upsert_metadata_viewer_panel_display_priority_for_leaf(
                     &mut layout.metadata_viewer_panel_instances,
                     leaf_id,
-                    ViewerPanelDisplayPriority::SelectionOnly,
+                    ViewerPanelDisplayPriority::Default,
                 );
                 upsert_metadata_viewer_panel_metadata_source_for_leaf(
                     &mut layout.metadata_viewer_panel_instances,
@@ -418,7 +391,7 @@ pub(crate) fn apply_layout_panel_selection_preset_to_leaf(
                 upsert_metadata_viewer_panel_display_priority_for_leaf(
                     &mut layout.metadata_viewer_panel_instances,
                     leaf_id,
-                    ViewerPanelDisplayPriority::SelectionOnly,
+                    ViewerPanelDisplayPriority::Default,
                 );
                 upsert_metadata_viewer_panel_metadata_source_for_leaf(
                     &mut layout.metadata_viewer_panel_instances,
@@ -437,11 +410,11 @@ pub(crate) fn apply_layout_panel_selection_preset_to_leaf(
 
     if panel == LayoutPanelKind::AlbumArtViewer {
         match panel_code {
-            PANEL_PRESET_IMAGE_ALBUM_ART_NOW_PLAYING => {
+            PANEL_PRESET_IMAGE_ALBUM_ART => {
                 upsert_album_art_viewer_panel_display_priority_for_leaf(
                     &mut layout.album_art_viewer_panel_instances,
                     leaf_id,
-                    ViewerPanelDisplayPriority::NowPlayingOnly,
+                    ViewerPanelDisplayPriority::Default,
                 );
                 upsert_album_art_viewer_panel_image_source_for_leaf(
                     &mut layout.album_art_viewer_panel_instances,
@@ -449,35 +422,11 @@ pub(crate) fn apply_layout_panel_selection_preset_to_leaf(
                     ViewerPanelImageSource::AlbumArt,
                 );
             }
-            PANEL_PRESET_IMAGE_ALBUM_ART_SELECTION => {
+            PANEL_PRESET_IMAGE_ARTIST_IMAGE => {
                 upsert_album_art_viewer_panel_display_priority_for_leaf(
                     &mut layout.album_art_viewer_panel_instances,
                     leaf_id,
-                    ViewerPanelDisplayPriority::SelectionOnly,
-                );
-                upsert_album_art_viewer_panel_image_source_for_leaf(
-                    &mut layout.album_art_viewer_panel_instances,
-                    leaf_id,
-                    ViewerPanelImageSource::AlbumArt,
-                );
-            }
-            PANEL_PRESET_IMAGE_ARTIST_IMAGE_NOW_PLAYING => {
-                upsert_album_art_viewer_panel_display_priority_for_leaf(
-                    &mut layout.album_art_viewer_panel_instances,
-                    leaf_id,
-                    ViewerPanelDisplayPriority::NowPlayingOnly,
-                );
-                upsert_album_art_viewer_panel_image_source_for_leaf(
-                    &mut layout.album_art_viewer_panel_instances,
-                    leaf_id,
-                    ViewerPanelImageSource::ArtistImage,
-                );
-            }
-            PANEL_PRESET_IMAGE_ARTIST_IMAGE_SELECTION => {
-                upsert_album_art_viewer_panel_display_priority_for_leaf(
-                    &mut layout.album_art_viewer_panel_instances,
-                    leaf_id,
-                    ViewerPanelDisplayPriority::SelectionOnly,
+                    ViewerPanelDisplayPriority::Default,
                 );
                 upsert_album_art_viewer_panel_image_source_for_leaf(
                     &mut layout.album_art_viewer_panel_instances,
@@ -1118,8 +1067,8 @@ mod tests {
     use super::{
         apply_layout_panel_selection_preset_to_leaf, default_button_cluster_actions_by_index,
         quantize_splitter_ratio_to_precision, resolve_layout_panel_selection,
-        sidebar_width_from_window, update_or_replace_vec_model,
-        PANEL_PRESET_IMAGE_ARTIST_IMAGE_SELECTION, PANEL_PRESET_TEXT_ARTIST_BIO,
+        sidebar_width_from_window, update_or_replace_vec_model, PANEL_PRESET_IMAGE_ARTIST_IMAGE,
+        PANEL_PRESET_TEXT_ARTIST_BIO,
     };
     use crate::layout::{
         AlbumArtViewerPanelInstanceConfig, LayoutConfig, LayoutNode, LayoutPanelKind,
@@ -1274,7 +1223,7 @@ mod tests {
             &mut layout,
             "leaf-image",
             LayoutPanelKind::AlbumArtViewer,
-            PANEL_PRESET_IMAGE_ARTIST_IMAGE_SELECTION,
+            PANEL_PRESET_IMAGE_ARTIST_IMAGE,
             None,
         );
 
@@ -1283,10 +1232,7 @@ mod tests {
             .iter()
             .find(|instance| instance.leaf_id == "leaf-image")
             .expect("image panel instance should exist");
-        assert_eq!(
-            image.display_priority,
-            ViewerPanelDisplayPriority::SelectionOnly
-        );
+        assert_eq!(image.display_priority, ViewerPanelDisplayPriority::Default);
         assert_eq!(image.image_source, ViewerPanelImageSource::ArtistImage);
     }
 }
