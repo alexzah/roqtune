@@ -781,10 +781,12 @@ export component AppWindow inherits Window {
                 clip: true;
                 background: root.theme_surface_bg;
                 property <length> content-height: min(30px, parent.height);
+                property <length> horizontal-inset: min(16px, max(8px, self.width / 24));
+                property <length> content-width: max(0px, self.width - self.horizontal-inset * 2);
                 SeekBarControl {
-                    x: 0px;
+                    x: (parent.width - self.width) / 2;
                     y: (parent.height - self.height) / 2;
-                    width: parent.width;
+                    width: parent.content-width;
                     height: parent.content-height;
                     position-percentage: root.position-percentage;
                     elapsed-text: root.format-time(root.elapsed-ms);
@@ -3173,7 +3175,7 @@ export component AppWindow inherits Window {
                     height: parent.height;
                     enabled: true;
                     text: root.viewer_panel_settings_metadata_text_format;
-                    placeholder-text: "[size=title][b]{title}[/b][/size]\\n[size=body][i]{artist}[/i][/size]";
+                    placeholder-text: "[size=title][b]{title}[/b][/size]\\n[size=body]{artist}[/size]\\n[size=body]{album}[/size]\\n[size=caption]{date;year} {genre}[/size]";
                     edited => {
                         root.viewer_panel_settings_metadata_text_format = self.text;
                         root.set_viewer_panel_metadata_text_format(

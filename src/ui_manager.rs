@@ -430,6 +430,19 @@ const VIEWER_METADATA_SOURCE_ARTIST_BIO: i32 = 2;
 const VIEWER_METADATA_SOURCE_CUSTOM_TEXT: i32 = 3;
 const VIEWER_IMAGE_SOURCE_ALBUM_ART: i32 = 0;
 const VIEWER_IMAGE_SOURCE_ARTIST_IMAGE: i32 = 1;
+const TEXT_PANEL_COMPACT_WIDTH_THRESHOLD_PX: i32 = 220;
+const TEXT_PANEL_COMPACT_HEIGHT_THRESHOLD_PX: i32 = 120;
+const TEXT_PANEL_TIGHT_INSET_THRESHOLD_WIDTH_PX: i32 = 180;
+const TEXT_PANEL_TIGHT_INSET_THRESHOLD_HEIGHT_PX: i32 = 120;
+const TEXT_PANEL_TIGHT_INSET_PX: i32 = 4;
+const TEXT_PANEL_REGULAR_INSET_PX: i32 = 10;
+const TEXT_PANEL_COMPACT_LINE_SPACING_PX: i32 = 1;
+const TEXT_PANEL_REGULAR_LINE_SPACING_PX: i32 = 2;
+const TEXT_PANEL_LINE_HEIGHT_PERCENT: u32 = 130;
+const TEXT_PANEL_LINE_HEIGHT_ROUNDING_BIAS: u32 = 99;
+const TEXT_PANEL_LINE_HEIGHT_DENOMINATOR: u32 = 100;
+const TEXT_PANEL_MIN_BASE_FONT_SIZE_PX: u32 = 1;
+const TEXT_PANEL_MIN_VISIBLE_LINES: usize = 2;
 const LIBRARY_ITEM_KIND_SONG: i32 = 0;
 const LIBRARY_ITEM_KIND_ARTIST: i32 = 1;
 const LIBRARY_ITEM_KIND_ALBUM: i32 = 2;
@@ -3686,6 +3699,134 @@ impl UiManager {
         }
     }
 
+    fn text_panel_content_inset_px(width_px: i32, height_px: i32) -> i32 {
+        if width_px < TEXT_PANEL_TIGHT_INSET_THRESHOLD_WIDTH_PX
+            || height_px < TEXT_PANEL_TIGHT_INSET_THRESHOLD_HEIGHT_PX
+        {
+            TEXT_PANEL_TIGHT_INSET_PX
+        } else {
+            TEXT_PANEL_REGULAR_INSET_PX
+        }
+    }
+
+    fn text_panel_is_compact(width_px: i32, height_px: i32) -> bool {
+        width_px < TEXT_PANEL_COMPACT_WIDTH_THRESHOLD_PX
+            || height_px < TEXT_PANEL_COMPACT_HEIGHT_THRESHOLD_PX
+    }
+
+    fn text_panel_line_spacing_px(compact: bool) -> i32 {
+        if compact {
+            TEXT_PANEL_COMPACT_LINE_SPACING_PX
+        } else {
+            TEXT_PANEL_REGULAR_LINE_SPACING_PX
+        }
+    }
+
+    fn text_panel_estimated_line_height_px(
+        line: &text_template::RichTextLine,
+        fallback_font_size_px: u32,
+    ) -> i32 {
+        let max_font_size_px = line
+            .runs
+            .iter()
+            .map(|run| run.font_size_px)
+            .max()
+            .unwrap_or(fallback_font_size_px.max(1));
+        let scaled = max_font_size_px
+            .saturating_mul(TEXT_PANEL_LINE_HEIGHT_PERCENT)
+            .saturating_add(TEXT_PANEL_LINE_HEIGHT_ROUNDING_BIAS)
+            / TEXT_PANEL_LINE_HEIGHT_DENOMINATOR;
+        scaled.max(1).min(i32::MAX as u32) as i32
+    }
+
+    fn text_panel_visible_line_count(
+        rendered: &text_template::RenderedText,
+        height_px: i32,
+        compact: bool,
+        fallback_font_size_px: u32,
+    ) -> usize {
+        if height_px <= 0 {
+            return 0;
+        }
+        let spacing_px = Self::text_panel_line_spacing_px(compact);
+        let mut consumed_height_px = 0i32;
+        let mut visible_count = 0usize;
+        for line in &rendered.lines {
+            let line_height_px =
+                Self::text_panel_estimated_line_height_px(line, fallback_font_size_px);
+            let line_with_spacing_px = if visible_count == 0 {
+                line_height_px
+            } else {
+                line_height_px.saturating_add(spacing_px)
+            };
+            if consumed_height_px.saturating_add(line_with_spacing_px) > height_px {
+                break;
+            }
+            consumed_height_px = consumed_height_px.saturating_add(line_with_spacing_px);
+            visible_count = visible_count.saturating_add(1);
+        }
+        visible_count
+    }
+
+    fn rendered_plain_text_for_lines(lines: &[text_template::RichTextLine]) -> String {
+        let mut plain = String::new();
+        for (line_index, line) in lines.iter().enumerate() {
+            if line_index > 0 {
+                plain.push('\n');
+            }
+            for run in &line.runs {
+                plain.push_str(&run.text);
+            }
+        }
+        plain
+    }
+
+    fn fit_text_panel_rendered_text(
+        template_source: &str,
+        context: &text_template::TemplateContext<'_>,
+        content_width_px: i32,
+        content_height_px: i32,
+    ) -> text_template::RenderedText {
+        let width_px = content_width_px.max(0);
+        let height_px = content_height_px.max(0);
+        let compact = Self::text_panel_is_compact(width_px, height_px);
+        let mut base_font_size_px = Self::text_panel_base_font_size_px(width_px, height_px);
+        let mut rendered = text_template::render_template_with_options(
+            template_source,
+            context,
+            text_template::RenderOptions { base_font_size_px },
+        );
+        let min_visible_lines = if rendered.plain_text.trim().is_empty() {
+            0
+        } else {
+            rendered.lines.len().clamp(1, TEXT_PANEL_MIN_VISIBLE_LINES)
+        };
+        while base_font_size_px > TEXT_PANEL_MIN_BASE_FONT_SIZE_PX {
+            let visible = Self::text_panel_visible_line_count(
+                &rendered,
+                height_px,
+                compact,
+                base_font_size_px,
+            );
+            if visible >= min_visible_lines {
+                break;
+            }
+            base_font_size_px = base_font_size_px.saturating_sub(1);
+            rendered = text_template::render_template_with_options(
+                template_source,
+                context,
+                text_template::RenderOptions { base_font_size_px },
+            );
+        }
+        let visible_line_count =
+            Self::text_panel_visible_line_count(&rendered, height_px, compact, base_font_size_px);
+        if visible_line_count < rendered.lines.len() {
+            rendered.lines.truncate(visible_line_count);
+            rendered.plain_text = Self::rendered_plain_text_for_lines(&rendered.lines);
+        }
+        rendered
+    }
+
     fn viewer_track_context_for_display_target(
         &self,
         display_path: Option<&PathBuf>,
@@ -4013,15 +4154,21 @@ impl UiManager {
                             &template_metadata.track_number,
                             display_path,
                         );
-                        text_template::render_template_with_options(
+                        let content_inset_px = Self::text_panel_content_inset_px(
+                            row_data.width_px,
+                            row_data.height_px,
+                        );
+                        let content_width_px = row_data
+                            .width_px
+                            .saturating_sub(content_inset_px.saturating_mul(2));
+                        let content_height_px = row_data
+                            .height_px
+                            .saturating_sub(content_inset_px.saturating_mul(2));
+                        Self::fit_text_panel_rendered_text(
                             &template_source,
                             &context,
-                            text_template::RenderOptions {
-                                base_font_size_px: UiManager::text_panel_base_font_size_px(
-                                    row_data.width_px,
-                                    row_data.height_px,
-                                ),
-                            },
+                            content_width_px,
+                            content_height_px,
                         )
                     } else {
                         UiManager::empty_rendered_text()
@@ -10891,7 +11038,7 @@ mod tests {
         PlaylistColumnClass, PlaylistSortDirection, TrackMetadata, UiManager,
         ENRICHMENT_FAILED_ATTEMPT_CAP,
     };
-    use crate::{config::PlaylistColumnConfig, protocol};
+    use crate::{config::PlaylistColumnConfig, protocol, text_template};
     use std::collections::{HashMap, HashSet};
     use std::path::PathBuf;
     use std::sync::mpsc;
@@ -10967,6 +11114,29 @@ mod tests {
         }
     }
 
+    fn rendered_with_line_font_sizes(font_sizes: &[u32]) -> text_template::RenderedText {
+        let plain_text = (0..font_sizes.len())
+            .map(|index| format!("line-{index}"))
+            .collect::<Vec<String>>()
+            .join("\n");
+        let lines = font_sizes
+            .iter()
+            .enumerate()
+            .map(|(index, size)| text_template::RichTextLine {
+                runs: vec![text_template::RichTextRun {
+                    text: format!("line-{index}"),
+                    bold: false,
+                    italic: false,
+                    underline: false,
+                    font_size_px: *size,
+                    font_family: String::new(),
+                    color: None,
+                }],
+            })
+            .collect();
+        text_template::RenderedText { plain_text, lines }
+    }
+
     fn default_album_art_profile() -> ColumnWidthProfile {
         ColumnWidthProfile {
             min_px: crate::config::default_playlist_album_art_column_min_width_px(),
@@ -10992,6 +11162,35 @@ mod tests {
         let first = rx.recv().expect("expected first request");
         let latest = UiManager::coalesce_cover_art_requests(first, &rx);
         assert_eq!(latest.track_path, None);
+    }
+
+    #[test]
+    fn test_text_panel_content_inset_matches_thresholds() {
+        assert_eq!(UiManager::text_panel_content_inset_px(400, 300), 10);
+        assert_eq!(UiManager::text_panel_content_inset_px(160, 300), 4);
+        assert_eq!(UiManager::text_panel_content_inset_px(400, 110), 4);
+    }
+
+    #[test]
+    fn test_text_panel_visible_line_count_uses_full_lines_only() {
+        let rendered = rendered_with_line_font_sizes(&[16, 16, 16]);
+        let compact = true;
+        let line_height = UiManager::text_panel_estimated_line_height_px(&rendered.lines[0], 16);
+        let spacing = UiManager::text_panel_line_spacing_px(compact);
+        let two_full_lines_height = line_height * 2 + spacing;
+        assert_eq!(
+            UiManager::text_panel_visible_line_count(&rendered, two_full_lines_height, compact, 16),
+            2
+        );
+        assert_eq!(
+            UiManager::text_panel_visible_line_count(
+                &rendered,
+                two_full_lines_height - 1,
+                compact,
+                16
+            ),
+            1
+        );
     }
 
     #[test]

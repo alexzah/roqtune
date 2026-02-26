@@ -222,9 +222,9 @@ export component TrackRow inherits Rectangle {
 
                 if self.has-rich-value : RichTextBlockView {
                     x: 0px;
-                    y: 0px;
                     width: parent.width;
-                    height: parent.height;
+                    height: min(parent.height, self.preferred-height);
+                    y: (parent.height - self.height) / 2;
                     block: root.data.rich_values[index];
                     default-color: parent.base-text-color;
                     compact: root.row-height <= 32px;

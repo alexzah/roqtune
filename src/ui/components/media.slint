@@ -167,7 +167,11 @@ export component SeekBarControl inherits Rectangle {
     }
 
     background: root.panel-bg;
-    HorizontalLayout {
+    bar-row := HorizontalLayout {
+        private property <length> time-slot-width: max(
+            root.label-width,
+            max(elapsed-label.preferred-width + 6px, total-label.preferred-width + 6px)
+        );
         padding-left: root.side-padding;
         padding-right: root.side-padding;
         padding-top: root.vertical-padding;
@@ -180,7 +184,7 @@ export component SeekBarControl inherits Rectangle {
             font-size: root.time-font-size;
             vertical-alignment: center;
             horizontal-alignment: right;
-            width: max(root.label-width, self.preferred-width + 6px);
+            width: bar-row.time-slot-width;
         }
 
         seekbar := Rectangle {
@@ -256,8 +260,8 @@ export component SeekBarControl inherits Rectangle {
             color: root.text-muted;
             font-size: root.time-font-size;
             vertical-alignment: center;
-            horizontal-alignment: right;
-            width: max(root.label-width, self.preferred-width + 6px);
+            horizontal-alignment: left;
+            width: bar-row.time-slot-width;
         }
     }
 }
@@ -363,7 +367,8 @@ export component TextPanel inherits Rectangle {
     background: transparent;
     if root.has-metadata : RichTextBlockView {
         width: parent.width;
-        height: parent.height;
+        height: min(parent.height, self.preferred-height);
+        y: (parent.height - self.height) / 2;
         block: root.display-text;
         compact: root.compact;
         default-color: root.text-secondary;
