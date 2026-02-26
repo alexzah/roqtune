@@ -65,6 +65,9 @@ pub struct UiManager {
     embedded_cover_art_prepare_tx: StdSender<EmbeddedCoverArtPrepareRequest>,
     metadata_lookup_tx: StdSender<MetadataLookupRequest>,
     last_cover_art_lookup_path: Option<PathBuf>,
+    pending_cover_art_lookup_request_id: u64,
+    pending_cover_art_lookup_track_path: Option<PathBuf>,
+    next_cover_art_lookup_request_id: u64,
     active_playlist_id: String,
     playlist_ids: Vec<String>,
     playlist_names: Vec<String>,
@@ -302,6 +305,7 @@ struct DeterministicColumnLayoutSpec {
 /// Cover-art lookup request payload used by the internal worker thread.
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct CoverArtLookupRequest {
+    request_id: u64,
     track_path: Option<PathBuf>,
 }
 
@@ -1198,6 +1202,10 @@ impl UiManager {
         Self::detect_image_extension(&header[..read]).is_some()
     }
 
+    fn is_usable_cover_source_path(path: &Path) -> bool {
+        path.exists() && Self::is_valid_image_file(path)
+    }
+
     fn embedded_art_cache_candidates(track_path: &Path) -> Option<Vec<PathBuf>> {
         let mut candidates = Vec::new();
         if let Some(normalized) = image_pipeline::cover_original_path_for_track(track_path) {
@@ -1609,7 +1617,11 @@ impl UiManager {
                     UiManager::find_cover_art(path.as_path(), &mut opensubsonic_password_cache)
                 });
                 let _ = cover_art_bus_sender.send(protocol::Message::Playback(
-                    protocol::PlaybackMessage::CoverArtChanged(cover_art_path),
+                    protocol::PlaybackMessage::CoverArtChanged {
+                        request_id: latest_request.request_id,
+                        requested_track_path: latest_request.track_path.clone(),
+                        cover_art_path,
+                    },
                 ));
             }
         });
@@ -1766,6 +1778,9 @@ impl UiManager {
             embedded_cover_art_prepare_tx,
             metadata_lookup_tx,
             last_cover_art_lookup_path: None,
+            pending_cover_art_lookup_request_id: 0,
+            pending_cover_art_lookup_track_path: None,
+            next_cover_art_lookup_request_id: 0,
             active_playlist_id: String::new(),
             playlist_ids: Vec::new(),
             playlist_names: Vec::new(),
@@ -2160,7 +2175,14 @@ impl UiManager {
             return;
         }
         self.last_cover_art_lookup_path = requested_track_path.clone();
+        self.next_cover_art_lookup_request_id = self
+            .next_cover_art_lookup_request_id
+            .saturating_add(1)
+            .max(1);
+        self.pending_cover_art_lookup_request_id = self.next_cover_art_lookup_request_id;
+        self.pending_cover_art_lookup_track_path = requested_track_path.clone();
         let _ = self.cover_art_lookup_tx.send(CoverArtLookupRequest {
+            request_id: self.pending_cover_art_lookup_request_id,
             track_path: requested_track_path,
         });
     }
@@ -2184,15 +2206,17 @@ impl UiManager {
         let track_path = self.track_paths.get(source_index).cloned()?;
         let is_remote = is_remote_track_path(track_path.as_path());
         if let Some(Some(existing_path)) = self.track_cover_art_paths.get(source_index) {
-            if Self::failed_cover_path(existing_path) {
+            if Self::failed_cover_path(existing_path)
+                || !Self::is_usable_cover_source_path(existing_path.as_path())
+            {
+                Self::delete_cached_image_file_if_managed(existing_path.as_path());
                 if let Some(cache_slot) = self.track_cover_art_paths.get_mut(source_index) {
                     *cache_slot = None;
                 }
-                self.track_cover_art_missing_tracks
-                    .insert(track_path.clone());
-                return None;
+            } else {
+                self.track_cover_art_missing_tracks.remove(&track_path);
+                return Some(existing_path.clone());
             }
-            return Some(existing_path.clone());
         }
         if let Some(cached_embedded) = Self::embedded_art_cache_path_if_present(&track_path) {
             if let Some(cache_slot) = self.track_cover_art_paths.get_mut(source_index) {
@@ -2221,6 +2245,8 @@ impl UiManager {
         }
         if resolved_path.is_none() {
             self.track_cover_art_missing_tracks.insert(track_path);
+        } else {
+            self.track_cover_art_missing_tracks.remove(&track_path);
         }
         resolved_path
     }
@@ -2457,11 +2483,12 @@ impl UiManager {
         }
     }
 
-    fn load_track_row_cover_art_image(path: Option<&PathBuf>) -> Image {
-        path.and_then(|path| {
+    fn load_track_row_cover_art(path: Option<&PathBuf>) -> (Image, bool) {
+        let image = path.and_then(|path| {
             Self::try_load_cover_art_image_with_kind(path, protocol::UiImageKind::CoverArt)
-        })
-        .unwrap_or_default()
+        });
+        let has_album_art = image.is_some();
+        (image.unwrap_or_default(), has_album_art)
     }
 
     fn to_detailed_metadata(track_metadata: &TrackMetadata) -> protocol::DetailedMetadata {
@@ -6165,11 +6192,14 @@ impl UiManager {
                     .iter()
                     .map(UiManager::to_ui_rich_text_block)
                     .collect();
+                let (album_art, has_album_art) =
+                    UiManager::load_track_row_cover_art(album_art_path.as_ref());
                 rows.push(TrackRowData {
                     status: status.into(),
                     values: ModelRc::from(values_shared.as_slice()),
                     rich_values: ModelRc::from(Rc::new(VecModel::from(rich_values_ui))),
-                    album_art: UiManager::load_track_row_cover_art_image(album_art_path.as_ref()),
+                    album_art,
+                    has_album_art,
                     source_badge: source_badge.into(),
                     favorited,
                     selected,
@@ -6335,11 +6365,16 @@ impl UiManager {
                 let Some(mut row_data) = vec_model.row_data(view_row) else {
                     continue;
                 };
-                row_data.album_art = UiManager::try_load_cover_art_image_with_kind(
+                if let Some(image) = UiManager::try_load_cover_art_image_with_kind(
                     thumbnail_path.as_path(),
                     protocol::UiImageKind::CoverArt,
-                )
-                .unwrap_or_default();
+                ) {
+                    row_data.album_art = image;
+                    row_data.has_album_art = true;
+                } else {
+                    row_data.album_art = Image::default();
+                    row_data.has_album_art = false;
+                }
                 vec_model.set_row_data(view_row, row_data);
             }
         });
@@ -7748,14 +7783,9 @@ impl UiManager {
             updates.push((row_index, presentation));
         }
 
-        let rows_to_clear: Vec<usize> = self
-            .library_rows_with_album_art
-            .difference(&rows_with_art_in_window)
-            .copied()
-            .collect();
         self.library_rows_with_album_art = rows_with_art_in_window;
 
-        if updates.is_empty() && rows_to_clear.is_empty() {
+        if updates.is_empty() {
             return false;
         }
 
@@ -7774,20 +7804,6 @@ impl UiManager {
                     vec_model.set_row_data(row_index, row_data);
                 }
             }
-            for row_index in rows_to_clear {
-                if row_index >= vec_model.row_count() {
-                    continue;
-                }
-                let Some(mut row_data) = vec_model.row_data(row_index) else {
-                    continue;
-                };
-                if !row_data.has_album_art {
-                    continue;
-                }
-                row_data.album_art = Image::default();
-                row_data.has_album_art = false;
-                vec_model.set_row_data(row_index, row_data);
-            }
         });
         true
     }
@@ -7795,10 +7811,13 @@ impl UiManager {
     fn resolve_library_cover_art_path(&mut self, track_path: &PathBuf) -> Option<PathBuf> {
         if let Some(cached) = self.library_cover_art_paths.get(track_path).cloned() {
             if let Some(path) = cached.clone() {
-                if Self::failed_cover_path(&path) {
+                if Self::failed_cover_path(&path) || !Self::is_usable_cover_source_path(&path) {
+                    Self::delete_cached_image_file_if_managed(path.as_path());
                     self.library_cover_art_paths
                         .insert(track_path.clone(), None);
-                    return None;
+                } else {
+                    self.track_cover_art_missing_tracks.remove(track_path);
+                    return Some(path);
                 }
             } else if let Some(cached_embedded) =
                 Self::embedded_art_cache_path_if_present(track_path)
@@ -7814,7 +7833,7 @@ impl UiManager {
                 self.track_cover_art_missing_tracks
                     .insert(track_path.clone());
             }
-            return cached;
+            cached.as_ref()?;
         }
         let resolved = if is_remote_track_path(track_path.as_path()) {
             self.update_cover_art(Some(track_path));
@@ -11533,16 +11552,32 @@ impl UiManager {
                             self.rebuild_track_model();
                         }
                         protocol::Message::Playback(
-                            protocol::PlaybackMessage::CoverArtChanged(path),
+                            protocol::PlaybackMessage::CoverArtChanged {
+                                request_id,
+                                requested_track_path,
+                                cover_art_path,
+                            },
                         ) => {
-                            if path.is_some() {
+                            if request_id != self.pending_cover_art_lookup_request_id
+                                || requested_track_path != self.pending_cover_art_lookup_track_path
+                            {
+                                trace!(
+                                    "Ignoring stale cover art response id={} requested={:?} pending_id={} pending={:?}",
+                                    request_id,
+                                    requested_track_path,
+                                    self.pending_cover_art_lookup_request_id,
+                                    self.pending_cover_art_lookup_track_path
+                                );
+                                continue;
+                            }
+                            if cover_art_path.is_some() {
                                 self.refresh_visible_library_cover_art_rows();
                                 if self.is_album_art_column_visible() {
                                     self.refresh_visible_playlist_cover_art_rows();
                                 }
                             }
                             let _ = self.ui.upgrade_in_event_loop(move |ui| {
-                                if let Some(path) = path {
+                                if let Some(path) = cover_art_path {
                                     if let Some(img) =
                                         UiManager::try_load_detail_cover_art_image_with_kind(
                                             &path,
@@ -11883,15 +11918,20 @@ mod tests {
     fn test_coalesce_cover_art_requests_keeps_latest() {
         let (tx, rx) = mpsc::channel::<CoverArtLookupRequest>();
         tx.send(CoverArtLookupRequest {
+            request_id: 1,
             track_path: Some(PathBuf::from("first.mp3")),
         })
         .expect("failed to queue request");
         tx.send(CoverArtLookupRequest {
+            request_id: 2,
             track_path: Some(PathBuf::from("second.mp3")),
         })
         .expect("failed to queue request");
-        tx.send(CoverArtLookupRequest { track_path: None })
-            .expect("failed to queue request");
+        tx.send(CoverArtLookupRequest {
+            request_id: 3,
+            track_path: None,
+        })
+        .expect("failed to queue request");
 
         let first = rx.recv().expect("expected first request");
         let latest = UiManager::coalesce_cover_art_requests(first, &rx);

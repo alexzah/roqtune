@@ -826,7 +826,11 @@ pub enum PlaybackMessage {
         elapsed_ms: u64,
         total_ms: u64,
     },
-    CoverArtChanged(Option<PathBuf>),
+    CoverArtChanged {
+        request_id: u64,
+        requested_track_path: Option<PathBuf>,
+        cover_art_path: Option<PathBuf>,
+    },
     ListImageReady {
         source_path: PathBuf,
         kind: UiImageKind,

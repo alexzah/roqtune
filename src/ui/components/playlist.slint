@@ -181,11 +181,21 @@ export component TrackRow inherits Rectangle {
                 height: self.width;
                 border-radius: 2px;
                 background: AppPalette.panel-bg-alt;
-                Image {
+                if root.data.has_album_art : Image {
                     source: root.data.album_art;
                     width: parent.width;
                     height: parent.height;
                     image-fit: contain;
+                }
+
+                if !root.data.has_album_art : Image {
+                    source: AppIcons.music;
+                    width: 12px;
+                    height: 12px;
+                    x: (parent.width - self.width) / 2;
+                    y: (parent.height - self.height) / 2;
+                    image-fit: contain;
+                    colorize: AppPalette.text-secondary;
                 }
             }
 
