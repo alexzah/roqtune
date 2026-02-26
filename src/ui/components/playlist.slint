@@ -129,6 +129,8 @@ export component TrackRow inherits Rectangle {
     in property <length> horizontal-padding: 8px;
     in property <length> column-spacing: 10px;
     in property <length> status-lane-width: 40px;
+    in property <int> hover-column-index: -1;
+    in property <bool> modifier-link-mode-active: false;
     callback metadata_link_activated(int, string, string, string, string);
 
     pure function column-width-for-index(index: int) -> length {
@@ -222,6 +224,7 @@ export component TrackRow inherits Rectangle {
                 width: parent.width;
                 height: parent.height;
                 clip: true;
+                property <bool> link-hover-active: root.modifier-link-mode-active && index == root.hover-column-index;
                 property <color> base-text-color: root.data.unavailable
                     ? AppPalette.text-disabled
                     : data.selected
@@ -241,6 +244,9 @@ export component TrackRow inherits Rectangle {
                     compact: root.row-height <= 32px;
                     max-lines: 6;
                     clip-lines: true;
+                    link-activation-requires-modifier: true;
+                    link-modifier-active: root.modifier-link-mode-active;
+                    force-link-hover: parent.link-hover-active;
                     metadata_link_activated(kind, value, album, album_artist, track_path) => {
                         root.metadata_link_activated(kind, value, album, album_artist, track_path);
                     }

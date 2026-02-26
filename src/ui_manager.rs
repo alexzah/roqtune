@@ -8386,17 +8386,6 @@ impl UiManager {
                 } else {
                     format!("{} • {}", track.artist, track.album)
                 };
-                let title_link = Self::metadata_link_payload(
-                    protocol::MetadataLinkKind::Title,
-                    track.title.clone(),
-                    track.album.clone(),
-                    if track.album_artist.trim().is_empty() {
-                        track.artist.clone()
-                    } else {
-                        track.album_artist.clone()
-                    },
-                    Some(track.path.as_path()),
-                );
                 let artist_link = Self::metadata_link_payload(
                     protocol::MetadataLinkKind::Artist,
                     track.artist.clone(),
@@ -8419,7 +8408,7 @@ impl UiManager {
                     },
                     Some(track.path.as_path()),
                 );
-                let primary_rich = Self::rendered_single_run(primary.clone(), 12, title_link);
+                let primary_rich = Self::rendered_single_run(primary.clone(), 12, None);
                 let secondary_rich = if compact_track_row_view {
                     Self::rendered_single_run(secondary.clone(), 11, artist_link)
                 } else if global_search_view {
