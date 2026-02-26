@@ -27,9 +27,9 @@ pub const PANEL_CODE_SEEK_BAR: i32 = 5;
 pub const PANEL_CODE_PLAYLIST_SWITCHER: i32 = 6;
 /// Stable panel kind code for `LayoutPanelKind::TrackList`.
 pub const PANEL_CODE_TRACK_LIST: i32 = 7;
-/// Stable panel kind code for `LayoutPanelKind::MetadataViewer`.
+/// Stable panel kind code for `LayoutPanelKind::MetadataViewer` (Text Panel).
 pub const PANEL_CODE_METADATA_VIEWER: i32 = 8;
-/// Stable panel kind code for `LayoutPanelKind::AlbumArtViewer`.
+/// Stable panel kind code for `LayoutPanelKind::AlbumArtViewer` (Image Panel).
 pub const PANEL_CODE_ALBUM_ART_VIEWER: i32 = 9;
 /// Stable panel kind code for `LayoutPanelKind::Spacer`.
 pub const PANEL_CODE_SPACER: i32 = 10;
@@ -59,7 +59,9 @@ pub enum LayoutPanelKind {
     SeekBar,
     PlaylistSwitcher,
     TrackList,
+    #[serde(rename = "text_panel", alias = "metadata_viewer")]
     MetadataViewer,
+    #[serde(rename = "image_panel", alias = "album_art_viewer")]
     AlbumArtViewer,
     Spacer,
     StatusBar,
@@ -211,7 +213,7 @@ pub enum LayoutNode {
     },
 }
 
-/// Display-target resolution strategy for metadata/album-art viewer panels.
+/// Display-target resolution strategy for text/image panels.
 #[derive(Debug, Clone, Copy, serde::Deserialize, serde::Serialize, PartialEq, Eq, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum ViewerPanelDisplayPriority {
@@ -228,7 +230,7 @@ pub enum ViewerPanelDisplayPriority {
     NowPlayingOnly,
 }
 
-/// Metadata payload source for metadata viewer panels.
+/// Text payload source for text panels.
 #[derive(Debug, Clone, Copy, serde::Deserialize, serde::Serialize, PartialEq, Eq, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum ViewerPanelMetadataSource {
@@ -243,7 +245,7 @@ pub enum ViewerPanelMetadataSource {
     CustomText,
 }
 
-/// Image payload source for image-metadata viewer panels.
+/// Image payload source for image panels.
 #[derive(Debug, Clone, Copy, serde::Deserialize, serde::Serialize, PartialEq, Eq, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum ViewerPanelImageSource {
@@ -254,7 +256,7 @@ pub enum ViewerPanelImageSource {
     ArtistImage,
 }
 
-/// Per-leaf metadata-viewer configuration persisted with layout preferences.
+/// Per-leaf text-panel configuration persisted with layout preferences.
 #[derive(Debug, Clone, serde::Deserialize, serde::Serialize, PartialEq, Eq)]
 pub struct MetadataViewerPanelInstanceConfig {
     /// Layout leaf identifier that owns this viewer.
@@ -262,15 +264,19 @@ pub struct MetadataViewerPanelInstanceConfig {
     /// Display-target resolution strategy.
     #[serde(default)]
     pub display_priority: ViewerPanelDisplayPriority,
-    /// Metadata source strategy for metadata viewers.
-    #[serde(default)]
+    /// Text source strategy for text panels.
+    #[serde(default, rename = "text_source", alias = "metadata_source")]
     pub metadata_source: ViewerPanelMetadataSource,
-    /// Custom metadata template string used when `metadata_source = "custom_text"`.
-    #[serde(default = "default_metadata_text_format")]
+    /// Custom text template string used when `text_source = "custom_text"`.
+    #[serde(
+        default = "default_metadata_text_format",
+        rename = "text_format",
+        alias = "metadata_text_format"
+    )]
     pub metadata_text_format: String,
 }
 
-/// Per-leaf album-art viewer configuration persisted with layout preferences.
+/// Per-leaf image-panel configuration persisted with layout preferences.
 #[derive(Debug, Clone, serde::Deserialize, serde::Serialize, PartialEq, Eq)]
 pub struct AlbumArtViewerPanelInstanceConfig {
     /// Layout leaf identifier that owns this viewer.
@@ -278,7 +284,7 @@ pub struct AlbumArtViewerPanelInstanceConfig {
     /// Display-target resolution strategy.
     #[serde(default)]
     pub display_priority: ViewerPanelDisplayPriority,
-    /// Image source strategy for image metadata viewers.
+    /// Image source strategy for image panels.
     #[serde(default)]
     pub image_source: ViewerPanelImageSource,
 }
@@ -351,9 +357,9 @@ pub struct LayoutConfig {
     pub playlist_column_width_overrides: Vec<PlaylistColumnWidthOverrideConfig>,
     /// Per-leaf button-cluster settings.
     pub button_cluster_instances: Vec<ButtonClusterInstanceConfig>,
-    /// Per-leaf metadata-viewer panel settings.
+    /// Per-leaf text-panel settings.
     pub metadata_viewer_panel_instances: Vec<MetadataViewerPanelInstanceConfig>,
-    /// Per-leaf album-art viewer panel settings.
+    /// Per-leaf image-panel settings.
     pub album_art_viewer_panel_instances: Vec<AlbumArtViewerPanelInstanceConfig>,
     /// Root node of the split-tree.
     pub root: LayoutNode,
@@ -422,9 +428,11 @@ struct LayoutConfigWire {
     #[serde(default)]
     button_cluster_instances: Vec<ButtonClusterInstanceConfig>,
     #[serde(default)]
-    metadata_viewer_panel_instances: Vec<MetadataViewerPanelInstanceConfig>,
+    #[serde(alias = "metadata_viewer_panel_instances")]
+    text_panel_instances: Vec<MetadataViewerPanelInstanceConfig>,
     #[serde(default)]
-    album_art_viewer_panel_instances: Vec<AlbumArtViewerPanelInstanceConfig>,
+    #[serde(alias = "album_art_viewer_panel_instances")]
+    image_panel_instances: Vec<AlbumArtViewerPanelInstanceConfig>,
     #[serde(default)]
     #[serde(skip_serializing_if = "Vec::is_empty")]
     viewer_panel_instances: Vec<LegacyViewerPanelInstanceConfig>,
@@ -463,8 +471,8 @@ impl<'de> serde::Deserialize<'de> for LayoutConfig {
                 width_px: legacy_override.width_px,
             });
         }
-        let mut metadata_viewer_panel_instances = v2.metadata_viewer_panel_instances;
-        let mut album_art_viewer_panel_instances = v2.album_art_viewer_panel_instances;
+        let mut metadata_viewer_panel_instances = v2.text_panel_instances;
+        let mut album_art_viewer_panel_instances = v2.image_panel_instances;
         if metadata_viewer_panel_instances.is_empty()
             && album_art_viewer_panel_instances.is_empty()
             && !v2.viewer_panel_instances.is_empty()
@@ -566,8 +574,8 @@ impl serde::Serialize for LayoutConfig {
             playlist_columns,
             playlist_column_width_overrides: Vec::new(),
             button_cluster_instances: self.button_cluster_instances.clone(),
-            metadata_viewer_panel_instances: self.metadata_viewer_panel_instances.clone(),
-            album_art_viewer_panel_instances: self.album_art_viewer_panel_instances.clone(),
+            text_panel_instances: self.metadata_viewer_panel_instances.clone(),
+            image_panel_instances: self.album_art_viewer_panel_instances.clone(),
             viewer_panel_instances: Vec::new(),
             root: self.root.clone(),
         }

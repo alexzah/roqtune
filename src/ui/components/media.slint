@@ -351,7 +351,7 @@ export component RichTextBlockView inherits Rectangle {
     }
 }
 
-export component MetadataViewer inherits Rectangle {
+export component TextPanel inherits Rectangle {
     in property <RichTextBlock> display-text;
     private property <bool> has-metadata: root.display-text.plain_text != "";
     private property <bool> compact: root.width < 220px || root.height < 120px;
@@ -386,7 +386,7 @@ export component MetadataViewer inherits Rectangle {
     }
 }
 
-export component AlbumArtViewer inherits Rectangle {
+export component ImagePanel inherits Rectangle {
     in property <image> art-source;
     in property <bool> has-art: false;
     in property <color> panel-bg: AppPalette.panel-bg-alt;

@@ -11,7 +11,7 @@ import {
 } from "ui/types.slint";
 import { ColumnHeaderMenu, ConfirmationDialog, InfoDialog } from "ui/components/menus.slint";
 import { PlayerButton, ButtonCluster, TooltipHoverArea } from "ui/components/controls.slint";
-import { VolumeSliderControl, SeekBarControl, MetadataViewer, AlbumArtViewer } from "ui/components/media.slint";
+import { VolumeSliderControl, SeekBarControl, TextPanel, ImagePanel } from "ui/components/media.slint";
 import { PlaylistRow, TrackRow } from "ui/components/playlist.slint";
 import { ModeTabs } from "ui/components/tabs.slint";
 import { LibraryRow } from "ui/components/library.slint";
@@ -452,8 +452,8 @@ export component AppWindow inherits Window {
         "Seek Bar",
         "Playlist Switcher",
         "Track List",
-        "Metadata Viewer",
-        "Image Metadata Viewer",
+        "Text Panel",
+        "Image Panel",
         "Status Bar"
     ];
     property <[int]> layout_panel_submenu_codes: [
@@ -566,10 +566,10 @@ export component AppWindow inherits Window {
             return "Track List";
         }
         if panel-kind == root.panel_kind_metadata_viewer {
-            return "Metadata Viewer";
+            return "Text Panel";
         }
         if panel-kind == root.panel_kind_album_art_viewer {
-            return "Image Metadata Viewer";
+            return "Image Panel";
         }
         if panel-kind == root.panel_kind_spacer {
             return "Spacer";
@@ -1038,7 +1038,7 @@ export component AppWindow inherits Window {
                 property <length> content-inset: panel.width_px < 180 || panel.height_px < 120
                     ? 4px
                     : 10px;
-                MetadataViewer {
+                TextPanel {
                     x: parent.content-inset;
                     y: parent.content-inset;
                     width: max(0px, parent.width - parent.content-inset * 2);
@@ -1062,7 +1062,7 @@ export component AppWindow inherits Window {
                 property <length> content-inset: panel.width_px < 180 || panel.height_px < 120
                     ? 4px
                     : 10px;
-                AlbumArtViewer {
+                ImagePanel {
                     x: parent.content-inset;
                     y: parent.content-inset;
                     width: max(0px, parent.width - parent.content-inset * 2);
@@ -3081,8 +3081,8 @@ export component AppWindow inherits Window {
 
             Text {
                 text: (root.viewer_panel_settings_target_panel_kind == root.panel_kind_album_art_viewer
-                    ? "Image Metadata Viewer"
-                    : "Metadata Viewer") + " Settings";
+                    ? "Image Panel"
+                    : "Text Panel") + " Settings";
                 color: AppPalette.text-primary;
                 font-size: 13px;
                 font-weight: 700;
@@ -3138,7 +3138,7 @@ export component AppWindow inherits Window {
                     height: 24px;
                     background: transparent;
                     Text {
-                        text: "Metadata Source";
+                        text: "Text Source";
                         color: AppPalette.text-primary;
                         font-size: 12px;
                         vertical-alignment: center;
