@@ -95,6 +95,12 @@ enabled = true
 custom = false
 
 [[playlist_columns]]
+name = "Track Details"
+format = "[size=body][color=text_primary]{title;file_name}[/color][/size]\\n[size=caption][color=text_secondary]{artist;album_artist} • {album}[/color][/size]"
+enabled = false
+custom = false
+
+[[playlist_columns]]
 name = "Artist"
 format = "{artist}"
 enabled = true
@@ -129,7 +135,7 @@ custom = false
 # leaf_id = "l1"
 # display_priority = "default"
 # text_source = "track"
-# text_format = "[size=title][b][color=text_primary]{title;file_name}[/color][/b][/size]\\n[size=body][color=text_secondary]{artist;album_artist}[/color][/size]\\n[size=body][color=text_muted]{album}[/color][/size]\\n[size=caption][color=text_muted]{date;year} {genre}[/color][/size]"
+# text_format = "[size=title][b][color=text_primary]{title;file_name}[/color][/b][/size]\\n[size=body][color=text_secondary]{artist;album_artist}[/color][/size]\\n[size=body][color=text_muted]{album}[/color][/size]\\n[size=caption][color=text_muted]{date;year} • {genre}[/color][/size]"
 #
 # Optional per-leaf image panel behavior overrides.
 # image_source options:

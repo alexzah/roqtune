@@ -672,6 +672,8 @@ fn apply_viewer_panel_views_to_ui(
                     metadata_source,
                     metadata_text_format: metadata_text_format.clone().into(),
                     display_text: existing.display_text.clone(),
+                    display_text_full: existing.display_text_full.clone(),
+                    display_text_elided: existing.display_text_elided,
                 };
             }
             LayoutMetadataViewerPanelModel {
@@ -685,6 +687,8 @@ fn apply_viewer_panel_views_to_ui(
                 metadata_source,
                 metadata_text_format: metadata_text_format.into(),
                 display_text: default_display_text.clone(),
+                display_text_full: "".into(),
+                display_text_elided: false,
             }
         })
         .collect();

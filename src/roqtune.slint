@@ -1050,6 +1050,11 @@ export component AppWindow inherits Window {
                     text-muted: AppPalette.text-muted;
                     text-disabled: AppPalette.text-disabled;
                     display-text: panel.display_text;
+                    tooltip-text: panel.display_text_full;
+                    tooltip-enabled: panel.display_text_elided;
+                    tooltip_hover_changed(is-hovered, tooltip, anchor-x-px, anchor-y-px) => {
+                        root.tooltip_hover_changed(is-hovered, tooltip, anchor-x-px, anchor-y-px);
+                    }
                 }
             }
 
@@ -2318,7 +2323,9 @@ export component AppWindow inherits Window {
                 visible: root.layout_edit_mode
                     && root.layout-region-is-visible(i)
                     && self.panel-kind != root.panel_kind_none;
-                background: leaf-select-ta.has-hover ? AppPalette.control-hover-bg : transparent;
+                background: leaf-select-ta.has-hover
+                    ? AppPalette.control-hover-bg.mix(transparent, 0.55)
+                    : transparent;
                 border-width: 1px;
                 border-color: i == root.layout_selected_leaf_index ? AppPalette.selection-border : AppPalette.border;
                 z: 100;
@@ -3175,7 +3182,7 @@ export component AppWindow inherits Window {
                     height: parent.height;
                     enabled: true;
                     text: root.viewer_panel_settings_metadata_text_format;
-                    placeholder-text: "[size=title][b]{title}[/b][/size]\\n[size=body]{artist}[/size]\\n[size=body]{album}[/size]\\n[size=caption]{date;year} {genre}[/size]";
+                    placeholder-text: "[size=title][b]{title}[/b][/size]\\n[size=body]{artist}[/size]\\n[size=body]{album}[/size]\\n[size=caption]{date;year} • {genre}[/size]";
                     edited => {
                         root.viewer_panel_settings_metadata_text_format = self.text;
                         root.set_viewer_panel_metadata_text_format(

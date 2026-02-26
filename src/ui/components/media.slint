@@ -1,6 +1,7 @@
 import { AppIcons } from "../icons.slint";
 import { AppPalette } from "../theme_palette.slint";
 import { RichTextBlock } from "../types.slint";
+import { TooltipHoverArea } from "controls.slint";
 
 export component VolumeSliderControl inherits Rectangle {
     in-out property <float> value: 1.0;
@@ -357,7 +358,10 @@ export component RichTextBlockView inherits Rectangle {
 
 export component TextPanel inherits Rectangle {
     in property <RichTextBlock> display-text;
-    private property <bool> has-metadata: root.display-text.plain_text != "";
+    in property <string> tooltip-text: "";
+    in property <bool> tooltip-enabled: false;
+    callback tooltip_hover_changed(bool, string, int, int);
+    private property <bool> has-metadata: root.display-text.plain_text != "" || root.tooltip-text != "";
     private property <bool> compact: root.width < 220px || root.height < 120px;
     in property <color> text-primary: AppPalette.text-primary;
     in property <color> text-secondary: AppPalette.text-secondary;
@@ -387,6 +391,18 @@ export component TextPanel inherits Rectangle {
             font-weight: 600;
             horizontal-alignment: center;
             vertical-alignment: center;
+        }
+    }
+
+    tooltip-hover-area := TooltipHoverArea {
+        x: 0px;
+        y: 0px;
+        width: root.width;
+        height: root.height;
+        tooltip-text: root.tooltip-text;
+        tooltip-enabled: root.tooltip-enabled && root.tooltip-text != "";
+        tooltip_hover_changed(is-hovered, tooltip, anchor-x-px, anchor-y-px) => {
+            root.tooltip_hover_changed(is-hovered, tooltip, anchor-x-px, anchor-y-px);
         }
     }
 }

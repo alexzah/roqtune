@@ -205,6 +205,13 @@ pub(crate) fn playlist_column_width_bounds_with_album_art(
         };
     }
 
+    if normalized_name == "track details" {
+        return ColumnWidthBounds {
+            min_px: 170,
+            max_px: 460,
+        };
+    }
+
     if normalized_format == "{artist}"
         || normalized_format == "{album_artist}"
         || normalized_format == "{albumartist}"
@@ -649,6 +656,19 @@ mod tests {
             (16, 480)
         );
         assert_eq!((custom_bounds.min_px, custom_bounds.max_px), (110, 340));
+    }
+
+    #[test]
+    fn test_playlist_column_width_bounds_for_track_details_builtin() {
+        let track_details_column = PlaylistColumnConfig {
+            name: "Track Details".to_string(),
+            format: crate::config::BUILTIN_TRACK_DETAILS_COLUMN_FORMAT.to_string(),
+            enabled: true,
+            custom: false,
+        };
+
+        let bounds = playlist_column_width_bounds(&track_details_column);
+        assert_eq!((bounds.min_px, bounds.max_px), (170, 460));
     }
 
     #[test]

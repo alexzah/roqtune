@@ -396,6 +396,13 @@ struct ViewerTrackContext {
     album_artist: String,
 }
 
+#[derive(Clone, Debug)]
+struct FittedTextPanelRender {
+    rendered: text_template::RenderedText,
+    full_plain_text: String,
+    was_elided: bool,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum DisplayTargetPriority {
     Selection,
@@ -441,6 +448,16 @@ const TEXT_PANEL_REGULAR_LINE_SPACING_PX: i32 = 2;
 const TEXT_PANEL_LINE_HEIGHT_PERCENT: u32 = 130;
 const TEXT_PANEL_LINE_HEIGHT_ROUNDING_BIAS: u32 = 99;
 const TEXT_PANEL_LINE_HEIGHT_DENOMINATOR: u32 = 100;
+const TEXT_PANEL_CHAR_WIDTH_DENOMINATOR: u32 = 100;
+const TEXT_PANEL_CHAR_WIDTH_DEFAULT_PERCENT: u32 = 56;
+const TEXT_PANEL_CHAR_WIDTH_UPPERCASE_PERCENT: u32 = 62;
+const TEXT_PANEL_CHAR_WIDTH_DIGIT_PERCENT: u32 = 56;
+const TEXT_PANEL_CHAR_WIDTH_SPACE_PERCENT: u32 = 33;
+const TEXT_PANEL_CHAR_WIDTH_NARROW_PERCENT: u32 = 36;
+const TEXT_PANEL_CHAR_WIDTH_WIDE_PERCENT: u32 = 92;
+const TEXT_PANEL_CHAR_WIDTH_CJK_PERCENT: u32 = 100;
+const TEXT_PANEL_WIDTH_ESTIMATE_GRACE_PX: i32 = 6;
+const TEXT_PANEL_ELLIPSIS: &str = "…";
 const TEXT_PANEL_MIN_BASE_FONT_SIZE_PX: u32 = 1;
 const TEXT_PANEL_MIN_VISIBLE_LINES: usize = 2;
 const LIBRARY_ITEM_KIND_SONG: i32 = 0;
@@ -2715,7 +2732,10 @@ impl UiManager {
             return PlaylistColumnClass::YearDate;
         }
 
-        if normalized_format == "{title}" || normalized_name == "title" {
+        if normalized_format == "{title}"
+            || normalized_name == "title"
+            || normalized_name == "track details"
+        {
             return PlaylistColumnClass::Title;
         }
 
@@ -3722,6 +3742,332 @@ impl UiManager {
         }
     }
 
+    fn text_panel_char_width_percent(ch: char) -> u32 {
+        if ch.is_whitespace() {
+            TEXT_PANEL_CHAR_WIDTH_SPACE_PERCENT
+        } else if ch.is_ascii_digit() {
+            TEXT_PANEL_CHAR_WIDTH_DIGIT_PERCENT
+        } else if matches!(
+            ch,
+            'i' | 'l' | 'I' | '|' | '!' | '.' | ',' | ':' | ';' | '\''
+        ) {
+            TEXT_PANEL_CHAR_WIDTH_NARROW_PERCENT
+        } else if matches!(ch, 'W' | 'M' | 'w' | 'm' | '@' | '%' | '#') {
+            TEXT_PANEL_CHAR_WIDTH_WIDE_PERCENT
+        } else if !ch.is_ascii() {
+            TEXT_PANEL_CHAR_WIDTH_CJK_PERCENT
+        } else if ch.is_ascii_uppercase() {
+            TEXT_PANEL_CHAR_WIDTH_UPPERCASE_PERCENT
+        } else {
+            TEXT_PANEL_CHAR_WIDTH_DEFAULT_PERCENT
+        }
+    }
+
+    fn text_panel_estimated_char_width_px(ch: char, font_size_px: u32) -> i32 {
+        let scaled = font_size_px
+            .max(1)
+            .saturating_mul(Self::text_panel_char_width_percent(ch))
+            .saturating_add(TEXT_PANEL_CHAR_WIDTH_DENOMINATOR.saturating_sub(1))
+            / TEXT_PANEL_CHAR_WIDTH_DENOMINATOR;
+        scaled.max(1).min(i32::MAX as u32) as i32
+    }
+
+    fn text_panel_estimated_text_width_px(text: &str, font_size_px: u32) -> i32 {
+        text.chars().fold(0i32, |acc, ch| {
+            acc.saturating_add(Self::text_panel_estimated_char_width_px(ch, font_size_px))
+        })
+    }
+
+    fn text_panel_estimated_line_width_px(line: &text_template::RichTextLine) -> i32 {
+        line.runs.iter().fold(0i32, |acc, run| {
+            acc.saturating_add(Self::text_panel_estimated_text_width_px(
+                &run.text,
+                run.font_size_px,
+            ))
+        })
+    }
+
+    fn text_panel_effective_width_px(width_px: i32) -> i32 {
+        width_px
+            .max(1)
+            .saturating_add(TEXT_PANEL_WIDTH_ESTIMATE_GRACE_PX)
+    }
+
+    fn text_panel_line_exceeds_width(line: &text_template::RichTextLine, width_px: i32) -> bool {
+        Self::text_panel_estimated_line_width_px(line)
+            > Self::text_panel_effective_width_px(width_px)
+    }
+
+    fn text_panel_any_line_exceeds_width(
+        rendered: &text_template::RenderedText,
+        width_px: i32,
+    ) -> bool {
+        rendered
+            .lines
+            .iter()
+            .any(|line| Self::text_panel_line_exceeds_width(line, width_px))
+    }
+
+    fn text_panel_style_signature_matches(
+        existing: &text_template::RichTextRun,
+        next: &text_template::RichTextRun,
+    ) -> bool {
+        existing.bold == next.bold
+            && existing.italic == next.italic
+            && existing.underline == next.underline
+            && existing.font_size_px == next.font_size_px
+            && existing.font_family == next.font_family
+            && existing.color == next.color
+    }
+
+    fn text_panel_push_run_fragment(
+        line: &mut text_template::RichTextLine,
+        prototype: &text_template::RichTextRun,
+        text_fragment: &str,
+    ) {
+        if text_fragment.is_empty() {
+            return;
+        }
+        if let Some(last_run) = line.runs.last_mut() {
+            if Self::text_panel_style_signature_matches(last_run, prototype) {
+                last_run.text.push_str(text_fragment);
+                return;
+            }
+        }
+        let mut next_run = prototype.clone();
+        next_run.text = text_fragment.to_string();
+        line.runs.push(next_run);
+    }
+
+    fn text_panel_byte_index_for_char_count(text: &str, char_count: usize) -> usize {
+        if char_count == 0 {
+            return 0;
+        }
+        text.char_indices()
+            .nth(char_count)
+            .map(|(byte_index, _)| byte_index)
+            .unwrap_or(text.len())
+    }
+
+    fn text_panel_fit_prefix_char_count_for_width(
+        text: &str,
+        font_size_px: u32,
+        max_width_px: i32,
+    ) -> usize {
+        if max_width_px <= 0 {
+            return 0;
+        }
+        let mut consumed_width_px = 0i32;
+        let mut consumed_chars = 0usize;
+        for ch in text.chars() {
+            let char_width_px = Self::text_panel_estimated_char_width_px(ch, font_size_px);
+            if consumed_chars > 0 && consumed_width_px.saturating_add(char_width_px) > max_width_px
+            {
+                break;
+            }
+            if consumed_chars == 0 && char_width_px > max_width_px {
+                return 0;
+            }
+            consumed_width_px = consumed_width_px.saturating_add(char_width_px);
+            consumed_chars = consumed_chars.saturating_add(1);
+        }
+        consumed_chars
+    }
+
+    fn text_panel_wrap_rendered_text_for_width(
+        rendered: &text_template::RenderedText,
+        width_px: i32,
+    ) -> text_template::RenderedText {
+        let max_width_px = Self::text_panel_effective_width_px(width_px);
+        let mut wrapped_lines: Vec<text_template::RichTextLine> = Vec::new();
+        for source_line in &rendered.lines {
+            let line_start_index = wrapped_lines.len();
+            let mut current_line = text_template::RichTextLine { runs: Vec::new() };
+            let mut current_width_px = 0i32;
+            for run in &source_line.runs {
+                let mut token_start = 0usize;
+                let mut token_is_whitespace: Option<bool> = None;
+                let mut token_boundaries: Vec<usize> = run
+                    .text
+                    .char_indices()
+                    .map(|(byte_index, _)| byte_index)
+                    .collect();
+                token_boundaries.push(run.text.len());
+                for (boundary_index, &byte_index) in token_boundaries.iter().enumerate() {
+                    if boundary_index == 0 {
+                        continue;
+                    }
+                    let prev_byte_index = token_boundaries[boundary_index - 1];
+                    let Some(segment_char) = run.text[prev_byte_index..byte_index].chars().next()
+                    else {
+                        continue;
+                    };
+                    let is_whitespace = segment_char.is_whitespace();
+                    if let Some(active_is_whitespace) = token_is_whitespace {
+                        if active_is_whitespace != is_whitespace {
+                            let token = &run.text[token_start..prev_byte_index];
+                            if active_is_whitespace {
+                                if !current_line.runs.is_empty() {
+                                    let token_width_px = Self::text_panel_estimated_text_width_px(
+                                        token,
+                                        run.font_size_px,
+                                    );
+                                    if current_width_px.saturating_add(token_width_px)
+                                        <= max_width_px
+                                    {
+                                        Self::text_panel_push_run_fragment(
+                                            &mut current_line,
+                                            run,
+                                            token,
+                                        );
+                                        current_width_px =
+                                            current_width_px.saturating_add(token_width_px);
+                                    } else {
+                                        wrapped_lines.push(current_line);
+                                        current_line =
+                                            text_template::RichTextLine { runs: Vec::new() };
+                                        current_width_px = 0;
+                                    }
+                                }
+                            } else {
+                                let mut remaining = token;
+                                while !remaining.is_empty() {
+                                    let available_width_px =
+                                        (max_width_px.saturating_sub(current_width_px)).max(0);
+                                    if available_width_px == 0 && !current_line.runs.is_empty() {
+                                        wrapped_lines.push(current_line);
+                                        current_line =
+                                            text_template::RichTextLine { runs: Vec::new() };
+                                        current_width_px = 0;
+                                        continue;
+                                    }
+                                    let mut fit_chars =
+                                        Self::text_panel_fit_prefix_char_count_for_width(
+                                            remaining,
+                                            run.font_size_px,
+                                            available_width_px.max(1),
+                                        );
+                                    if fit_chars == 0 {
+                                        if current_line.runs.is_empty() {
+                                            fit_chars = 1;
+                                        } else {
+                                            wrapped_lines.push(current_line);
+                                            current_line =
+                                                text_template::RichTextLine { runs: Vec::new() };
+                                            current_width_px = 0;
+                                            continue;
+                                        }
+                                    }
+                                    let split_byte_index =
+                                        Self::text_panel_byte_index_for_char_count(
+                                            remaining, fit_chars,
+                                        );
+                                    let fragment = &remaining[..split_byte_index];
+                                    Self::text_panel_push_run_fragment(
+                                        &mut current_line,
+                                        run,
+                                        fragment,
+                                    );
+                                    let fragment_width_px =
+                                        Self::text_panel_estimated_text_width_px(
+                                            fragment,
+                                            run.font_size_px,
+                                        );
+                                    current_width_px =
+                                        current_width_px.saturating_add(fragment_width_px);
+                                    remaining = &remaining[split_byte_index..];
+                                    if !remaining.is_empty() {
+                                        wrapped_lines.push(current_line);
+                                        current_line =
+                                            text_template::RichTextLine { runs: Vec::new() };
+                                        current_width_px = 0;
+                                    }
+                                }
+                            }
+                            token_start = prev_byte_index;
+                            token_is_whitespace = Some(is_whitespace);
+                        }
+                    } else {
+                        token_is_whitespace = Some(is_whitespace);
+                    }
+                }
+                if let Some(active_is_whitespace) = token_is_whitespace {
+                    let token = &run.text[token_start..];
+                    if active_is_whitespace {
+                        if !current_line.runs.is_empty() {
+                            let token_width_px =
+                                Self::text_panel_estimated_text_width_px(token, run.font_size_px);
+                            if current_width_px.saturating_add(token_width_px) <= max_width_px {
+                                Self::text_panel_push_run_fragment(&mut current_line, run, token);
+                                current_width_px = current_width_px.saturating_add(token_width_px);
+                            } else {
+                                wrapped_lines.push(current_line);
+                                current_line = text_template::RichTextLine { runs: Vec::new() };
+                                current_width_px = 0;
+                            }
+                        }
+                    } else {
+                        let mut remaining = token;
+                        while !remaining.is_empty() {
+                            let available_width_px =
+                                (max_width_px.saturating_sub(current_width_px)).max(0);
+                            if available_width_px == 0 && !current_line.runs.is_empty() {
+                                wrapped_lines.push(current_line);
+                                current_line = text_template::RichTextLine { runs: Vec::new() };
+                                current_width_px = 0;
+                                continue;
+                            }
+                            let mut fit_chars = Self::text_panel_fit_prefix_char_count_for_width(
+                                remaining,
+                                run.font_size_px,
+                                available_width_px.max(1),
+                            );
+                            if fit_chars == 0 {
+                                if current_line.runs.is_empty() {
+                                    fit_chars = 1;
+                                } else {
+                                    wrapped_lines.push(current_line);
+                                    current_line = text_template::RichTextLine { runs: Vec::new() };
+                                    current_width_px = 0;
+                                    continue;
+                                }
+                            }
+                            let split_byte_index =
+                                Self::text_panel_byte_index_for_char_count(remaining, fit_chars);
+                            let fragment = &remaining[..split_byte_index];
+                            Self::text_panel_push_run_fragment(&mut current_line, run, fragment);
+                            let fragment_width_px = Self::text_panel_estimated_text_width_px(
+                                fragment,
+                                run.font_size_px,
+                            );
+                            current_width_px = current_width_px.saturating_add(fragment_width_px);
+                            remaining = &remaining[split_byte_index..];
+                            if !remaining.is_empty() {
+                                wrapped_lines.push(current_line);
+                                current_line = text_template::RichTextLine { runs: Vec::new() };
+                                current_width_px = 0;
+                            }
+                        }
+                    }
+                }
+            }
+            if current_line.runs.is_empty() {
+                if wrapped_lines.len() == line_start_index {
+                    wrapped_lines.push(text_template::RichTextLine { runs: Vec::new() });
+                }
+            } else {
+                wrapped_lines.push(current_line);
+            }
+        }
+        if wrapped_lines.is_empty() {
+            wrapped_lines.push(text_template::RichTextLine { runs: Vec::new() });
+        }
+        text_template::RenderedText {
+            plain_text: Self::rendered_plain_text_for_lines(&wrapped_lines),
+            lines: wrapped_lines,
+        }
+    }
+
     fn text_panel_estimated_line_height_px(
         line: &text_template::RichTextLine,
         fallback_font_size_px: u32,
@@ -3781,50 +4127,182 @@ impl UiManager {
         plain
     }
 
+    fn text_panel_apply_ellipsis_to_line(
+        line: &mut text_template::RichTextLine,
+        width_px: i32,
+        fallback_font_size_px: u32,
+    ) {
+        let max_width_px = Self::text_panel_effective_width_px(width_px);
+        let ellipsis_font_size_px = line
+            .runs
+            .last()
+            .map(|run| run.font_size_px.max(1))
+            .unwrap_or(fallback_font_size_px.max(1));
+        let ellipsis_width_px =
+            Self::text_panel_estimated_text_width_px(TEXT_PANEL_ELLIPSIS, ellipsis_font_size_px);
+        loop {
+            let line_width_px = Self::text_panel_estimated_line_width_px(line);
+            if line_width_px.saturating_add(ellipsis_width_px) <= max_width_px {
+                break;
+            }
+            let mut remove_run = false;
+            if let Some(last_run) = line.runs.last_mut() {
+                if let Some((last_char_byte_index, _)) = last_run.text.char_indices().next_back() {
+                    last_run.text.truncate(last_char_byte_index);
+                }
+                if last_run.text.is_empty() {
+                    remove_run = true;
+                }
+            } else {
+                break;
+            }
+            if remove_run {
+                line.runs.pop();
+            }
+            if line.runs.is_empty() {
+                break;
+            }
+        }
+
+        if let Some(last_run) = line.runs.last_mut() {
+            last_run.text.push('…');
+        } else {
+            line.runs.push(text_template::RichTextRun {
+                text: TEXT_PANEL_ELLIPSIS.to_string(),
+                bold: false,
+                italic: false,
+                underline: false,
+                font_size_px: fallback_font_size_px.max(1),
+                font_family: String::new(),
+                color: None,
+            });
+        }
+    }
+
+    fn text_panel_elide_overflowing_lines(
+        rendered: &mut text_template::RenderedText,
+        width_px: i32,
+        fallback_font_size_px: u32,
+    ) -> bool {
+        let mut was_elided = false;
+        for line in &mut rendered.lines {
+            if Self::text_panel_line_exceeds_width(line, width_px) {
+                Self::text_panel_apply_ellipsis_to_line(line, width_px, fallback_font_size_px);
+                was_elided = true;
+            }
+        }
+        if was_elided {
+            rendered.plain_text = Self::rendered_plain_text_for_lines(&rendered.lines);
+        }
+        was_elided
+    }
+
     fn fit_text_panel_rendered_text(
         template_source: &str,
         context: &text_template::TemplateContext<'_>,
         content_width_px: i32,
         content_height_px: i32,
-    ) -> text_template::RenderedText {
+    ) -> FittedTextPanelRender {
         let width_px = content_width_px.max(0);
         let height_px = content_height_px.max(0);
         let compact = Self::text_panel_is_compact(width_px, height_px);
         let mut base_font_size_px = Self::text_panel_base_font_size_px(width_px, height_px);
-        let mut rendered = text_template::render_template_with_options(
+        let mut rendered_full = text_template::render_template_with_options(
             template_source,
             context,
             text_template::RenderOptions { base_font_size_px },
         );
-        let min_visible_lines = if rendered.plain_text.trim().is_empty() {
+        let mut wrapped_rendered =
+            Self::text_panel_wrap_rendered_text_for_width(&rendered_full, width_px);
+        let min_visible_lines = if rendered_full.plain_text.trim().is_empty() {
             0
         } else {
-            rendered.lines.len().clamp(1, TEXT_PANEL_MIN_VISIBLE_LINES)
+            rendered_full
+                .lines
+                .len()
+                .clamp(1, TEXT_PANEL_MIN_VISIBLE_LINES)
         };
         while base_font_size_px > TEXT_PANEL_MIN_BASE_FONT_SIZE_PX {
-            let visible = Self::text_panel_visible_line_count(
-                &rendered,
+            let wrapped_visible = Self::text_panel_visible_line_count(
+                &wrapped_rendered,
                 height_px,
                 compact,
                 base_font_size_px,
             );
+            let unwrapped_visible = Self::text_panel_visible_line_count(
+                &rendered_full,
+                height_px,
+                compact,
+                base_font_size_px,
+            );
+            let has_horizontal_overflow =
+                Self::text_panel_any_line_exceeds_width(&rendered_full, width_px);
+            let wrap_fits_vertically = wrapped_visible >= wrapped_rendered.lines.len();
+            let use_wrap_mode = has_horizontal_overflow && wrap_fits_vertically;
+            let visible = if use_wrap_mode {
+                wrapped_visible
+            } else {
+                unwrapped_visible
+            };
             if visible >= min_visible_lines {
                 break;
             }
             base_font_size_px = base_font_size_px.saturating_sub(1);
-            rendered = text_template::render_template_with_options(
+            rendered_full = text_template::render_template_with_options(
                 template_source,
                 context,
                 text_template::RenderOptions { base_font_size_px },
             );
+            wrapped_rendered =
+                Self::text_panel_wrap_rendered_text_for_width(&rendered_full, width_px);
         }
-        let visible_line_count =
-            Self::text_panel_visible_line_count(&rendered, height_px, compact, base_font_size_px);
-        if visible_line_count < rendered.lines.len() {
-            rendered.lines.truncate(visible_line_count);
+        let full_plain_text = rendered_full.plain_text.clone();
+        let wrapped_visible_line_count = Self::text_panel_visible_line_count(
+            &wrapped_rendered,
+            height_px,
+            compact,
+            base_font_size_px,
+        );
+        let unwrapped_visible_line_count = Self::text_panel_visible_line_count(
+            &rendered_full,
+            height_px,
+            compact,
+            base_font_size_px,
+        );
+        let has_horizontal_overflow =
+            Self::text_panel_any_line_exceeds_width(&rendered_full, width_px);
+        let wrap_fits_vertically = wrapped_visible_line_count >= wrapped_rendered.lines.len();
+        let use_wrap_mode = has_horizontal_overflow && wrap_fits_vertically;
+
+        if use_wrap_mode {
+            return FittedTextPanelRender {
+                rendered: wrapped_rendered,
+                full_plain_text,
+                was_elided: false,
+            };
+        }
+
+        let mut rendered = rendered_full;
+        let mut was_elided = false;
+        if unwrapped_visible_line_count < rendered.lines.len() {
+            rendered.lines.truncate(unwrapped_visible_line_count);
+            if let Some(last_visible_line) = rendered.lines.last_mut() {
+                Self::text_panel_apply_ellipsis_to_line(
+                    last_visible_line,
+                    width_px,
+                    base_font_size_px,
+                );
+            }
             rendered.plain_text = Self::rendered_plain_text_for_lines(&rendered.lines);
+            was_elided = true;
         }
-        rendered
+        was_elided |=
+            Self::text_panel_elide_overflowing_lines(&mut rendered, width_px, base_font_size_px);
+        FittedTextPanelRender {
+            rendered,
+            full_plain_text,
+            was_elided,
+        }
     }
 
     fn viewer_track_context_for_display_target(
@@ -4113,7 +4591,7 @@ impl UiManager {
                             track_number: String::new(),
                         });
 
-                    let rendered_text = if let Some(metadata) = metadata {
+                    let fitted_text = if let Some(metadata) = metadata {
                         template_metadata.title = metadata.title.clone();
                         template_metadata.artist = metadata.artist.clone();
                         template_metadata.album = metadata.album.clone();
@@ -4171,9 +4649,15 @@ impl UiManager {
                             content_height_px,
                         )
                     } else {
-                        UiManager::empty_rendered_text()
+                        FittedTextPanelRender {
+                            rendered: UiManager::empty_rendered_text(),
+                            full_plain_text: String::new(),
+                            was_elided: false,
+                        }
                     };
-                    row_data.display_text = UiManager::to_ui_rich_text_block(&rendered_text);
+                    row_data.display_text = UiManager::to_ui_rich_text_block(&fitted_text.rendered);
+                    row_data.display_text_full = fitted_text.full_plain_text.as_str().into();
+                    row_data.display_text_elided = fitted_text.was_elided;
                     vec_model.set_row_data(row_index, row_data);
                 }
             }
@@ -11142,6 +11626,21 @@ mod tests {
         text_template::RenderedText { plain_text, lines }
     }
 
+    fn test_template_context<'a>() -> text_template::TemplateContext<'a> {
+        text_template::TemplateContext {
+            title: "Example Song",
+            artist: "Artist",
+            album: "Album",
+            album_artist: "Album Artist",
+            date: "2026-01-01",
+            year: "2026",
+            genre: "Synthwave",
+            track_number: "1",
+            file_name: Some("example.mp3"),
+            path: Some("/music/example.mp3"),
+        }
+    }
+
     fn default_album_art_profile() -> ColumnWidthProfile {
         ColumnWidthProfile {
             min_px: crate::config::default_playlist_album_art_column_min_width_px(),
@@ -11196,6 +11695,84 @@ mod tests {
             ),
             1
         );
+    }
+
+    #[test]
+    fn test_text_panel_wrap_rendered_text_for_width_wraps_long_line() {
+        let rendered = text_template::RenderedText {
+            plain_text: "this is a very long line".to_string(),
+            lines: vec![text_template::RichTextLine {
+                runs: vec![text_template::RichTextRun {
+                    text: "this is a very long line".to_string(),
+                    bold: false,
+                    italic: false,
+                    underline: false,
+                    font_size_px: 13,
+                    font_family: String::new(),
+                    color: None,
+                }],
+            }],
+        };
+        let wrapped = UiManager::text_panel_wrap_rendered_text_for_width(&rendered, 80);
+        assert!(wrapped.lines.len() > 1);
+        let wrapped_compact: String = wrapped
+            .plain_text
+            .chars()
+            .filter(|ch| !ch.is_whitespace())
+            .collect();
+        let source_compact: String = rendered
+            .plain_text
+            .chars()
+            .filter(|ch| !ch.is_whitespace())
+            .collect();
+        assert_eq!(wrapped_compact, source_compact);
+    }
+
+    #[test]
+    fn test_fit_text_panel_rendered_text_marks_elided_when_vertical_space_is_limited() {
+        let fitted = UiManager::fit_text_panel_rendered_text(
+            "{title}\\n{artist}\\n{album}",
+            &test_template_context(),
+            220,
+            22,
+        );
+        assert!(fitted.was_elided);
+        let displayed_plain = fitted.rendered.plain_text.trim();
+        assert!(!displayed_plain.is_empty());
+        assert!(displayed_plain.ends_with('…'));
+        assert!(fitted.full_plain_text.contains("Example Song"));
+    }
+
+    #[test]
+    fn test_fit_text_panel_rendered_text_wraps_without_eliding_when_vertical_space_allows() {
+        let fitted = UiManager::fit_text_panel_rendered_text(
+            "{title}",
+            &text_template::TemplateContext {
+                title: "A very long title that should wrap when there is enough room",
+                ..test_template_context()
+            },
+            120,
+            120,
+        );
+        assert!(!fitted.was_elided);
+        assert!(fitted.rendered.lines.len() > 1);
+        assert!(!fitted.rendered.plain_text.contains('…'));
+    }
+
+    #[test]
+    fn test_fit_text_panel_rendered_text_elides_without_wrapping_when_vertical_space_is_tight() {
+        let fitted = UiManager::fit_text_panel_rendered_text(
+            "{title}",
+            &text_template::TemplateContext {
+                title: "A very long title that should elide when vertical room is tight",
+                ..test_template_context()
+            },
+            120,
+            16,
+        );
+        assert!(fitted.was_elided);
+        assert_eq!(fitted.rendered.lines.len(), 1);
+        assert!(fitted.rendered.plain_text.contains('…'));
     }
 
     #[test]
@@ -12327,6 +12904,21 @@ mod tests {
         assert_eq!(
             UiManager::playlist_column_class(&custom_favorite),
             PlaylistColumnClass::Custom
+        );
+    }
+
+    #[test]
+    fn test_playlist_column_class_treats_track_details_as_title_family() {
+        let track_details = PlaylistColumnConfig {
+            name: "Track Details".to_string(),
+            format: crate::config::BUILTIN_TRACK_DETAILS_COLUMN_FORMAT.to_string(),
+            enabled: true,
+            custom: false,
+        };
+
+        assert_eq!(
+            UiManager::playlist_column_class(&track_details),
+            PlaylistColumnClass::Title
         );
     }
 
