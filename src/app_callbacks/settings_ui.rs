@@ -67,6 +67,17 @@ fn set_custom_color_draft_value(ui: &AppWindow, index: usize, value: String) {
     set_custom_color_draft_preview_colors(ui);
 }
 
+fn set_custom_color_draft_values(ui: &AppWindow, values: &[String]) {
+    let values_shared: Vec<slint::SharedString> = values
+        .iter()
+        .map(|value| slint::SharedString::from(value.as_str()))
+        .collect();
+    ui.set_settings_custom_color_draft_values(ModelRc::from(Rc::new(VecModel::from(
+        values_shared,
+    ))));
+    set_custom_color_draft_preview_colors(ui);
+}
+
 /// Registers callbacks that mutate persisted settings and runtime audio/UI state.
 pub(crate) fn register_settings_ui_callbacks(ui: &AppWindow, shared_state: &AppSharedState) {
     let bus_sender_clone = shared_state.bus_sender.clone();
@@ -315,6 +326,16 @@ pub(crate) fn register_settings_ui_callbacks(ui: &AppWindow, shared_state: &AppS
         }
     });
 
+    let ui_handle_clone = shared_state.ui_handles.ui_handle.clone();
+    ui.on_settings_reset_custom_colors(move || {
+        if let Some(ui) = ui_handle_clone.upgrade() {
+            let default_colors = crate::theme::default_custom_theme_colors();
+            let default_values = crate::theme::custom_color_values_for_ui(&default_colors);
+            set_custom_color_draft_values(&ui, &default_values);
+            ui.set_show_custom_color_picker_dialog(false);
+        }
+    });
+
     let bus_sender_clone = shared_state.bus_sender.clone();
     let config_state_clone = shared_state.config_state.clone();
     let output_options_clone = shared_state.runtime_handles.output_options.clone();
@@ -423,7 +444,8 @@ pub(crate) fn register_settings_ui_callbacks(ui: &AppWindow, shared_state: &AppS
             };
             let selected_color_scheme = crate::theme::scheme_id_for_index(color_scheme_index);
             let custom_color_values = shared_string_model_to_vec(custom_color_values);
-            let fallback_colors = crate::theme::resolve_theme(&previous_config.ui.layout).colors;
+            let fallback_colors =
+                crate::theme::resolve_persisted_custom_colors(&previous_config.ui.layout);
             let custom_colors =
                 crate::theme::custom_colors_from_ui_values(&custom_color_values, &fallback_colors);
             let mut next_layout = previous_config.ui.layout.clone();

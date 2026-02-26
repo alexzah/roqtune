@@ -5636,12 +5636,19 @@ export component AppWindow inherits Window {
 
                 HorizontalLayout {
                     spacing: 10px;
+                    Button {
+                        text: "Reset...";
+                        clicked => {
+                            root.show_custom_color_reset_confirm = true;
+                        }
+                    }
                     Rectangle { horizontal-stretch: 1; }
                     Button {
                         text: "Cancel";
                         clicked => {
                             root.show_custom_color_scheme_dialog = false;
                             root.show_custom_color_picker_dialog = false;
+                            root.show_custom_color_reset_confirm = false;
                             root.settings_custom_color_draft_values = root.settings_custom_color_values;
                         }
                     }
@@ -5651,11 +5658,26 @@ export component AppWindow inherits Window {
                         clicked => {
                             root.settings_custom_color_values = root.settings_custom_color_draft_values;
                             root.show_custom_color_picker_dialog = false;
+                            root.show_custom_color_reset_confirm = false;
                             root.show_custom_color_scheme_dialog = false;
                         }
                     }
                 }
             }
+        }
+    }
+
+    custom_color_reset_overlay := ConfirmationDialog {
+        z: 157;
+        is-visible: root.show_custom_color_reset_confirm;
+        message: "Reset custom colors to roqtune (dark) defaults?\n\nThis discards unsaved color edits in this dialog.";
+        confirm-button-text: "Reset";
+        confirmed => {
+            root.settings_reset_custom_colors();
+            root.show_custom_color_reset_confirm = false;
+        }
+        cancelled => {
+            root.show_custom_color_reset_confirm = false;
         }
     }
 
@@ -5940,6 +5962,7 @@ export component AppWindow inherits Window {
     in-out property <[string]> settings_custom_color_draft_values: [];
     in-out property <[color]> settings_custom_color_draft_preview_colors: [];
     in-out property <bool> show_custom_color_scheme_dialog: false;
+    in-out property <bool> show_custom_color_reset_confirm: false;
     in-out property <bool> show_custom_color_picker_dialog: false;
     in-out property <int> settings_custom_color_picker_target_index: -1;
     in-out property <string> settings_custom_color_picker_target_label: "";
@@ -5968,6 +5991,9 @@ export component AppWindow inherits Window {
     changed show_custom_color_scheme_dialog => {
         if (root.show_custom_color_scheme_dialog) {
             root.settings_refresh_custom_color_previews();
+        } else {
+            root.show_custom_color_reset_confirm = false;
+            root.show_custom_color_picker_dialog = false;
         }
     }
     
@@ -6129,5 +6155,6 @@ export component AppWindow inherits Window {
     callback settings_open_custom_color_picker(int, string, string);
     callback settings_apply_custom_color_picker(int, int, int, int);
     callback settings_refresh_custom_color_previews();
+    callback settings_reset_custom_colors();
     callback apply_settings(int, int, int, int, string, string, string, string, bool, bool, bool, int, int, bool, bool, bool, int, [string]);
 }

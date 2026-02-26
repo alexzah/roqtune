@@ -150,13 +150,9 @@ pub fn resolve_theme(layout: &LayoutConfig) -> ResolvedTheme {
     let default = catalog.default_preset();
     let selected = layout.color_scheme.trim();
     if selected.eq_ignore_ascii_case(CUSTOM_COLOR_SCHEME_ID) {
-        let fallback = default.colors.clone();
-        let colors = layout
-            .custom_colors
-            .as_ref()
-            .map(|custom| sanitize_color_components(custom, &fallback))
-            .unwrap_or(fallback);
-        let mode = infer_mode_from_window_bg(&colors).unwrap_or(default.mode);
+        let custom_default_mode = custom_default_preset(catalog).mode;
+        let colors = resolve_persisted_custom_colors(layout);
+        let mode = infer_mode_from_window_bg(&colors).unwrap_or(custom_default_mode);
         return ResolvedTheme { mode, colors };
     }
 
@@ -165,6 +161,21 @@ pub fn resolve_theme(layout: &LayoutConfig) -> ResolvedTheme {
         mode: preset.mode,
         colors: preset.colors.clone(),
     }
+}
+
+/// Returns sanitized persisted custom colors, falling back to roqtune dark defaults.
+pub fn resolve_persisted_custom_colors(layout: &LayoutConfig) -> ThemeColorComponents {
+    let fallback = default_custom_theme_colors();
+    layout
+        .custom_colors
+        .as_ref()
+        .map(|custom| sanitize_color_components(custom, &fallback))
+        .unwrap_or(fallback)
+}
+
+/// Returns the default custom color set (roqtune dark).
+pub fn default_custom_theme_colors() -> ThemeColorComponents {
+    custom_default_preset(theme_preset_catalog()).colors.clone()
 }
 
 /// Selects the combo index for a persisted scheme id.
@@ -330,6 +341,12 @@ fn parse_hex_byte(value: &str) -> Option<u8> {
     u8::from_str_radix(value, 16).ok()
 }
 
+fn custom_default_preset(catalog: &ThemePresetCatalog) -> &ThemePreset {
+    catalog
+        .preset_by_id(DEFAULT_COLOR_SCHEME_ID)
+        .unwrap_or_else(|| catalog.default_preset())
+}
+
 fn infer_mode_from_window_bg(colors: &ThemeColorComponents) -> Option<ThemeSchemeMode> {
     let normalized = normalize_hex_color(&colors.window_bg)?;
     if normalized.len() < 7 {
@@ -348,8 +365,11 @@ fn infer_mode_from_window_bg(colors: &ThemeColorComponents) -> Option<ThemeSchem
 
 #[cfg(test)]
 mod tests {
+    use crate::layout::LayoutConfig;
+
     use super::{
-        parse_slint_color, scheme_picker_options, theme_preset_catalog, CUSTOM_COLOR_SCHEME_ID,
+        parse_slint_color, resolve_persisted_custom_colors, scheme_picker_options,
+        theme_preset_catalog, CUSTOM_COLOR_SCHEME_ID,
     };
 
     #[test]
@@ -381,5 +401,17 @@ mod tests {
         assert!(parse_slint_color("#2A6DEF").is_some());
         assert!(parse_slint_color("#2A6DEFCC").is_some());
         assert!(parse_slint_color("invalid").is_none());
+    }
+
+    #[test]
+    fn test_resolve_persisted_custom_colors_defaults_to_roqtune_dark() {
+        let layout = LayoutConfig::default();
+        let resolved_custom = resolve_persisted_custom_colors(&layout);
+        let roqtune_dark = theme_preset_catalog()
+            .preset_by_id("roqtune_dark")
+            .expect("roqtune dark preset should exist")
+            .colors
+            .clone();
+        assert_eq!(resolved_custom, roqtune_dark);
     }
 }

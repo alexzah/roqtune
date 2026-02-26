@@ -76,8 +76,8 @@ use protocol::Message;
 use runtime_config::{RuntimeAudioState, RuntimeOutputOverride};
 use slint::{ComponentHandle, ModelRc, VecModel};
 use theme::{
-    custom_color_component_labels, custom_color_values_for_ui, parse_slint_color, resolve_theme,
-    scheme_index_for_id, scheme_picker_options,
+    custom_color_component_labels, custom_color_values_for_ui, parse_slint_color,
+    resolve_persisted_custom_colors, resolve_theme, scheme_index_for_id, scheme_picker_options,
 };
 use tokio::sync::broadcast;
 // Re-export shared UI helpers at crate root for callback modules that call through `crate::...`.
@@ -626,8 +626,9 @@ pub(crate) fn apply_config_to_ui(
     ui.set_settings_custom_color_labels(ModelRc::from(Rc::new(VecModel::from(
         custom_color_labels,
     ))));
-    let custom_color_value_strings = custom_color_values_for_ui(&resolved_theme.colors);
-    let custom_color_preview_fallback = parse_theme_color(&resolved_theme.colors.accent);
+    let persisted_custom_colors = resolve_persisted_custom_colors(&config.ui.layout);
+    let custom_color_value_strings = custom_color_values_for_ui(&persisted_custom_colors);
+    let custom_color_preview_fallback = parse_theme_color(&persisted_custom_colors.accent);
     let custom_color_preview_values: Vec<slint::Color> = custom_color_value_strings
         .iter()
         .map(|value| parse_slint_color(value).unwrap_or(custom_color_preview_fallback))
