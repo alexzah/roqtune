@@ -461,6 +461,16 @@ export component AppWindow inherits Window {
     property <length> layout_leaf_context_menu_y: 0px;
     property <length> layout_splitter_context_menu_x: 0px;
     property <length> layout_splitter_context_menu_y: 0px;
+    property <length> layout_exit_editor_button_width: 108px;
+    property <length> layout_exit_editor_button_height: 28px;
+    in-out property <length> layout_exit_editor_button_x: 0px;
+    in-out property <length> layout_exit_editor_button_y: 8px;
+    property <length> layout_exit_editor_drag_start_mouse_x: 0px;
+    property <length> layout_exit_editor_drag_start_mouse_y: 0px;
+    property <length> layout_exit_editor_drag_origin_x: 0px;
+    property <length> layout_exit_editor_drag_origin_y: 0px;
+    in-out property <bool> layout_exit_editor_dragging: false;
+    in-out property <bool> layout_exit_editor_drag_moved: false;
     property <int> panel_kind_none: 0;
     property <int> panel_kind_button_cluster: 1;
     property <int> panel_kind_transport_button_cluster: 2;
@@ -657,9 +667,17 @@ export component AppWindow inherits Window {
     }
 
     changed width => {
+        root.layout_exit_editor_button_x = min(
+            max(0px, root.layout_exit_editor_button_x),
+            max(0px, root.width - root.layout_exit_editor_button_width)
+        );
         root.window_resized(max(0, floor(self.width / 1px)), max(0, floor(self.height / 1px)));
     }
     changed height => {
+        root.layout_exit_editor_button_y = min(
+            max(0px, root.layout_exit_editor_button_y),
+            max(0px, root.height - root.layout_exit_editor_button_height)
+        );
         root.window_resized(max(0, floor(self.width / 1px)), max(0, floor(self.height / 1px)));
     }
 
@@ -668,33 +686,6 @@ export component AppWindow inherits Window {
     in-out property <string> status-selection-summary: "";
 
     VerticalLayout {
-        if root.layout_edit_mode : Rectangle {
-            height: 30px;
-            background: AppPalette.panel-bg-elevated;
-            border-width: 1px;
-            border-color: AppPalette.border;
-            HorizontalLayout {
-                padding-left: 8px;
-                padding-right: 8px;
-                spacing: 8px;
-                Text {
-                    text: "Layout editor is active";
-                    color: AppPalette.text-muted;
-                    font-size: 11px;
-                    vertical-alignment: center;
-                }
-                Rectangle { horizontal-stretch: 1; }
-                Button {
-                    width: 96px;
-                    height: 24px;
-                    text: "Exit editor";
-                    clicked => {
-                        root.open_layout_editor();
-                    }
-                }
-            }
-        }
-
         layout-workspace := Rectangle {
             vertical-stretch: 1;
             background: root.theme_window_bg;
@@ -2559,6 +2550,75 @@ export component AppWindow inherits Window {
                 root.layout_leaf_presets_submenu_hover = false;
                 root.show_layout_leaf_context_menu = false;
                 root.show_layout_splitter_context_menu = false;
+            }
+        }
+    }
+
+    if root.layout_edit_mode : Rectangle {
+        z: 128;
+        width: root.layout_exit_editor_button_width;
+        height: root.layout_exit_editor_button_height;
+        x: min(max(0px, root.layout_exit_editor_button_x), max(0px, root.width - self.width));
+        y: min(max(0px, root.layout_exit_editor_button_y), max(0px, root.height - self.height));
+        border-radius: 5px;
+        border-width: 1px;
+        border-color: AppPalette.warning;
+        background: exit-layout-editor-ta.has-hover
+            ? AppPalette.warning.mix(AppPalette.panel-bg-elevated, 0.28)
+            : AppPalette.warning.mix(AppPalette.panel-bg-elevated, 0.42);
+
+        Text {
+            text: "Exit editor";
+            color: AppPalette.text-primary;
+            font-size: 11px;
+            font-weight: 700;
+            horizontal-alignment: center;
+            vertical-alignment: center;
+        }
+
+        exit-layout-editor-ta := TouchArea {
+            mouse-cursor: pointer;
+            pointer-event(event) => {
+                if (event.kind == PointerEventKind.down && event.button == PointerEventButton.left) {
+                    root.layout_exit_editor_dragging = true;
+                    root.layout_exit_editor_drag_moved = false;
+                    root.layout_exit_editor_drag_start_mouse_x = self.mouse-x;
+                    root.layout_exit_editor_drag_start_mouse_y = self.mouse-y;
+                    root.layout_exit_editor_drag_origin_x = root.layout_exit_editor_button_x;
+                    root.layout_exit_editor_drag_origin_y = root.layout_exit_editor_button_y;
+                }
+                if (event.kind == PointerEventKind.up && event.button == PointerEventButton.left) {
+                    if (root.layout_exit_editor_dragging && !root.layout_exit_editor_drag_moved) {
+                        root.open_layout_editor();
+                    }
+                    root.layout_exit_editor_dragging = false;
+                    root.layout_exit_editor_drag_moved = false;
+                }
+                if (event.kind == PointerEventKind.cancel && event.button == PointerEventButton.left) {
+                    root.layout_exit_editor_dragging = false;
+                    root.layout_exit_editor_drag_moved = false;
+                }
+            }
+            moved => {
+                if (root.layout_exit_editor_dragging && self.pressed) {
+                    let delta-x-px = abs((self.mouse-x - root.layout_exit_editor_drag_start_mouse_x) / 1px);
+                    let delta-y-px = abs((self.mouse-y - root.layout_exit_editor_drag_start_mouse_y) / 1px);
+                    if (!root.layout_exit_editor_drag_moved && (delta-x-px > 2 || delta-y-px > 2)) {
+                        root.layout_exit_editor_drag_moved = true;
+                    }
+                    let target-x = root.layout_exit_editor_drag_origin_x
+                        + (self.mouse-x - root.layout_exit_editor_drag_start_mouse_x);
+                    let target-y = root.layout_exit_editor_drag_origin_y
+                        + (self.mouse-y - root.layout_exit_editor_drag_start_mouse_y);
+                    root.layout_exit_editor_button_x = min(
+                        max(0px, target-x),
+                        max(0px, root.width - root.layout_exit_editor_button_width)
+                    );
+                    root.layout_exit_editor_button_y = min(
+                        max(0px, target-y),
+                        max(0px, root.height - root.layout_exit_editor_button_height)
+                    );
+                }
             }
         }
     }
@@ -6191,6 +6251,17 @@ export component AppWindow inherits Window {
         } else {
             root.show_custom_color_reset_confirm = false;
             root.show_custom_color_picker_dialog = false;
+        }
+    }
+
+    changed layout_edit_mode => {
+        if (root.layout_edit_mode) {
+            root.layout_exit_editor_button_x =
+                min(max(0px, (root.width - root.layout_exit_editor_button_width) / 2), max(0px, root.width - root.layout_exit_editor_button_width));
+            root.layout_exit_editor_button_y = 8px;
+        } else {
+            root.layout_exit_editor_dragging = false;
+            root.layout_exit_editor_drag_moved = false;
         }
     }
     

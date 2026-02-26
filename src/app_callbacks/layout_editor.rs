@@ -11,7 +11,6 @@ use crate::{
     },
     AppWindow,
 };
-
 fn panel_kind_for_leaf(node: &LayoutNode, leaf_id: &str) -> Option<LayoutPanelKind> {
     match node {
         LayoutNode::Leaf { id, panel } => (id == leaf_id).then_some(*panel),
