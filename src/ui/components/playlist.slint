@@ -129,6 +129,7 @@ export component TrackRow inherits Rectangle {
     in property <length> horizontal-padding: 8px;
     in property <length> column-spacing: 10px;
     in property <length> status-lane-width: 40px;
+    callback metadata_link_activated(int, string, string, string, string);
 
     pure function column-width-for-index(index: int) -> length {
         if index >= 0 && index < root.column-widths-px.length {
@@ -240,6 +241,9 @@ export component TrackRow inherits Rectangle {
                     compact: root.row-height <= 32px;
                     max-lines: 6;
                     clip-lines: true;
+                    metadata_link_activated(kind, value, album, album_artist, track_path) => {
+                        root.metadata_link_activated(kind, value, album, album_artist, track_path);
+                    }
                 }
 
                 if !self.has-rich-value : Text {

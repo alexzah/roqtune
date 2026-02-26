@@ -262,4 +262,18 @@ pub(crate) fn register_imports_library_callbacks(ui: &AppWindow, shared_state: &
         };
         apply_config_update(&shared_state_clone, next_config, true);
     });
+
+    let shared_state_clone = shared_state.clone();
+    ui.on_settings_set_library_include_playlist_tracks_in_library(move |enabled| {
+        let next_config = {
+            let state = shared_state_clone
+                .config_state
+                .lock()
+                .expect("config state lock poisoned");
+            let mut next = state.clone();
+            next.library.include_playlist_tracks_in_library = enabled;
+            crate::sanitize_config(next)
+        };
+        apply_config_update(&shared_state_clone, next_config, true);
+    });
 }

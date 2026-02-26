@@ -22,19 +22,22 @@ mod tests {
     }
 
     #[test]
-    fn test_library_view_shows_add_folder_cta_when_no_folders_are_configured() {
+    fn test_library_view_shows_add_folder_cta_when_library_has_no_content() {
         let slint_ui = include_str!("../roqtune.slint");
         assert!(
-            slint_ui.contains(
-                "property <bool> has-configured-folders: root.settings_library_folders.length > 0;"
-            ),
-            "Library list container should detect when no folders are configured"
+            slint_ui.contains("in-out property <bool> library_has_any_content: false;")
+                && slint_ui
+                    .contains("property <bool> has-any-content: root.library_has_any_content;"),
+            "Library view should expose and consume a content-based empty-state signal"
         );
         assert!(
-            slint_ui.contains("if !library-list-container.has-configured-folders : Rectangle {")
+            slint_ui.contains("if !library-list-container.has-any-content : Rectangle {")
                 && slint_ui.contains("text: \"Add folders to get started\"")
+                && slint_ui.contains(
+                    "text: \"Library mode is empty. Add folders, playlist tracks, or remote tracks to populate it.\""
+                )
                 && slint_ui.contains("root.library_add_folder();"),
-            "Library view should expose an in-view call-to-action to add folders"
+            "Library view should expose an in-view call-to-action when all library sources are empty"
         );
     }
 

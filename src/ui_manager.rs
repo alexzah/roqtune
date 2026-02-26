@@ -193,6 +193,7 @@ pub struct UiManager {
     library_last_detail_enrichment_entity: Option<protocol::LibraryEnrichmentEntity>,
     library_online_metadata_enabled: bool,
     library_online_metadata_prompt_pending: bool,
+    library_include_playlist_tracks_in_library: bool,
     list_image_max_edge_px: u32,
     cover_art_cache_max_size_mb: u32,
     artist_image_cache_max_size_mb: u32,
@@ -220,6 +221,9 @@ pub struct UiManager {
     library_search_visible: bool,
     library_scan_in_progress: bool,
     library_status_text: String,
+    pending_metadata_link_fallback: Option<PendingMetadataLinkFallback>,
+    pending_metadata_link_track_path: Option<PathBuf>,
+    pending_metadata_link_track_title: Option<String>,
     library_add_to_playlist_checked: Vec<bool>,
     library_add_to_dialog_visible: bool,
     library_toast_generation: u64,
@@ -344,7 +348,7 @@ enum PropertiesRequestKind {
     Save,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 enum LibraryViewState {
     TracksRoot,
     ArtistsRoot,
@@ -360,6 +364,13 @@ enum LibraryViewState {
     AlbumDetail { album: String, album_artist: String },
     GenreDetail { genre: String },
     DecadeDetail { decade: String },
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct PendingMetadataLinkFallback {
+    expected_view: LibraryViewState,
+    fallback_root: LibraryViewState,
+    search_query: String,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -391,6 +402,8 @@ struct LibraryRowPresentation {
     leading: String,
     primary: String,
     secondary: String,
+    primary_rich: text_template::RenderedText,
+    secondary_rich: text_template::RenderedText,
     item_kind: i32,
     cover_art_path: Option<PathBuf>,
     source_badge: String,
@@ -1865,6 +1878,8 @@ impl UiManager {
             library_online_metadata_enabled: initial_library_config.online_metadata_enabled,
             library_online_metadata_prompt_pending: initial_library_config
                 .online_metadata_prompt_pending,
+            library_include_playlist_tracks_in_library: initial_library_config
+                .include_playlist_tracks_in_library,
             list_image_max_edge_px: initial_library_config.list_image_max_edge_px.max(1),
             cover_art_cache_max_size_mb: initial_library_config.cover_art_cache_max_size_mb.max(1),
             artist_image_cache_max_size_mb: initial_library_config
@@ -1897,6 +1912,9 @@ impl UiManager {
             library_search_visible: false,
             library_scan_in_progress: false,
             library_status_text: String::new(),
+            pending_metadata_link_fallback: None,
+            pending_metadata_link_track_path: None,
+            pending_metadata_link_track_title: None,
             library_add_to_playlist_checked: Vec::new(),
             library_add_to_dialog_visible: false,
             library_toast_generation: 0,
@@ -2525,6 +2543,65 @@ impl UiManager {
         }
     }
 
+    fn rendered_text_from_runs(
+        runs: Vec<text_template::RichTextRun>,
+    ) -> text_template::RenderedText {
+        let plain_text = runs
+            .iter()
+            .map(|run| run.text.as_str())
+            .collect::<Vec<&str>>()
+            .join("");
+        text_template::RenderedText {
+            plain_text,
+            lines: vec![text_template::RichTextLine { runs }],
+        }
+    }
+
+    fn rendered_single_run(
+        text: impl Into<String>,
+        font_size_px: u32,
+        link: Option<protocol::MetadataLinkPayload>,
+    ) -> text_template::RenderedText {
+        Self::rendered_text_from_runs(vec![Self::rich_text_run(text, font_size_px, link)])
+    }
+
+    fn rich_text_run(
+        text: impl Into<String>,
+        font_size_px: u32,
+        link: Option<protocol::MetadataLinkPayload>,
+    ) -> text_template::RichTextRun {
+        text_template::RichTextRun {
+            text: text.into(),
+            bold: false,
+            italic: false,
+            underline: false,
+            font_size_px: font_size_px.max(1),
+            font_family: String::new(),
+            color: None,
+            link,
+        }
+    }
+
+    fn metadata_link_payload(
+        kind: protocol::MetadataLinkKind,
+        value: impl Into<String>,
+        album: impl Into<String>,
+        album_artist: impl Into<String>,
+        track_path: Option<&Path>,
+    ) -> Option<protocol::MetadataLinkPayload> {
+        let value = value.into();
+        if value.trim().is_empty() {
+            return None;
+        }
+        Some(protocol::MetadataLinkPayload {
+            kind,
+            value,
+            album: album.into(),
+            album_artist: album_artist.into(),
+            track_path: track_path.map(Path::to_path_buf),
+        })
+    }
+
     fn render_column_rich_value(
         track_metadata: &TrackMetadata,
         track_path: Option<&Path>,
@@ -2595,6 +2672,7 @@ impl UiManager {
                                 font_size_px: 13,
                                 font_family: String::new(),
                                 color: None,
+                                link: None,
                             }],
                         }],
                     };
@@ -2615,6 +2693,30 @@ impl UiManager {
             }
             None => (0, 0, slint::Color::from_argb_u8(255, 0, 0, 0)),
         };
+        let (link_kind, link_value, link_album, link_album_artist, link_track_path) =
+            if let Some(link) = run.link.as_ref() {
+                let link_kind = match link.kind {
+                    protocol::MetadataLinkKind::Artist => 1,
+                    protocol::MetadataLinkKind::Album => 2,
+                    protocol::MetadataLinkKind::Genre => 3,
+                    protocol::MetadataLinkKind::Decade => 4,
+                    protocol::MetadataLinkKind::Title => 5,
+                };
+                let track_path = link
+                    .track_path
+                    .as_ref()
+                    .map(|path| path.to_string_lossy().to_string())
+                    .unwrap_or_default();
+                (
+                    link_kind,
+                    link.value.as_str().into(),
+                    link.album.as_str().into(),
+                    link.album_artist.as_str().into(),
+                    track_path.into(),
+                )
+            } else {
+                (0, "".into(), "".into(), "".into(), "".into())
+            };
         UiRichTextRun {
             text: run.text.as_str().into(),
             bold: run.bold,
@@ -2625,6 +2727,11 @@ impl UiManager {
             color_mode,
             palette_color,
             color_rgba,
+            link_kind,
+            link_value,
+            link_album,
+            link_album_artist,
+            link_track_path,
         }
     }
 
@@ -4017,6 +4124,7 @@ impl UiManager {
             && existing.font_size_px == next.font_size_px
             && existing.font_family == next.font_family
             && existing.color == next.color
+            && existing.link == next.link
     }
 
     fn text_panel_push_run_fragment(
@@ -4374,6 +4482,7 @@ impl UiManager {
                 font_size_px: fallback_font_size_px.max(1),
                 font_family: String::new(),
                 color: None,
+                link: None,
             });
         }
     }
@@ -7907,6 +8016,8 @@ impl UiManager {
             leading: entry.leading.into(),
             primary: entry.primary.into(),
             secondary: entry.secondary.into(),
+            primary_rich: UiManager::to_ui_rich_text_block(&entry.primary_rich),
+            secondary_rich: UiManager::to_ui_rich_text_block(&entry.secondary_rich),
             item_kind: entry.item_kind,
             album_art: album_art.unwrap_or_default(),
             has_album_art,
@@ -8015,8 +8126,10 @@ impl UiManager {
             .iter()
             .map(|count| (*count).min(i32::MAX as usize) as i32)
             .collect();
+        let has_any_content = self.library_root_counts[0] > 0;
         let _ = self.ui.upgrade_in_event_loop(move |ui| {
             ui.set_library_root_counts(ModelRc::from(Rc::new(VecModel::from(counts))));
+            ui.set_library_has_any_content(has_any_content);
         });
     }
 
@@ -8265,20 +8378,74 @@ impl UiManager {
         match entry {
             LibraryEntry::Track(track) => {
                 let favorite_key = Self::favorite_key_for_track_path(track.path.as_path());
+                let primary = track.title.clone();
+                let secondary = if compact_track_row_view {
+                    track.artist.clone()
+                } else if global_search_view {
+                    format!("Track • {} • {}", track.artist, track.album)
+                } else {
+                    format!("{} • {}", track.artist, track.album)
+                };
+                let title_link = Self::metadata_link_payload(
+                    protocol::MetadataLinkKind::Title,
+                    track.title.clone(),
+                    track.album.clone(),
+                    if track.album_artist.trim().is_empty() {
+                        track.artist.clone()
+                    } else {
+                        track.album_artist.clone()
+                    },
+                    Some(track.path.as_path()),
+                );
+                let artist_link = Self::metadata_link_payload(
+                    protocol::MetadataLinkKind::Artist,
+                    track.artist.clone(),
+                    track.album.clone(),
+                    if track.album_artist.trim().is_empty() {
+                        track.artist.clone()
+                    } else {
+                        track.album_artist.clone()
+                    },
+                    Some(track.path.as_path()),
+                );
+                let album_link = Self::metadata_link_payload(
+                    protocol::MetadataLinkKind::Album,
+                    track.album.clone(),
+                    track.album.clone(),
+                    if track.album_artist.trim().is_empty() {
+                        track.artist.clone()
+                    } else {
+                        track.album_artist.clone()
+                    },
+                    Some(track.path.as_path()),
+                );
+                let primary_rich = Self::rendered_single_run(primary.clone(), 12, title_link);
+                let secondary_rich = if compact_track_row_view {
+                    Self::rendered_single_run(secondary.clone(), 11, artist_link)
+                } else if global_search_view {
+                    Self::rendered_text_from_runs(vec![
+                        Self::rich_text_run("Track • ", 11, None),
+                        Self::rich_text_run(track.artist.clone(), 11, artist_link),
+                        Self::rich_text_run(" • ", 11, None),
+                        Self::rich_text_run(track.album.clone(), 11, album_link),
+                    ])
+                } else {
+                    Self::rendered_text_from_runs(vec![
+                        Self::rich_text_run(track.artist.clone(), 11, artist_link),
+                        Self::rich_text_run(" • ", 11, None),
+                        Self::rich_text_run(track.album.clone(), 11, album_link),
+                    ])
+                };
                 LibraryRowPresentation {
                     leading: if compact_track_row_view {
                         Self::library_track_number_leading(&track.track_number)
                     } else {
                         String::new()
                     },
-                    primary: track.title.clone(),
-                    secondary: if compact_track_row_view {
-                        track.artist.clone()
-                    } else if global_search_view {
-                        format!("Track • {} • {}", track.artist, track.album)
-                    } else {
-                        format!("{} • {}", track.artist, track.album)
-                    },
+                    primary,
+                    secondary,
+                    primary_rich,
+                    secondary_rich,
                     item_kind: LIBRARY_ITEM_KIND_SONG,
                     cover_art_path: if compact_track_row_view || !resolve_cover_art {
                         None
@@ -8294,20 +8461,35 @@ impl UiManager {
             }
             LibraryEntry::Artist(artist) => {
                 let favorite_key = Self::favorite_key_for_artist(&artist.artist);
+                let primary = artist.artist.clone();
+                let secondary = if global_search_view {
+                    format!(
+                        "Artist • {} albums • {} tracks",
+                        artist.album_count, artist.track_count
+                    )
+                } else {
+                    format!(
+                        "{} albums • {} tracks",
+                        artist.album_count, artist.track_count
+                    )
+                };
+                let primary_rich = Self::rendered_single_run(
+                    primary.clone(),
+                    12,
+                    Self::metadata_link_payload(
+                        protocol::MetadataLinkKind::Artist,
+                        artist.artist.clone(),
+                        "",
+                        artist.artist.clone(),
+                        None,
+                    ),
+                );
                 LibraryRowPresentation {
                     leading: String::new(),
-                    primary: artist.artist.clone(),
-                    secondary: if global_search_view {
-                        format!(
-                            "Artist • {} albums • {} tracks",
-                            artist.album_count, artist.track_count
-                        )
-                    } else {
-                        format!(
-                            "{} albums • {} tracks",
-                            artist.album_count, artist.track_count
-                        )
-                    },
+                    primary,
+                    secondary: secondary.clone(),
+                    primary_rich,
+                    secondary_rich: Self::rendered_single_run(secondary, 11, None),
                     item_kind: LIBRARY_ITEM_KIND_ARTIST,
                     cover_art_path: if resolve_cover_art {
                         self.artist_enrichment_image_path(&artist.artist)
@@ -8323,17 +8505,48 @@ impl UiManager {
             }
             LibraryEntry::Album(album) => {
                 let favorite_key = Self::favorite_key_for_album(&album.album, &album.album_artist);
+                let primary = album.album.clone();
+                let secondary = if global_search_view {
+                    format!(
+                        "Album • {} • {} tracks",
+                        album.album_artist, album.track_count
+                    )
+                } else {
+                    format!("{} • {} tracks", album.album_artist, album.track_count)
+                };
+                let album_link = Self::metadata_link_payload(
+                    protocol::MetadataLinkKind::Album,
+                    album.album.clone(),
+                    album.album.clone(),
+                    album.album_artist.clone(),
+                    album.representative_track_path.as_deref(),
+                );
+                let artist_link = Self::metadata_link_payload(
+                    protocol::MetadataLinkKind::Artist,
+                    album.album_artist.clone(),
+                    album.album.clone(),
+                    album.album_artist.clone(),
+                    album.representative_track_path.as_deref(),
+                );
+                let primary_rich = Self::rendered_single_run(primary.clone(), 12, album_link);
+                let secondary_rich = if global_search_view {
+                    Self::rendered_text_from_runs(vec![
+                        Self::rich_text_run("Album • ", 11, None),
+                        Self::rich_text_run(album.album_artist.clone(), 11, artist_link),
+                        Self::rich_text_run(format!(" • {} tracks", album.track_count), 11, None),
+                    ])
+                } else {
+                    Self::rendered_text_from_runs(vec![
+                        Self::rich_text_run(album.album_artist.clone(), 11, artist_link),
+                        Self::rich_text_run(format!(" • {} tracks", album.track_count), 11, None),
+                    ])
+                };
                 LibraryRowPresentation {
                     leading: String::new(),
-                    primary: album.album.clone(),
-                    secondary: if global_search_view {
-                        format!(
-                            "Album • {} • {} tracks",
-                            album.album_artist, album.track_count
-                        )
-                    } else {
-                        format!("{} • {} tracks", album.album_artist, album.track_count)
-                    },
+                    primary,
+                    secondary,
+                    primary_rich,
+                    secondary_rich,
                     item_kind: LIBRARY_ITEM_KIND_ALBUM,
                     cover_art_path: if resolve_cover_art {
                         album
@@ -8354,6 +8567,22 @@ impl UiManager {
                 leading: String::new(),
                 primary: genre.genre.clone(),
                 secondary: format!("{} tracks", genre.track_count),
+                primary_rich: Self::rendered_single_run(
+                    genre.genre.clone(),
+                    12,
+                    Self::metadata_link_payload(
+                        protocol::MetadataLinkKind::Genre,
+                        genre.genre.clone(),
+                        "",
+                        "",
+                        None,
+                    ),
+                ),
+                secondary_rich: Self::rendered_single_run(
+                    format!("{} tracks", genre.track_count),
+                    11,
+                    None,
+                ),
                 item_kind: LIBRARY_ITEM_KIND_GENRE,
                 cover_art_path: None,
                 source_badge: String::new(),
@@ -8366,6 +8595,22 @@ impl UiManager {
                 leading: String::new(),
                 primary: decade.decade.clone(),
                 secondary: format!("{} tracks", decade.track_count),
+                primary_rich: Self::rendered_single_run(
+                    decade.decade.clone(),
+                    12,
+                    Self::metadata_link_payload(
+                        protocol::MetadataLinkKind::Decade,
+                        decade.decade.clone(),
+                        "",
+                        "",
+                        None,
+                    ),
+                ),
+                secondary_rich: Self::rendered_single_run(
+                    format!("{} tracks", decade.track_count),
+                    11,
+                    None,
+                ),
                 item_kind: LIBRARY_ITEM_KIND_DECADE,
                 cover_art_path: None,
                 source_badge: String::new(),
@@ -8378,6 +8623,12 @@ impl UiManager {
                 leading: String::new(),
                 primary: category.title.clone(),
                 secondary: format!("{} items", category.count),
+                primary_rich: Self::rendered_single_run(category.title.clone(), 12, None),
+                secondary_rich: Self::rendered_single_run(
+                    format!("{} items", category.count),
+                    11,
+                    None,
+                ),
                 item_kind: Self::item_kind_for_favorite_category(category.kind),
                 cover_art_path: None,
                 source_badge: String::new(),
@@ -8850,6 +9101,194 @@ impl UiManager {
         self.sync_library_ui();
     }
 
+    fn normalize_metadata_link_value(value: &str) -> String {
+        value.trim().to_string()
+    }
+
+    fn normalize_metadata_decade_label(raw_value: &str) -> String {
+        let trimmed = raw_value.trim();
+        if trimmed.is_empty() {
+            return "Unknown Decade".to_string();
+        }
+        let normalized = trimmed.to_ascii_lowercase();
+        if normalized == "unknown" || normalized == "unknown decade" {
+            return "Unknown Decade".to_string();
+        }
+        if normalized.len() == 5
+            && normalized.ends_with('s')
+            && normalized[..4].chars().all(|ch| ch.is_ascii_digit())
+        {
+            return format!("{}s", &normalized[..4]);
+        }
+        let digits: String = trimmed.chars().filter(|ch| ch.is_ascii_digit()).collect();
+        if digits.len() >= 4 {
+            if let Ok(year) = digits[..4].parse::<i32>() {
+                let decade_start = (year / 10) * 10;
+                return format!("{decade_start}s");
+            }
+        }
+        trimmed.to_string()
+    }
+
+    fn navigate_to_library_view(&mut self, next_view: LibraryViewState) {
+        self.set_collection_mode(COLLECTION_MODE_LIBRARY);
+        self.clear_search_bars_for_track_list_view_switch();
+        self.remember_current_library_scroll_position();
+        if self.current_library_view() != next_view {
+            self.library_view_stack.push(next_view);
+        }
+        self.library_artist_prefetch_first_row = 0;
+        self.library_artist_prefetch_row_count = 0;
+        self.pending_library_scroll_restore_row = None;
+        self.prepare_library_view_transition();
+        self.request_library_view_data();
+        self.sync_library_ui();
+    }
+
+    fn navigate_to_library_root_with_search(
+        &mut self,
+        root: LibraryViewState,
+        search_query: String,
+    ) {
+        self.set_collection_mode(COLLECTION_MODE_LIBRARY);
+        self.clear_search_bars_for_track_list_view_switch();
+        self.remember_current_library_scroll_position();
+        self.library_view_stack.clear();
+        self.library_view_stack.push(root);
+        self.library_artist_prefetch_first_row = 0;
+        self.library_artist_prefetch_row_count = 0;
+        self.pending_library_scroll_restore_row = None;
+        self.prepare_library_view_transition();
+        self.request_library_view_data();
+        let normalized_query = Self::normalize_metadata_link_value(&search_query);
+        if normalized_query.is_empty() {
+            self.sync_library_ui();
+            return;
+        }
+        self.set_library_search_query(normalized_query);
+        self.open_library_search();
+    }
+
+    fn select_library_track_for_pending_metadata_link(&mut self) {
+        let pending_path = self.pending_metadata_link_track_path.clone();
+        let pending_title = self
+            .pending_metadata_link_track_title
+            .as_ref()
+            .map(|title| title.trim().to_string())
+            .filter(|title| !title.is_empty());
+        if pending_path.is_none() && pending_title.is_none() {
+            return;
+        }
+        let selected_index = self
+            .library_entries
+            .iter()
+            .enumerate()
+            .find_map(|(index, entry)| {
+                let LibraryEntry::Track(track) = entry else {
+                    return None;
+                };
+                if pending_path
+                    .as_ref()
+                    .is_some_and(|path| track.path == *path)
+                {
+                    return Some(index);
+                }
+                pending_title
+                    .as_ref()
+                    .is_some_and(|title| track.title.eq_ignore_ascii_case(title))
+                    .then_some(index)
+            });
+        self.pending_metadata_link_track_path = None;
+        self.pending_metadata_link_track_title = None;
+        let Some(source_index) = selected_index else {
+            return;
+        };
+        self.library_selected_indices.clear();
+        self.library_selected_indices.push(source_index);
+        self.library_selection_anchor = Some(source_index);
+        self.sync_library_ui();
+        let Some(view_index) = self.map_library_source_to_view_index(source_index) else {
+            return;
+        };
+        self.library_scroll_center_token = self.library_scroll_center_token.wrapping_add(1);
+        let row = view_index as i32;
+        let token = self.library_scroll_center_token;
+        let _ = self.ui.upgrade_in_event_loop(move |ui| {
+            ui.set_library_scroll_target_row(row);
+            ui.set_library_scroll_center_token(token);
+        });
+    }
+
+    fn activate_metadata_link(&mut self, link: protocol::MetadataLinkPayload) {
+        let value = Self::normalize_metadata_link_value(&link.value);
+        if value.is_empty() {
+            return;
+        }
+        self.pending_metadata_link_track_path = None;
+        self.pending_metadata_link_track_title = None;
+
+        let mut search_query = value.clone();
+        let (target_view, fallback_root) = match link.kind {
+            protocol::MetadataLinkKind::Artist => (
+                LibraryViewState::ArtistDetail {
+                    artist: value.clone(),
+                },
+                LibraryViewState::ArtistsRoot,
+            ),
+            protocol::MetadataLinkKind::Album => (
+                LibraryViewState::AlbumDetail {
+                    album: value.clone(),
+                    album_artist: Self::normalize_metadata_link_value(&link.album_artist),
+                },
+                LibraryViewState::AlbumsRoot,
+            ),
+            protocol::MetadataLinkKind::Genre => (
+                LibraryViewState::GenreDetail {
+                    genre: value.clone(),
+                },
+                LibraryViewState::GenresRoot,
+            ),
+            protocol::MetadataLinkKind::Decade => {
+                let normalized_decade = Self::normalize_metadata_decade_label(&value);
+                if search_query.is_empty() {
+                    search_query = normalized_decade.clone();
+                }
+                (
+                    LibraryViewState::DecadeDetail {
+                        decade: normalized_decade,
+                    },
+                    LibraryViewState::DecadesRoot,
+                )
+            }
+            protocol::MetadataLinkKind::Title => {
+                let album = Self::normalize_metadata_link_value(&link.album);
+                if album.is_empty() {
+                    self.navigate_to_library_root_with_search(
+                        LibraryViewState::TracksRoot,
+                        value.clone(),
+                    );
+                    return;
+                }
+                self.pending_metadata_link_track_path = link.track_path.clone();
+                self.pending_metadata_link_track_title = Some(value.clone());
+                (
+                    LibraryViewState::AlbumDetail {
+                        album,
+                        album_artist: Self::normalize_metadata_link_value(&link.album_artist),
+                    },
+                    LibraryViewState::AlbumsRoot,
+                )
+            }
+        };
+
+        self.pending_metadata_link_fallback = Some(PendingMetadataLinkFallback {
+            expected_view: target_view.clone(),
+            fallback_root,
+            search_query,
+        });
+        self.navigate_to_library_view(target_view);
+    }
+
     fn library_page_query_for_view(view: &LibraryViewState) -> protocol::LibraryViewQuery {
         match view {
             LibraryViewState::TracksRoot => protocol::LibraryViewQuery::Tracks,
@@ -8961,12 +9400,37 @@ impl UiManager {
             }
             final_entries = Self::build_artist_detail_entries(albums, tracks);
         }
+        if let Some(pending_fallback) = self.pending_metadata_link_fallback.clone() {
+            if self.current_library_view() == pending_fallback.expected_view {
+                self.pending_metadata_link_fallback = None;
+                if final_entries.is_empty() {
+                    self.reset_library_page_state();
+                    self.pending_metadata_link_track_path = None;
+                    self.pending_metadata_link_track_title = None;
+                    self.navigate_to_library_root_with_search(
+                        pending_fallback.fallback_root,
+                        pending_fallback.search_query,
+                    );
+                    return;
+                }
+            }
+        }
         self.reset_library_page_state();
         self.set_library_entries(final_entries);
+        self.select_library_track_for_pending_metadata_link();
     }
 
     fn request_library_view_data(&mut self) {
         let view = self.current_library_view();
+        if self
+            .pending_metadata_link_fallback
+            .as_ref()
+            .is_some_and(|pending| pending.expected_view != view)
+        {
+            self.pending_metadata_link_fallback = None;
+            self.pending_metadata_link_track_path = None;
+            self.pending_metadata_link_track_title = None;
+        }
         if matches!(view, LibraryViewState::GlobalSearch)
             && self.library_search_query.trim().is_empty()
         {
@@ -10056,6 +10520,8 @@ impl UiManager {
         let previous_library_online_metadata_enabled = self.library_online_metadata_enabled;
         let previous_library_online_metadata_prompt_pending =
             self.library_online_metadata_prompt_pending;
+        let previous_library_include_playlist_tracks_in_library =
+            self.library_include_playlist_tracks_in_library;
         let previous_playlist_columns = self.playlist_columns.clone();
         let previous_album_art_column_min_width_px = self.album_art_column_min_width_px;
         let previous_album_art_column_max_width_px = self.album_art_column_max_width_px;
@@ -10070,6 +10536,9 @@ impl UiManager {
             }
             if let Some(value) = library.online_metadata_prompt_pending {
                 self.library_online_metadata_prompt_pending = value;
+            }
+            if let Some(value) = library.include_playlist_tracks_in_library {
+                self.library_include_playlist_tracks_in_library = value;
             }
             if let Some(value) = library.list_image_max_edge_px {
                 self.list_image_max_edge_px = value;
@@ -10106,6 +10575,9 @@ impl UiManager {
                 previous_library_online_metadata_enabled != self.library_online_metadata_enabled;
             online_metadata_prompt_changed = previous_library_online_metadata_prompt_pending
                 != self.library_online_metadata_prompt_pending;
+            let include_playlist_tracks_changed =
+                previous_library_include_playlist_tracks_in_library
+                    != self.library_include_playlist_tracks_in_library;
 
             if list_image_max_edge_changed
                 || cover_art_cache_budget_changed
@@ -10165,6 +10637,17 @@ impl UiManager {
                 self.replace_prefetch_queue_if_changed(Vec::new());
                 self.replace_background_queue_if_changed(Vec::new());
                 self.library_last_detail_enrichment_entity = None;
+            }
+            if include_playlist_tracks_changed {
+                let include_playlist_tracks_in_library =
+                    self.library_include_playlist_tracks_in_library;
+                let _ = self.ui.upgrade_in_event_loop(move |ui| {
+                    ui.set_settings_library_include_playlist_tracks_in_library(
+                        include_playlist_tracks_in_library,
+                    );
+                });
+                self.request_library_view_data();
+                self.request_library_root_counts();
             }
         }
 
@@ -10317,6 +10800,9 @@ impl UiManager {
                             }
                             protocol::LibraryMessage::OpenGlobalSearch => {
                                 self.open_global_library_search();
+                            }
+                            protocol::LibraryMessage::ActivateMetadataLink { link } => {
+                                self.activate_metadata_link(link);
                             }
                             protocol::LibraryMessage::SelectListItem {
                                 index,
@@ -11885,6 +12371,7 @@ mod tests {
                     font_size_px: *size,
                     font_family: String::new(),
                     color: None,
+                    link: None,
                 }],
             })
             .collect();
@@ -11980,6 +12467,7 @@ mod tests {
                     font_size_px: 13,
                     font_family: String::new(),
                     color: None,
+                    link: None,
                 }],
             }],
         };
@@ -12056,6 +12544,7 @@ mod tests {
                 font_size_px: 13,
                 font_family: String::new(),
                 color: None,
+                link: None,
             }],
         };
         let effective_width = UiManager::text_panel_estimated_line_width_px(&line)

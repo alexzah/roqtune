@@ -62,6 +62,30 @@ pub enum PageNavigationAction {
     PageDown,
 }
 
+/// Supported metadata link targets that can navigate Library views.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+pub enum MetadataLinkKind {
+    Artist,
+    Album,
+    Genre,
+    Decade,
+    Title,
+}
+
+/// UI-emitted metadata link activation payload.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+pub struct MetadataLinkPayload {
+    pub kind: MetadataLinkKind,
+    /// Primary link value rendered in the clicked metadata run.
+    pub value: String,
+    /// Album context used for title -> album-detail navigation.
+    pub album: String,
+    /// Album-artist context used for album-detail navigation.
+    pub album_artist: String,
+    /// Optional track path context for selecting one row after navigation.
+    pub track_path: Option<PathBuf>,
+}
+
 /// Playback start notification payload.
 #[derive(Debug, Clone)]
 pub struct TrackStarted {
@@ -256,6 +280,9 @@ pub enum LibraryMessage {
         ctrl: bool,
         shift: bool,
         context_click: bool,
+    },
+    ActivateMetadataLink {
+        link: MetadataLinkPayload,
     },
     NavigateBack,
     ActivateListItem(usize),
@@ -1004,6 +1031,7 @@ pub struct LibraryConfigDelta {
     pub folders: Option<Vec<String>>,
     pub online_metadata_enabled: Option<bool>,
     pub online_metadata_prompt_pending: Option<bool>,
+    pub include_playlist_tracks_in_library: Option<bool>,
     pub list_image_max_edge_px: Option<u32>,
     pub cover_art_cache_max_size_mb: Option<u32>,
     pub cover_art_memory_cache_max_size_mb: Option<u32>,

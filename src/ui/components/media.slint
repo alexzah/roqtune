@@ -273,6 +273,7 @@ export component RichTextBlockView inherits Rectangle {
     in property <bool> compact: false;
     in property <int> max-lines: 0; // 0 means no limit
     in property <bool> clip-lines: true;
+    callback metadata_link_activated(int, string, string, string, string);
 
     pure function color-from-palette(code: int) -> color {
         if code == 1 {
@@ -349,6 +350,18 @@ export component RichTextBlockView inherits Rectangle {
                         height: 1px;
                         background: root.run-color(run.color_mode, run.palette_color, run.color_rgba);
                     }
+                    if run.link_kind != 0 : TouchArea {
+                        mouse-cursor: pointer;
+                        clicked => {
+                            root.metadata_link_activated(
+                                run.link_kind,
+                                run.link_value,
+                                run.link_album,
+                                run.link_album_artist,
+                                run.link_track_path
+                            );
+                        }
+                    }
                 }
                 Rectangle { horizontal-stretch: 1; }
             }
@@ -361,6 +374,7 @@ export component TextPanel inherits Rectangle {
     in property <string> tooltip-text: "";
     in property <bool> tooltip-enabled: false;
     callback tooltip_hover_changed(bool, string, int, int);
+    callback metadata_link_activated(int, string, string, string, string);
     private property <bool> has-metadata: root.display-text.plain_text != "" || root.tooltip-text != "";
     private property <bool> compact: root.width < 220px || root.height < 120px;
     in property <color> text-primary: AppPalette.text-primary;
@@ -377,6 +391,9 @@ export component TextPanel inherits Rectangle {
         compact: root.compact;
         default-color: root.text-secondary;
         clip-lines: true;
+        metadata_link_activated(kind, value, album, album_artist, track_path) => {
+            root.metadata_link_activated(kind, value, album, album_artist, track_path);
+        }
     }
 
     if !root.has-metadata : Rectangle {

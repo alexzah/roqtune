@@ -444,6 +444,7 @@ pub(crate) fn sanitize_config(config: Config) -> Config {
             folders: sanitized_library_folders,
             online_metadata_enabled: config.library.online_metadata_enabled,
             online_metadata_prompt_pending: config.library.online_metadata_prompt_pending,
+            include_playlist_tracks_in_library: config.library.include_playlist_tracks_in_library,
             list_image_max_edge_px: clamped_list_image_max_edge_px,
             cover_art_cache_max_size_mb: clamped_cover_art_cache_max_size_mb,
             cover_art_memory_cache_max_size_mb: clamped_cover_art_memory_cache_max_size_mb,
@@ -721,6 +722,9 @@ pub(crate) fn apply_config_to_ui(
         }
     }
     ui.set_settings_library_online_metadata_enabled(config.library.online_metadata_enabled);
+    ui.set_settings_library_include_playlist_tracks_in_library(
+        config.library.include_playlist_tracks_in_library,
+    );
     if let Some(backend) = find_opensubsonic_backend(config) {
         ui.set_settings_subsonic_enabled(backend.enabled);
         ui.set_settings_subsonic_endpoint(backend.endpoint.clone().into());

@@ -126,6 +126,7 @@ impl LibraryConfigDelta {
         self.folders.is_none()
             && self.online_metadata_enabled.is_none()
             && self.online_metadata_prompt_pending.is_none()
+            && self.include_playlist_tracks_in_library.is_none()
             && self.list_image_max_edge_px.is_none()
             && self.cover_art_cache_max_size_mb.is_none()
             && self.cover_art_memory_cache_max_size_mb.is_none()
@@ -144,6 +145,9 @@ impl LibraryConfigDelta {
         }
         if newer.online_metadata_prompt_pending.is_some() {
             self.online_metadata_prompt_pending = newer.online_metadata_prompt_pending;
+        }
+        if newer.include_playlist_tracks_in_library.is_some() {
+            self.include_playlist_tracks_in_library = newer.include_playlist_tracks_in_library;
         }
         if newer.list_image_max_edge_px.is_some() {
             self.list_image_max_edge_px = newer.list_image_max_edge_px;
