@@ -668,6 +668,33 @@ export component AppWindow inherits Window {
     in-out property <string> status-selection-summary: "";
 
     VerticalLayout {
+        if root.layout_edit_mode : Rectangle {
+            height: 30px;
+            background: AppPalette.panel-bg-elevated;
+            border-width: 1px;
+            border-color: AppPalette.border;
+            HorizontalLayout {
+                padding-left: 8px;
+                padding-right: 8px;
+                spacing: 8px;
+                Text {
+                    text: "Layout editor is active";
+                    color: AppPalette.text-muted;
+                    font-size: 11px;
+                    vertical-alignment: center;
+                }
+                Rectangle { horizontal-stretch: 1; }
+                Button {
+                    width: 96px;
+                    height: 24px;
+                    text: "Exit editor";
+                    clicked => {
+                        root.open_layout_editor();
+                    }
+                }
+            }
+        }
+
         layout-workspace := Rectangle {
             vertical-stretch: 1;
             background: root.theme_window_bg;
@@ -2519,26 +2546,6 @@ export component AppWindow inherits Window {
         }
     }
 
-    if root.layout_edit_mode : Rectangle {
-        z: 126;
-        width: 220px;
-        height: 34px;
-        x: max(8px, root.width - self.width - 12px);
-        y: 12px;
-        background: AppPalette.panel-bg-elevated;
-        border-width: 1px;
-        border-color: AppPalette.border;
-        border-radius: 4px;
-        Button {
-            width: parent.width;
-            height: parent.height;
-            text: "Exit Layout Editing Mode";
-            clicked => {
-                root.open_layout_editor();
-            }
-        }
-    }
-
     if root.layout_edit_mode && (root.show_layout_leaf_context_menu || root.show_layout_splitter_context_menu) : Rectangle {
         z: 129;
         background: transparent;
@@ -2773,16 +2780,16 @@ export component AppWindow inherits Window {
                             if (selected-panel-kind == root.panel_kind_button_cluster) {
                                 root.open_control_cluster_menu_for_leaf(
                                     root.layout_leaf_ids[root.layout_selected_leaf_index],
-                                    max(8, floor((panel-settings-ta.absolute-position.x + panel-settings-ta.mouse-x) / 1px)),
-                                    max(8, floor((panel-settings-ta.absolute-position.y + panel-settings-ta.mouse-y + 6px) / 1px))
+                                    max(8, floor(root.layout_leaf_context_menu_x / 1px)),
+                                    max(8, floor(root.layout_leaf_context_menu_y / 1px))
                                 );
                             } else if (selected-panel-kind == root.panel_kind_metadata_viewer
                                     || selected-panel-kind == root.panel_kind_album_art_viewer) {
                                 root.open_viewer_panel_settings_for_leaf(
                                     root.layout_leaf_ids[root.layout_selected_leaf_index],
                                     selected-panel-kind,
-                                    max(8, floor((panel-settings-ta.absolute-position.x + panel-settings-ta.mouse-x) / 1px)),
-                                    max(8, floor((panel-settings-ta.absolute-position.y + panel-settings-ta.mouse-y + 6px) / 1px))
+                                    max(8, floor(root.layout_leaf_context_menu_x / 1px)),
+                                    max(8, floor(root.layout_leaf_context_menu_y / 1px))
                                 );
                             }
                         }
@@ -4440,7 +4447,7 @@ export component AppWindow inherits Window {
 
         Rectangle {
             width: min(root.width - 40px, 560px);
-            height: 338px;
+            height: min(root.height - 40px, 420px);
             x: (parent.width - self.width) / 2;
             y: (parent.height - self.height) / 2;
             border-radius: 6px;
