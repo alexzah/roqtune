@@ -123,6 +123,9 @@ custom = false
 # [[viewer_panel_instances]]
 # leaf_id = "l1"
 # display_priority = "default"
+# metadata_source = "track"
+# metadata_use_custom_text = false
+# metadata_text_format = "[b][color=text_primary]{title;file_name}[/color][/b]\\n[color=text_secondary]{artist;album_artist}[/color]\\n[color=text_muted]{album}[/color]\\n[color=text_muted]{date;year} {genre}[/color]"
 
 [root]
 node_type = "split"

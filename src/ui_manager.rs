@@ -31,8 +31,9 @@ use crate::{
     integration_keyring::get_opensubsonic_password,
     integration_uri::{is_remote_track_path, parse_opensubsonic_track_uri},
     layout::PlaylistColumnWidthOverrideConfig,
-    metadata_tags, protocol, AppWindow, LayoutAlbumArtViewerPanelModel,
+    metadata_tags, protocol, text_template, AppWindow, LayoutAlbumArtViewerPanelModel,
     LayoutMetadataViewerPanelModel, LibraryRowData, MetadataEditorField as UiMetadataEditorField,
+    RichTextBlock as UiRichTextBlock, RichTextLine as UiRichTextLine, RichTextRun as UiRichTextRun,
     TrackRowData,
 };
 use governor::{Quota, RateLimiter};
@@ -240,6 +241,12 @@ struct TrackMetadata {
     track_number: String,
 }
 
+#[derive(Clone, Debug)]
+struct RenderedColumnValue {
+    plain_text: String,
+    rich_text: text_template::RenderedText,
+}
+
 #[derive(Clone, Default)]
 struct PlayingTrackState {
     /// Stable track id of the currently playing track.  Used to resolve the
@@ -408,6 +415,8 @@ const PLAYLIST_COLUMN_KIND_ALBUM_ART: i32 = 1;
 const PLAYLIST_COLUMN_KIND_FAVORITE: i32 = 2;
 const BASE_ROW_HEIGHT_PX: u32 = 30;
 const ALBUM_ART_ROW_PADDING_PX: u32 = 8;
+const TEXT_ROW_VERTICAL_PADDING_PX: u32 = 8;
+const DEFAULT_TEXT_LINE_HEIGHT_PX: u32 = 17;
 const COLLECTION_MODE_PLAYLIST: i32 = 0;
 const COLLECTION_MODE_LIBRARY: i32 = 1;
 const VIEWER_DISPLAY_PRIORITY_DEFAULT: i32 = 0;
@@ -2426,102 +2435,77 @@ impl UiManager {
         }
     }
 
-    fn normalize_metadata_key(key: &str) -> String {
-        let mut normalized = String::new();
-        for ch in key.chars() {
-            if ch.is_ascii_alphanumeric() {
-                normalized.push(ch.to_ascii_lowercase());
-            } else if ch == '_' || ch == '-' || ch.is_whitespace() {
-                normalized.push('_');
-            }
-        }
-        normalized
+    fn template_context_for_track<'a>(
+        track_metadata: &'a TrackMetadata,
+        track_path: Option<&'a Path>,
+    ) -> text_template::TemplateContext<'a> {
+        text_template::TemplateContext::from_path_metadata(
+            &track_metadata.title,
+            &track_metadata.artist,
+            &track_metadata.album,
+            &track_metadata.album_artist,
+            &track_metadata.date,
+            &track_metadata.year,
+            &track_metadata.genre,
+            &track_metadata.track_number,
+            track_path,
+        )
     }
 
-    fn metadata_value(track_metadata: &TrackMetadata, key: &str) -> String {
-        let normalized = Self::normalize_metadata_key(key);
-        match normalized.as_str() {
-            "title" => track_metadata.title.clone(),
-            "artist" => track_metadata.artist.clone(),
-            "album" => track_metadata.album.clone(),
-            "album_artist" | "albumartist" => track_metadata.album_artist.clone(),
-            "date" => track_metadata.date.clone(),
-            "year" => {
-                if !track_metadata.year.is_empty() {
-                    track_metadata.year.clone()
-                } else if track_metadata.date.len() >= 4 {
-                    track_metadata.date[0..4].to_string()
-                } else {
-                    String::new()
-                }
-            }
-            "genre" => track_metadata.genre.clone(),
-            "track" | "track_number" | "tracknumber" => track_metadata.track_number.clone(),
-            _ => String::new(),
+    fn empty_rendered_text() -> text_template::RenderedText {
+        text_template::RenderedText {
+            plain_text: String::new(),
+            lines: vec![text_template::RichTextLine { runs: Vec::new() }],
         }
     }
 
-    fn render_column_value(track_metadata: &TrackMetadata, format_string: &str) -> String {
-        let mut rendered = String::new();
-        let mut chars = format_string.chars().peekable();
+    fn render_column_rich_value(
+        track_metadata: &TrackMetadata,
+        track_path: Option<&Path>,
+        format_string: &str,
+    ) -> text_template::RenderedText {
+        let context = Self::template_context_for_track(track_metadata, track_path);
+        text_template::render_template(format_string, &context)
+    }
 
-        while let Some(ch) = chars.next() {
-            if ch == '{' {
-                if chars.peek() == Some(&'{') {
-                    chars.next();
-                    rendered.push('{');
-                    continue;
-                }
-
-                let mut token = String::new();
-                let mut found_closing = false;
-                for token_ch in chars.by_ref() {
-                    if token_ch == '}' {
-                        found_closing = true;
-                        break;
-                    }
-                    token.push(token_ch);
-                }
-
-                if found_closing {
-                    let value = Self::metadata_value(track_metadata, token.trim());
-                    rendered.push_str(&value);
-                } else {
-                    rendered.push('{');
-                    rendered.push_str(&token);
-                }
-            } else if ch == '}' {
-                if chars.peek() == Some(&'}') {
-                    chars.next();
-                }
-                rendered.push('}');
-            } else {
-                rendered.push(ch);
-            }
-        }
-
-        rendered
+    fn render_column_value(
+        track_metadata: &TrackMetadata,
+        track_path: Option<&Path>,
+        format_string: &str,
+    ) -> String {
+        Self::render_column_rich_value(track_metadata, track_path, format_string).plain_text
     }
 
     fn build_playlist_row_values(
         track_metadata: &TrackMetadata,
+        track_path: Option<&Path>,
         playlist_columns: &[PlaylistColumnConfig],
-    ) -> Vec<String> {
+    ) -> Vec<RenderedColumnValue> {
         playlist_columns
             .iter()
             .filter(|column| column.enabled)
             .map(|column| {
-                if Self::is_album_art_builtin_column(column) {
-                    String::new()
+                if Self::is_album_art_builtin_column(column)
+                    || Self::is_favorite_builtin_column(column)
+                {
+                    RenderedColumnValue {
+                        plain_text: String::new(),
+                        rich_text: Self::empty_rendered_text(),
+                    }
                 } else {
-                    Self::render_column_value(track_metadata, &column.format)
+                    let rich_text =
+                        Self::render_column_rich_value(track_metadata, track_path, &column.format);
+                    RenderedColumnValue {
+                        plain_text: rich_text.plain_text.clone(),
+                        rich_text,
+                    }
                 }
             })
             .collect()
     }
 
     fn apply_unavailable_title_override(
-        values: &mut [String],
+        values: &mut [RenderedColumnValue],
         playlist_columns: &[PlaylistColumnConfig],
     ) {
         for (visible_index, column) in playlist_columns
@@ -2533,10 +2517,71 @@ impl UiManager {
             let normalized_name = column.name.trim().to_ascii_lowercase();
             if normalized_format == "{title}" || normalized_name == "title" {
                 if let Some(value) = values.get_mut(visible_index) {
-                    *value = REMOTE_TRACK_UNAVAILABLE_TITLE.to_string();
+                    value.plain_text = REMOTE_TRACK_UNAVAILABLE_TITLE.to_string();
+                    value.rich_text = text_template::RenderedText {
+                        plain_text: REMOTE_TRACK_UNAVAILABLE_TITLE.to_string(),
+                        lines: vec![text_template::RichTextLine {
+                            runs: vec![text_template::RichTextRun {
+                                text: REMOTE_TRACK_UNAVAILABLE_TITLE.to_string(),
+                                bold: false,
+                                italic: false,
+                                underline: false,
+                                font_size_px: 13,
+                                font_family: String::new(),
+                                color: None,
+                            }],
+                        }],
+                    };
                 }
                 break;
             }
+        }
+    }
+
+    fn to_ui_rich_text_run(run: &text_template::RichTextRun) -> UiRichTextRun {
+        let (color_mode, palette_color, color_rgba) = match run.color.as_ref() {
+            Some(text_template::RunColor::Palette(color)) => {
+                (1, color.code(), slint::Color::from_argb_u8(255, 0, 0, 0))
+            }
+            Some(text_template::RunColor::Rgba { r, g, b, a }) => {
+                let alpha = ((*a).clamp(0.0, 1.0) * 255.0).round() as u8;
+                (2, 0, slint::Color::from_argb_u8(alpha, *r, *g, *b))
+            }
+            None => (0, 0, slint::Color::from_argb_u8(255, 0, 0, 0)),
+        };
+        UiRichTextRun {
+            text: run.text.as_str().into(),
+            bold: run.bold,
+            italic: run.italic,
+            underline: run.underline,
+            font_size_px: run.font_size_px.min(i32::MAX as u32) as i32,
+            font_family: run.font_family.as_str().into(),
+            color_mode,
+            palette_color,
+            color_rgba,
+        }
+    }
+
+    fn to_ui_rich_text_block(rendered: &text_template::RenderedText) -> UiRichTextBlock {
+        let mut lines: Vec<UiRichTextLine> = rendered
+            .lines
+            .iter()
+            .map(|line| {
+                let runs: Vec<UiRichTextRun> =
+                    line.runs.iter().map(Self::to_ui_rich_text_run).collect();
+                UiRichTextLine {
+                    runs: ModelRc::from(Rc::new(VecModel::from(runs))),
+                }
+            })
+            .collect();
+        if lines.is_empty() {
+            lines.push(UiRichTextLine {
+                runs: ModelRc::from(Rc::new(VecModel::from(Vec::<UiRichTextRun>::new()))),
+            });
+        }
+        UiRichTextBlock {
+            plain_text: rendered.plain_text.as_str().into(),
+            lines: ModelRc::from(Rc::new(VecModel::from(lines))),
         }
     }
 
@@ -2877,13 +2922,18 @@ impl UiManager {
             char_width_samples.push(header_chars);
 
             if total_rows > 0 {
-                for metadata in self
+                for (source_index, metadata) in self
                     .track_metadata
                     .iter()
+                    .enumerate()
                     .step_by(stride)
                     .take(SAMPLE_LIMIT)
                 {
-                    let rendered_value = Self::render_column_value(metadata, &column.format);
+                    let rendered_value = Self::render_column_value(
+                        metadata,
+                        self.track_paths.get(source_index).map(PathBuf::as_path),
+                        &column.format,
+                    );
                     let measured_chars =
                         rendered_value.chars().take(MAX_MEASURED_CHARS).count() as u32;
                     char_width_samples.push(measured_chars);
@@ -3022,12 +3072,30 @@ impl UiManager {
         column_widths_px: &[u32],
         album_art_profile: ColumnWidthProfile,
     ) -> u32 {
+        let mut text_row_height_px = BASE_ROW_HEIGHT_PX;
+        for column in visible_columns {
+            if Self::is_album_art_builtin_column(column) || Self::is_favorite_builtin_column(column)
+            {
+                continue;
+            }
+            let metrics = text_template::template_metrics(&column.format);
+            let explicit_line_count = metrics.explicit_line_count.max(1);
+            let max_font_size_px = metrics.max_font_size_px.max(13);
+            let estimated_line_height_px =
+                ((max_font_size_px.saturating_mul(13)).saturating_add(9) / 10)
+                    .max(DEFAULT_TEXT_LINE_HEIGHT_PX);
+            let estimated_height_px = explicit_line_count
+                .saturating_mul(estimated_line_height_px)
+                .saturating_add(TEXT_ROW_VERTICAL_PADDING_PX);
+            text_row_height_px = text_row_height_px.max(estimated_height_px);
+        }
+
         let Some((column_index, _column)) = visible_columns
             .iter()
             .enumerate()
             .find(|(_, column)| Self::is_album_art_builtin_column(column))
         else {
-            return BASE_ROW_HEIGHT_PX;
+            return text_row_height_px;
         };
 
         let album_art_width_px = column_widths_px
@@ -3035,14 +3103,15 @@ impl UiManager {
             .copied()
             .unwrap_or(album_art_profile.preferred_px);
 
-        album_art_width_px
+        let album_art_height_px = album_art_width_px
             .saturating_add(ALBUM_ART_ROW_PADDING_PX)
             .clamp(
                 BASE_ROW_HEIGHT_PX,
                 album_art_profile
                     .max_px
                     .saturating_add(ALBUM_ART_ROW_PADDING_PX),
-            )
+            );
+        text_row_height_px.max(album_art_height_px)
     }
 
     fn compute_playlist_row_height_px(&self, column_widths_px: &[u32]) -> u32 {
@@ -3661,6 +3730,54 @@ impl UiManager {
         ViewerTrackContext::default()
     }
 
+    fn viewer_template_metadata_for_display_target(
+        &self,
+        display_path: Option<&PathBuf>,
+        display_metadata: Option<&protocol::DetailedMetadata>,
+    ) -> Option<TrackMetadata> {
+        if let Some(path) = display_path {
+            if let Some(index) = self
+                .track_paths
+                .iter()
+                .position(|candidate| candidate == path)
+            {
+                if let Some(metadata) = self.track_metadata.get(index) {
+                    return Some(metadata.clone());
+                }
+            }
+            if let Some(library_track) = self.library_entries.iter().find_map(|entry| match entry {
+                LibraryEntry::Track(track) if &track.path == path => Some(track),
+                _ => None,
+            }) {
+                return Some(TrackMetadata {
+                    title: library_track.title.clone(),
+                    artist: library_track.artist.clone(),
+                    album: library_track.album.clone(),
+                    album_artist: library_track.album_artist.clone(),
+                    date: library_track.year.clone(),
+                    year: library_track.year.clone(),
+                    genre: library_track.genre.clone(),
+                    track_number: library_track.track_number.clone(),
+                });
+            }
+        }
+
+        display_metadata.map(|metadata| TrackMetadata {
+            title: metadata.title.clone(),
+            artist: metadata.artist.clone(),
+            album: metadata.album.clone(),
+            album_artist: metadata.artist.clone(),
+            date: metadata.date.clone(),
+            year: if metadata.date.len() >= 4 {
+                metadata.date[0..4].to_string()
+            } else {
+                String::new()
+            },
+            genre: metadata.genre.clone(),
+            track_number: String::new(),
+        })
+    }
+
     fn viewer_artist_entity_for_track_context(
         context: &ViewerTrackContext,
     ) -> Option<protocol::LibraryEnrichmentEntity> {
@@ -3784,9 +3901,12 @@ impl UiManager {
         cover_art_path
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn refresh_viewer_panel_models(
         &self,
         track_metadata_by_priority: Vec<Option<protocol::DetailedMetadata>>,
+        template_metadata_by_priority: Vec<Option<TrackMetadata>>,
+        display_paths_by_priority: Vec<Option<PathBuf>>,
         album_description_by_priority: Vec<Option<protocol::DetailedMetadata>>,
         artist_bio_by_priority: Vec<Option<protocol::DetailedMetadata>>,
         album_art_paths_by_priority: Vec<Option<PathBuf>>,
@@ -3820,19 +3940,66 @@ impl UiManager {
                             .get(priority_index)
                             .and_then(|value| value.as_ref()),
                     };
-                    if let Some(metadata) = metadata {
-                        row_data.display_title = metadata.title.as_str().into();
-                        row_data.display_artist = metadata.artist.as_str().into();
-                        row_data.display_album = metadata.album.as_str().into();
-                        row_data.display_date = metadata.date.as_str().into();
-                        row_data.display_genre = metadata.genre.as_str().into();
+
+                    let mut template_metadata = template_metadata_by_priority
+                        .get(priority_index)
+                        .and_then(|value| value.as_ref())
+                        .cloned()
+                        .unwrap_or(TrackMetadata {
+                            title: String::new(),
+                            artist: String::new(),
+                            album: String::new(),
+                            album_artist: String::new(),
+                            date: String::new(),
+                            year: String::new(),
+                            genre: String::new(),
+                            track_number: String::new(),
+                        });
+
+                    let rendered_text = if let Some(metadata) = metadata {
+                        template_metadata.title = metadata.title.clone();
+                        template_metadata.artist = metadata.artist.clone();
+                        template_metadata.album = metadata.album.clone();
+                        template_metadata.date = metadata.date.clone();
+                        template_metadata.year = if metadata.date.len() >= 4 {
+                            metadata.date[0..4].to_string()
+                        } else {
+                            String::new()
+                        };
+                        template_metadata.genre = metadata.genre.clone();
+                        if template_metadata.album_artist.is_empty() {
+                            template_metadata.album_artist = template_metadata.artist.clone();
+                        }
+                        let template_source = if row_data.metadata_use_custom_text {
+                            let custom = row_data.metadata_text_format.to_string();
+                            if custom.trim().is_empty() {
+                                text_template::DEFAULT_METADATA_PANEL_TEMPLATE.to_string()
+                            } else {
+                                custom
+                            }
+                        } else {
+                            text_template::DEFAULT_METADATA_PANEL_TEMPLATE.to_string()
+                        };
+                        let display_path = display_paths_by_priority
+                            .get(priority_index)
+                            .and_then(|value| value.as_ref())
+                            .map(PathBuf::as_path);
+                        let context = text_template::TemplateContext::from_path_metadata(
+                            &template_metadata.title,
+                            &template_metadata.artist,
+                            &template_metadata.album,
+                            &template_metadata.album_artist,
+                            &template_metadata.date,
+                            &template_metadata.year,
+                            &template_metadata.genre,
+                            &template_metadata.track_number,
+                            display_path,
+                        );
+                        text_template::render_template(&template_source, &context)
                     } else {
-                        row_data.display_title = "".into();
-                        row_data.display_artist = "".into();
-                        row_data.display_album = "".into();
-                        row_data.display_date = "".into();
-                        row_data.display_genre = "".into();
-                    }
+                        UiManager::empty_rendered_text()
+                    };
+                    row_data.display_text = UiManager::to_ui_rich_text_block(&rendered_text);
                     vec_model.set_row_data(row_index, row_data);
                 }
             }
@@ -3897,6 +4064,7 @@ impl UiManager {
             VIEWER_DISPLAY_PRIORITY_NOW_PLAYING_ONLY,
         ];
         let mut track_metadata_by_priority = Vec::with_capacity(priority_codes.len());
+        let mut template_metadata_by_priority = Vec::with_capacity(priority_codes.len());
         let mut display_paths_by_priority = Vec::with_capacity(priority_codes.len());
         let mut display_contexts_by_priority = Vec::with_capacity(priority_codes.len());
         let mut album_entities_by_priority = Vec::with_capacity(priority_codes.len());
@@ -3916,10 +4084,15 @@ impl UiManager {
                 display_path.as_ref(),
                 display_metadata.as_ref(),
             );
+            let template_metadata = self.viewer_template_metadata_for_display_target(
+                display_path.as_ref(),
+                display_metadata.as_ref(),
+            );
             let album_entity = Self::viewer_album_entity_for_track_context(&display_context);
             let artist_entity = Self::viewer_artist_entity_for_track_context(&display_context);
             display_paths_by_priority.push(display_path);
             track_metadata_by_priority.push(display_metadata);
+            template_metadata_by_priority.push(template_metadata);
             display_contexts_by_priority.push(display_context);
             album_entities_by_priority.push(album_entity);
             artist_entities_by_priority.push(artist_entity);
@@ -3990,6 +4163,8 @@ impl UiManager {
 
         self.refresh_viewer_panel_models(
             track_metadata_by_priority,
+            template_metadata_by_priority,
+            display_paths_by_priority,
             album_description_by_priority,
             artist_bio_by_priority,
             album_art_paths_by_priority,
@@ -4986,37 +5161,45 @@ impl UiManager {
 
         struct ViewRow {
             source_index: usize,
-            values: Vec<String>,
+            rendered_values: Vec<RenderedColumnValue>,
             sort_key: String,
         }
 
         let mut rows: Vec<ViewRow> = Vec::with_capacity(self.track_metadata.len());
         for (source_index, metadata) in self.track_metadata.iter().enumerate() {
-            let mut values = Self::build_playlist_row_values(metadata, &self.playlist_columns);
+            let track_path = self.track_paths.get(source_index).map(PathBuf::as_path);
+            let mut rendered_values =
+                Self::build_playlist_row_values(metadata, track_path, &self.playlist_columns);
             let track_unavailable = self
                 .track_ids
                 .get(source_index)
                 .map(|track_id| self.unavailable_track_ids.contains(track_id))
                 .unwrap_or(false);
             if track_unavailable {
-                Self::apply_unavailable_title_override(&mut values, &self.playlist_columns);
+                Self::apply_unavailable_title_override(
+                    &mut rendered_values,
+                    &self.playlist_columns,
+                );
             }
             if !normalized_query.is_empty()
-                && !values
-                    .iter()
-                    .any(|value| value.to_ascii_lowercase().contains(&normalized_query))
+                && !rendered_values.iter().any(|value| {
+                    value
+                        .plain_text
+                        .to_ascii_lowercase()
+                        .contains(&normalized_query)
+                })
             {
                 continue;
             }
 
             let sort_key = active_sort_index
-                .and_then(|index| values.get(index))
-                .map(|value| value.to_ascii_lowercase())
+                .and_then(|index| rendered_values.get(index))
+                .map(|value| value.plain_text.to_ascii_lowercase())
                 .unwrap_or_default();
 
             rows.push(ViewRow {
                 source_index,
-                values,
+                rendered_values,
                 sort_key,
             });
         }
@@ -5054,6 +5237,7 @@ impl UiManager {
         let (cover_decode_start, cover_decode_end) = self.playlist_cover_decode_window(rows.len());
         type TrackRowPayload = (
             Vec<String>,
+            Vec<text_template::RenderedText>,
             Option<PathBuf>,
             String,
             bool,
@@ -5106,8 +5290,19 @@ impl UiManager {
                     .map(|path| Self::favorite_key_for_track_path(path.as_path()))
                     .map(|key| self.favorites_by_key.contains_key(&key))
                     .unwrap_or(false);
+                let plain_values: Vec<String> = row
+                    .rendered_values
+                    .iter()
+                    .map(|value| value.plain_text.clone())
+                    .collect();
+                let rich_values: Vec<text_template::RenderedText> = row
+                    .rendered_values
+                    .iter()
+                    .map(|value| value.rich_text.clone())
+                    .collect();
                 (
-                    row.values,
+                    plain_values,
+                    rich_values,
                     album_art_path,
                     source_badge,
                     favorited,
@@ -5120,14 +5315,27 @@ impl UiManager {
 
         let _ = self.ui.upgrade_in_event_loop(move |ui| {
             let mut rows = Vec::with_capacity(row_data.len());
-            for (values, album_art_path, source_badge, favorited, selected, status, unavailable) in
-                row_data
+            for (
+                values,
+                rich_values,
+                album_art_path,
+                source_badge,
+                favorited,
+                selected,
+                status,
+                unavailable,
+            ) in row_data
             {
                 let values_shared: Vec<slint::SharedString> =
                     values.into_iter().map(Into::into).collect();
+                let rich_values_ui: Vec<UiRichTextBlock> = rich_values
+                    .iter()
+                    .map(UiManager::to_ui_rich_text_block)
+                    .collect();
                 rows.push(TrackRowData {
                     status: status.into(),
                     values: ModelRc::from(values_shared.as_slice()),
+                    rich_values: ModelRc::from(Rc::new(VecModel::from(rich_values_ui))),
                     album_art: UiManager::load_track_row_cover_art_image(album_art_path.as_ref()),
                     source_badge: source_badge.into(),
                     favorited,
@@ -9109,6 +9317,7 @@ impl UiManager {
 
         let mut playlist_columns_changed = false;
         let mut album_art_column_width_limits_changed = false;
+        let mut layout_changed = false;
         if let Some(ui_config) = ui_update {
             let has_playlist_columns_patch = ui_config.playlist_columns.is_some();
             let has_layout_patch = ui_config.layout.is_some();
@@ -9140,6 +9349,7 @@ impl UiManager {
             if let Some(layout) = ui_config.layout {
                 self.apply_layout_column_width_overrides(&layout.playlist_column_width_overrides);
             }
+            layout_changed = has_layout_patch;
             self.playlist_column_target_widths_px
                 .retain(|key, _| valid_column_keys.contains(key));
             let playlist_layout_affected = has_playlist_columns_patch
@@ -9201,8 +9411,10 @@ impl UiManager {
             || online_metadata_enabled_changed
             || online_metadata_prompt_changed;
         let rebuild_playlist_rows = list_image_max_edge_changed || playlist_columns_changed;
-        let refresh_display_target =
-            refresh_library_ui || playlist_columns_changed || album_art_column_width_limits_changed;
+        let refresh_display_target = refresh_library_ui
+            || playlist_columns_changed
+            || album_art_column_width_limits_changed
+            || layout_changed;
         if refresh_library_ui {
             self.sync_library_ui();
         }
@@ -11738,15 +11950,22 @@ mod tests {
     #[test]
     fn test_render_column_value_replaces_placeholders() {
         let metadata = make_meta("Track");
-        let rendered = UiManager::render_column_value(&metadata, "{album} ({year})");
+        let rendered = UiManager::render_column_value(&metadata, None, "{album} ({year})");
         assert_eq!(rendered, "Track-album (2026)");
     }
 
     #[test]
     fn test_render_column_value_handles_escaping_and_unknown_fields() {
         let metadata = make_meta("Track");
-        let rendered = UiManager::render_column_value(&metadata, "{{{unknown}}} - {artist}");
-        assert_eq!(rendered, "{} - Track-artist");
+        let rendered = UiManager::render_column_value(
+            &metadata,
+            None,
+            "\\{artist\\} \\[b\\]x\\[/b\\] \\\\ {bad field name} - {artist}",
+        );
+        assert_eq!(
+            rendered,
+            "{artist} [b]x[/b] \\ {bad field name} - Track-artist"
+        );
     }
 
     #[test]
@@ -11792,10 +12011,10 @@ mod tests {
             },
         ];
 
-        let values = UiManager::build_playlist_row_values(&metadata, &columns);
-        assert_eq!(values[0], "Track");
-        assert_eq!(values[1], "");
-        assert_eq!(values[2], "");
+        let values = UiManager::build_playlist_row_values(&metadata, None, &columns);
+        assert_eq!(values[0].plain_text, "Track");
+        assert_eq!(values[1].plain_text, "");
+        assert_eq!(values[2].plain_text, "");
     }
 
     #[test]
@@ -11933,6 +12152,25 @@ mod tests {
                 default_album_art_profile(),
             ),
             72
+        );
+    }
+
+    #[test]
+    fn test_compute_playlist_row_height_with_multiline_template_grows_text_height() {
+        let columns = [PlaylistColumnConfig {
+            name: "Custom".to_string(),
+            format: "{title}[br]{artist}[br]{album}".to_string(),
+            enabled: true,
+            custom: true,
+        }];
+        let visible_columns: Vec<&PlaylistColumnConfig> = columns.iter().collect();
+
+        assert!(
+            UiManager::compute_playlist_row_height_px_for_visible_columns(
+                &visible_columns,
+                &[240],
+                default_album_art_profile(),
+            ) > 30
         );
     }
 

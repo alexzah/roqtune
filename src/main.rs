@@ -26,6 +26,7 @@ mod protocol;
 mod protocol_utils;
 mod runtime;
 mod runtime_config;
+mod text_template;
 mod theme;
 mod ui;
 mod ui_manager;

@@ -16,8 +16,8 @@ use crate::{
         ViewerPanelInstanceConfig, ViewerPanelMetadataSource, SPLITTER_THICKNESS_PX,
     },
     AppWindow, LayoutAlbumArtViewerPanelModel, LayoutButtonClusterPanelModel,
-    LayoutMetadataViewerPanelModel, LayoutSplitterModel, IMPORT_CLUSTER_PRESET,
-    TRANSPORT_CLUSTER_PRESET, UTILITY_CLUSTER_PRESET,
+    LayoutMetadataViewerPanelModel, LayoutSplitterModel, RichTextBlock, RichTextLine,
+    IMPORT_CLUSTER_PRESET, TRANSPORT_CLUSTER_PRESET, UTILITY_CLUSTER_PRESET,
 };
 
 fn collect_button_cluster_leaf_ids(node: &LayoutNode, out: &mut Vec<String>) {
@@ -154,6 +154,8 @@ pub(crate) fn sanitize_viewer_panel_instances(
     let leaf_ids = viewer_panel_leaf_ids(layout);
     let mut priority_by_leaf: HashMap<&str, ViewerPanelDisplayPriority> = HashMap::new();
     let mut metadata_source_by_leaf: HashMap<&str, ViewerPanelMetadataSource> = HashMap::new();
+    let mut metadata_use_custom_text_by_leaf: HashMap<&str, bool> = HashMap::new();
+    let mut metadata_text_format_by_leaf: HashMap<&str, String> = HashMap::new();
     let mut image_source_by_leaf: HashMap<&str, ViewerPanelImageSource> = HashMap::new();
     for instance in instances {
         let leaf_id = instance.leaf_id.trim();
@@ -162,6 +164,8 @@ pub(crate) fn sanitize_viewer_panel_instances(
         }
         priority_by_leaf.insert(leaf_id, instance.display_priority);
         metadata_source_by_leaf.insert(leaf_id, instance.metadata_source);
+        metadata_use_custom_text_by_leaf.insert(leaf_id, instance.metadata_use_custom_text);
+        metadata_text_format_by_leaf.insert(leaf_id, instance.metadata_text_format.clone());
         image_source_by_leaf.insert(leaf_id, instance.image_source);
     }
 
@@ -176,6 +180,16 @@ pub(crate) fn sanitize_viewer_panel_instances(
                 .get(leaf_id.as_str())
                 .copied()
                 .unwrap_or_default(),
+            metadata_use_custom_text: metadata_use_custom_text_by_leaf
+                .get(leaf_id.as_str())
+                .copied()
+                .unwrap_or(false),
+            metadata_text_format: metadata_text_format_by_leaf
+                .get(leaf_id.as_str())
+                .cloned()
+                .unwrap_or_else(|| {
+                    crate::text_template::DEFAULT_METADATA_PANEL_TEMPLATE.to_string()
+                }),
             image_source: image_source_by_leaf
                 .get(leaf_id.as_str())
                 .copied()
@@ -307,6 +321,8 @@ pub(crate) fn upsert_viewer_panel_display_priority_for_leaf(
         leaf_id: leaf_id.to_string(),
         display_priority,
         metadata_source: ViewerPanelMetadataSource::default(),
+        metadata_use_custom_text: false,
+        metadata_text_format: crate::text_template::DEFAULT_METADATA_PANEL_TEMPLATE.to_string(),
         image_source: ViewerPanelImageSource::default(),
     });
 }
@@ -328,6 +344,8 @@ pub(crate) fn upsert_viewer_panel_metadata_source_for_leaf(
         leaf_id: leaf_id.to_string(),
         display_priority: ViewerPanelDisplayPriority::default(),
         metadata_source,
+        metadata_use_custom_text: false,
+        metadata_text_format: crate::text_template::DEFAULT_METADATA_PANEL_TEMPLATE.to_string(),
         image_source: ViewerPanelImageSource::default(),
     });
 }
@@ -349,6 +367,8 @@ pub(crate) fn upsert_viewer_panel_image_source_for_leaf(
         leaf_id: leaf_id.to_string(),
         display_priority: ViewerPanelDisplayPriority::default(),
         metadata_source: ViewerPanelMetadataSource::default(),
+        metadata_use_custom_text: false,
+        metadata_text_format: crate::text_template::DEFAULT_METADATA_PANEL_TEMPLATE.to_string(),
         image_source,
     });
 }
@@ -474,6 +494,26 @@ pub(crate) fn viewer_panel_metadata_source_for_leaf(
         .unwrap_or_default()
 }
 
+/// Returns whether a metadata viewer leaf uses a custom template.
+pub(crate) fn viewer_panel_metadata_use_custom_text_for_leaf(
+    instances: &[ViewerPanelInstanceConfig],
+    leaf_id: &str,
+) -> bool {
+    viewer_panel_instance_for_leaf(instances, leaf_id)
+        .map(|instance| instance.metadata_use_custom_text)
+        .unwrap_or(false)
+}
+
+/// Returns metadata template text for a viewer leaf with a default fallback.
+pub(crate) fn viewer_panel_metadata_text_format_for_leaf(
+    instances: &[ViewerPanelInstanceConfig],
+    leaf_id: &str,
+) -> String {
+    viewer_panel_instance_for_leaf(instances, leaf_id)
+        .map(|instance| instance.metadata_text_format.clone())
+        .unwrap_or_else(|| crate::text_template::DEFAULT_METADATA_PANEL_TEMPLATE.to_string())
+}
+
 /// Returns viewer image-source for a leaf with a default fallback.
 pub(crate) fn viewer_panel_image_source_for_leaf(
     instances: &[ViewerPanelInstanceConfig],
@@ -484,18 +524,49 @@ pub(crate) fn viewer_panel_image_source_for_leaf(
         .unwrap_or_default()
 }
 
+/// Inserts or updates viewer metadata custom-text mode and format for a leaf.
+pub(crate) fn upsert_viewer_panel_metadata_text_for_leaf(
+    instances: &mut Vec<ViewerPanelInstanceConfig>,
+    leaf_id: &str,
+    use_custom_text: bool,
+    metadata_text_format: String,
+) {
+    let normalized_format = if metadata_text_format.trim().is_empty() {
+        crate::text_template::DEFAULT_METADATA_PANEL_TEMPLATE.to_string()
+    } else {
+        metadata_text_format
+    };
+    if let Some(existing) = instances
+        .iter_mut()
+        .find(|instance| instance.leaf_id == leaf_id)
+    {
+        existing.metadata_use_custom_text = use_custom_text;
+        existing.metadata_text_format = normalized_format;
+        return;
+    }
+    instances.push(ViewerPanelInstanceConfig {
+        leaf_id: leaf_id.to_string(),
+        display_priority: ViewerPanelDisplayPriority::default(),
+        metadata_source: ViewerPanelMetadataSource::default(),
+        metadata_use_custom_text: use_custom_text,
+        metadata_text_format: normalized_format,
+        image_source: ViewerPanelImageSource::default(),
+    });
+}
+
 fn apply_viewer_panel_views_to_ui(
     ui: &AppWindow,
     metrics: &layout::TreeLayoutMetrics,
     config: &Config,
 ) {
-    let default_display_title = ui.get_display_title();
-    let default_display_artist = ui.get_display_artist();
-    let default_display_album = ui.get_display_album();
-    let default_display_date = ui.get_display_date();
-    let default_display_genre = ui.get_display_genre();
     let default_art_source = ui.get_current_cover_art();
     let default_has_art = ui.get_current_cover_art_available();
+    let default_display_text = RichTextBlock {
+        plain_text: "".into(),
+        lines: ModelRc::from(Rc::new(VecModel::from(vec![RichTextLine {
+            runs: ModelRc::from(Rc::new(VecModel::from(Vec::new()))),
+        }]))),
+    };
     let existing_metadata_by_leaf: HashMap<String, LayoutMetadataViewerPanelModel> = ui
         .get_layout_metadata_viewer_panels()
         .iter()
@@ -522,6 +593,14 @@ fn apply_viewer_panel_views_to_ui(
                     &config.ui.layout.viewer_panel_instances,
                     &leaf.id,
                 ));
+            let metadata_use_custom_text = viewer_panel_metadata_use_custom_text_for_leaf(
+                &config.ui.layout.viewer_panel_instances,
+                &leaf.id,
+            );
+            let metadata_text_format = viewer_panel_metadata_text_format_for_leaf(
+                &config.ui.layout.viewer_panel_instances,
+                &leaf.id,
+            );
             if let Some(existing) = existing_metadata_by_leaf.get(&leaf.id) {
                 return LayoutMetadataViewerPanelModel {
                     leaf_id: leaf.id.clone().into(),
@@ -532,11 +611,9 @@ fn apply_viewer_panel_views_to_ui(
                     visible: true,
                     display_priority,
                     metadata_source,
-                    display_title: existing.display_title.clone(),
-                    display_artist: existing.display_artist.clone(),
-                    display_album: existing.display_album.clone(),
-                    display_date: existing.display_date.clone(),
-                    display_genre: existing.display_genre.clone(),
+                    metadata_use_custom_text,
+                    metadata_text_format: metadata_text_format.clone().into(),
+                    display_text: existing.display_text.clone(),
                 };
             }
             LayoutMetadataViewerPanelModel {
@@ -548,11 +625,9 @@ fn apply_viewer_panel_views_to_ui(
                 visible: true,
                 display_priority,
                 metadata_source,
-                display_title: default_display_title.clone(),
-                display_artist: default_display_artist.clone(),
-                display_album: default_display_album.clone(),
-                display_date: default_display_date.clone(),
-                display_genre: default_display_genre.clone(),
+                metadata_use_custom_text,
+                metadata_text_format: metadata_text_format.into(),
+                display_text: default_display_text.clone(),
             }
         })
         .collect();

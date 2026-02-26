@@ -4,6 +4,7 @@ use crate::config::{
     default_playlist_album_art_column_max_width_px, default_playlist_album_art_column_min_width_px,
     default_playlist_columns, ButtonClusterInstanceConfig, PlaylistColumnConfig,
 };
+use crate::text_template::DEFAULT_METADATA_PANEL_TEMPLATE;
 use std::collections::{HashMap, HashSet};
 
 /// Current persisted layout schema version.
@@ -262,6 +263,12 @@ pub struct ViewerPanelInstanceConfig {
     /// Metadata source strategy for metadata viewers.
     #[serde(default)]
     pub metadata_source: ViewerPanelMetadataSource,
+    /// Whether metadata viewers should use the custom template string.
+    #[serde(default)]
+    pub metadata_use_custom_text: bool,
+    /// Custom metadata template string used when `metadata_use_custom_text` is enabled.
+    #[serde(default = "default_metadata_text_format")]
+    pub metadata_text_format: String,
     /// Image source strategy for image metadata viewers.
     #[serde(default)]
     pub image_source: ViewerPanelImageSource,
@@ -532,6 +539,10 @@ fn default_layout_version() -> u32 {
 
 fn default_color_scheme_id() -> String {
     DEFAULT_COLOR_SCHEME_ID.to_string()
+}
+
+fn default_metadata_text_format() -> String {
+    DEFAULT_METADATA_PANEL_TEMPLATE.to_string()
 }
 
 fn default_layout_root_for_wire() -> LayoutNode {
