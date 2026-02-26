@@ -5067,6 +5067,46 @@ export component AppWindow inherits Window {
 
                             Rectangle {
                                 height: 32px;
+                                background: settings-theme-mode-toggle-ta.has-hover
+                                    ? AppPalette.control-hover-bg
+                                    : transparent;
+                                border-radius: 4px;
+                                HorizontalLayout {
+                                    spacing: 10px;
+                                    Text {
+                                        text: "Dark mode";
+                                        color: root.theme_text_primary;
+                                        font-size: 12px;
+                                        width: settings-dialog-panel.label_column_width + 24px;
+                                        vertical-alignment: center;
+                                        horizontal-alignment: left;
+                                    }
+                                    Rectangle {
+                                        width: settings-dialog-panel.control_max_width;
+                                        height: parent.height;
+                                        background: transparent;
+                                        settings-theme-mode-toggle := Switch {
+                                            x: parent.width - self.width - 8px;
+                                            y: (parent.height - self.height) / 2;
+                                            width: 36px;
+                                            text: "";
+                                            checked <=> root.settings_prefer_dark_mode;
+                                            changed checked => {
+                                                root.settings_theme_mode_filter_changed(self.checked);
+                                            }
+                                        }
+                                    }
+                                    Rectangle { horizontal-stretch: 1; }
+                                }
+                                settings-theme-mode-toggle-ta := TouchArea {
+                                    clicked => {
+                                        settings-theme-mode-toggle.checked = !settings-theme-mode-toggle.checked;
+                                    }
+                                }
+                            }
+
+                            Rectangle {
+                                height: 32px;
                                 background: transparent;
                                 border-radius: 4px;
                                 HorizontalLayout {
@@ -5102,7 +5142,11 @@ export component AppWindow inherits Window {
                                             model: root.settings_color_scheme_options;
                                             current-index <=> root.settings_color_scheme_index;
                                             selected(_) => {
-                                                if (root.settings_color_scheme_index == root.settings_color_scheme_options.length - 1) {
+                                                if (root.settings_color_scheme_index >= 0
+                                                        && root.settings_color_scheme_index < root.settings_color_scheme_option_ids.length) {
+                                                    root.settings_selected_color_scheme_id = root.settings_color_scheme_option_ids[root.settings_color_scheme_index];
+                                                }
+                                                if (root.settings_selected_color_scheme_id == root.settings_custom_color_scheme_id) {
                                                     root.settings_custom_color_draft_values = root.settings_custom_color_values;
                                                     root.show_custom_color_scheme_dialog = true;
                                                 }
@@ -5113,7 +5157,7 @@ export component AppWindow inherits Window {
                                 }
                             }
 
-                            if root.settings_color_scheme_index == root.settings_color_scheme_options.length - 1 : Rectangle {
+                            if root.settings_selected_color_scheme_id == root.settings_custom_color_scheme_id : Rectangle {
                                 height: 32px;
                                 background: custom-theme-button-ta.has-hover
                                     ? AppPalette.control-hover-bg
@@ -5815,7 +5859,7 @@ export component AppWindow inherits Window {
                             root.settings_dither_on_bitdepth_reduce,
                             root.settings_downmix_higher_channel_tracks,
                             root.settings_cast_allow_transcode_fallback,
-                            root.settings_color_scheme_index,
+                            root.settings_selected_color_scheme_id,
                             root.settings_custom_color_values
                         );
                         root.show_settings_dialog = false;
@@ -6249,8 +6293,12 @@ export component AppWindow inherits Window {
     in-out property <bool> settings_show_layout_edit_tutorial: true;
     in-out property <bool> settings_show_tooltips: true;
     in-out property <bool> settings_auto_scroll_to_playing_track: true;
+    in-out property <bool> settings_prefer_dark_mode: true;
     in-out property <[string]> settings_color_scheme_options: [];
+    in-out property <[string]> settings_color_scheme_option_ids: [];
     in-out property <int> settings_color_scheme_index: 0;
+    in-out property <string> settings_selected_color_scheme_id: "";
+    property <string> settings_custom_color_scheme_id: "custom";
     in-out property <[string]> settings_custom_color_labels: [];
     in-out property <[string]> settings_custom_color_values: [];
     in-out property <[string]> settings_custom_color_draft_values: [];
@@ -6461,5 +6509,6 @@ export component AppWindow inherits Window {
     callback settings_apply_custom_color_picker(int, int, int, int);
     callback settings_refresh_custom_color_previews();
     callback settings_reset_custom_colors();
-    callback apply_settings(int, int, int, int, string, string, string, string, bool, bool, bool, int, int, bool, bool, bool, int, [string]);
+    callback settings_theme_mode_filter_changed(bool);
+    callback apply_settings(int, int, int, int, string, string, string, string, bool, bool, bool, int, int, bool, bool, bool, string, [string]);
 }

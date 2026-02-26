@@ -77,8 +77,9 @@ use protocol::Message;
 use runtime_config::{RuntimeAudioState, RuntimeOutputOverride};
 use slint::{ComponentHandle, ModelRc, VecModel};
 use theme::{
-    custom_color_component_labels, custom_color_values_for_ui, parse_slint_color,
-    resolve_persisted_custom_colors, resolve_theme, scheme_index_for_id, scheme_picker_options,
+    custom_color_component_labels, custom_color_values_for_ui, normalize_scheme_id_for_options,
+    parse_slint_color, preferred_mode_for_scheme_id, resolve_persisted_custom_colors,
+    resolve_theme, scheme_index_for_id_in_options, scheme_picker_options_for_mode,
 };
 use tokio::sync::broadcast;
 // Re-export shared UI helpers at crate root for callback modules that call through `crate::...`.
@@ -459,6 +460,32 @@ pub(crate) fn sanitize_config(config: Config) -> Config {
 }
 
 /// Applies a config snapshot to Slint UI properties and models.
+pub(crate) fn apply_theme_scheme_filter_to_ui(
+    ui: &AppWindow,
+    prefer_dark_mode: bool,
+    requested_scheme_id: &str,
+) {
+    let mode = if prefer_dark_mode {
+        theme::ThemeSchemeMode::Dark
+    } else {
+        theme::ThemeSchemeMode::Light
+    };
+    let options = scheme_picker_options_for_mode(mode);
+    let selected_scheme_id = normalize_scheme_id_for_options(requested_scheme_id, &options);
+    let selected_scheme_index = scheme_index_for_id_in_options(&selected_scheme_id, &options);
+    let option_labels: Vec<slint::SharedString> = options
+        .iter()
+        .map(|(_, label)| label.as_str().into())
+        .collect();
+    let option_ids: Vec<slint::SharedString> =
+        options.iter().map(|(id, _)| id.as_str().into()).collect();
+    ui.set_settings_color_scheme_options(ModelRc::from(Rc::new(VecModel::from(option_labels))));
+    ui.set_settings_color_scheme_option_ids(ModelRc::from(Rc::new(VecModel::from(option_ids))));
+    ui.set_settings_selected_color_scheme_id(selected_scheme_id.into());
+    ui.set_settings_color_scheme_index(selected_scheme_index);
+}
+
+/// Applies a config snapshot to Slint UI properties and models.
 pub(crate) fn apply_config_to_ui(
     ui: &AppWindow,
     config: &Config,
@@ -619,12 +646,11 @@ pub(crate) fn apply_config_to_ui(
     app_palette.set_selection_bg(parse_theme_color(&resolved_theme.colors.selection_bg));
     app_palette.set_selection_border(parse_theme_color(&resolved_theme.colors.selection_border));
     ui.set_ui_dark_mode(matches!(resolved_theme.mode, theme::ThemeSchemeMode::Dark));
-    let scheme_options: Vec<slint::SharedString> = scheme_picker_options()
-        .iter()
-        .map(|(_, label)| label.as_str().into())
-        .collect();
-    ui.set_settings_color_scheme_options(ModelRc::from(Rc::new(VecModel::from(scheme_options))));
-    ui.set_settings_color_scheme_index(scheme_index_for_id(&config.ui.layout.color_scheme));
+    let preferred_mode =
+        preferred_mode_for_scheme_id(&config.ui.layout.color_scheme, resolved_theme.mode);
+    let prefer_dark_mode = matches!(preferred_mode, theme::ThemeSchemeMode::Dark);
+    ui.set_settings_prefer_dark_mode(prefer_dark_mode);
+    apply_theme_scheme_filter_to_ui(ui, prefer_dark_mode, &config.ui.layout.color_scheme);
     let custom_color_labels: Vec<slint::SharedString> = custom_color_component_labels()
         .into_iter()
         .map(|label| label.into())

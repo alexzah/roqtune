@@ -336,6 +336,14 @@ pub(crate) fn register_settings_ui_callbacks(ui: &AppWindow, shared_state: &AppS
         }
     });
 
+    let ui_handle_clone = shared_state.ui_handles.ui_handle.clone();
+    ui.on_settings_theme_mode_filter_changed(move |prefer_dark_mode| {
+        if let Some(ui) = ui_handle_clone.upgrade() {
+            let selected_scheme_id = ui.get_settings_selected_color_scheme_id().to_string();
+            crate::apply_theme_scheme_filter_to_ui(&ui, prefer_dark_mode, &selected_scheme_id);
+        }
+    });
+
     let bus_sender_clone = shared_state.bus_sender.clone();
     let config_state_clone = shared_state.config_state.clone();
     let output_options_clone = shared_state.runtime_handles.output_options.clone();
@@ -366,7 +374,7 @@ pub(crate) fn register_settings_ui_callbacks(ui: &AppWindow, shared_state: &AppS
               dither_on_bitdepth_reduce,
               downmix_higher_channel_tracks,
               cast_allow_transcode_fallback,
-              color_scheme_index,
+              color_scheme_id,
               custom_color_values| {
             let previous_config = {
                 let state = config_state_clone
@@ -442,7 +450,8 @@ pub(crate) fn register_settings_ui_callbacks(ui: &AppWindow, shared_state: &AppS
                 1 => ResamplerQuality::Highest,
                 _ => ResamplerQuality::High,
             };
-            let selected_color_scheme = crate::theme::scheme_id_for_index(color_scheme_index);
+            let selected_color_scheme =
+                crate::theme::normalize_scheme_id_for_persistence(&color_scheme_id);
             let custom_color_values = shared_string_model_to_vec(custom_color_values);
             let fallback_colors =
                 crate::theme::resolve_persisted_custom_colors(&previous_config.ui.layout);

@@ -106,7 +106,8 @@ mod tests {
         );
         assert!(
             slint_ui.contains("in-out property <[string]> settings_color_scheme_options: [];")
-                && slint_ui.contains("in-out property <int> settings_color_scheme_index: 0;"),
+                && slint_ui.contains("in-out property <int> settings_color_scheme_index: 0;")
+                && slint_ui.contains("in-out property <bool> settings_prefer_dark_mode: true;"),
             "Settings dialog should expose color scheme options and selected index"
         );
         assert!(
@@ -149,13 +150,14 @@ mod tests {
         );
         assert!(
             slint_ui.contains("text: \"Appearance\"")
+                && slint_ui.contains("text: \"Dark mode\"")
                 && slint_ui.contains("text: \"Color Scheme\"")
                 && slint_ui.contains("settings-theme-picker := ComboBox"),
             "General tab should expose appearance section with color scheme picker"
         );
         assert!(
             slint_ui.contains(
-                "callback apply_settings(int, int, int, int, string, string, string, string, bool, bool, bool, int, int, bool, bool, bool, int, [string]);"
+                "callback apply_settings(int, int, int, int, string, string, string, string, bool, bool, bool, int, int, bool, bool, bool, string, [string]);"
             ),
             "Apply settings callback should include color scheme selection and custom color values"
         );

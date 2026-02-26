@@ -132,16 +132,77 @@ fn load_theme_preset_catalog() -> ThemePresetCatalog {
     }
 }
 
-/// Returns `(id, label)` options for the settings combo, with custom last.
-pub fn scheme_picker_options() -> Vec<(String, String)> {
+/// Returns `(id, label)` picker options filtered to one visual mode, with custom last.
+pub fn scheme_picker_options_for_mode(mode: ThemeSchemeMode) -> Vec<(String, String)> {
     let catalog = theme_preset_catalog();
     let mut options: Vec<(String, String)> = catalog
         .presets()
         .iter()
-        .map(|preset| (preset.id.clone(), preset.label.clone()))
+        .filter(|preset| preset.mode == mode)
+        .map(|preset| {
+            (
+                preset.id.clone(),
+                strip_picker_mode_suffix(&preset.label).to_string(),
+            )
+        })
         .collect();
     options.push((CUSTOM_COLOR_SCHEME_ID.to_string(), "Custom".to_string()));
     options
+}
+
+/// Returns true when the input selects the custom color scheme.
+pub fn is_custom_scheme_id(scheme_id: &str) -> bool {
+    scheme_id
+        .trim()
+        .eq_ignore_ascii_case(CUSTOM_COLOR_SCHEME_ID)
+}
+
+/// Returns the persisted canonical scheme id for one user-provided id.
+pub fn normalize_scheme_id_for_persistence(scheme_id: &str) -> String {
+    let trimmed = scheme_id.trim();
+    if is_custom_scheme_id(trimmed) {
+        return CUSTOM_COLOR_SCHEME_ID.to_string();
+    }
+    theme_preset_catalog()
+        .preset_by_id(trimmed)
+        .map(|preset| preset.id.clone())
+        .unwrap_or_else(|| DEFAULT_COLOR_SCHEME_ID.to_string())
+}
+
+/// Returns the first matching picker index for one scheme id within `options`.
+pub fn scheme_index_for_id_in_options(scheme_id: &str, options: &[(String, String)]) -> i32 {
+    options
+        .iter()
+        .position(|(id, _)| id.eq_ignore_ascii_case(scheme_id.trim()))
+        .unwrap_or(0) as i32
+}
+
+/// Returns the preferred mode for one scheme id; unknown/custom ids fall back to `default_mode`.
+pub fn preferred_mode_for_scheme_id(
+    scheme_id: &str,
+    default_mode: ThemeSchemeMode,
+) -> ThemeSchemeMode {
+    theme_preset_catalog()
+        .preset_by_id(scheme_id.trim())
+        .map(|preset| preset.mode)
+        .unwrap_or(default_mode)
+}
+
+/// Returns a canonical selectable id for `options`, preserving `requested_id` when available.
+pub fn normalize_scheme_id_for_options(requested_id: &str, options: &[(String, String)]) -> String {
+    let trimmed = requested_id.trim();
+    if let Some((id, _)) = options
+        .iter()
+        .find(|(id, _)| id.eq_ignore_ascii_case(trimmed))
+    {
+        return id.clone();
+    }
+    options
+        .iter()
+        .find(|(id, _)| !is_custom_scheme_id(id))
+        .or_else(|| options.first())
+        .map(|(id, _)| id.clone())
+        .unwrap_or_else(|| DEFAULT_COLOR_SCHEME_ID.to_string())
 }
 
 /// Resolves one selected scheme from persisted layout state.
@@ -176,25 +237,6 @@ pub fn resolve_persisted_custom_colors(layout: &LayoutConfig) -> ThemeColorCompo
 /// Returns the default custom color set (roqtune dark).
 pub fn default_custom_theme_colors() -> ThemeColorComponents {
     custom_default_preset(theme_preset_catalog()).colors.clone()
-}
-
-/// Selects the combo index for a persisted scheme id.
-pub fn scheme_index_for_id(scheme_id: &str) -> i32 {
-    let options = scheme_picker_options();
-    options
-        .iter()
-        .position(|(id, _)| id.eq_ignore_ascii_case(scheme_id.trim()))
-        .unwrap_or(0) as i32
-}
-
-/// Returns the persisted scheme id for one combo index.
-pub fn scheme_id_for_index(index: i32) -> String {
-    let options = scheme_picker_options();
-    let idx = index.max(0) as usize;
-    options
-        .get(idx)
-        .map(|(id, _)| id.clone())
-        .unwrap_or_else(|| DEFAULT_COLOR_SCHEME_ID.to_string())
 }
 
 /// Returns display labels for each custom color component in persisted order.
@@ -363,13 +405,25 @@ fn infer_mode_from_window_bg(colors: &ThemeColorComponents) -> Option<ThemeSchem
     }
 }
 
+fn strip_picker_mode_suffix(label: &str) -> &str {
+    let trimmed = label.trim();
+    let lowered = trimmed.to_ascii_lowercase();
+    for suffix in [" (dark)", " (light)"] {
+        if lowered.ends_with(suffix) {
+            let suffix_start = trimmed.len() - suffix.len();
+            return trimmed[..suffix_start].trim_end();
+        }
+    }
+    trimmed
+}
+
 #[cfg(test)]
 mod tests {
     use crate::layout::LayoutConfig;
 
     use super::{
-        parse_slint_color, resolve_persisted_custom_colors, scheme_picker_options,
-        theme_preset_catalog, CUSTOM_COLOR_SCHEME_ID,
+        parse_slint_color, resolve_persisted_custom_colors, scheme_picker_options_for_mode,
+        theme_preset_catalog, ThemeSchemeMode, CUSTOM_COLOR_SCHEME_ID,
     };
 
     #[test]
@@ -389,9 +443,43 @@ mod tests {
 
     #[test]
     fn test_theme_picker_options_include_custom_last() {
-        let options = scheme_picker_options();
+        let options = scheme_picker_options_for_mode(ThemeSchemeMode::Dark);
         assert_eq!(
             options.last().map(|(id, _)| id.as_str()),
+            Some(CUSTOM_COLOR_SCHEME_ID)
+        );
+    }
+
+    #[test]
+    fn test_theme_picker_labels_strip_mode_suffixes() {
+        let mut labels: Vec<String> = scheme_picker_options_for_mode(ThemeSchemeMode::Dark)
+            .iter()
+            .map(|(_, label)| label.clone())
+            .collect();
+        labels.extend(
+            scheme_picker_options_for_mode(ThemeSchemeMode::Light)
+                .iter()
+                .map(|(_, label)| label.clone()),
+        );
+        assert!(labels.contains(&"roqtune".to_string()));
+        assert!(!labels.contains(&"roqtune (dark)".to_string()));
+        assert!(!labels.contains(&"roqtune (light)".to_string()));
+    }
+
+    #[test]
+    fn test_theme_picker_options_for_mode_filters_presets_and_keeps_custom() {
+        let light_options = scheme_picker_options_for_mode(ThemeSchemeMode::Light);
+        let dark_options = scheme_picker_options_for_mode(ThemeSchemeMode::Dark);
+        assert!(light_options.iter().any(|(id, _)| id == "roqtune_light"));
+        assert!(!light_options.iter().any(|(id, _)| id == "roqtune_dark"));
+        assert!(dark_options.iter().any(|(id, _)| id == "roqtune_dark"));
+        assert!(!dark_options.iter().any(|(id, _)| id == "roqtune_light"));
+        assert_eq!(
+            light_options.last().map(|(id, _)| id.as_str()),
+            Some(CUSTOM_COLOR_SCHEME_ID)
+        );
+        assert_eq!(
+            dark_options.last().map(|(id, _)| id.as_str()),
             Some(CUSTOM_COLOR_SCHEME_ID)
         );
     }
