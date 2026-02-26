@@ -2668,7 +2668,7 @@ impl PlaylistManager {
                     }) => {
                         self.current_elapsed_ms = elapsed_ms;
                         if total_ms > 0 {
-                            self.current_track_duration_ms = total_ms;
+                            self.current_track_duration_ms = total_ms.max(elapsed_ms);
                         }
                     }
                     protocol::Message::Playback(protocol::PlaybackMessage::Seek(percentage)) => {

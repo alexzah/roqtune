@@ -877,6 +877,21 @@ Check Settings -> OpenSubsonic status and re-save credentials if needed.",
         }
     }
 
+    fn decode_error_silence(
+        packet_duration_frames: u64,
+        source_channels: usize,
+    ) -> Option<Vec<f32>> {
+        if packet_duration_frames == 0 || source_channels == 0 {
+            return None;
+        }
+        let frame_count = usize::try_from(packet_duration_frames).ok()?;
+        let sample_count = frame_count.checked_mul(source_channels)?;
+        if sample_count == 0 {
+            return None;
+        }
+        Some(vec![0.0; sample_count])
+    }
+
     fn decode_one_packet_into_buffer(&mut self) -> bool {
         let mut decoded_samples: Option<(Vec<f32>, usize)> = None;
         let mut exhausted_input = false;
@@ -909,6 +924,13 @@ Check Settings -> OpenSubsonic status and re-save credentials if needed.",
                         }
                         Err(Error::DecodeError(msg)) => {
                             active.consecutive_decode_errors += 1;
+                            if let Some(silence) = Self::decode_error_silence(
+                                packet.dur,
+                                active.source_channels.max(1) as usize,
+                            ) {
+                                decoded_samples =
+                                    Some((silence, active.source_channels.max(1) as usize));
+                            }
                             if active.consecutive_decode_errors == 1
                                 || active.consecutive_decode_errors % 250 == 0
                             {
@@ -924,6 +946,35 @@ Check Settings -> OpenSubsonic status and re-save credentials if needed.",
                             {
                                 error!(
                                     "DecodeWorker: too many consecutive decode errors while reading {}. Giving up on track.",
+                                    active.track_identifier.path.display()
+                                );
+                                exhausted_input = true;
+                            }
+                        }
+                        Err(Error::LimitError(msg)) => {
+                            active.consecutive_decode_errors += 1;
+                            if let Some(silence) = Self::decode_error_silence(
+                                packet.dur,
+                                active.source_channels.max(1) as usize,
+                            ) {
+                                decoded_samples =
+                                    Some((silence, active.source_channels.max(1) as usize));
+                            }
+                            if active.consecutive_decode_errors == 1
+                                || active.consecutive_decode_errors % 250 == 0
+                            {
+                                warn!(
+                                    "DecodeWorker: decode limit error while reading {} (consecutive={}): {}",
+                                    active.track_identifier.path.display(),
+                                    active.consecutive_decode_errors,
+                                    msg
+                                );
+                            }
+                            if active.consecutive_decode_errors
+                                > MAX_CONSECUTIVE_FRAME_DECODE_ERRORS
+                            {
+                                error!(
+                                    "DecodeWorker: too many consecutive decode limit errors while reading {}. Giving up on track.",
                                     active.track_identifier.path.display()
                                 );
                                 exhausted_input = true;
@@ -1755,6 +1806,21 @@ mod tests {
         assert_eq!(worker.decode_generation, 4);
         assert!(worker.pending_tracks.is_empty());
         assert!(worker.active_track.is_none());
+    }
+
+    #[test]
+    fn test_decode_error_silence_uses_packet_duration_and_channels() {
+        let silence = DecodeWorker::decode_error_silence(1_152, 2)
+            .expect("decode error placeholder should be generated");
+        assert_eq!(silence.len(), 2_304);
+        assert!(silence.iter().all(|sample| *sample == 0.0));
+    }
+
+    #[test]
+    fn test_decode_error_silence_rejects_zero_or_overflowing_inputs() {
+        assert!(DecodeWorker::decode_error_silence(0, 2).is_none());
+        assert!(DecodeWorker::decode_error_silence(1_152, 0).is_none());
+        assert!(DecodeWorker::decode_error_silence(u64::MAX, usize::MAX).is_none());
     }
 
     #[test]
