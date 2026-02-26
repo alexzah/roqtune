@@ -461,16 +461,13 @@ export component AppWindow inherits Window {
     property <length> layout_leaf_context_menu_y: 0px;
     property <length> layout_splitter_context_menu_x: 0px;
     property <length> layout_splitter_context_menu_y: 0px;
-    property <length> layout_exit_editor_button_width: 108px;
-    property <length> layout_exit_editor_button_height: 28px;
+    property <length> layout_exit_editor_button_width: 114px;
+    property <length> layout_exit_editor_button_height: 24px;
     in-out property <length> layout_exit_editor_button_x: 0px;
     in-out property <length> layout_exit_editor_button_y: 8px;
-    property <length> layout_exit_editor_drag_start_mouse_x: 0px;
-    property <length> layout_exit_editor_drag_start_mouse_y: 0px;
-    property <length> layout_exit_editor_drag_origin_x: 0px;
-    property <length> layout_exit_editor_drag_origin_y: 0px;
+    property <length> layout_exit_editor_drag_last_abs_x: 0px;
+    property <length> layout_exit_editor_drag_last_abs_y: 0px;
     in-out property <bool> layout_exit_editor_dragging: false;
-    in-out property <bool> layout_exit_editor_drag_moved: false;
     property <int> panel_kind_none: 0;
     property <int> panel_kind_button_cluster: 1;
     property <int> panel_kind_transport_button_cluster: 2;
@@ -2560,64 +2557,104 @@ export component AppWindow inherits Window {
         height: root.layout_exit_editor_button_height;
         x: min(max(0px, root.layout_exit_editor_button_x), max(0px, root.width - self.width));
         y: min(max(0px, root.layout_exit_editor_button_y), max(0px, root.height - self.height));
-        border-radius: 5px;
-        border-width: 1px;
-        border-color: AppPalette.warning;
-        background: exit-layout-editor-ta.has-hover
-            ? AppPalette.warning.mix(AppPalette.panel-bg-elevated, 0.28)
-            : AppPalette.warning.mix(AppPalette.panel-bg-elevated, 0.42);
+        background: transparent;
 
-        Text {
-            text: "Exit editor";
-            color: AppPalette.text-primary;
-            font-size: 11px;
-            font-weight: 700;
-            horizontal-alignment: center;
-            vertical-alignment: center;
-        }
+        drag-handle-chip := Rectangle {
+            x: 0px;
+            y: 0px;
+            width: 20px;
+            height: parent.height;
+            border-radius: 4px;
+            border-width: 1px;
+            border-color: AppPalette.warning;
+            background: root.layout_exit_editor_dragging || drag-handle-ta.has-hover
+                ? AppPalette.warning.mix(AppPalette.panel-bg-elevated, 0.34)
+                : AppPalette.warning.mix(AppPalette.panel-bg-elevated, 0.46);
 
-        exit-layout-editor-ta := TouchArea {
-            mouse-cursor: pointer;
-            pointer-event(event) => {
-                if (event.kind == PointerEventKind.down && event.button == PointerEventButton.left) {
-                    root.layout_exit_editor_dragging = true;
-                    root.layout_exit_editor_drag_moved = false;
-                    root.layout_exit_editor_drag_start_mouse_x = self.mouse-x;
-                    root.layout_exit_editor_drag_start_mouse_y = self.mouse-y;
-                    root.layout_exit_editor_drag_origin_x = root.layout_exit_editor_button_x;
-                    root.layout_exit_editor_drag_origin_y = root.layout_exit_editor_button_y;
-                }
-                if (event.kind == PointerEventKind.up && event.button == PointerEventButton.left) {
-                    if (root.layout_exit_editor_dragging && !root.layout_exit_editor_drag_moved) {
-                        root.open_layout_editor();
+            Rectangle {
+                width: 3px;
+                height: 3px;
+                border-radius: 1px;
+                x: (parent.width - self.width) / 2;
+                y: (parent.height - 11px) / 2;
+                background: AppPalette.text-primary;
+            }
+            Rectangle {
+                width: 3px;
+                height: 3px;
+                border-radius: 1px;
+                x: (parent.width - self.width) / 2;
+                y: (parent.height - 11px) / 2 + 4px;
+                background: AppPalette.text-primary;
+            }
+            Rectangle {
+                width: 3px;
+                height: 3px;
+                border-radius: 1px;
+                x: (parent.width - self.width) / 2;
+                y: (parent.height - 11px) / 2 + 8px;
+                background: AppPalette.text-primary;
+            }
+
+            drag-handle-ta := TouchArea {
+                mouse-cursor: root.layout_exit_editor_dragging ? grabbing : grab;
+                pointer-event(event) => {
+                    if (event.button == PointerEventButton.left && event.kind == PointerEventKind.down) {
+                        root.layout_exit_editor_dragging = true;
+                        root.layout_exit_editor_drag_last_abs_x = root.layout_exit_editor_button_x + self.mouse-x;
+                        root.layout_exit_editor_drag_last_abs_y = root.layout_exit_editor_button_y + self.mouse-y;
                     }
-                    root.layout_exit_editor_dragging = false;
-                    root.layout_exit_editor_drag_moved = false;
+                    if (event.button == PointerEventButton.left
+                            && (event.kind == PointerEventKind.up || event.kind == PointerEventKind.cancel)) {
+                        root.layout_exit_editor_dragging = false;
+                    }
                 }
-                if (event.kind == PointerEventKind.cancel && event.button == PointerEventButton.left) {
-                    root.layout_exit_editor_dragging = false;
-                    root.layout_exit_editor_drag_moved = false;
+                moved => {
+                    if (root.layout_exit_editor_dragging && self.pressed) {
+                        let current-abs-x = root.layout_exit_editor_button_x + self.mouse-x;
+                        let current-abs-y = root.layout_exit_editor_button_y + self.mouse-y;
+                        let delta-x = current-abs-x - root.layout_exit_editor_drag_last_abs_x;
+                        let delta-y = current-abs-y - root.layout_exit_editor_drag_last_abs_y;
+                        root.layout_exit_editor_button_x = min(
+                            max(0px, root.layout_exit_editor_button_x + delta-x),
+                            max(0px, root.width - root.layout_exit_editor_button_width)
+                        );
+                        root.layout_exit_editor_button_y = min(
+                            max(0px, root.layout_exit_editor_button_y + delta-y),
+                            max(0px, root.height - root.layout_exit_editor_button_height)
+                        );
+                        root.layout_exit_editor_drag_last_abs_x = current-abs-x;
+                        root.layout_exit_editor_drag_last_abs_y = current-abs-y;
+                    }
                 }
             }
-            moved => {
-                if (root.layout_exit_editor_dragging && self.pressed) {
-                    let delta-x-px = abs((self.mouse-x - root.layout_exit_editor_drag_start_mouse_x) / 1px);
-                    let delta-y-px = abs((self.mouse-y - root.layout_exit_editor_drag_start_mouse_y) / 1px);
-                    if (!root.layout_exit_editor_drag_moved && (delta-x-px > 2 || delta-y-px > 2)) {
-                        root.layout_exit_editor_drag_moved = true;
-                    }
-                    let target-x = root.layout_exit_editor_drag_origin_x
-                        + (self.mouse-x - root.layout_exit_editor_drag_start_mouse_x);
-                    let target-y = root.layout_exit_editor_drag_origin_y
-                        + (self.mouse-y - root.layout_exit_editor_drag_start_mouse_y);
-                    root.layout_exit_editor_button_x = min(
-                        max(0px, target-x),
-                        max(0px, root.width - root.layout_exit_editor_button_width)
-                    );
-                    root.layout_exit_editor_button_y = min(
-                        max(0px, target-y),
-                        max(0px, root.height - root.layout_exit_editor_button_height)
-                    );
+        }
+
+        exit-editor-chip := Rectangle {
+            x: drag-handle-chip.width + 4px;
+            y: 0px;
+            width: max(0px, parent.width - self.x);
+            height: parent.height;
+            border-radius: 4px;
+            border-width: 1px;
+            border-color: AppPalette.warning;
+            background: exit-editor-ta.has-hover
+                ? AppPalette.warning.mix(AppPalette.panel-bg-elevated, 0.28)
+                : AppPalette.warning.mix(AppPalette.panel-bg-elevated, 0.40);
+
+            Text {
+                text: "Exit editor";
+                color: AppPalette.text-primary;
+                font-size: 11px;
+                font-weight: 700;
+                horizontal-alignment: center;
+                vertical-alignment: center;
+            }
+
+            exit-editor-ta := TouchArea {
+                mouse-cursor: pointer;
+                clicked => {
+                    root.open_layout_editor();
                 }
             }
         }
@@ -6261,7 +6298,6 @@ export component AppWindow inherits Window {
             root.layout_exit_editor_button_y = 8px;
         } else {
             root.layout_exit_editor_dragging = false;
-            root.layout_exit_editor_drag_moved = false;
         }
     }
     
