@@ -525,12 +525,10 @@ export component AppWindow inherits Window {
         "Import Controls",
         "Transport Controls",
         "Utility Controls",
-        "",
         "Text Panel",
         "Track Details",
         "Album Description",
         "Artist Bio",
-        "",
         "Image Panel",
         "Album Art",
         "Artist Image"
@@ -540,12 +538,10 @@ export component AppWindow inherits Window {
         root.panel_kind_import_button_cluster,
         root.panel_kind_transport_button_cluster,
         root.panel_kind_utility_button_cluster,
-        -2,
         -3,
         root.panel_preset_text_track_details,
         root.panel_preset_text_album_description,
         root.panel_preset_text_artist_bio,
-        -4,
         -5,
         root.panel_preset_image_album_art,
         root.panel_preset_image_artist_image
@@ -3192,7 +3188,7 @@ export component AppWindow inherits Window {
                                 Text {
                                     text: preset-option;
                                     color: parent.is-header ? AppPalette.text-primary : AppPalette.text-primary;
-                                    font-size: parent.is-header ? 12px : 12px;
+                                    font-size: 12px;
                                     font-weight: parent.is-header ? 700 : 400;
                                     x: parent.is-header ? 8px : 18px;
                                     width: max(0px, parent.width - 20px);
