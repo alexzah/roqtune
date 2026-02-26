@@ -283,6 +283,7 @@ pub enum LibraryMessage {
     },
     ActivateMetadataLink {
         link: MetadataLinkPayload,
+        reset_stack_to_root: bool,
     },
     NavigateBack,
     ActivateListItem(usize),

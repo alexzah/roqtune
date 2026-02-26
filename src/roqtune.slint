@@ -1182,7 +1182,14 @@ export component AppWindow inherits Window {
                         root.tooltip_hover_changed(is-hovered, tooltip, anchor-x-px, anchor-y-px);
                     }
                     metadata_link_activated(kind, value, album, album_artist, track_path) => {
-                        root.activate_metadata_link(kind, value, album, album_artist, track_path);
+                        root.activate_metadata_link(
+                            kind,
+                            value,
+                            album,
+                            album_artist,
+                            track_path,
+                            true
+                        );
                     }
                 }
             }
@@ -1759,7 +1766,8 @@ export component AppWindow inherits Window {
                                         value,
                                         album,
                                         album_artist,
-                                        track_path
+                                        track_path,
+                                        true
                                     );
                                 }
                             }
@@ -1827,7 +1835,8 @@ export component AppWindow inherits Window {
                                                 run.link_value,
                                                 run.link_album,
                                                 run.link_album_artist,
-                                                run.link_track_path
+                                                run.link_track_path,
+                                                true
                                             );
                                             return;
                                         }
@@ -2307,7 +2316,8 @@ export component AppWindow inherits Window {
                                             value,
                                             album,
                                             album_artist,
-                                            track_path
+                                            track_path,
+                                            false
                                         );
                                     }
                                 }
@@ -6738,7 +6748,7 @@ export component AppWindow inherits Window {
     callback library_online_metadata_prompt_deny();
     callback settings_set_library_online_metadata_enabled(bool);
     callback settings_set_library_include_playlist_tracks_in_library(bool);
-    callback activate_metadata_link(int, string, string, string, string);
+    callback activate_metadata_link(int, string, string, string, string, bool);
     callback settings_save_subsonic_profile(bool, string, string, string);
     callback settings_test_subsonic_connection();
     callback settings_sync_subsonic_now();

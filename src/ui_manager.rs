@@ -9134,6 +9134,27 @@ impl UiManager {
         self.sync_library_ui();
     }
 
+    fn navigate_to_library_view_from_root(
+        &mut self,
+        root_view: LibraryViewState,
+        next_view: LibraryViewState,
+    ) {
+        self.set_collection_mode(COLLECTION_MODE_LIBRARY);
+        self.clear_search_bars_for_track_list_view_switch();
+        self.remember_current_library_scroll_position();
+        self.library_view_stack.clear();
+        self.library_view_stack.push(root_view.clone());
+        if root_view != next_view {
+            self.library_view_stack.push(next_view);
+        }
+        self.library_artist_prefetch_first_row = 0;
+        self.library_artist_prefetch_row_count = 0;
+        self.pending_library_scroll_restore_row = None;
+        self.prepare_library_view_transition();
+        self.request_library_view_data();
+        self.sync_library_ui();
+    }
+
     fn navigate_to_library_root_with_search(
         &mut self,
         root: LibraryViewState,
@@ -9208,7 +9229,11 @@ impl UiManager {
         });
     }
 
-    fn activate_metadata_link(&mut self, link: protocol::MetadataLinkPayload) {
+    fn activate_metadata_link(
+        &mut self,
+        link: protocol::MetadataLinkPayload,
+        reset_stack_to_root: bool,
+    ) {
         let value = Self::normalize_metadata_link_value(&link.value);
         if value.is_empty() {
             return;
@@ -9272,10 +9297,14 @@ impl UiManager {
 
         self.pending_metadata_link_fallback = Some(PendingMetadataLinkFallback {
             expected_view: target_view.clone(),
-            fallback_root,
+            fallback_root: fallback_root.clone(),
             search_query,
         });
-        self.navigate_to_library_view(target_view);
+        if reset_stack_to_root {
+            self.navigate_to_library_view_from_root(fallback_root, target_view);
+        } else {
+            self.navigate_to_library_view(target_view);
+        }
     }
 
     fn library_page_query_for_view(view: &LibraryViewState) -> protocol::LibraryViewQuery {
@@ -10790,8 +10819,11 @@ impl UiManager {
                             protocol::LibraryMessage::OpenGlobalSearch => {
                                 self.open_global_library_search();
                             }
-                            protocol::LibraryMessage::ActivateMetadataLink { link } => {
-                                self.activate_metadata_link(link);
+                            protocol::LibraryMessage::ActivateMetadataLink {
+                                link,
+                                reset_stack_to_root,
+                            } => {
+                                self.activate_metadata_link(link, reset_stack_to_root);
                             }
                             protocol::LibraryMessage::SelectListItem {
                                 index,
