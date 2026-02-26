@@ -308,6 +308,10 @@ pub(crate) fn sanitize_config(config: Config) -> Config {
         &sanitized_layout,
         &sanitized_layout.button_cluster_instances,
     );
+    let sanitized_collection_panel_instances = sanitize_collection_panel_instances(
+        &sanitized_layout,
+        &sanitized_layout.collection_panel_instances,
+    );
     let sanitized_metadata_viewer_panel_instances = sanitize_metadata_viewer_panel_instances(
         &sanitized_layout,
         &sanitized_layout.metadata_viewer_panel_instances,
@@ -344,6 +348,7 @@ pub(crate) fn sanitize_config(config: Config) -> Config {
     sanitized_layout.playlist_columns = sanitized_playlist_columns.clone();
     sanitized_layout.playlist_column_width_overrides = sanitized_column_width_overrides;
     sanitized_layout.button_cluster_instances = sanitized_button_cluster_instances;
+    sanitized_layout.collection_panel_instances = sanitized_collection_panel_instances;
     sanitized_layout.metadata_viewer_panel_instances = sanitized_metadata_viewer_panel_instances;
     sanitized_layout.album_art_viewer_panel_instances = sanitized_album_art_viewer_panel_instances;
     let clamped_low_watermark = config.buffering.player_low_watermark_ms.max(500);

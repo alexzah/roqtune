@@ -12,9 +12,10 @@ use crate::{
     config::{ButtonClusterInstanceConfig, Config, UiConfig},
     layout::{
         self, compute_tree_layout_metrics, sanitize_layout_config,
-        AlbumArtViewerPanelInstanceConfig, LayoutConfig, LayoutNode, LayoutPanelKind,
-        MetadataViewerPanelInstanceConfig, ViewerPanelDisplayPriority, ViewerPanelImageSource,
-        ViewerPanelMetadataSource, SPLITTER_THICKNESS_PX,
+        AlbumArtViewerPanelInstanceConfig, CollectionPanelInstanceConfig, CollectionPanelMode,
+        LayoutConfig, LayoutNode, LayoutPanelKind, MetadataViewerPanelInstanceConfig,
+        ViewerPanelDisplayPriority, ViewerPanelImageSource, ViewerPanelMetadataSource,
+        SPLITTER_THICKNESS_PX,
     },
     AppWindow, LayoutAlbumArtViewerPanelModel, LayoutButtonClusterPanelModel,
     LayoutMetadataViewerPanelModel, LayoutSplitterModel, RichTextBlock, RichTextLine,
@@ -77,6 +78,21 @@ fn collect_album_art_viewer_leaf_ids(node: &LayoutNode, out: &mut Vec<String>) {
     }
 }
 
+fn collect_collection_panel_leaf_ids(node: &LayoutNode, out: &mut Vec<String>) {
+    match node {
+        LayoutNode::Leaf { id, panel } => {
+            if *panel == LayoutPanelKind::PlaylistSwitcher || *panel == LayoutPanelKind::TrackList {
+                out.push(id.clone());
+            }
+        }
+        LayoutNode::Split { first, second, .. } => {
+            collect_collection_panel_leaf_ids(first, out);
+            collect_collection_panel_leaf_ids(second, out);
+        }
+        LayoutNode::Empty => {}
+    }
+}
+
 fn button_cluster_leaf_ids(layout: &LayoutConfig) -> Vec<String> {
     let mut ids = Vec::new();
     collect_button_cluster_leaf_ids(&layout.root, &mut ids);
@@ -92,6 +108,12 @@ fn metadata_viewer_leaf_ids(layout: &LayoutConfig) -> Vec<String> {
 fn album_art_viewer_leaf_ids(layout: &LayoutConfig) -> Vec<String> {
     let mut ids = Vec::new();
     collect_album_art_viewer_leaf_ids(&layout.root, &mut ids);
+    ids
+}
+
+fn collection_panel_leaf_ids(layout: &LayoutConfig) -> Vec<String> {
+    let mut ids = Vec::new();
+    collect_collection_panel_leaf_ids(&layout.root, &mut ids);
     ids
 }
 
@@ -251,6 +273,33 @@ pub(crate) fn sanitize_album_art_viewer_panel_instances(
         .collect()
 }
 
+/// Sanitizes collection-panel instances against the active layout leaf set.
+pub(crate) fn sanitize_collection_panel_instances(
+    layout: &LayoutConfig,
+    instances: &[CollectionPanelInstanceConfig],
+) -> Vec<CollectionPanelInstanceConfig> {
+    let leaf_ids = collection_panel_leaf_ids(layout);
+    let mut mode_by_leaf: HashMap<&str, CollectionPanelMode> = HashMap::new();
+    for instance in instances {
+        let leaf_id = instance.leaf_id.trim();
+        if leaf_id.is_empty() {
+            continue;
+        }
+        mode_by_leaf.insert(leaf_id, instance.mode);
+    }
+
+    leaf_ids
+        .into_iter()
+        .map(|leaf_id| CollectionPanelInstanceConfig {
+            mode: mode_by_leaf
+                .get(leaf_id.as_str())
+                .copied()
+                .unwrap_or_default(),
+            leaf_id,
+        })
+        .collect()
+}
+
 /// Computes sidebar width from current window width with responsive clamping.
 pub(crate) fn sidebar_width_from_window(window_width_px: u32) -> i32 {
     let proportional = ((window_width_px as f32) * 0.24).round() as u32;
@@ -282,7 +331,7 @@ pub(crate) fn layout_panel_options() -> Vec<slint::SharedString> {
         "Utility Button Cluster".into(),
         "Volume Slider".into(),
         "Seek Bar".into(),
-        "Playlist Switcher".into(),
+        "Collection Panel".into(),
         "Track List".into(),
         "Text Panel".into(),
         "Image Panel".into(),
@@ -680,6 +729,62 @@ pub(crate) fn viewer_panel_image_source_from_code(source: i32) -> ViewerPanelIma
     }
 }
 
+/// Converts a collection-panel mode enum to its UI code.
+pub(crate) fn collection_panel_mode_to_code(mode: CollectionPanelMode) -> i32 {
+    match mode {
+        CollectionPanelMode::Both => 0,
+        CollectionPanelMode::PlaylistOnly => 1,
+        CollectionPanelMode::LibraryOnly => 2,
+    }
+}
+
+/// Converts a UI collection-panel mode code into its enum form.
+pub(crate) fn collection_panel_mode_from_code(mode: i32) -> CollectionPanelMode {
+    match mode {
+        1 => CollectionPanelMode::PlaylistOnly,
+        2 => CollectionPanelMode::LibraryOnly,
+        _ => CollectionPanelMode::Both,
+    }
+}
+
+fn collection_panel_instance_for_leaf<'a>(
+    instances: &'a [CollectionPanelInstanceConfig],
+    leaf_id: &str,
+) -> Option<&'a CollectionPanelInstanceConfig> {
+    instances
+        .iter()
+        .find(|instance| instance.leaf_id == leaf_id)
+}
+
+/// Returns collection-panel mode for a leaf with a default fallback.
+pub(crate) fn collection_panel_mode_for_leaf(
+    instances: &[CollectionPanelInstanceConfig],
+    leaf_id: &str,
+) -> CollectionPanelMode {
+    collection_panel_instance_for_leaf(instances, leaf_id)
+        .map(|instance| instance.mode)
+        .unwrap_or_default()
+}
+
+/// Inserts or updates collection-panel mode for a leaf.
+pub(crate) fn upsert_collection_panel_mode_for_leaf(
+    instances: &mut Vec<CollectionPanelInstanceConfig>,
+    leaf_id: &str,
+    mode: CollectionPanelMode,
+) {
+    if let Some(existing) = instances
+        .iter_mut()
+        .find(|instance| instance.leaf_id == leaf_id)
+    {
+        existing.mode = mode;
+        return;
+    }
+    instances.push(CollectionPanelInstanceConfig {
+        leaf_id: leaf_id.to_string(),
+        mode,
+    });
+}
+
 fn metadata_viewer_panel_instance_for_leaf<'a>(
     instances: &'a [MetadataViewerPanelInstanceConfig],
     leaf_id: &str,
@@ -1048,6 +1153,20 @@ pub(crate) fn apply_layout_to_ui(
     ui.set_layout_region_visible(update_or_replace_vec_model(
         ui.get_layout_region_visible(),
         region_visible,
+    ));
+    let region_collection_modes: Vec<i32> = metrics
+        .leaves
+        .iter()
+        .map(|leaf| {
+            collection_panel_mode_to_code(collection_panel_mode_for_leaf(
+                &config.ui.layout.collection_panel_instances,
+                &leaf.id,
+            ))
+        })
+        .collect();
+    ui.set_layout_region_collection_modes(update_or_replace_vec_model(
+        ui.get_layout_region_collection_modes(),
+        region_collection_modes,
     ));
     ui.set_layout_splitters(update_or_replace_vec_model(
         ui.get_layout_splitters(),

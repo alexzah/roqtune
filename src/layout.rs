@@ -256,6 +256,29 @@ pub enum ViewerPanelImageSource {
     ArtistImage,
 }
 
+/// Mode policy for collection-aware panels (switcher + track list).
+#[derive(Debug, Clone, Copy, serde::Deserialize, serde::Serialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum CollectionPanelMode {
+    /// Follow global collection mode (playlist/library).
+    #[default]
+    Both,
+    /// Force playlist mode content only.
+    PlaylistOnly,
+    /// Force library mode content only.
+    LibraryOnly,
+}
+
+/// Per-leaf configuration for collection-aware panels.
+#[derive(Debug, Clone, serde::Deserialize, serde::Serialize, PartialEq, Eq)]
+pub struct CollectionPanelInstanceConfig {
+    /// Layout leaf identifier that owns this panel.
+    pub leaf_id: String,
+    /// Content mode policy.
+    #[serde(default)]
+    pub mode: CollectionPanelMode,
+}
+
 /// Per-leaf text-panel configuration persisted with layout preferences.
 #[derive(Debug, Clone, serde::Deserialize, serde::Serialize, PartialEq, Eq)]
 pub struct MetadataViewerPanelInstanceConfig {
@@ -357,6 +380,8 @@ pub struct LayoutConfig {
     pub playlist_column_width_overrides: Vec<PlaylistColumnWidthOverrideConfig>,
     /// Per-leaf button-cluster settings.
     pub button_cluster_instances: Vec<ButtonClusterInstanceConfig>,
+    /// Per-leaf mode settings for collection-aware panels.
+    pub collection_panel_instances: Vec<CollectionPanelInstanceConfig>,
     /// Per-leaf text-panel settings.
     pub metadata_viewer_panel_instances: Vec<MetadataViewerPanelInstanceConfig>,
     /// Per-leaf image-panel settings.
@@ -380,6 +405,7 @@ impl Default for LayoutConfig {
             playlist_columns: default_playlist_columns(),
             playlist_column_width_overrides: Vec::new(),
             button_cluster_instances: Vec::new(),
+            collection_panel_instances: Vec::new(),
             metadata_viewer_panel_instances: Vec::new(),
             album_art_viewer_panel_instances: Vec::new(),
             root: build_default_layout_root(),
@@ -427,6 +453,9 @@ struct LayoutConfigWire {
     playlist_column_width_overrides: Vec<PlaylistColumnWidthOverrideConfig>,
     #[serde(default)]
     button_cluster_instances: Vec<ButtonClusterInstanceConfig>,
+    #[serde(default)]
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    collection_panel_instances: Vec<CollectionPanelInstanceConfig>,
     #[serde(default)]
     #[serde(alias = "metadata_viewer_panel_instances")]
     text_panel_instances: Vec<MetadataViewerPanelInstanceConfig>,
@@ -528,6 +557,7 @@ impl<'de> serde::Deserialize<'de> for LayoutConfig {
             playlist_columns,
             playlist_column_width_overrides,
             button_cluster_instances: v2.button_cluster_instances,
+            collection_panel_instances: v2.collection_panel_instances,
             metadata_viewer_panel_instances,
             album_art_viewer_panel_instances,
             root: v2.root,
@@ -574,6 +604,7 @@ impl serde::Serialize for LayoutConfig {
             playlist_columns,
             playlist_column_width_overrides: Vec::new(),
             button_cluster_instances: self.button_cluster_instances.clone(),
+            collection_panel_instances: self.collection_panel_instances.clone(),
             text_panel_instances: self.metadata_viewer_panel_instances.clone(),
             image_panel_instances: self.album_art_viewer_panel_instances.clone(),
             viewer_panel_instances: Vec::new(),
@@ -996,6 +1027,7 @@ pub fn sanitize_layout_config(
         playlist_columns: config.playlist_columns.clone(),
         playlist_column_width_overrides: config.playlist_column_width_overrides.clone(),
         button_cluster_instances: config.button_cluster_instances.clone(),
+        collection_panel_instances: config.collection_panel_instances.clone(),
         metadata_viewer_panel_instances: config.metadata_viewer_panel_instances.clone(),
         album_art_viewer_panel_instances: config.album_art_viewer_panel_instances.clone(),
         root,
@@ -1210,6 +1242,7 @@ pub fn add_root_leaf_if_empty(layout: &LayoutConfig, panel: LayoutPanelKind) -> 
             playlist_columns: layout.playlist_columns.clone(),
             playlist_column_width_overrides: layout.playlist_column_width_overrides.clone(),
             button_cluster_instances: layout.button_cluster_instances.clone(),
+            collection_panel_instances: layout.collection_panel_instances.clone(),
             metadata_viewer_panel_instances: layout.metadata_viewer_panel_instances.clone(),
             album_art_viewer_panel_instances: layout.album_art_viewer_panel_instances.clone(),
             root,
@@ -1482,6 +1515,7 @@ mod tests {
                 leaf_id: "cluster".to_string(),
                 actions: vec![1, 2, 3, 4],
             }],
+            collection_panel_instances: Vec::new(),
             metadata_viewer_panel_instances: Vec::new(),
             album_art_viewer_panel_instances: Vec::new(),
             root: LayoutNode::Split {
@@ -1527,6 +1561,7 @@ mod tests {
             playlist_columns: crate::config::default_playlist_columns(),
             playlist_column_width_overrides: Vec::new(),
             button_cluster_instances: Vec::new(),
+            collection_panel_instances: Vec::new(),
             metadata_viewer_panel_instances: Vec::new(),
             album_art_viewer_panel_instances: Vec::new(),
             root: LayoutNode::Split {
@@ -1636,6 +1671,7 @@ mod tests {
             playlist_columns: crate::config::default_playlist_columns(),
             playlist_column_width_overrides: Vec::new(),
             button_cluster_instances: Vec::new(),
+            collection_panel_instances: Vec::new(),
             metadata_viewer_panel_instances: Vec::new(),
             album_art_viewer_panel_instances: Vec::new(),
             root: LayoutNode::Split {

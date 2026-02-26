@@ -41,6 +41,7 @@ pub(crate) fn register_layout_editor_callbacks(ui: &AppWindow, shared_state: &Ap
             ui.set_control_cluster_menu_y(y_px.max(8) as f32);
             crate::apply_control_cluster_menu_actions_for_leaf(&ui, &config_snapshot, &leaf_id);
             ui.set_show_viewer_panel_settings_menu(false);
+            ui.set_show_collection_panel_settings_menu(false);
             ui.set_show_control_cluster_menu(true);
         }
     });
@@ -82,6 +83,7 @@ pub(crate) fn register_layout_editor_callbacks(ui: &AppWindow, shared_state: &Ap
             ui.set_control_cluster_menu_target_leaf_id(leaf_id.clone());
             crate::apply_control_cluster_menu_actions_for_leaf(&ui, &next_config, &leaf_id);
             ui.set_show_viewer_panel_settings_menu(false);
+            ui.set_show_collection_panel_settings_menu(false);
             ui.set_show_control_cluster_menu(true);
         }
     });
@@ -127,6 +129,7 @@ pub(crate) fn register_layout_editor_callbacks(ui: &AppWindow, shared_state: &Ap
             ui.set_control_cluster_menu_target_leaf_id(leaf_id.clone());
             crate::apply_control_cluster_menu_actions_for_leaf(&ui, &next_config, &leaf_id);
             ui.set_show_viewer_panel_settings_menu(false);
+            ui.set_show_collection_panel_settings_menu(false);
             ui.set_show_control_cluster_menu(true);
         }
     });
@@ -190,6 +193,7 @@ pub(crate) fn register_layout_editor_callbacks(ui: &AppWindow, shared_state: &Ap
         if let Some(ui) = ui_handle_clone.upgrade() {
             ui.set_control_cluster_menu_target_leaf_id("".into());
             ui.set_show_control_cluster_menu(false);
+            ui.set_show_collection_panel_settings_menu(false);
             ui.set_viewer_panel_settings_target_leaf_id(leaf_id.clone());
             ui.set_viewer_panel_settings_target_panel_kind(panel_kind);
             ui.set_viewer_panel_settings_display_priority_index(priority_index);
@@ -199,6 +203,90 @@ pub(crate) fn register_layout_editor_callbacks(ui: &AppWindow, shared_state: &Ap
             ui.set_viewer_panel_settings_x(x_px.max(8) as f32);
             ui.set_viewer_panel_settings_y(y_px.max(8) as f32);
             ui.set_show_viewer_panel_settings_menu(true);
+        }
+    });
+
+    let config_state_clone = shared_state.config_state.clone();
+    let ui_handle_clone = shared_state.ui_handles.ui_handle.clone();
+    ui.on_open_collection_panel_settings_for_leaf(move |leaf_id, panel_kind, x_px, y_px| {
+        if leaf_id.trim().is_empty() {
+            return;
+        }
+        if panel_kind != LayoutPanelKind::PlaylistSwitcher.to_code()
+            && panel_kind != LayoutPanelKind::TrackList.to_code()
+        {
+            return;
+        }
+        let mode_index = {
+            let state = config_state_clone
+                .lock()
+                .expect("config state lock poisoned");
+            crate::collection_panel_mode_to_code(crate::collection_panel_mode_for_leaf(
+                &state.ui.layout.collection_panel_instances,
+                &leaf_id,
+            ))
+        };
+        if let Some(ui) = ui_handle_clone.upgrade() {
+            ui.set_control_cluster_menu_target_leaf_id("".into());
+            ui.set_show_control_cluster_menu(false);
+            ui.set_show_viewer_panel_settings_menu(false);
+            ui.set_collection_panel_settings_target_leaf_id(leaf_id.clone());
+            ui.set_collection_panel_settings_target_panel_kind(panel_kind);
+            ui.set_collection_panel_settings_mode_index(mode_index);
+            ui.set_collection_panel_settings_x(x_px.max(8) as f32);
+            ui.set_collection_panel_settings_y(y_px.max(8) as f32);
+            ui.set_show_collection_panel_settings_menu(true);
+        }
+    });
+
+    let shared_state_clone = shared_state.clone();
+    ui.on_set_collection_panel_mode(move |leaf_id, mode_code| {
+        let leaf_id_text = leaf_id.to_string();
+        if leaf_id_text.trim().is_empty() {
+            return;
+        }
+        let mode = crate::collection_panel_mode_from_code(mode_code);
+        let (next_config, workspace_width_px, workspace_height_px) = {
+            let mut state = shared_state_clone
+                .config_state
+                .lock()
+                .expect("config state lock poisoned");
+            let mut next_config = state.clone();
+            match panel_kind_for_leaf(&next_config.ui.layout.root, &leaf_id_text) {
+                Some(LayoutPanelKind::PlaylistSwitcher) | Some(LayoutPanelKind::TrackList) => {
+                    crate::upsert_collection_panel_mode_for_leaf(
+                        &mut next_config.ui.layout.collection_panel_instances,
+                        &leaf_id_text,
+                        mode,
+                    );
+                }
+                _ => return,
+            }
+            next_config = crate::sanitize_config(next_config);
+            *state = next_config.clone();
+            let (workspace_width_px, workspace_height_px) = crate::workspace_size_snapshot(
+                &shared_state_clone.ui_handles.layout_workspace_size,
+            );
+            (next_config, workspace_width_px, workspace_height_px)
+        };
+        persist_state_files_with_config_path(
+            &next_config,
+            &shared_state_clone.persistence_paths.config_file,
+        );
+        publish_runtime_from_state(&shared_state_clone, &next_config);
+        if let Some(ui) = shared_state_clone.ui_handles.ui_handle.upgrade() {
+            crate::apply_layout_to_ui(&ui, &next_config, workspace_width_px, workspace_height_px);
+            let panel_kind = panel_kind_for_leaf(&next_config.ui.layout.root, &leaf_id_text)
+                .unwrap_or(LayoutPanelKind::None);
+            ui.set_collection_panel_settings_target_leaf_id(leaf_id_text.clone().into());
+            ui.set_collection_panel_settings_target_panel_kind(panel_kind.to_code());
+            ui.set_collection_panel_settings_mode_index(crate::collection_panel_mode_to_code(
+                crate::collection_panel_mode_for_leaf(
+                    &next_config.ui.layout.collection_panel_instances,
+                    &leaf_id_text,
+                ),
+            ));
+            ui.set_show_collection_panel_settings_menu(true);
         }
     });
 

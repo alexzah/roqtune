@@ -135,6 +135,10 @@ export component AppWindow inherits Window {
                 root.show_viewer_panel_settings_menu = false;
                 return accept;
             }
+            if (event.text == Key.Escape && root.show_collection_panel_settings_menu) {
+                root.show_collection_panel_settings_menu = false;
+                return accept;
+            }
             if (event.text == Key.Escape && root.show_template_language_reference) {
                 root.show_template_language_reference = false;
                 return accept;
@@ -304,6 +308,7 @@ export component AppWindow inherits Window {
     in-out property <[LayoutButtonClusterPanelModel]> layout_button_cluster_panels: [];
     in-out property <[LayoutMetadataViewerPanelModel]> layout_metadata_viewer_panels: [];
     in-out property <[LayoutAlbumArtViewerPanelModel]> layout_album_art_viewer_panels: [];
+    in-out property <[int]> layout_region_collection_modes: [];
     in-out property <bool> show_import_menu: false;
     property <length> import_menu_width: 176px;
     property <length> import_menu_height: 104px;
@@ -335,6 +340,12 @@ export component AppWindow inherits Window {
     in-out property <int> viewer_panel_settings_image_source_index: 0;
     in-out property <length> viewer_panel_settings_x: 0px;
     in-out property <length> viewer_panel_settings_y: 0px;
+    in-out property <bool> show_collection_panel_settings_menu: false;
+    in-out property <string> collection_panel_settings_target_leaf_id: "";
+    in-out property <int> collection_panel_settings_target_panel_kind: root.panel_kind_none;
+    in-out property <int> collection_panel_settings_mode_index: 0;
+    in-out property <length> collection_panel_settings_x: 0px;
+    in-out property <length> collection_panel_settings_y: 0px;
     property <[string]> viewer_panel_display_priority_options: [
         "Balanced (Default)",
         "Prefer Selection",
@@ -351,6 +362,11 @@ export component AppWindow inherits Window {
     property <[string]> viewer_panel_image_source_options: [
         "Album Art (Default)",
         "Artist Image"
+    ];
+    property <[string]> collection_panel_mode_options: [
+        "Both (Default)",
+        "Playlist Only",
+        "Library Only"
     ];
     property <string> template_language_reference_text:
         "Template Language Reference\n\n"
@@ -482,6 +498,9 @@ export component AppWindow inherits Window {
     property <int> panel_kind_spacer: 10;
     property <int> panel_kind_status_bar: 11;
     property <int> panel_kind_import_button_cluster: 12;
+    property <int> panel_mode_both: 0;
+    property <int> panel_mode_playlist_only: 1;
+    property <int> panel_mode_library_only: 2;
     property <int> panel_preset_text_track_details: 101;
     property <int> panel_preset_text_album_description: 102;
     property <int> panel_preset_text_artist_bio: 103;
@@ -504,7 +523,7 @@ export component AppWindow inherits Window {
         "Button Cluster",
         "Volume Slider",
         "Seek Bar",
-        "Playlist Switcher",
+        "Collection Panel",
         "Track List",
         "Text Panel",
         "Image Panel",
@@ -613,6 +632,24 @@ export component AppWindow inherits Window {
         return root.panel_kind_none;
     }
 
+    pure function layout-region-collection-mode(region: int) -> int {
+        if region >= 0 && region < root.layout_region_collection_modes.length {
+            return root.layout_region_collection_modes[region];
+        }
+        return root.panel_mode_both;
+    }
+
+    pure function layout-region-active-collection-mode(region: int) -> int {
+        let panel-mode = root.layout-region-collection-mode(region);
+        if panel-mode == root.panel_mode_playlist_only {
+            return 0;
+        }
+        if panel-mode == root.panel_mode_library_only {
+            return 1;
+        }
+        return root.collection_mode;
+    }
+
     pure function layout-panel-label(panel-kind: int) -> string {
         if panel-kind == root.panel_kind_button_cluster {
             return "Button Cluster";
@@ -630,7 +667,7 @@ export component AppWindow inherits Window {
             return "Seek Bar";
         }
         if panel-kind == root.panel_kind_playlist_switcher {
-            return "Playlist Switcher";
+            return "Collection Panel";
         }
         if panel-kind == root.panel_kind_track_list {
             return "Track List";
@@ -661,6 +698,8 @@ export component AppWindow inherits Window {
     pure function layout-selected-panel-has-settings() -> bool {
         let panel-kind = root.layout-selected-panel-kind();
         return panel-kind == root.panel_kind_button_cluster
+            || panel-kind == root.panel_kind_playlist_switcher
+            || panel-kind == root.panel_kind_track_list
             || panel-kind == root.panel_kind_metadata_viewer
             || panel-kind == root.panel_kind_album_art_viewer;
     }
@@ -880,7 +919,7 @@ export component AppWindow inherits Window {
                 }
             }
 
-            for leaf-id[i] in root.layout_leaf_ids : Rectangle {
+            for leaf-id[i] in root.layout_leaf_ids : collection-switcher-panel := Rectangle {
                 x: root.layout-region-x(i);
                 y: root.layout-region-y(i);
                 width: root.layout-region-width(i);
@@ -889,17 +928,19 @@ export component AppWindow inherits Window {
                     && root.layout-region-panel-kind(i) == root.panel_kind_playlist_switcher;
                 clip: true;
                 background: root.theme_surface_bg;
+                property <int> panel-mode: root.layout-region-collection-mode(i);
+                property <int> active-mode: root.layout-region-active-collection-mode(i);
                 VerticalLayout {
                     padding: 8px;
                     spacing: 6px;
 
-                    ModeTabs {
+                    if collection-switcher-panel.panel-mode == root.panel_mode_both : ModeTabs {
                         labels: ["Playlists", "Library"];
                         selected_index: root.collection_mode;
                         selected(index) => { root.switch_collection_mode(index); }
                     }
 
-                    if root.collection_mode == 0 : VerticalLayout {
+                    if collection-switcher-panel.active-mode == 0 : VerticalLayout {
                         spacing: 4px;
                         HorizontalLayout {
                             Text {
@@ -987,7 +1028,7 @@ export component AppWindow inherits Window {
                         }
                     }
 
-                    if root.collection_mode == 1 : VerticalLayout {
+                    if collection-switcher-panel.active-mode == 1 : VerticalLayout {
                         spacing: 6px;
 
                         HorizontalLayout {
@@ -1164,7 +1205,7 @@ export component AppWindow inherits Window {
                 }
             }
 
-            for leaf-id[i] in root.layout_leaf_ids : Rectangle {
+            for leaf-id[i] in root.layout_leaf_ids : track-list-panel := Rectangle {
                 x: root.layout-region-x(i);
                 y: root.layout-region-y(i);
                 width: root.layout-region-width(i);
@@ -1173,8 +1214,9 @@ export component AppWindow inherits Window {
                     && root.layout-region-panel-kind(i) == root.panel_kind_track_list;
                 clip: true;
                 background: root.theme_window_bg;
+                property <int> active-mode: root.layout-region-active-collection-mode(i);
 
-                if root.collection_mode == 0 : VerticalLayout {
+                if track-list-panel.active-mode == 0 : VerticalLayout {
                     Rectangle {
                         height: 28px;
                         clip: true;
@@ -1839,7 +1881,7 @@ export component AppWindow inherits Window {
                     }
                 }
 
-                if root.collection_mode == 1 : Rectangle {
+                if track-list-panel.active-mode == 1 : Rectangle {
                     background: transparent;
 
                     VerticalLayout {
@@ -2902,6 +2944,14 @@ export component AppWindow inherits Window {
                                     max(8, floor(root.layout_leaf_context_menu_x / 1px)),
                                     max(8, floor(root.layout_leaf_context_menu_y / 1px))
                                 );
+                            } else if (selected-panel-kind == root.panel_kind_playlist_switcher
+                                    || selected-panel-kind == root.panel_kind_track_list) {
+                                root.open_collection_panel_settings_for_leaf(
+                                    root.layout_leaf_ids[root.layout_selected_leaf_index],
+                                    selected-panel-kind,
+                                    max(8, floor(root.layout_leaf_context_menu_x / 1px)),
+                                    max(8, floor(root.layout_leaf_context_menu_y / 1px))
+                                );
                             } else if (selected-panel-kind == root.panel_kind_metadata_viewer
                                     || selected-panel-kind == root.panel_kind_album_art_viewer) {
                                 root.open_viewer_panel_settings_for_leaf(
@@ -3289,6 +3339,16 @@ export component AppWindow inherits Window {
         }
     }
 
+    if root.show_collection_panel_settings_menu : Rectangle {
+        z: 145;
+        background: transparent;
+        TouchArea {
+            clicked => {
+                root.show_collection_panel_settings_menu = false;
+            }
+        }
+    }
+
     if root.show_viewer_panel_settings_menu : Rectangle {
         z: 146;
         x: root.viewer_panel_settings_x;
@@ -3465,6 +3525,68 @@ export component AppWindow inherits Window {
                             root.set_viewer_panel_image_source(
                                 root.viewer_panel_settings_target_leaf_id,
                                 root.viewer_panel_settings_image_source_index
+                            );
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    if root.show_collection_panel_settings_menu : Rectangle {
+        z: 146;
+        x: root.collection_panel_settings_x;
+        y: root.collection_panel_settings_y;
+        width: 320px;
+        height: 98px;
+        border-radius: 6px;
+        background: AppPalette.panel-bg-elevated;
+        border-width: 1px;
+        border-color: AppPalette.border;
+
+        VerticalLayout {
+            alignment: start;
+            padding: 10px;
+            spacing: 8px;
+
+            Text {
+                text: (root.collection_panel_settings_target_panel_kind == root.panel_kind_track_list
+                    ? "Track List"
+                    : "Collection Panel") + " Settings";
+                color: AppPalette.text-primary;
+                font-size: 13px;
+                font-weight: 700;
+            }
+
+            Rectangle { height: 1px; background: AppPalette.separator; }
+
+            HorizontalLayout {
+                spacing: 8px;
+                Rectangle {
+                    horizontal-stretch: 1;
+                    height: 24px;
+                    background: transparent;
+                    Text {
+                        text: "Mode";
+                        color: AppPalette.text-primary;
+                        font-size: 12px;
+                        vertical-alignment: center;
+                        horizontal-alignment: left;
+                        width: parent.width;
+                    }
+                }
+                Rectangle {
+                    width: 190px;
+                    height: 30px;
+                    ComboBox {
+                        width: parent.width;
+                        height: parent.height;
+                        model: root.collection_panel_mode_options;
+                        current-index <=> root.collection_panel_settings_mode_index;
+                        selected(_) => {
+                            root.set_collection_panel_mode(
+                                root.collection_panel_settings_target_leaf_id,
+                                root.collection_panel_settings_mode_index
                             );
                         }
                     }
@@ -6531,8 +6653,10 @@ export component AppWindow inherits Window {
     callback playlist_modification_blocked();
     callback open_control_cluster_menu_for_leaf(string, int, int);
     callback open_viewer_panel_settings_for_leaf(string, int, int, int);
+    callback open_collection_panel_settings_for_leaf(string, int, int, int);
     callback add_control_cluster_button(string, int);
     callback remove_control_cluster_button(string, int);
+    callback set_collection_panel_mode(string, int);
     callback set_viewer_panel_display_priority(string, int);
     callback set_viewer_panel_metadata_source(string, int);
     callback set_viewer_panel_metadata_text_format(string, string);
