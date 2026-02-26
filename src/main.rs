@@ -307,9 +307,13 @@ pub(crate) fn sanitize_config(config: Config) -> Config {
         &sanitized_layout,
         &sanitized_layout.button_cluster_instances,
     );
-    let sanitized_viewer_panel_instances = sanitize_viewer_panel_instances(
+    let sanitized_metadata_viewer_panel_instances = sanitize_metadata_viewer_panel_instances(
         &sanitized_layout,
-        &sanitized_layout.viewer_panel_instances,
+        &sanitized_layout.metadata_viewer_panel_instances,
+    );
+    let sanitized_album_art_viewer_panel_instances = sanitize_album_art_viewer_panel_instances(
+        &sanitized_layout,
+        &sanitized_layout.album_art_viewer_panel_instances,
     );
     let clamped_volume = config.ui.volume.clamp(0.0, 1.0);
     let mut clamped_album_art_column_min_width_px = config
@@ -339,7 +343,8 @@ pub(crate) fn sanitize_config(config: Config) -> Config {
     sanitized_layout.playlist_columns = sanitized_playlist_columns.clone();
     sanitized_layout.playlist_column_width_overrides = sanitized_column_width_overrides;
     sanitized_layout.button_cluster_instances = sanitized_button_cluster_instances;
-    sanitized_layout.viewer_panel_instances = sanitized_viewer_panel_instances;
+    sanitized_layout.metadata_viewer_panel_instances = sanitized_metadata_viewer_panel_instances;
+    sanitized_layout.album_art_viewer_panel_instances = sanitized_album_art_viewer_panel_instances;
     let clamped_low_watermark = config.buffering.player_low_watermark_ms.max(500);
     let clamped_target = config
         .buffering

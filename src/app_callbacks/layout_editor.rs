@@ -6,10 +6,21 @@ use crate::{
     config_persistence::{load_system_layout_template, persist_state_files_with_config_path},
     layout::{
         delete_leaf, first_leaf_id, replace_leaf_panel, sanitize_layout_config, set_split_ratio,
-        split_leaf, LayoutPanelKind, SplitAxis,
+        split_leaf, LayoutNode, LayoutPanelKind, SplitAxis, ViewerPanelDisplayPriority,
+        ViewerPanelImageSource, ViewerPanelMetadataSource,
     },
     AppWindow,
 };
+
+fn panel_kind_for_leaf(node: &LayoutNode, leaf_id: &str) -> Option<LayoutPanelKind> {
+    match node {
+        LayoutNode::Leaf { id, panel } => (id == leaf_id).then_some(*panel),
+        LayoutNode::Split { first, second, .. } => {
+            panel_kind_for_leaf(first, leaf_id).or_else(|| panel_kind_for_leaf(second, leaf_id))
+        }
+        LayoutNode::Empty => None,
+    }
+}
 
 /// Registers layout-editor callbacks for panel/menu/splitter editing actions.
 pub(crate) fn register_layout_editor_callbacks(ui: &AppWindow, shared_state: &AppSharedState) {
@@ -132,44 +143,50 @@ pub(crate) fn register_layout_editor_callbacks(ui: &AppWindow, shared_state: &Ap
         {
             return;
         }
-        let (
-            priority_index,
-            metadata_source_index,
-            image_source_index,
-            metadata_use_custom_text,
-            metadata_text_format,
-        ) = {
+        let (priority_index, metadata_source_index, image_source_index, metadata_text_format) = {
             let state = config_state_clone
                 .lock()
                 .expect("config state lock poisoned");
-            (
-                crate::viewer_panel_display_priority_to_code(
-                    crate::viewer_panel_display_priority_for_leaf(
-                        &state.ui.layout.viewer_panel_instances,
+            if panel_kind == LayoutPanelKind::MetadataViewer.to_code() {
+                (
+                    crate::viewer_panel_display_priority_to_code(
+                        crate::metadata_viewer_panel_display_priority_for_leaf(
+                            &state.ui.layout.metadata_viewer_panel_instances,
+                            &leaf_id,
+                        ),
+                    ),
+                    crate::viewer_panel_metadata_source_to_code(
+                        crate::metadata_viewer_panel_metadata_source_for_leaf(
+                            &state.ui.layout.metadata_viewer_panel_instances,
+                            &leaf_id,
+                        ),
+                    ),
+                    crate::viewer_panel_image_source_to_code(ViewerPanelImageSource::default()),
+                    crate::metadata_viewer_panel_text_format_for_leaf(
+                        &state.ui.layout.metadata_viewer_panel_instances,
                         &leaf_id,
                     ),
-                ),
-                crate::viewer_panel_metadata_source_to_code(
-                    crate::viewer_panel_metadata_source_for_leaf(
-                        &state.ui.layout.viewer_panel_instances,
-                        &leaf_id,
+                )
+            } else {
+                (
+                    crate::viewer_panel_display_priority_to_code(
+                        crate::album_art_viewer_panel_display_priority_for_leaf(
+                            &state.ui.layout.album_art_viewer_panel_instances,
+                            &leaf_id,
+                        ),
                     ),
-                ),
-                crate::viewer_panel_image_source_to_code(
-                    crate::viewer_panel_image_source_for_leaf(
-                        &state.ui.layout.viewer_panel_instances,
-                        &leaf_id,
+                    crate::viewer_panel_metadata_source_to_code(
+                        ViewerPanelMetadataSource::default(),
                     ),
-                ),
-                crate::viewer_panel_metadata_use_custom_text_for_leaf(
-                    &state.ui.layout.viewer_panel_instances,
-                    &leaf_id,
-                ),
-                crate::viewer_panel_metadata_text_format_for_leaf(
-                    &state.ui.layout.viewer_panel_instances,
-                    &leaf_id,
-                ),
-            )
+                    crate::viewer_panel_image_source_to_code(
+                        crate::album_art_viewer_panel_image_source_for_leaf(
+                            &state.ui.layout.album_art_viewer_panel_instances,
+                            &leaf_id,
+                        ),
+                    ),
+                    crate::text_template::DEFAULT_METADATA_PANEL_TEMPLATE.to_string(),
+                )
+            }
         };
         if let Some(ui) = ui_handle_clone.upgrade() {
             ui.set_control_cluster_menu_target_leaf_id("".into());
@@ -179,7 +196,6 @@ pub(crate) fn register_layout_editor_callbacks(ui: &AppWindow, shared_state: &Ap
             ui.set_viewer_panel_settings_display_priority_index(priority_index);
             ui.set_viewer_panel_settings_metadata_source_index(metadata_source_index);
             ui.set_viewer_panel_settings_image_source_index(image_source_index);
-            ui.set_viewer_panel_settings_metadata_use_custom_text(metadata_use_custom_text);
             ui.set_viewer_panel_settings_metadata_text_format(metadata_text_format.into());
             ui.set_viewer_panel_settings_x(x_px.max(8) as f32);
             ui.set_viewer_panel_settings_y(y_px.max(8) as f32);
@@ -200,11 +216,23 @@ pub(crate) fn register_layout_editor_callbacks(ui: &AppWindow, shared_state: &Ap
                 .lock()
                 .expect("config state lock poisoned");
             let mut next_config = state.clone();
-            crate::upsert_viewer_panel_display_priority_for_leaf(
-                &mut next_config.ui.layout.viewer_panel_instances,
-                &leaf_id_text,
-                display_priority,
-            );
+            match panel_kind_for_leaf(&next_config.ui.layout.root, &leaf_id_text) {
+                Some(LayoutPanelKind::MetadataViewer) => {
+                    crate::upsert_metadata_viewer_panel_display_priority_for_leaf(
+                        &mut next_config.ui.layout.metadata_viewer_panel_instances,
+                        &leaf_id_text,
+                        display_priority,
+                    );
+                }
+                Some(LayoutPanelKind::AlbumArtViewer) => {
+                    crate::upsert_album_art_viewer_panel_display_priority_for_leaf(
+                        &mut next_config.ui.layout.album_art_viewer_panel_instances,
+                        &leaf_id_text,
+                        display_priority,
+                    );
+                }
+                _ => return,
+            }
             next_config = crate::sanitize_config(next_config);
             *state = next_config.clone();
             let (workspace_width_px, workspace_height_px) = crate::workspace_size_snapshot(
@@ -219,35 +247,44 @@ pub(crate) fn register_layout_editor_callbacks(ui: &AppWindow, shared_state: &Ap
         publish_runtime_from_state(&shared_state_clone, &next_config);
         if let Some(ui) = shared_state_clone.ui_handles.ui_handle.upgrade() {
             crate::apply_layout_to_ui(&ui, &next_config, workspace_width_px, workspace_height_px);
+            let panel_kind = panel_kind_for_leaf(&next_config.ui.layout.root, &leaf_id_text);
             ui.set_viewer_panel_settings_target_leaf_id(leaf_id_text.clone().into());
             ui.set_viewer_panel_settings_display_priority_index(
-                crate::viewer_panel_display_priority_to_code(display_priority),
+                crate::viewer_panel_display_priority_to_code(match panel_kind {
+                    Some(LayoutPanelKind::MetadataViewer) => {
+                        crate::metadata_viewer_panel_display_priority_for_leaf(
+                            &next_config.ui.layout.metadata_viewer_panel_instances,
+                            &leaf_id_text,
+                        )
+                    }
+                    Some(LayoutPanelKind::AlbumArtViewer) => {
+                        crate::album_art_viewer_panel_display_priority_for_leaf(
+                            &next_config.ui.layout.album_art_viewer_panel_instances,
+                            &leaf_id_text,
+                        )
+                    }
+                    _ => ViewerPanelDisplayPriority::default(),
+                }),
             );
             ui.set_viewer_panel_settings_metadata_source_index(
                 crate::viewer_panel_metadata_source_to_code(
-                    crate::viewer_panel_metadata_source_for_leaf(
-                        &next_config.ui.layout.viewer_panel_instances,
+                    crate::metadata_viewer_panel_metadata_source_for_leaf(
+                        &next_config.ui.layout.metadata_viewer_panel_instances,
                         &leaf_id_text,
                     ),
                 ),
             );
             ui.set_viewer_panel_settings_image_source_index(
                 crate::viewer_panel_image_source_to_code(
-                    crate::viewer_panel_image_source_for_leaf(
-                        &next_config.ui.layout.viewer_panel_instances,
+                    crate::album_art_viewer_panel_image_source_for_leaf(
+                        &next_config.ui.layout.album_art_viewer_panel_instances,
                         &leaf_id_text,
                     ),
                 ),
             );
-            ui.set_viewer_panel_settings_metadata_use_custom_text(
-                crate::viewer_panel_metadata_use_custom_text_for_leaf(
-                    &next_config.ui.layout.viewer_panel_instances,
-                    &leaf_id_text,
-                ),
-            );
             ui.set_viewer_panel_settings_metadata_text_format(
-                crate::viewer_panel_metadata_text_format_for_leaf(
-                    &next_config.ui.layout.viewer_panel_instances,
+                crate::metadata_viewer_panel_text_format_for_leaf(
+                    &next_config.ui.layout.metadata_viewer_panel_instances,
                     &leaf_id_text,
                 )
                 .into(),
@@ -269,8 +306,8 @@ pub(crate) fn register_layout_editor_callbacks(ui: &AppWindow, shared_state: &Ap
                 .lock()
                 .expect("config state lock poisoned");
             let mut next_config = state.clone();
-            crate::upsert_viewer_panel_metadata_source_for_leaf(
-                &mut next_config.ui.layout.viewer_panel_instances,
+            crate::upsert_metadata_viewer_panel_metadata_source_for_leaf(
+                &mut next_config.ui.layout.metadata_viewer_panel_instances,
                 &leaf_id_text,
                 metadata_source,
             );
@@ -291,8 +328,8 @@ pub(crate) fn register_layout_editor_callbacks(ui: &AppWindow, shared_state: &Ap
             ui.set_viewer_panel_settings_target_leaf_id(leaf_id_text.clone().into());
             ui.set_viewer_panel_settings_display_priority_index(
                 crate::viewer_panel_display_priority_to_code(
-                    crate::viewer_panel_display_priority_for_leaf(
-                        &next_config.ui.layout.viewer_panel_instances,
+                    crate::metadata_viewer_panel_display_priority_for_leaf(
+                        &next_config.ui.layout.metadata_viewer_panel_instances,
                         &leaf_id_text,
                     ),
                 ),
@@ -302,99 +339,15 @@ pub(crate) fn register_layout_editor_callbacks(ui: &AppWindow, shared_state: &Ap
             );
             ui.set_viewer_panel_settings_image_source_index(
                 crate::viewer_panel_image_source_to_code(
-                    crate::viewer_panel_image_source_for_leaf(
-                        &next_config.ui.layout.viewer_panel_instances,
+                    crate::album_art_viewer_panel_image_source_for_leaf(
+                        &next_config.ui.layout.album_art_viewer_panel_instances,
                         &leaf_id_text,
                     ),
-                ),
-            );
-            ui.set_viewer_panel_settings_metadata_use_custom_text(
-                crate::viewer_panel_metadata_use_custom_text_for_leaf(
-                    &next_config.ui.layout.viewer_panel_instances,
-                    &leaf_id_text,
                 ),
             );
             ui.set_viewer_panel_settings_metadata_text_format(
-                crate::viewer_panel_metadata_text_format_for_leaf(
-                    &next_config.ui.layout.viewer_panel_instances,
-                    &leaf_id_text,
-                )
-                .into(),
-            );
-            ui.set_show_viewer_panel_settings_menu(true);
-        }
-    });
-
-    let shared_state_clone = shared_state.clone();
-    ui.on_set_viewer_panel_metadata_custom_text_enabled(move |leaf_id, enabled| {
-        let leaf_id_text = leaf_id.to_string();
-        if leaf_id_text.trim().is_empty() {
-            return;
-        }
-        let (next_config, workspace_width_px, workspace_height_px) = {
-            let mut state = shared_state_clone
-                .config_state
-                .lock()
-                .expect("config state lock poisoned");
-            let mut next_config = state.clone();
-            let metadata_text_format = crate::viewer_panel_metadata_text_format_for_leaf(
-                &next_config.ui.layout.viewer_panel_instances,
-                &leaf_id_text,
-            );
-            crate::upsert_viewer_panel_metadata_text_for_leaf(
-                &mut next_config.ui.layout.viewer_panel_instances,
-                &leaf_id_text,
-                enabled,
-                metadata_text_format,
-            );
-            next_config = crate::sanitize_config(next_config);
-            *state = next_config.clone();
-            let (workspace_width_px, workspace_height_px) = crate::workspace_size_snapshot(
-                &shared_state_clone.ui_handles.layout_workspace_size,
-            );
-            (next_config, workspace_width_px, workspace_height_px)
-        };
-        persist_state_files_with_config_path(
-            &next_config,
-            &shared_state_clone.persistence_paths.config_file,
-        );
-        publish_runtime_from_state(&shared_state_clone, &next_config);
-        if let Some(ui) = shared_state_clone.ui_handles.ui_handle.upgrade() {
-            crate::apply_layout_to_ui(&ui, &next_config, workspace_width_px, workspace_height_px);
-            ui.set_viewer_panel_settings_target_leaf_id(leaf_id_text.clone().into());
-            ui.set_viewer_panel_settings_display_priority_index(
-                crate::viewer_panel_display_priority_to_code(
-                    crate::viewer_panel_display_priority_for_leaf(
-                        &next_config.ui.layout.viewer_panel_instances,
-                        &leaf_id_text,
-                    ),
-                ),
-            );
-            ui.set_viewer_panel_settings_metadata_source_index(
-                crate::viewer_panel_metadata_source_to_code(
-                    crate::viewer_panel_metadata_source_for_leaf(
-                        &next_config.ui.layout.viewer_panel_instances,
-                        &leaf_id_text,
-                    ),
-                ),
-            );
-            ui.set_viewer_panel_settings_image_source_index(
-                crate::viewer_panel_image_source_to_code(
-                    crate::viewer_panel_image_source_for_leaf(
-                        &next_config.ui.layout.viewer_panel_instances,
-                        &leaf_id_text,
-                    ),
-                ),
-            );
-            ui.set_viewer_panel_settings_metadata_use_custom_text(
-                crate::viewer_panel_metadata_use_custom_text_for_leaf(
-                    &next_config.ui.layout.viewer_panel_instances,
-                    &leaf_id_text,
-                ),
-            );
-            ui.set_viewer_panel_settings_metadata_text_format(
-                crate::viewer_panel_metadata_text_format_for_leaf(
-                    &next_config.ui.layout.viewer_panel_instances,
+                crate::metadata_viewer_panel_text_format_for_leaf(
+                    &next_config.ui.layout.metadata_viewer_panel_instances,
                     &leaf_id_text,
                 )
                 .into(),
@@ -415,14 +368,9 @@ pub(crate) fn register_layout_editor_callbacks(ui: &AppWindow, shared_state: &Ap
                 .lock()
                 .expect("config state lock poisoned");
             let mut next_config = state.clone();
-            let use_custom_text = crate::viewer_panel_metadata_use_custom_text_for_leaf(
-                &next_config.ui.layout.viewer_panel_instances,
+            crate::upsert_metadata_viewer_panel_text_format_for_leaf(
+                &mut next_config.ui.layout.metadata_viewer_panel_instances,
                 &leaf_id_text,
-            );
-            crate::upsert_viewer_panel_metadata_text_for_leaf(
-                &mut next_config.ui.layout.viewer_panel_instances,
-                &leaf_id_text,
-                use_custom_text,
                 metadata_text_format.to_string(),
             );
             next_config = crate::sanitize_config(next_config);
@@ -442,37 +390,31 @@ pub(crate) fn register_layout_editor_callbacks(ui: &AppWindow, shared_state: &Ap
             ui.set_viewer_panel_settings_target_leaf_id(leaf_id_text.clone().into());
             ui.set_viewer_panel_settings_display_priority_index(
                 crate::viewer_panel_display_priority_to_code(
-                    crate::viewer_panel_display_priority_for_leaf(
-                        &next_config.ui.layout.viewer_panel_instances,
+                    crate::metadata_viewer_panel_display_priority_for_leaf(
+                        &next_config.ui.layout.metadata_viewer_panel_instances,
                         &leaf_id_text,
                     ),
                 ),
             );
             ui.set_viewer_panel_settings_metadata_source_index(
                 crate::viewer_panel_metadata_source_to_code(
-                    crate::viewer_panel_metadata_source_for_leaf(
-                        &next_config.ui.layout.viewer_panel_instances,
+                    crate::metadata_viewer_panel_metadata_source_for_leaf(
+                        &next_config.ui.layout.metadata_viewer_panel_instances,
                         &leaf_id_text,
                     ),
                 ),
             );
             ui.set_viewer_panel_settings_image_source_index(
                 crate::viewer_panel_image_source_to_code(
-                    crate::viewer_panel_image_source_for_leaf(
-                        &next_config.ui.layout.viewer_panel_instances,
+                    crate::album_art_viewer_panel_image_source_for_leaf(
+                        &next_config.ui.layout.album_art_viewer_panel_instances,
                         &leaf_id_text,
                     ),
                 ),
             );
-            ui.set_viewer_panel_settings_metadata_use_custom_text(
-                crate::viewer_panel_metadata_use_custom_text_for_leaf(
-                    &next_config.ui.layout.viewer_panel_instances,
-                    &leaf_id_text,
-                ),
-            );
             ui.set_viewer_panel_settings_metadata_text_format(
-                crate::viewer_panel_metadata_text_format_for_leaf(
-                    &next_config.ui.layout.viewer_panel_instances,
+                crate::metadata_viewer_panel_text_format_for_leaf(
+                    &next_config.ui.layout.metadata_viewer_panel_instances,
                     &leaf_id_text,
                 )
                 .into(),
@@ -494,8 +436,8 @@ pub(crate) fn register_layout_editor_callbacks(ui: &AppWindow, shared_state: &Ap
                 .lock()
                 .expect("config state lock poisoned");
             let mut next_config = state.clone();
-            crate::upsert_viewer_panel_image_source_for_leaf(
-                &mut next_config.ui.layout.viewer_panel_instances,
+            crate::upsert_album_art_viewer_panel_image_source_for_leaf(
+                &mut next_config.ui.layout.album_art_viewer_panel_instances,
                 &leaf_id_text,
                 image_source,
             );
@@ -516,16 +458,16 @@ pub(crate) fn register_layout_editor_callbacks(ui: &AppWindow, shared_state: &Ap
             ui.set_viewer_panel_settings_target_leaf_id(leaf_id_text.clone().into());
             ui.set_viewer_panel_settings_display_priority_index(
                 crate::viewer_panel_display_priority_to_code(
-                    crate::viewer_panel_display_priority_for_leaf(
-                        &next_config.ui.layout.viewer_panel_instances,
+                    crate::album_art_viewer_panel_display_priority_for_leaf(
+                        &next_config.ui.layout.album_art_viewer_panel_instances,
                         &leaf_id_text,
                     ),
                 ),
             );
             ui.set_viewer_panel_settings_metadata_source_index(
                 crate::viewer_panel_metadata_source_to_code(
-                    crate::viewer_panel_metadata_source_for_leaf(
-                        &next_config.ui.layout.viewer_panel_instances,
+                    crate::metadata_viewer_panel_metadata_source_for_leaf(
+                        &next_config.ui.layout.metadata_viewer_panel_instances,
                         &leaf_id_text,
                     ),
                 ),
@@ -533,15 +475,9 @@ pub(crate) fn register_layout_editor_callbacks(ui: &AppWindow, shared_state: &Ap
             ui.set_viewer_panel_settings_image_source_index(
                 crate::viewer_panel_image_source_to_code(image_source),
             );
-            ui.set_viewer_panel_settings_metadata_use_custom_text(
-                crate::viewer_panel_metadata_use_custom_text_for_leaf(
-                    &next_config.ui.layout.viewer_panel_instances,
-                    &leaf_id_text,
-                ),
-            );
             ui.set_viewer_panel_settings_metadata_text_format(
-                crate::viewer_panel_metadata_text_format_for_leaf(
-                    &next_config.ui.layout.viewer_panel_instances,
+                crate::metadata_viewer_panel_text_format_for_leaf(
+                    &next_config.ui.layout.metadata_viewer_panel_instances,
                     &leaf_id_text,
                 )
                 .into(),

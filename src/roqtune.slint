@@ -325,7 +325,6 @@ export component AppWindow inherits Window {
     in-out property <int> viewer_panel_settings_target_panel_kind: root.panel_kind_none;
     in-out property <int> viewer_panel_settings_display_priority_index: 0;
     in-out property <int> viewer_panel_settings_metadata_source_index: 0;
-    in-out property <bool> viewer_panel_settings_metadata_use_custom_text: false;
     in-out property <string> viewer_panel_settings_metadata_text_format: "";
     in-out property <int> viewer_panel_settings_image_source_index: 0;
     in-out property <length> viewer_panel_settings_x: 0px;
@@ -340,7 +339,8 @@ export component AppWindow inherits Window {
     property <[string]> viewer_panel_metadata_source_options: [
         "Track (Default)",
         "Album Description",
-        "Artist Bio"
+        "Artist Bio",
+        "Custom Text"
     ];
     property <[string]> viewer_panel_image_source_options: [
         "Album Art (Default)",
@@ -3164,48 +3164,14 @@ export component AppWindow inherits Window {
                 }
             }
 
-            if root.viewer_panel_settings_target_panel_kind == root.panel_kind_metadata_viewer : HorizontalLayout {
-                spacing: 8px;
-                Rectangle {
-                    horizontal-stretch: 1;
-                    height: 24px;
-                    background: transparent;
-                    Text {
-                        text: "Custom Text";
-                        color: AppPalette.text-primary;
-                        font-size: 12px;
-                        vertical-alignment: center;
-                        horizontal-alignment: left;
-                        width: parent.width;
-                    }
-                }
-                Rectangle {
-                    width: 190px;
-                    height: 30px;
-                    Switch {
-                        x: parent.width - self.width;
-                        y: (parent.height - self.height) / 2;
-                        checked <=> root.viewer_panel_settings_metadata_use_custom_text;
-                        toggled => {
-                            root.set_viewer_panel_metadata_custom_text_enabled(
-                                root.viewer_panel_settings_target_leaf_id,
-                                root.viewer_panel_settings_metadata_use_custom_text
-                            );
-                        }
-                    }
-                }
-            }
-
-            if root.viewer_panel_settings_target_panel_kind == root.panel_kind_metadata_viewer : Rectangle {
+            if root.viewer_panel_settings_target_panel_kind == root.panel_kind_metadata_viewer
+                    && root.viewer_panel_settings_metadata_source_index == 3 : Rectangle {
                 height: 30px;
                 background: transparent;
-                property <color> editor-bg: root.viewer_panel_settings_metadata_use_custom_text
-                    ? AppPalette.panel-bg
-                    : AppPalette.panel-bg-alt;
                 LineEdit {
                     width: parent.width;
                     height: parent.height;
-                    enabled: root.viewer_panel_settings_metadata_use_custom_text;
+                    enabled: true;
                     text: root.viewer_panel_settings_metadata_text_format;
                     placeholder-text: "[b]{title}[/b]\\n{i}{artist}[/i]";
                     edited => {
@@ -6183,7 +6149,6 @@ export component AppWindow inherits Window {
     callback remove_control_cluster_button(string, int);
     callback set_viewer_panel_display_priority(string, int);
     callback set_viewer_panel_metadata_source(string, int);
-    callback set_viewer_panel_metadata_custom_text_enabled(string, bool);
     callback set_viewer_panel_metadata_text_format(string, string);
     callback set_viewer_panel_image_source(string, int);
     callback window_resized(int, int);

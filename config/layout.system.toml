@@ -113,19 +113,32 @@ custom = false
 # leaf_id = "n8"
 # actions = [1, 2, 3]
 #
-# Optional per-leaf metadata/album-art viewer behavior overrides.
+# Optional per-leaf metadata viewer behavior overrides.
 # display_priority options:
 # - "default"
 # - "prefer_selection"
 # - "prefer_now_playing"
 # - "selection_only"
 # - "now_playing_only"
-# [[viewer_panel_instances]]
+# metadata_source options:
+# - "track"
+# - "album_description"
+# - "artist_bio"
+# - "custom_text"
+# [[metadata_viewer_panel_instances]]
 # leaf_id = "l1"
 # display_priority = "default"
 # metadata_source = "track"
-# metadata_use_custom_text = false
 # metadata_text_format = "[b][color=text_primary]{title;file_name}[/color][/b]\\n[color=text_secondary]{artist;album_artist}[/color]\\n[color=text_muted]{album}[/color]\\n[color=text_muted]{date;year} {genre}[/color]"
+#
+# Optional per-leaf album-art viewer behavior overrides.
+# image_source options:
+# - "album_art"
+# - "artist_image"
+# [[album_art_viewer_panel_instances]]
+# leaf_id = "l2"
+# display_priority = "default"
+# image_source = "album_art"
 
 [root]
 node_type = "split"
@@ -167,17 +180,15 @@ min_second_px = 240
 leaf_id = "n10"
 actions = [7, 8, 11]
 
-[[viewer_panel_instances]]
+[[album_art_viewer_panel_instances]]
 leaf_id = "l4"
 display_priority = "now_playing_only"
-metadata_source = "track"
 image_source = "album_art"
 
-[[viewer_panel_instances]]
+[[metadata_viewer_panel_instances]]
 leaf_id = "l5"
 display_priority = "now_playing_only"
 metadata_source = "track"
-image_source = "album_art"
 
 [root.first.first.first]
 node_type = "split"
@@ -240,11 +251,10 @@ node_type = "leaf"
 id = "l6"
 panel = "spacer"
 
-[[viewer_panel_instances]]
+[[metadata_viewer_panel_instances]]
 leaf_id = "l1"
 display_priority = "default"
 metadata_source = "track"
-image_source = "album_art"
 
 [root.first.first.second]
 node_type = "split"
@@ -254,10 +264,9 @@ ratio = 0.37
 min_first_px = 180
 min_second_px = 110
 
-[[viewer_panel_instances]]
+[[album_art_viewer_panel_instances]]
 leaf_id = "l2"
 display_priority = "default"
-metadata_source = "track"
 image_source = "album_art"
 
 [root.first.first.second.first]

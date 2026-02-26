@@ -427,6 +427,7 @@ const VIEWER_DISPLAY_PRIORITY_NOW_PLAYING_ONLY: i32 = 4;
 const VIEWER_METADATA_SOURCE_TRACK: i32 = 0;
 const VIEWER_METADATA_SOURCE_ALBUM_DESCRIPTION: i32 = 1;
 const VIEWER_METADATA_SOURCE_ARTIST_BIO: i32 = 2;
+const VIEWER_METADATA_SOURCE_CUSTOM_TEXT: i32 = 3;
 const VIEWER_IMAGE_SOURCE_ALBUM_ART: i32 = 0;
 const VIEWER_IMAGE_SOURCE_ARTIST_IMAGE: i32 = 1;
 const LIBRARY_ITEM_KIND_SONG: i32 = 0;
@@ -3657,6 +3658,7 @@ impl UiManager {
         match source_code {
             VIEWER_METADATA_SOURCE_ALBUM_DESCRIPTION => 1,
             VIEWER_METADATA_SOURCE_ARTIST_BIO => 2,
+            VIEWER_METADATA_SOURCE_CUSTOM_TEXT => 3,
             VIEWER_METADATA_SOURCE_TRACK => 0,
             _ => 0,
         }
@@ -3970,7 +3972,9 @@ impl UiManager {
                         if template_metadata.album_artist.is_empty() {
                             template_metadata.album_artist = template_metadata.artist.clone();
                         }
-                        let template_source = if row_data.metadata_use_custom_text {
+                        let template_source = if metadata_source_index
+                            == VIEWER_METADATA_SOURCE_CUSTOM_TEXT as usize
+                        {
                             let custom = row_data.metadata_text_format.to_string();
                             if custom.trim().is_empty() {
                                 text_template::DEFAULT_METADATA_PANEL_TEMPLATE.to_string()
