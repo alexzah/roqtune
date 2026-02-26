@@ -3,6 +3,7 @@ import { LineEdit } from "std-widgets.slint";
 import { TrackRowData } from "../types.slint";
 import { AppIcons } from "../icons.slint";
 import { ContextMenu } from "menus.slint";
+import { RichTextBlockView } from "media.slint";
 import { AppPalette } from "../theme_palette.slint";
 
 export component PlaylistRow inherits Rectangle {
@@ -206,21 +207,41 @@ export component TrackRow inherits Rectangle {
                 }
             }
 
-            if self.column-kind != 1 && self.column-kind != 2 : Text {
-                x: 0px;
+            if self.column-kind != 1 && self.column-kind != 2 : Rectangle {
                 width: parent.width;
-                text: column-value;
-                color: root.data.unavailable
+                height: parent.height;
+                clip: true;
+                property <color> base-text-color: root.data.unavailable
                     ? AppPalette.text-disabled
                     : data.selected
                         ? AppPalette.text-primary
                         : (index < root.headers.length && root.headers[index] == "Title")
                             ? AppPalette.text-primary
                             : AppPalette.text-secondary;
-                font-size: 13px;
-                vertical-alignment: center;
-                overflow: elide;
-                horizontal-alignment: left;
+                property <bool> has-rich-value: index >= 0 && index < root.data.rich_values.length;
+
+                if self.has-rich-value : RichTextBlockView {
+                    x: 0px;
+                    width: parent.width;
+                    height: min(parent.height, self.preferred-height);
+                    y: (parent.height - self.height) / 2;
+                    block: root.data.rich_values[index];
+                    default-color: parent.base-text-color;
+                    compact: root.row-height <= 32px;
+                    max-lines: 6;
+                    clip-lines: true;
+                }
+
+                if !self.has-rich-value : Text {
+                    x: 0px;
+                    width: parent.width;
+                    text: column-value;
+                    color: parent.base-text-color;
+                    font-size: 13px;
+                    vertical-alignment: center;
+                    overflow: elide;
+                    horizontal-alignment: left;
+                }
             }
         }
 

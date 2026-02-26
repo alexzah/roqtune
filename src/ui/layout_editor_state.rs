@@ -11,13 +11,14 @@ use slint::{Model, ModelRc, VecModel};
 use crate::{
     config::{ButtonClusterInstanceConfig, Config, UiConfig},
     layout::{
-        self, compute_tree_layout_metrics, sanitize_layout_config, LayoutConfig, LayoutNode,
-        LayoutPanelKind, ViewerPanelDisplayPriority, ViewerPanelImageSource,
-        ViewerPanelInstanceConfig, ViewerPanelMetadataSource, SPLITTER_THICKNESS_PX,
+        self, compute_tree_layout_metrics, sanitize_layout_config,
+        AlbumArtViewerPanelInstanceConfig, LayoutConfig, LayoutNode, LayoutPanelKind,
+        MetadataViewerPanelInstanceConfig, ViewerPanelDisplayPriority, ViewerPanelImageSource,
+        ViewerPanelMetadataSource, SPLITTER_THICKNESS_PX,
     },
     AppWindow, LayoutAlbumArtViewerPanelModel, LayoutButtonClusterPanelModel,
-    LayoutMetadataViewerPanelModel, LayoutSplitterModel, IMPORT_CLUSTER_PRESET,
-    TRANSPORT_CLUSTER_PRESET, UTILITY_CLUSTER_PRESET,
+    LayoutMetadataViewerPanelModel, LayoutSplitterModel, RichTextBlock, RichTextLine,
+    IMPORT_CLUSTER_PRESET, TRANSPORT_CLUSTER_PRESET, UTILITY_CLUSTER_PRESET,
 };
 
 fn collect_button_cluster_leaf_ids(node: &LayoutNode, out: &mut Vec<String>) {
@@ -35,18 +36,31 @@ fn collect_button_cluster_leaf_ids(node: &LayoutNode, out: &mut Vec<String>) {
     }
 }
 
-fn collect_viewer_panel_leaf_ids(node: &LayoutNode, out: &mut Vec<String>) {
+fn collect_metadata_viewer_leaf_ids(node: &LayoutNode, out: &mut Vec<String>) {
     match node {
         LayoutNode::Leaf { id, panel } => {
-            if *panel == LayoutPanelKind::MetadataViewer
-                || *panel == LayoutPanelKind::AlbumArtViewer
-            {
+            if *panel == LayoutPanelKind::MetadataViewer {
                 out.push(id.clone());
             }
         }
         LayoutNode::Split { first, second, .. } => {
-            collect_viewer_panel_leaf_ids(first, out);
-            collect_viewer_panel_leaf_ids(second, out);
+            collect_metadata_viewer_leaf_ids(first, out);
+            collect_metadata_viewer_leaf_ids(second, out);
+        }
+        LayoutNode::Empty => {}
+    }
+}
+
+fn collect_album_art_viewer_leaf_ids(node: &LayoutNode, out: &mut Vec<String>) {
+    match node {
+        LayoutNode::Leaf { id, panel } => {
+            if *panel == LayoutPanelKind::AlbumArtViewer {
+                out.push(id.clone());
+            }
+        }
+        LayoutNode::Split { first, second, .. } => {
+            collect_album_art_viewer_leaf_ids(first, out);
+            collect_album_art_viewer_leaf_ids(second, out);
         }
         LayoutNode::Empty => {}
     }
@@ -58,9 +72,15 @@ fn button_cluster_leaf_ids(layout: &LayoutConfig) -> Vec<String> {
     ids
 }
 
-fn viewer_panel_leaf_ids(layout: &LayoutConfig) -> Vec<String> {
+fn metadata_viewer_leaf_ids(layout: &LayoutConfig) -> Vec<String> {
     let mut ids = Vec::new();
-    collect_viewer_panel_leaf_ids(&layout.root, &mut ids);
+    collect_metadata_viewer_leaf_ids(&layout.root, &mut ids);
+    ids
+}
+
+fn album_art_viewer_leaf_ids(layout: &LayoutConfig) -> Vec<String> {
+    let mut ids = Vec::new();
+    collect_album_art_viewer_leaf_ids(&layout.root, &mut ids);
     ids
 }
 
@@ -146,15 +166,15 @@ pub(crate) fn sanitize_button_cluster_instances(
         .collect()
 }
 
-/// Sanitizes viewer-panel instances against the active layout leaf set.
-pub(crate) fn sanitize_viewer_panel_instances(
+/// Sanitizes metadata-viewer instances against the active layout leaf set.
+pub(crate) fn sanitize_metadata_viewer_panel_instances(
     layout: &LayoutConfig,
-    instances: &[ViewerPanelInstanceConfig],
-) -> Vec<ViewerPanelInstanceConfig> {
-    let leaf_ids = viewer_panel_leaf_ids(layout);
+    instances: &[MetadataViewerPanelInstanceConfig],
+) -> Vec<MetadataViewerPanelInstanceConfig> {
+    let leaf_ids = metadata_viewer_leaf_ids(layout);
     let mut priority_by_leaf: HashMap<&str, ViewerPanelDisplayPriority> = HashMap::new();
     let mut metadata_source_by_leaf: HashMap<&str, ViewerPanelMetadataSource> = HashMap::new();
-    let mut image_source_by_leaf: HashMap<&str, ViewerPanelImageSource> = HashMap::new();
+    let mut metadata_text_format_by_leaf: HashMap<&str, String> = HashMap::new();
     for instance in instances {
         let leaf_id = instance.leaf_id.trim();
         if leaf_id.is_empty() {
@@ -162,17 +182,52 @@ pub(crate) fn sanitize_viewer_panel_instances(
         }
         priority_by_leaf.insert(leaf_id, instance.display_priority);
         metadata_source_by_leaf.insert(leaf_id, instance.metadata_source);
-        image_source_by_leaf.insert(leaf_id, instance.image_source);
+        metadata_text_format_by_leaf.insert(leaf_id, instance.metadata_text_format.clone());
     }
 
     leaf_ids
         .into_iter()
-        .map(|leaf_id| ViewerPanelInstanceConfig {
+        .map(|leaf_id| MetadataViewerPanelInstanceConfig {
             display_priority: priority_by_leaf
                 .get(leaf_id.as_str())
                 .copied()
                 .unwrap_or_default(),
             metadata_source: metadata_source_by_leaf
+                .get(leaf_id.as_str())
+                .copied()
+                .unwrap_or_default(),
+            metadata_text_format: metadata_text_format_by_leaf
+                .get(leaf_id.as_str())
+                .cloned()
+                .unwrap_or_else(|| {
+                    crate::text_template::DEFAULT_METADATA_PANEL_TEMPLATE.to_string()
+                }),
+            leaf_id,
+        })
+        .collect()
+}
+
+/// Sanitizes album-art-viewer instances against the active layout leaf set.
+pub(crate) fn sanitize_album_art_viewer_panel_instances(
+    layout: &LayoutConfig,
+    instances: &[AlbumArtViewerPanelInstanceConfig],
+) -> Vec<AlbumArtViewerPanelInstanceConfig> {
+    let leaf_ids = album_art_viewer_leaf_ids(layout);
+    let mut priority_by_leaf: HashMap<&str, ViewerPanelDisplayPriority> = HashMap::new();
+    let mut image_source_by_leaf: HashMap<&str, ViewerPanelImageSource> = HashMap::new();
+    for instance in instances {
+        let leaf_id = instance.leaf_id.trim();
+        if leaf_id.is_empty() {
+            continue;
+        }
+        priority_by_leaf.insert(leaf_id, instance.display_priority);
+        image_source_by_leaf.insert(leaf_id, instance.image_source);
+    }
+
+    leaf_ids
+        .into_iter()
+        .map(|leaf_id| AlbumArtViewerPanelInstanceConfig {
+            display_priority: priority_by_leaf
                 .get(leaf_id.as_str())
                 .copied()
                 .unwrap_or_default(),
@@ -218,8 +273,8 @@ pub(crate) fn layout_panel_options() -> Vec<slint::SharedString> {
         "Seek Bar".into(),
         "Playlist Switcher".into(),
         "Track List".into(),
-        "Metadata Viewer".into(),
-        "Image Metadata Viewer".into(),
+        "Text Panel".into(),
+        "Image Panel".into(),
         "Spacer".into(),
         "Status Bar".into(),
         "Import Button Cluster".into(),
@@ -290,9 +345,9 @@ pub(crate) fn remove_button_cluster_instance_for_leaf(
     instances.retain(|instance| instance.leaf_id != leaf_id);
 }
 
-/// Inserts or updates viewer display priority for a leaf.
-pub(crate) fn upsert_viewer_panel_display_priority_for_leaf(
-    instances: &mut Vec<ViewerPanelInstanceConfig>,
+/// Inserts or updates metadata-viewer display priority for a leaf.
+pub(crate) fn upsert_metadata_viewer_panel_display_priority_for_leaf(
+    instances: &mut Vec<MetadataViewerPanelInstanceConfig>,
     leaf_id: &str,
     display_priority: ViewerPanelDisplayPriority,
 ) {
@@ -303,17 +358,17 @@ pub(crate) fn upsert_viewer_panel_display_priority_for_leaf(
         existing.display_priority = display_priority;
         return;
     }
-    instances.push(ViewerPanelInstanceConfig {
+    instances.push(MetadataViewerPanelInstanceConfig {
         leaf_id: leaf_id.to_string(),
         display_priority,
         metadata_source: ViewerPanelMetadataSource::default(),
-        image_source: ViewerPanelImageSource::default(),
+        metadata_text_format: crate::text_template::DEFAULT_METADATA_PANEL_TEMPLATE.to_string(),
     });
 }
 
-/// Inserts or updates viewer metadata source for a leaf.
-pub(crate) fn upsert_viewer_panel_metadata_source_for_leaf(
-    instances: &mut Vec<ViewerPanelInstanceConfig>,
+/// Inserts or updates metadata-viewer metadata source for a leaf.
+pub(crate) fn upsert_metadata_viewer_panel_metadata_source_for_leaf(
+    instances: &mut Vec<MetadataViewerPanelInstanceConfig>,
     leaf_id: &str,
     metadata_source: ViewerPanelMetadataSource,
 ) {
@@ -324,17 +379,63 @@ pub(crate) fn upsert_viewer_panel_metadata_source_for_leaf(
         existing.metadata_source = metadata_source;
         return;
     }
-    instances.push(ViewerPanelInstanceConfig {
+    instances.push(MetadataViewerPanelInstanceConfig {
         leaf_id: leaf_id.to_string(),
         display_priority: ViewerPanelDisplayPriority::default(),
         metadata_source,
+        metadata_text_format: crate::text_template::DEFAULT_METADATA_PANEL_TEMPLATE.to_string(),
+    });
+}
+
+/// Inserts or updates metadata-viewer template text for a leaf.
+pub(crate) fn upsert_metadata_viewer_panel_text_format_for_leaf(
+    instances: &mut Vec<MetadataViewerPanelInstanceConfig>,
+    leaf_id: &str,
+    metadata_text_format: String,
+) {
+    let normalized_format = if metadata_text_format.trim().is_empty() {
+        crate::text_template::DEFAULT_METADATA_PANEL_TEMPLATE.to_string()
+    } else {
+        metadata_text_format
+    };
+    if let Some(existing) = instances
+        .iter_mut()
+        .find(|instance| instance.leaf_id == leaf_id)
+    {
+        existing.metadata_text_format = normalized_format;
+        return;
+    }
+    instances.push(MetadataViewerPanelInstanceConfig {
+        leaf_id: leaf_id.to_string(),
+        display_priority: ViewerPanelDisplayPriority::default(),
+        metadata_source: ViewerPanelMetadataSource::CustomText,
+        metadata_text_format: normalized_format,
+    });
+}
+
+/// Inserts or updates album-art-viewer display priority for a leaf.
+pub(crate) fn upsert_album_art_viewer_panel_display_priority_for_leaf(
+    instances: &mut Vec<AlbumArtViewerPanelInstanceConfig>,
+    leaf_id: &str,
+    display_priority: ViewerPanelDisplayPriority,
+) {
+    if let Some(existing) = instances
+        .iter_mut()
+        .find(|instance| instance.leaf_id == leaf_id)
+    {
+        existing.display_priority = display_priority;
+        return;
+    }
+    instances.push(AlbumArtViewerPanelInstanceConfig {
+        leaf_id: leaf_id.to_string(),
+        display_priority,
         image_source: ViewerPanelImageSource::default(),
     });
 }
 
-/// Inserts or updates viewer image source for a leaf.
-pub(crate) fn upsert_viewer_panel_image_source_for_leaf(
-    instances: &mut Vec<ViewerPanelInstanceConfig>,
+/// Inserts or updates album-art-viewer image source for a leaf.
+pub(crate) fn upsert_album_art_viewer_panel_image_source_for_leaf(
+    instances: &mut Vec<AlbumArtViewerPanelInstanceConfig>,
     leaf_id: &str,
     image_source: ViewerPanelImageSource,
 ) {
@@ -345,10 +446,9 @@ pub(crate) fn upsert_viewer_panel_image_source_for_leaf(
         existing.image_source = image_source;
         return;
     }
-    instances.push(ViewerPanelInstanceConfig {
+    instances.push(AlbumArtViewerPanelInstanceConfig {
         leaf_id: leaf_id.to_string(),
         display_priority: ViewerPanelDisplayPriority::default(),
-        metadata_source: ViewerPanelMetadataSource::default(),
         image_source,
     });
 }
@@ -417,6 +517,7 @@ pub(crate) fn viewer_panel_metadata_source_to_code(source: ViewerPanelMetadataSo
         ViewerPanelMetadataSource::Track => 0,
         ViewerPanelMetadataSource::AlbumDescription => 1,
         ViewerPanelMetadataSource::ArtistBio => 2,
+        ViewerPanelMetadataSource::CustomText => 3,
     }
 }
 
@@ -425,6 +526,7 @@ pub(crate) fn viewer_panel_metadata_source_from_code(source: i32) -> ViewerPanel
     match source {
         1 => ViewerPanelMetadataSource::AlbumDescription,
         2 => ViewerPanelMetadataSource::ArtistBio,
+        3 => ViewerPanelMetadataSource::CustomText,
         _ => ViewerPanelMetadataSource::Track,
     }
 }
@@ -445,41 +547,70 @@ pub(crate) fn viewer_panel_image_source_from_code(source: i32) -> ViewerPanelIma
     }
 }
 
-fn viewer_panel_instance_for_leaf<'a>(
-    instances: &'a [ViewerPanelInstanceConfig],
+fn metadata_viewer_panel_instance_for_leaf<'a>(
+    instances: &'a [MetadataViewerPanelInstanceConfig],
     leaf_id: &str,
-) -> Option<&'a ViewerPanelInstanceConfig> {
+) -> Option<&'a MetadataViewerPanelInstanceConfig> {
     instances
         .iter()
         .find(|instance| instance.leaf_id == leaf_id)
 }
 
-/// Returns viewer display-priority for a leaf with a default fallback.
-pub(crate) fn viewer_panel_display_priority_for_leaf(
-    instances: &[ViewerPanelInstanceConfig],
+fn album_art_viewer_panel_instance_for_leaf<'a>(
+    instances: &'a [AlbumArtViewerPanelInstanceConfig],
+    leaf_id: &str,
+) -> Option<&'a AlbumArtViewerPanelInstanceConfig> {
+    instances
+        .iter()
+        .find(|instance| instance.leaf_id == leaf_id)
+}
+
+/// Returns metadata-viewer display-priority for a leaf with a default fallback.
+pub(crate) fn metadata_viewer_panel_display_priority_for_leaf(
+    instances: &[MetadataViewerPanelInstanceConfig],
     leaf_id: &str,
 ) -> ViewerPanelDisplayPriority {
-    viewer_panel_instance_for_leaf(instances, leaf_id)
+    metadata_viewer_panel_instance_for_leaf(instances, leaf_id)
         .map(|instance| instance.display_priority)
         .unwrap_or_default()
 }
 
-/// Returns viewer metadata-source for a leaf with a default fallback.
-pub(crate) fn viewer_panel_metadata_source_for_leaf(
-    instances: &[ViewerPanelInstanceConfig],
+/// Returns metadata-viewer metadata-source for a leaf with a default fallback.
+pub(crate) fn metadata_viewer_panel_metadata_source_for_leaf(
+    instances: &[MetadataViewerPanelInstanceConfig],
     leaf_id: &str,
 ) -> ViewerPanelMetadataSource {
-    viewer_panel_instance_for_leaf(instances, leaf_id)
+    metadata_viewer_panel_instance_for_leaf(instances, leaf_id)
         .map(|instance| instance.metadata_source)
         .unwrap_or_default()
 }
 
-/// Returns viewer image-source for a leaf with a default fallback.
-pub(crate) fn viewer_panel_image_source_for_leaf(
-    instances: &[ViewerPanelInstanceConfig],
+/// Returns metadata-viewer template text for a leaf with a default fallback.
+pub(crate) fn metadata_viewer_panel_text_format_for_leaf(
+    instances: &[MetadataViewerPanelInstanceConfig],
+    leaf_id: &str,
+) -> String {
+    metadata_viewer_panel_instance_for_leaf(instances, leaf_id)
+        .map(|instance| instance.metadata_text_format.clone())
+        .unwrap_or_else(|| crate::text_template::DEFAULT_METADATA_PANEL_TEMPLATE.to_string())
+}
+
+/// Returns album-art-viewer display-priority for a leaf with a default fallback.
+pub(crate) fn album_art_viewer_panel_display_priority_for_leaf(
+    instances: &[AlbumArtViewerPanelInstanceConfig],
+    leaf_id: &str,
+) -> ViewerPanelDisplayPriority {
+    album_art_viewer_panel_instance_for_leaf(instances, leaf_id)
+        .map(|instance| instance.display_priority)
+        .unwrap_or_default()
+}
+
+/// Returns album-art-viewer image-source for a leaf with a default fallback.
+pub(crate) fn album_art_viewer_panel_image_source_for_leaf(
+    instances: &[AlbumArtViewerPanelInstanceConfig],
     leaf_id: &str,
 ) -> ViewerPanelImageSource {
-    viewer_panel_instance_for_leaf(instances, leaf_id)
+    album_art_viewer_panel_instance_for_leaf(instances, leaf_id)
         .map(|instance| instance.image_source)
         .unwrap_or_default()
 }
@@ -489,13 +620,14 @@ fn apply_viewer_panel_views_to_ui(
     metrics: &layout::TreeLayoutMetrics,
     config: &Config,
 ) {
-    let default_display_title = ui.get_display_title();
-    let default_display_artist = ui.get_display_artist();
-    let default_display_album = ui.get_display_album();
-    let default_display_date = ui.get_display_date();
-    let default_display_genre = ui.get_display_genre();
     let default_art_source = ui.get_current_cover_art();
     let default_has_art = ui.get_current_cover_art_available();
+    let default_display_text = RichTextBlock {
+        plain_text: "".into(),
+        lines: ModelRc::from(Rc::new(VecModel::from(vec![RichTextLine {
+            runs: ModelRc::from(Rc::new(VecModel::from(Vec::new()))),
+        }]))),
+    };
     let existing_metadata_by_leaf: HashMap<String, LayoutMetadataViewerPanelModel> = ui
         .get_layout_metadata_viewer_panels()
         .iter()
@@ -512,16 +644,22 @@ fn apply_viewer_panel_views_to_ui(
         .iter()
         .filter(|leaf| leaf.panel == LayoutPanelKind::MetadataViewer)
         .map(|leaf| {
-            let display_priority =
-                viewer_panel_display_priority_to_code(viewer_panel_display_priority_for_leaf(
-                    &config.ui.layout.viewer_panel_instances,
+            let display_priority = viewer_panel_display_priority_to_code(
+                metadata_viewer_panel_display_priority_for_leaf(
+                    &config.ui.layout.metadata_viewer_panel_instances,
                     &leaf.id,
-                ));
-            let metadata_source =
-                viewer_panel_metadata_source_to_code(viewer_panel_metadata_source_for_leaf(
-                    &config.ui.layout.viewer_panel_instances,
+                ),
+            );
+            let metadata_source = viewer_panel_metadata_source_to_code(
+                metadata_viewer_panel_metadata_source_for_leaf(
+                    &config.ui.layout.metadata_viewer_panel_instances,
                     &leaf.id,
-                ));
+                ),
+            );
+            let metadata_text_format = metadata_viewer_panel_text_format_for_leaf(
+                &config.ui.layout.metadata_viewer_panel_instances,
+                &leaf.id,
+            );
             if let Some(existing) = existing_metadata_by_leaf.get(&leaf.id) {
                 return LayoutMetadataViewerPanelModel {
                     leaf_id: leaf.id.clone().into(),
@@ -532,11 +670,10 @@ fn apply_viewer_panel_views_to_ui(
                     visible: true,
                     display_priority,
                     metadata_source,
-                    display_title: existing.display_title.clone(),
-                    display_artist: existing.display_artist.clone(),
-                    display_album: existing.display_album.clone(),
-                    display_date: existing.display_date.clone(),
-                    display_genre: existing.display_genre.clone(),
+                    metadata_text_format: metadata_text_format.clone().into(),
+                    display_text: existing.display_text.clone(),
+                    display_text_full: existing.display_text_full.clone(),
+                    display_text_elided: existing.display_text_elided,
                 };
             }
             LayoutMetadataViewerPanelModel {
@@ -548,11 +685,10 @@ fn apply_viewer_panel_views_to_ui(
                 visible: true,
                 display_priority,
                 metadata_source,
-                display_title: default_display_title.clone(),
-                display_artist: default_display_artist.clone(),
-                display_album: default_display_album.clone(),
-                display_date: default_display_date.clone(),
-                display_genre: default_display_genre.clone(),
+                metadata_text_format: metadata_text_format.into(),
+                display_text: default_display_text.clone(),
+                display_text_full: "".into(),
+                display_text_elided: false,
             }
         })
         .collect();
@@ -562,14 +698,15 @@ fn apply_viewer_panel_views_to_ui(
         .iter()
         .filter(|leaf| leaf.panel == LayoutPanelKind::AlbumArtViewer)
         .map(|leaf| {
-            let display_priority =
-                viewer_panel_display_priority_to_code(viewer_panel_display_priority_for_leaf(
-                    &config.ui.layout.viewer_panel_instances,
+            let display_priority = viewer_panel_display_priority_to_code(
+                album_art_viewer_panel_display_priority_for_leaf(
+                    &config.ui.layout.album_art_viewer_panel_instances,
                     &leaf.id,
-                ));
+                ),
+            );
             let image_source =
-                viewer_panel_image_source_to_code(viewer_panel_image_source_for_leaf(
-                    &config.ui.layout.viewer_panel_instances,
+                viewer_panel_image_source_to_code(album_art_viewer_panel_image_source_for_leaf(
+                    &config.ui.layout.album_art_viewer_panel_instances,
                     &leaf.id,
                 ));
             if let Some(existing) = existing_album_art_by_leaf.get(&leaf.id) {

@@ -95,6 +95,12 @@ enabled = true
 custom = false
 
 [[playlist_columns]]
+name = "Track Details"
+format = "[size=body][color=text_primary]{title;file_name}[/color][/size]\\n[size=caption][color=text_secondary]{artist;album_artist} • {album}[/color][/size]"
+enabled = false
+custom = false
+
+[[playlist_columns]]
 name = "Artist"
 format = "{artist}"
 enabled = true
@@ -113,16 +119,32 @@ custom = false
 # leaf_id = "n8"
 # actions = [1, 2, 3]
 #
-# Optional per-leaf metadata/album-art viewer behavior overrides.
+# Optional per-leaf text panel behavior overrides.
 # display_priority options:
 # - "default"
 # - "prefer_selection"
 # - "prefer_now_playing"
 # - "selection_only"
 # - "now_playing_only"
-# [[viewer_panel_instances]]
+# text_source options:
+# - "track"
+# - "album_description"
+# - "artist_bio"
+# - "custom_text"
+# [[text_panel_instances]]
 # leaf_id = "l1"
 # display_priority = "default"
+# text_source = "track"
+# text_format = "[size=title][b][color=text_primary]{title;file_name}[/color][/b][/size]\\n[size=body][color=text_secondary]{artist;album_artist}[/color][/size]\\n[size=body][color=text_muted]{album}[/color][/size]\\n[size=caption][color=text_muted]{date;year} • {genre}[/color][/size]"
+#
+# Optional per-leaf image panel behavior overrides.
+# image_source options:
+# - "album_art"
+# - "artist_image"
+# [[image_panel_instances]]
+# leaf_id = "l2"
+# display_priority = "default"
+# image_source = "album_art"
 
 [root]
 node_type = "split"
@@ -164,17 +186,15 @@ min_second_px = 240
 leaf_id = "n10"
 actions = [7, 8, 11]
 
-[[viewer_panel_instances]]
+[[image_panel_instances]]
 leaf_id = "l4"
 display_priority = "now_playing_only"
-metadata_source = "track"
 image_source = "album_art"
 
-[[viewer_panel_instances]]
+[[text_panel_instances]]
 leaf_id = "l5"
 display_priority = "now_playing_only"
-metadata_source = "track"
-image_source = "album_art"
+text_source = "track"
 
 [root.first.first.first]
 node_type = "split"
@@ -216,12 +236,12 @@ min_second_px = 0
 [root.first.first.first.second.second.first]
 node_type = "leaf"
 id = "l4"
-panel = "album_art_viewer"
+panel = "image_panel"
 
 [root.first.first.first.second.second.second]
 node_type = "leaf"
 id = "l5"
-panel = "metadata_viewer"
+panel = "text_panel"
 axis = "vertical"
 ratio = 0.9
 min_first_px = 0
@@ -230,18 +250,17 @@ min_second_px = 0
 [root.first.first.first.second.second.second.first]
 node_type = "leaf"
 id = "l5"
-panel = "metadata_viewer"
+panel = "text_panel"
 
 [root.first.first.first.second.second.second.second]
 node_type = "leaf"
 id = "l6"
 panel = "spacer"
 
-[[viewer_panel_instances]]
+[[text_panel_instances]]
 leaf_id = "l1"
 display_priority = "default"
-metadata_source = "track"
-image_source = "album_art"
+text_source = "track"
 
 [root.first.first.second]
 node_type = "split"
@@ -251,10 +270,9 @@ ratio = 0.37
 min_first_px = 180
 min_second_px = 110
 
-[[viewer_panel_instances]]
+[[image_panel_instances]]
 leaf_id = "l2"
 display_priority = "default"
-metadata_source = "track"
 image_source = "album_art"
 
 [root.first.first.second.first]
@@ -325,12 +343,12 @@ min_second_px = 24
 [root.second.first.first.second.first]
 node_type = "leaf"
 id = "l1"
-panel = "metadata_viewer"
+panel = "text_panel"
 
 [root.second.first.first.second.second]
 node_type = "leaf"
 id = "l2"
-panel = "album_art_viewer"
+panel = "image_panel"
 
 [root.second.first.second]
 node_type = "leaf"

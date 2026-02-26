@@ -31,8 +31,9 @@ use crate::{
     integration_keyring::get_opensubsonic_password,
     integration_uri::{is_remote_track_path, parse_opensubsonic_track_uri},
     layout::PlaylistColumnWidthOverrideConfig,
-    metadata_tags, protocol, AppWindow, LayoutAlbumArtViewerPanelModel,
+    metadata_tags, protocol, text_template, AppWindow, LayoutAlbumArtViewerPanelModel,
     LayoutMetadataViewerPanelModel, LibraryRowData, MetadataEditorField as UiMetadataEditorField,
+    RichTextBlock as UiRichTextBlock, RichTextLine as UiRichTextLine, RichTextRun as UiRichTextRun,
     TrackRowData,
 };
 use governor::{Quota, RateLimiter};
@@ -240,6 +241,12 @@ struct TrackMetadata {
     track_number: String,
 }
 
+#[derive(Clone, Debug)]
+struct RenderedColumnValue {
+    plain_text: String,
+    rich_text: text_template::RenderedText,
+}
+
 #[derive(Clone, Default)]
 struct PlayingTrackState {
     /// Stable track id of the currently playing track.  Used to resolve the
@@ -389,6 +396,13 @@ struct ViewerTrackContext {
     album_artist: String,
 }
 
+#[derive(Clone, Debug)]
+struct FittedTextPanelRender {
+    rendered: text_template::RenderedText,
+    full_plain_text: String,
+    was_elided: bool,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum DisplayTargetPriority {
     Selection,
@@ -408,6 +422,8 @@ const PLAYLIST_COLUMN_KIND_ALBUM_ART: i32 = 1;
 const PLAYLIST_COLUMN_KIND_FAVORITE: i32 = 2;
 const BASE_ROW_HEIGHT_PX: u32 = 30;
 const ALBUM_ART_ROW_PADDING_PX: u32 = 8;
+const TEXT_ROW_VERTICAL_PADDING_PX: u32 = 8;
+const DEFAULT_TEXT_LINE_HEIGHT_PX: u32 = 17;
 const COLLECTION_MODE_PLAYLIST: i32 = 0;
 const COLLECTION_MODE_LIBRARY: i32 = 1;
 const VIEWER_DISPLAY_PRIORITY_DEFAULT: i32 = 0;
@@ -418,8 +434,33 @@ const VIEWER_DISPLAY_PRIORITY_NOW_PLAYING_ONLY: i32 = 4;
 const VIEWER_METADATA_SOURCE_TRACK: i32 = 0;
 const VIEWER_METADATA_SOURCE_ALBUM_DESCRIPTION: i32 = 1;
 const VIEWER_METADATA_SOURCE_ARTIST_BIO: i32 = 2;
+const VIEWER_METADATA_SOURCE_CUSTOM_TEXT: i32 = 3;
 const VIEWER_IMAGE_SOURCE_ALBUM_ART: i32 = 0;
 const VIEWER_IMAGE_SOURCE_ARTIST_IMAGE: i32 = 1;
+const TEXT_PANEL_COMPACT_WIDTH_THRESHOLD_PX: i32 = 220;
+const TEXT_PANEL_COMPACT_HEIGHT_THRESHOLD_PX: i32 = 120;
+const TEXT_PANEL_TIGHT_INSET_THRESHOLD_WIDTH_PX: i32 = 180;
+const TEXT_PANEL_TIGHT_INSET_THRESHOLD_HEIGHT_PX: i32 = 120;
+const TEXT_PANEL_TIGHT_INSET_PX: i32 = 4;
+const TEXT_PANEL_REGULAR_INSET_PX: i32 = 10;
+const TEXT_PANEL_COMPACT_LINE_SPACING_PX: i32 = 1;
+const TEXT_PANEL_REGULAR_LINE_SPACING_PX: i32 = 2;
+const TEXT_PANEL_LINE_HEIGHT_PERCENT: u32 = 130;
+const TEXT_PANEL_LINE_HEIGHT_ROUNDING_BIAS: u32 = 99;
+const TEXT_PANEL_LINE_HEIGHT_DENOMINATOR: u32 = 100;
+const TEXT_PANEL_CHAR_WIDTH_DENOMINATOR: u32 = 100;
+const TEXT_PANEL_CHAR_WIDTH_DEFAULT_PERCENT: u32 = 56;
+const TEXT_PANEL_CHAR_WIDTH_UPPERCASE_PERCENT: u32 = 62;
+const TEXT_PANEL_CHAR_WIDTH_DIGIT_PERCENT: u32 = 56;
+const TEXT_PANEL_CHAR_WIDTH_SPACE_PERCENT: u32 = 33;
+const TEXT_PANEL_CHAR_WIDTH_NARROW_PERCENT: u32 = 36;
+const TEXT_PANEL_CHAR_WIDTH_WIDE_PERCENT: u32 = 92;
+const TEXT_PANEL_CHAR_WIDTH_CJK_PERCENT: u32 = 100;
+const TEXT_PANEL_WIDTH_ESTIMATE_GRACE_PX: i32 = 6;
+const TEXT_PANEL_WIDTH_OVERFLOW_THRESHOLD_PX: i32 = 10;
+const TEXT_PANEL_ELLIPSIS: &str = "…";
+const TEXT_PANEL_MIN_BASE_FONT_SIZE_PX: u32 = 1;
+const TEXT_PANEL_MIN_VISIBLE_LINES: usize = 2;
 const LIBRARY_ITEM_KIND_SONG: i32 = 0;
 const LIBRARY_ITEM_KIND_ARTIST: i32 = 1;
 const LIBRARY_ITEM_KIND_ALBUM: i32 = 2;
@@ -2426,102 +2467,77 @@ impl UiManager {
         }
     }
 
-    fn normalize_metadata_key(key: &str) -> String {
-        let mut normalized = String::new();
-        for ch in key.chars() {
-            if ch.is_ascii_alphanumeric() {
-                normalized.push(ch.to_ascii_lowercase());
-            } else if ch == '_' || ch == '-' || ch.is_whitespace() {
-                normalized.push('_');
-            }
-        }
-        normalized
+    fn template_context_for_track<'a>(
+        track_metadata: &'a TrackMetadata,
+        track_path: Option<&'a Path>,
+    ) -> text_template::TemplateContext<'a> {
+        text_template::TemplateContext::from_path_metadata(
+            &track_metadata.title,
+            &track_metadata.artist,
+            &track_metadata.album,
+            &track_metadata.album_artist,
+            &track_metadata.date,
+            &track_metadata.year,
+            &track_metadata.genre,
+            &track_metadata.track_number,
+            track_path,
+        )
     }
 
-    fn metadata_value(track_metadata: &TrackMetadata, key: &str) -> String {
-        let normalized = Self::normalize_metadata_key(key);
-        match normalized.as_str() {
-            "title" => track_metadata.title.clone(),
-            "artist" => track_metadata.artist.clone(),
-            "album" => track_metadata.album.clone(),
-            "album_artist" | "albumartist" => track_metadata.album_artist.clone(),
-            "date" => track_metadata.date.clone(),
-            "year" => {
-                if !track_metadata.year.is_empty() {
-                    track_metadata.year.clone()
-                } else if track_metadata.date.len() >= 4 {
-                    track_metadata.date[0..4].to_string()
-                } else {
-                    String::new()
-                }
-            }
-            "genre" => track_metadata.genre.clone(),
-            "track" | "track_number" | "tracknumber" => track_metadata.track_number.clone(),
-            _ => String::new(),
+    fn empty_rendered_text() -> text_template::RenderedText {
+        text_template::RenderedText {
+            plain_text: String::new(),
+            lines: vec![text_template::RichTextLine { runs: Vec::new() }],
         }
     }
 
-    fn render_column_value(track_metadata: &TrackMetadata, format_string: &str) -> String {
-        let mut rendered = String::new();
-        let mut chars = format_string.chars().peekable();
+    fn render_column_rich_value(
+        track_metadata: &TrackMetadata,
+        track_path: Option<&Path>,
+        format_string: &str,
+    ) -> text_template::RenderedText {
+        let context = Self::template_context_for_track(track_metadata, track_path);
+        text_template::render_template(format_string, &context)
+    }
 
-        while let Some(ch) = chars.next() {
-            if ch == '{' {
-                if chars.peek() == Some(&'{') {
-                    chars.next();
-                    rendered.push('{');
-                    continue;
-                }
-
-                let mut token = String::new();
-                let mut found_closing = false;
-                for token_ch in chars.by_ref() {
-                    if token_ch == '}' {
-                        found_closing = true;
-                        break;
-                    }
-                    token.push(token_ch);
-                }
-
-                if found_closing {
-                    let value = Self::metadata_value(track_metadata, token.trim());
-                    rendered.push_str(&value);
-                } else {
-                    rendered.push('{');
-                    rendered.push_str(&token);
-                }
-            } else if ch == '}' {
-                if chars.peek() == Some(&'}') {
-                    chars.next();
-                }
-                rendered.push('}');
-            } else {
-                rendered.push(ch);
-            }
-        }
-
-        rendered
+    fn render_column_value(
+        track_metadata: &TrackMetadata,
+        track_path: Option<&Path>,
+        format_string: &str,
+    ) -> String {
+        Self::render_column_rich_value(track_metadata, track_path, format_string).plain_text
     }
 
     fn build_playlist_row_values(
         track_metadata: &TrackMetadata,
+        track_path: Option<&Path>,
         playlist_columns: &[PlaylistColumnConfig],
-    ) -> Vec<String> {
+    ) -> Vec<RenderedColumnValue> {
         playlist_columns
             .iter()
             .filter(|column| column.enabled)
             .map(|column| {
-                if Self::is_album_art_builtin_column(column) {
-                    String::new()
+                if Self::is_album_art_builtin_column(column)
+                    || Self::is_favorite_builtin_column(column)
+                {
+                    RenderedColumnValue {
+                        plain_text: String::new(),
+                        rich_text: Self::empty_rendered_text(),
+                    }
                 } else {
-                    Self::render_column_value(track_metadata, &column.format)
+                    let rich_text =
+                        Self::render_column_rich_value(track_metadata, track_path, &column.format);
+                    RenderedColumnValue {
+                        plain_text: rich_text.plain_text.clone(),
+                        rich_text,
+                    }
                 }
             })
             .collect()
     }
 
     fn apply_unavailable_title_override(
-        values: &mut [String],
+        values: &mut [RenderedColumnValue],
         playlist_columns: &[PlaylistColumnConfig],
     ) {
         for (visible_index, column) in playlist_columns
@@ -2533,10 +2549,71 @@ impl UiManager {
             let normalized_name = column.name.trim().to_ascii_lowercase();
             if normalized_format == "{title}" || normalized_name == "title" {
                 if let Some(value) = values.get_mut(visible_index) {
-                    *value = REMOTE_TRACK_UNAVAILABLE_TITLE.to_string();
+                    value.plain_text = REMOTE_TRACK_UNAVAILABLE_TITLE.to_string();
+                    value.rich_text = text_template::RenderedText {
+                        plain_text: REMOTE_TRACK_UNAVAILABLE_TITLE.to_string(),
+                        lines: vec![text_template::RichTextLine {
+                            runs: vec![text_template::RichTextRun {
+                                text: REMOTE_TRACK_UNAVAILABLE_TITLE.to_string(),
+                                bold: false,
+                                italic: false,
+                                underline: false,
+                                font_size_px: 13,
+                                font_family: String::new(),
+                                color: None,
+                            }],
+                        }],
+                    };
                 }
                 break;
             }
+        }
+    }
+
+    fn to_ui_rich_text_run(run: &text_template::RichTextRun) -> UiRichTextRun {
+        let (color_mode, palette_color, color_rgba) = match run.color.as_ref() {
+            Some(text_template::RunColor::Palette(color)) => {
+                (1, color.code(), slint::Color::from_argb_u8(255, 0, 0, 0))
+            }
+            Some(text_template::RunColor::Rgba { r, g, b, a }) => {
+                let alpha = ((*a).clamp(0.0, 1.0) * 255.0).round() as u8;
+                (2, 0, slint::Color::from_argb_u8(alpha, *r, *g, *b))
+            }
+            None => (0, 0, slint::Color::from_argb_u8(255, 0, 0, 0)),
+        };
+        UiRichTextRun {
+            text: run.text.as_str().into(),
+            bold: run.bold,
+            italic: run.italic,
+            underline: run.underline,
+            font_size_px: run.font_size_px.min(i32::MAX as u32) as i32,
+            font_family: run.font_family.as_str().into(),
+            color_mode,
+            palette_color,
+            color_rgba,
+        }
+    }
+
+    fn to_ui_rich_text_block(rendered: &text_template::RenderedText) -> UiRichTextBlock {
+        let mut lines: Vec<UiRichTextLine> = rendered
+            .lines
+            .iter()
+            .map(|line| {
+                let runs: Vec<UiRichTextRun> =
+                    line.runs.iter().map(Self::to_ui_rich_text_run).collect();
+                UiRichTextLine {
+                    runs: ModelRc::from(Rc::new(VecModel::from(runs))),
+                }
+            })
+            .collect();
+        if lines.is_empty() {
+            lines.push(UiRichTextLine {
+                runs: ModelRc::from(Rc::new(VecModel::from(Vec::<UiRichTextRun>::new()))),
+            });
+        }
+        UiRichTextBlock {
+            plain_text: rendered.plain_text.as_str().into(),
+            lines: ModelRc::from(Rc::new(VecModel::from(lines))),
         }
     }
 
@@ -2656,7 +2733,10 @@ impl UiManager {
             return PlaylistColumnClass::YearDate;
         }
 
-        if normalized_format == "{title}" || normalized_name == "title" {
+        if normalized_format == "{title}"
+            || normalized_name == "title"
+            || normalized_name == "track details"
+        {
             return PlaylistColumnClass::Title;
         }
 
@@ -2877,13 +2957,18 @@ impl UiManager {
             char_width_samples.push(header_chars);
 
             if total_rows > 0 {
-                for metadata in self
+                for (source_index, metadata) in self
                     .track_metadata
                     .iter()
+                    .enumerate()
                     .step_by(stride)
                     .take(SAMPLE_LIMIT)
                 {
-                    let rendered_value = Self::render_column_value(metadata, &column.format);
+                    let rendered_value = Self::render_column_value(
+                        metadata,
+                        self.track_paths.get(source_index).map(PathBuf::as_path),
+                        &column.format,
+                    );
                     let measured_chars =
                         rendered_value.chars().take(MAX_MEASURED_CHARS).count() as u32;
                     char_width_samples.push(measured_chars);
@@ -3022,12 +3107,30 @@ impl UiManager {
         column_widths_px: &[u32],
         album_art_profile: ColumnWidthProfile,
     ) -> u32 {
+        let mut text_row_height_px = BASE_ROW_HEIGHT_PX;
+        for column in visible_columns {
+            if Self::is_album_art_builtin_column(column) || Self::is_favorite_builtin_column(column)
+            {
+                continue;
+            }
+            let metrics = text_template::template_metrics(&column.format);
+            let explicit_line_count = metrics.explicit_line_count.max(1);
+            let max_font_size_px = metrics.max_font_size_px.max(13);
+            let estimated_line_height_px =
+                ((max_font_size_px.saturating_mul(13)).saturating_add(9) / 10)
+                    .max(DEFAULT_TEXT_LINE_HEIGHT_PX);
+            let estimated_height_px = explicit_line_count
+                .saturating_mul(estimated_line_height_px)
+                .saturating_add(TEXT_ROW_VERTICAL_PADDING_PX);
+            text_row_height_px = text_row_height_px.max(estimated_height_px);
+        }
+
         let Some((column_index, _column)) = visible_columns
             .iter()
             .enumerate()
             .find(|(_, column)| Self::is_album_art_builtin_column(column))
         else {
-            return BASE_ROW_HEIGHT_PX;
+            return text_row_height_px;
         };
 
         let album_art_width_px = column_widths_px
@@ -3035,14 +3138,15 @@ impl UiManager {
             .copied()
             .unwrap_or(album_art_profile.preferred_px);
 
-        album_art_width_px
+        let album_art_height_px = album_art_width_px
             .saturating_add(ALBUM_ART_ROW_PADDING_PX)
             .clamp(
                 BASE_ROW_HEIGHT_PX,
                 album_art_profile
                     .max_px
                     .saturating_add(ALBUM_ART_ROW_PADDING_PX),
-            )
+            );
+        text_row_height_px.max(album_art_height_px)
     }
 
     fn compute_playlist_row_height_px(&self, column_widths_px: &[u32]) -> u32 {
@@ -3588,6 +3692,7 @@ impl UiManager {
         match source_code {
             VIEWER_METADATA_SOURCE_ALBUM_DESCRIPTION => 1,
             VIEWER_METADATA_SOURCE_ARTIST_BIO => 2,
+            VIEWER_METADATA_SOURCE_CUSTOM_TEXT => 3,
             VIEWER_METADATA_SOURCE_TRACK => 0,
             _ => 0,
         }
@@ -3598,6 +3703,612 @@ impl UiManager {
             VIEWER_IMAGE_SOURCE_ARTIST_IMAGE => 1,
             VIEWER_IMAGE_SOURCE_ALBUM_ART => 0,
             _ => 0,
+        }
+    }
+
+    fn text_panel_base_font_size_px(width_px: i32, height_px: i32) -> u32 {
+        let width = width_px.max(0) as u32;
+        let height = height_px.max(0) as u32;
+        let min_edge_px = width.min(height);
+        match min_edge_px {
+            0..=119 => 11,
+            120..=179 => 12,
+            180..=259 => 13,
+            260..=359 => 14,
+            360..=519 => 15,
+            _ => 16,
+        }
+    }
+
+    fn text_panel_content_inset_px(width_px: i32, height_px: i32) -> i32 {
+        if width_px < TEXT_PANEL_TIGHT_INSET_THRESHOLD_WIDTH_PX
+            || height_px < TEXT_PANEL_TIGHT_INSET_THRESHOLD_HEIGHT_PX
+        {
+            TEXT_PANEL_TIGHT_INSET_PX
+        } else {
+            TEXT_PANEL_REGULAR_INSET_PX
+        }
+    }
+
+    fn text_panel_is_compact(width_px: i32, height_px: i32) -> bool {
+        width_px < TEXT_PANEL_COMPACT_WIDTH_THRESHOLD_PX
+            || height_px < TEXT_PANEL_COMPACT_HEIGHT_THRESHOLD_PX
+    }
+
+    fn text_panel_line_spacing_px(compact: bool) -> i32 {
+        if compact {
+            TEXT_PANEL_COMPACT_LINE_SPACING_PX
+        } else {
+            TEXT_PANEL_REGULAR_LINE_SPACING_PX
+        }
+    }
+
+    fn text_panel_char_width_percent(ch: char) -> u32 {
+        if ch.is_whitespace() {
+            TEXT_PANEL_CHAR_WIDTH_SPACE_PERCENT
+        } else if ch.is_ascii_digit() {
+            TEXT_PANEL_CHAR_WIDTH_DIGIT_PERCENT
+        } else if matches!(
+            ch,
+            'i' | 'l' | 'I' | '|' | '!' | '.' | ',' | ':' | ';' | '\''
+        ) {
+            TEXT_PANEL_CHAR_WIDTH_NARROW_PERCENT
+        } else if matches!(ch, 'W' | 'M' | 'w' | 'm' | '@' | '%' | '#') {
+            TEXT_PANEL_CHAR_WIDTH_WIDE_PERCENT
+        } else if !ch.is_ascii() {
+            TEXT_PANEL_CHAR_WIDTH_CJK_PERCENT
+        } else if ch.is_ascii_uppercase() {
+            TEXT_PANEL_CHAR_WIDTH_UPPERCASE_PERCENT
+        } else {
+            TEXT_PANEL_CHAR_WIDTH_DEFAULT_PERCENT
+        }
+    }
+
+    fn text_panel_estimated_char_width_px(ch: char, font_size_px: u32) -> i32 {
+        let scaled = font_size_px
+            .max(1)
+            .saturating_mul(Self::text_panel_char_width_percent(ch))
+            .saturating_add(TEXT_PANEL_CHAR_WIDTH_DENOMINATOR.saturating_sub(1))
+            / TEXT_PANEL_CHAR_WIDTH_DENOMINATOR;
+        scaled.max(1).min(i32::MAX as u32) as i32
+    }
+
+    fn text_panel_estimated_text_width_px(text: &str, font_size_px: u32) -> i32 {
+        text.chars().fold(0i32, |acc, ch| {
+            acc.saturating_add(Self::text_panel_estimated_char_width_px(ch, font_size_px))
+        })
+    }
+
+    fn text_panel_estimated_line_width_px(line: &text_template::RichTextLine) -> i32 {
+        line.runs.iter().fold(0i32, |acc, run| {
+            acc.saturating_add(Self::text_panel_estimated_text_width_px(
+                &run.text,
+                run.font_size_px,
+            ))
+        })
+    }
+
+    fn text_panel_effective_width_px(width_px: i32) -> i32 {
+        width_px
+            .max(1)
+            .saturating_add(TEXT_PANEL_WIDTH_ESTIMATE_GRACE_PX)
+    }
+
+    fn text_panel_line_overflow_px(line: &text_template::RichTextLine, width_px: i32) -> i32 {
+        Self::text_panel_estimated_line_width_px(line)
+            .saturating_sub(Self::text_panel_effective_width_px(width_px))
+    }
+
+    fn text_panel_line_exceeds_width(line: &text_template::RichTextLine, width_px: i32) -> bool {
+        Self::text_panel_line_overflow_px(line, width_px) > TEXT_PANEL_WIDTH_OVERFLOW_THRESHOLD_PX
+    }
+
+    fn text_panel_any_line_exceeds_width(
+        rendered: &text_template::RenderedText,
+        width_px: i32,
+    ) -> bool {
+        rendered
+            .lines
+            .iter()
+            .any(|line| Self::text_panel_line_exceeds_width(line, width_px))
+    }
+
+    fn text_panel_style_signature_matches(
+        existing: &text_template::RichTextRun,
+        next: &text_template::RichTextRun,
+    ) -> bool {
+        existing.bold == next.bold
+            && existing.italic == next.italic
+            && existing.underline == next.underline
+            && existing.font_size_px == next.font_size_px
+            && existing.font_family == next.font_family
+            && existing.color == next.color
+    }
+
+    fn text_panel_push_run_fragment(
+        line: &mut text_template::RichTextLine,
+        prototype: &text_template::RichTextRun,
+        text_fragment: &str,
+    ) {
+        if text_fragment.is_empty() {
+            return;
+        }
+        if let Some(last_run) = line.runs.last_mut() {
+            if Self::text_panel_style_signature_matches(last_run, prototype) {
+                last_run.text.push_str(text_fragment);
+                return;
+            }
+        }
+        let mut next_run = prototype.clone();
+        next_run.text = text_fragment.to_string();
+        line.runs.push(next_run);
+    }
+
+    fn text_panel_byte_index_for_char_count(text: &str, char_count: usize) -> usize {
+        if char_count == 0 {
+            return 0;
+        }
+        text.char_indices()
+            .nth(char_count)
+            .map(|(byte_index, _)| byte_index)
+            .unwrap_or(text.len())
+    }
+
+    fn text_panel_fit_prefix_char_count_for_width(
+        text: &str,
+        font_size_px: u32,
+        max_width_px: i32,
+    ) -> usize {
+        if max_width_px <= 0 {
+            return 0;
+        }
+        let mut consumed_width_px = 0i32;
+        let mut consumed_chars = 0usize;
+        for ch in text.chars() {
+            let char_width_px = Self::text_panel_estimated_char_width_px(ch, font_size_px);
+            if consumed_chars > 0 && consumed_width_px.saturating_add(char_width_px) > max_width_px
+            {
+                break;
+            }
+            if consumed_chars == 0 && char_width_px > max_width_px {
+                return 0;
+            }
+            consumed_width_px = consumed_width_px.saturating_add(char_width_px);
+            consumed_chars = consumed_chars.saturating_add(1);
+        }
+        consumed_chars
+    }
+
+    fn text_panel_wrap_rendered_text_for_width(
+        rendered: &text_template::RenderedText,
+        width_px: i32,
+    ) -> text_template::RenderedText {
+        let max_width_px = Self::text_panel_effective_width_px(width_px);
+        let mut wrapped_lines: Vec<text_template::RichTextLine> = Vec::new();
+        for source_line in &rendered.lines {
+            let line_start_index = wrapped_lines.len();
+            let mut current_line = text_template::RichTextLine { runs: Vec::new() };
+            let mut current_width_px = 0i32;
+            for run in &source_line.runs {
+                let mut token_start = 0usize;
+                let mut token_is_whitespace: Option<bool> = None;
+                let mut token_boundaries: Vec<usize> = run
+                    .text
+                    .char_indices()
+                    .map(|(byte_index, _)| byte_index)
+                    .collect();
+                token_boundaries.push(run.text.len());
+                for (boundary_index, &byte_index) in token_boundaries.iter().enumerate() {
+                    if boundary_index == 0 {
+                        continue;
+                    }
+                    let prev_byte_index = token_boundaries[boundary_index - 1];
+                    let Some(segment_char) = run.text[prev_byte_index..byte_index].chars().next()
+                    else {
+                        continue;
+                    };
+                    let is_whitespace = segment_char.is_whitespace();
+                    if let Some(active_is_whitespace) = token_is_whitespace {
+                        if active_is_whitespace != is_whitespace {
+                            let token = &run.text[token_start..prev_byte_index];
+                            if active_is_whitespace {
+                                if !current_line.runs.is_empty() {
+                                    let token_width_px = Self::text_panel_estimated_text_width_px(
+                                        token,
+                                        run.font_size_px,
+                                    );
+                                    if current_width_px.saturating_add(token_width_px)
+                                        <= max_width_px
+                                    {
+                                        Self::text_panel_push_run_fragment(
+                                            &mut current_line,
+                                            run,
+                                            token,
+                                        );
+                                        current_width_px =
+                                            current_width_px.saturating_add(token_width_px);
+                                    } else {
+                                        wrapped_lines.push(current_line);
+                                        current_line =
+                                            text_template::RichTextLine { runs: Vec::new() };
+                                        current_width_px = 0;
+                                    }
+                                }
+                            } else {
+                                let mut remaining = token;
+                                while !remaining.is_empty() {
+                                    let available_width_px =
+                                        (max_width_px.saturating_sub(current_width_px)).max(0);
+                                    if available_width_px == 0 && !current_line.runs.is_empty() {
+                                        wrapped_lines.push(current_line);
+                                        current_line =
+                                            text_template::RichTextLine { runs: Vec::new() };
+                                        current_width_px = 0;
+                                        continue;
+                                    }
+                                    let mut fit_chars =
+                                        Self::text_panel_fit_prefix_char_count_for_width(
+                                            remaining,
+                                            run.font_size_px,
+                                            available_width_px.max(1),
+                                        );
+                                    if fit_chars == 0 {
+                                        if current_line.runs.is_empty() {
+                                            fit_chars = 1;
+                                        } else {
+                                            wrapped_lines.push(current_line);
+                                            current_line =
+                                                text_template::RichTextLine { runs: Vec::new() };
+                                            current_width_px = 0;
+                                            continue;
+                                        }
+                                    }
+                                    let split_byte_index =
+                                        Self::text_panel_byte_index_for_char_count(
+                                            remaining, fit_chars,
+                                        );
+                                    let fragment = &remaining[..split_byte_index];
+                                    Self::text_panel_push_run_fragment(
+                                        &mut current_line,
+                                        run,
+                                        fragment,
+                                    );
+                                    let fragment_width_px =
+                                        Self::text_panel_estimated_text_width_px(
+                                            fragment,
+                                            run.font_size_px,
+                                        );
+                                    current_width_px =
+                                        current_width_px.saturating_add(fragment_width_px);
+                                    remaining = &remaining[split_byte_index..];
+                                    if !remaining.is_empty() {
+                                        wrapped_lines.push(current_line);
+                                        current_line =
+                                            text_template::RichTextLine { runs: Vec::new() };
+                                        current_width_px = 0;
+                                    }
+                                }
+                            }
+                            token_start = prev_byte_index;
+                            token_is_whitespace = Some(is_whitespace);
+                        }
+                    } else {
+                        token_is_whitespace = Some(is_whitespace);
+                    }
+                }
+                if let Some(active_is_whitespace) = token_is_whitespace {
+                    let token = &run.text[token_start..];
+                    if active_is_whitespace {
+                        if !current_line.runs.is_empty() {
+                            let token_width_px =
+                                Self::text_panel_estimated_text_width_px(token, run.font_size_px);
+                            if current_width_px.saturating_add(token_width_px) <= max_width_px {
+                                Self::text_panel_push_run_fragment(&mut current_line, run, token);
+                                current_width_px = current_width_px.saturating_add(token_width_px);
+                            } else {
+                                wrapped_lines.push(current_line);
+                                current_line = text_template::RichTextLine { runs: Vec::new() };
+                                current_width_px = 0;
+                            }
+                        }
+                    } else {
+                        let mut remaining = token;
+                        while !remaining.is_empty() {
+                            let available_width_px =
+                                (max_width_px.saturating_sub(current_width_px)).max(0);
+                            if available_width_px == 0 && !current_line.runs.is_empty() {
+                                wrapped_lines.push(current_line);
+                                current_line = text_template::RichTextLine { runs: Vec::new() };
+                                current_width_px = 0;
+                                continue;
+                            }
+                            let mut fit_chars = Self::text_panel_fit_prefix_char_count_for_width(
+                                remaining,
+                                run.font_size_px,
+                                available_width_px.max(1),
+                            );
+                            if fit_chars == 0 {
+                                if current_line.runs.is_empty() {
+                                    fit_chars = 1;
+                                } else {
+                                    wrapped_lines.push(current_line);
+                                    current_line = text_template::RichTextLine { runs: Vec::new() };
+                                    current_width_px = 0;
+                                    continue;
+                                }
+                            }
+                            let split_byte_index =
+                                Self::text_panel_byte_index_for_char_count(remaining, fit_chars);
+                            let fragment = &remaining[..split_byte_index];
+                            Self::text_panel_push_run_fragment(&mut current_line, run, fragment);
+                            let fragment_width_px = Self::text_panel_estimated_text_width_px(
+                                fragment,
+                                run.font_size_px,
+                            );
+                            current_width_px = current_width_px.saturating_add(fragment_width_px);
+                            remaining = &remaining[split_byte_index..];
+                            if !remaining.is_empty() {
+                                wrapped_lines.push(current_line);
+                                current_line = text_template::RichTextLine { runs: Vec::new() };
+                                current_width_px = 0;
+                            }
+                        }
+                    }
+                }
+            }
+            if current_line.runs.is_empty() {
+                if wrapped_lines.len() == line_start_index {
+                    wrapped_lines.push(text_template::RichTextLine { runs: Vec::new() });
+                }
+            } else {
+                wrapped_lines.push(current_line);
+            }
+        }
+        if wrapped_lines.is_empty() {
+            wrapped_lines.push(text_template::RichTextLine { runs: Vec::new() });
+        }
+        text_template::RenderedText {
+            plain_text: Self::rendered_plain_text_for_lines(&wrapped_lines),
+            lines: wrapped_lines,
+        }
+    }
+
+    fn text_panel_estimated_line_height_px(
+        line: &text_template::RichTextLine,
+        fallback_font_size_px: u32,
+    ) -> i32 {
+        let max_font_size_px = line
+            .runs
+            .iter()
+            .map(|run| run.font_size_px)
+            .max()
+            .unwrap_or(fallback_font_size_px.max(1));
+        let scaled = max_font_size_px
+            .saturating_mul(TEXT_PANEL_LINE_HEIGHT_PERCENT)
+            .saturating_add(TEXT_PANEL_LINE_HEIGHT_ROUNDING_BIAS)
+            / TEXT_PANEL_LINE_HEIGHT_DENOMINATOR;
+        scaled.max(1).min(i32::MAX as u32) as i32
+    }
+
+    fn text_panel_visible_line_count(
+        rendered: &text_template::RenderedText,
+        height_px: i32,
+        compact: bool,
+        fallback_font_size_px: u32,
+    ) -> usize {
+        if height_px <= 0 {
+            return 0;
+        }
+        let spacing_px = Self::text_panel_line_spacing_px(compact);
+        let mut consumed_height_px = 0i32;
+        let mut visible_count = 0usize;
+        for line in &rendered.lines {
+            let line_height_px =
+                Self::text_panel_estimated_line_height_px(line, fallback_font_size_px);
+            let line_with_spacing_px = if visible_count == 0 {
+                line_height_px
+            } else {
+                line_height_px.saturating_add(spacing_px)
+            };
+            if consumed_height_px.saturating_add(line_with_spacing_px) > height_px {
+                break;
+            }
+            consumed_height_px = consumed_height_px.saturating_add(line_with_spacing_px);
+            visible_count = visible_count.saturating_add(1);
+        }
+        visible_count
+    }
+
+    fn rendered_plain_text_for_lines(lines: &[text_template::RichTextLine]) -> String {
+        let mut plain = String::new();
+        for (line_index, line) in lines.iter().enumerate() {
+            if line_index > 0 {
+                plain.push('\n');
+            }
+            for run in &line.runs {
+                plain.push_str(&run.text);
+            }
+        }
+        plain
+    }
+
+    fn text_panel_apply_ellipsis_to_line(
+        line: &mut text_template::RichTextLine,
+        width_px: i32,
+        fallback_font_size_px: u32,
+    ) {
+        let max_width_px = Self::text_panel_effective_width_px(width_px);
+        let ellipsis_font_size_px = line
+            .runs
+            .last()
+            .map(|run| run.font_size_px.max(1))
+            .unwrap_or(fallback_font_size_px.max(1));
+        let ellipsis_width_px =
+            Self::text_panel_estimated_text_width_px(TEXT_PANEL_ELLIPSIS, ellipsis_font_size_px);
+        loop {
+            let line_width_px = Self::text_panel_estimated_line_width_px(line);
+            if line_width_px.saturating_add(ellipsis_width_px) <= max_width_px {
+                break;
+            }
+            let mut remove_run = false;
+            if let Some(last_run) = line.runs.last_mut() {
+                if let Some((last_char_byte_index, _)) = last_run.text.char_indices().next_back() {
+                    last_run.text.truncate(last_char_byte_index);
+                }
+                if last_run.text.is_empty() {
+                    remove_run = true;
+                }
+            } else {
+                break;
+            }
+            if remove_run {
+                line.runs.pop();
+            }
+            if line.runs.is_empty() {
+                break;
+            }
+        }
+
+        if let Some(last_run) = line.runs.last_mut() {
+            last_run.text.push('…');
+        } else {
+            line.runs.push(text_template::RichTextRun {
+                text: TEXT_PANEL_ELLIPSIS.to_string(),
+                bold: false,
+                italic: false,
+                underline: false,
+                font_size_px: fallback_font_size_px.max(1),
+                font_family: String::new(),
+                color: None,
+            });
+        }
+    }
+
+    fn text_panel_elide_overflowing_lines(
+        rendered: &mut text_template::RenderedText,
+        width_px: i32,
+        fallback_font_size_px: u32,
+    ) -> bool {
+        let mut was_elided = false;
+        for line in &mut rendered.lines {
+            if Self::text_panel_line_exceeds_width(line, width_px) {
+                Self::text_panel_apply_ellipsis_to_line(line, width_px, fallback_font_size_px);
+                was_elided = true;
+            }
+        }
+        if was_elided {
+            rendered.plain_text = Self::rendered_plain_text_for_lines(&rendered.lines);
+        }
+        was_elided
+    }
+
+    fn fit_text_panel_rendered_text(
+        template_source: &str,
+        context: &text_template::TemplateContext<'_>,
+        content_width_px: i32,
+        content_height_px: i32,
+    ) -> FittedTextPanelRender {
+        let width_px = content_width_px.max(0);
+        let height_px = content_height_px.max(0);
+        let compact = Self::text_panel_is_compact(width_px, height_px);
+        let mut base_font_size_px = Self::text_panel_base_font_size_px(width_px, height_px);
+        let mut rendered_full = text_template::render_template_with_options(
+            template_source,
+            context,
+            text_template::RenderOptions { base_font_size_px },
+        );
+        let mut wrapped_rendered =
+            Self::text_panel_wrap_rendered_text_for_width(&rendered_full, width_px);
+        let min_visible_lines = if rendered_full.plain_text.trim().is_empty() {
+            0
+        } else {
+            rendered_full
+                .lines
+                .len()
+                .clamp(1, TEXT_PANEL_MIN_VISIBLE_LINES)
+        };
+        while base_font_size_px > TEXT_PANEL_MIN_BASE_FONT_SIZE_PX {
+            let wrapped_visible = Self::text_panel_visible_line_count(
+                &wrapped_rendered,
+                height_px,
+                compact,
+                base_font_size_px,
+            );
+            let unwrapped_visible = Self::text_panel_visible_line_count(
+                &rendered_full,
+                height_px,
+                compact,
+                base_font_size_px,
+            );
+            let has_horizontal_overflow =
+                Self::text_panel_any_line_exceeds_width(&rendered_full, width_px);
+            let wrap_fits_vertically = wrapped_visible >= wrapped_rendered.lines.len();
+            let use_wrap_mode = has_horizontal_overflow && wrap_fits_vertically;
+            let visible = if use_wrap_mode {
+                wrapped_visible
+            } else {
+                unwrapped_visible
+            };
+            if visible >= min_visible_lines {
+                break;
+            }
+            base_font_size_px = base_font_size_px.saturating_sub(1);
+            rendered_full = text_template::render_template_with_options(
+                template_source,
+                context,
+                text_template::RenderOptions { base_font_size_px },
+            );
+            wrapped_rendered =
+                Self::text_panel_wrap_rendered_text_for_width(&rendered_full, width_px);
+        }
+        let full_plain_text = rendered_full.plain_text.clone();
+        let wrapped_visible_line_count = Self::text_panel_visible_line_count(
+            &wrapped_rendered,
+            height_px,
+            compact,
+            base_font_size_px,
+        );
+        let unwrapped_visible_line_count = Self::text_panel_visible_line_count(
+            &rendered_full,
+            height_px,
+            compact,
+            base_font_size_px,
+        );
+        let has_horizontal_overflow =
+            Self::text_panel_any_line_exceeds_width(&rendered_full, width_px);
+        let wrap_fits_vertically = wrapped_visible_line_count >= wrapped_rendered.lines.len();
+        let use_wrap_mode = has_horizontal_overflow && wrap_fits_vertically;
+
+        if use_wrap_mode {
+            return FittedTextPanelRender {
+                rendered: wrapped_rendered,
+                full_plain_text,
+                was_elided: false,
+            };
+        }
+
+        let mut rendered = rendered_full;
+        let mut was_elided = false;
+        if unwrapped_visible_line_count < rendered.lines.len() {
+            rendered.lines.truncate(unwrapped_visible_line_count);
+            if let Some(last_visible_line) = rendered.lines.last_mut() {
+                if Self::text_panel_line_exceeds_width(last_visible_line, width_px) {
+                    Self::text_panel_apply_ellipsis_to_line(
+                        last_visible_line,
+                        width_px,
+                        base_font_size_px,
+                    );
+                }
+            }
+            rendered.plain_text = Self::rendered_plain_text_for_lines(&rendered.lines);
+            was_elided = true;
+        }
+        was_elided |=
+            Self::text_panel_elide_overflowing_lines(&mut rendered, width_px, base_font_size_px);
+        FittedTextPanelRender {
+            rendered,
+            full_plain_text,
+            was_elided,
         }
     }
 
@@ -3659,6 +4370,54 @@ impl UiManager {
         }
 
         ViewerTrackContext::default()
+    }
+
+    fn viewer_template_metadata_for_display_target(
+        &self,
+        display_path: Option<&PathBuf>,
+        display_metadata: Option<&protocol::DetailedMetadata>,
+    ) -> Option<TrackMetadata> {
+        if let Some(path) = display_path {
+            if let Some(index) = self
+                .track_paths
+                .iter()
+                .position(|candidate| candidate == path)
+            {
+                if let Some(metadata) = self.track_metadata.get(index) {
+                    return Some(metadata.clone());
+                }
+            }
+            if let Some(library_track) = self.library_entries.iter().find_map(|entry| match entry {
+                LibraryEntry::Track(track) if &track.path == path => Some(track),
+                _ => None,
+            }) {
+                return Some(TrackMetadata {
+                    title: library_track.title.clone(),
+                    artist: library_track.artist.clone(),
+                    album: library_track.album.clone(),
+                    album_artist: library_track.album_artist.clone(),
+                    date: library_track.year.clone(),
+                    year: library_track.year.clone(),
+                    genre: library_track.genre.clone(),
+                    track_number: library_track.track_number.clone(),
+                });
+            }
+        }
+
+        display_metadata.map(|metadata| TrackMetadata {
+            title: metadata.title.clone(),
+            artist: metadata.artist.clone(),
+            album: metadata.album.clone(),
+            album_artist: metadata.artist.clone(),
+            date: metadata.date.clone(),
+            year: if metadata.date.len() >= 4 {
+                metadata.date[0..4].to_string()
+            } else {
+                String::new()
+            },
+            genre: metadata.genre.clone(),
+            track_number: String::new(),
+        })
     }
 
     fn viewer_artist_entity_for_track_context(
@@ -3784,9 +4543,12 @@ impl UiManager {
         cover_art_path
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn refresh_viewer_panel_models(
         &self,
         track_metadata_by_priority: Vec<Option<protocol::DetailedMetadata>>,
+        template_metadata_by_priority: Vec<Option<TrackMetadata>>,
+        display_paths_by_priority: Vec<Option<PathBuf>>,
         album_description_by_priority: Vec<Option<protocol::DetailedMetadata>>,
         artist_bio_by_priority: Vec<Option<protocol::DetailedMetadata>>,
         album_art_paths_by_priority: Vec<Option<PathBuf>>,
@@ -3820,19 +4582,89 @@ impl UiManager {
                             .get(priority_index)
                             .and_then(|value| value.as_ref()),
                     };
-                    if let Some(metadata) = metadata {
-                        row_data.display_title = metadata.title.as_str().into();
-                        row_data.display_artist = metadata.artist.as_str().into();
-                        row_data.display_album = metadata.album.as_str().into();
-                        row_data.display_date = metadata.date.as_str().into();
-                        row_data.display_genre = metadata.genre.as_str().into();
+
+                    let mut template_metadata = template_metadata_by_priority
+                        .get(priority_index)
+                        .and_then(|value| value.as_ref())
+                        .cloned()
+                        .unwrap_or(TrackMetadata {
+                            title: String::new(),
+                            artist: String::new(),
+                            album: String::new(),
+                            album_artist: String::new(),
+                            date: String::new(),
+                            year: String::new(),
+                            genre: String::new(),
+                            track_number: String::new(),
+                        });
+
+                    let fitted_text = if let Some(metadata) = metadata {
+                        template_metadata.title = metadata.title.clone();
+                        template_metadata.artist = metadata.artist.clone();
+                        template_metadata.album = metadata.album.clone();
+                        template_metadata.date = metadata.date.clone();
+                        template_metadata.year = if metadata.date.len() >= 4 {
+                            metadata.date[0..4].to_string()
+                        } else {
+                            String::new()
+                        };
+                        template_metadata.genre = metadata.genre.clone();
+                        if template_metadata.album_artist.is_empty() {
+                            template_metadata.album_artist = template_metadata.artist.clone();
+                        }
+                        let template_source = if metadata_source_index
+                            == VIEWER_METADATA_SOURCE_CUSTOM_TEXT as usize
+                        {
+                            let custom = row_data.metadata_text_format.to_string();
+                            if custom.trim().is_empty() {
+                                text_template::DEFAULT_METADATA_PANEL_TEMPLATE.to_string()
+                            } else {
+                                custom
+                            }
+                        } else {
+                            text_template::DEFAULT_METADATA_PANEL_TEMPLATE.to_string()
+                        };
+                        let display_path = display_paths_by_priority
+                            .get(priority_index)
+                            .and_then(|value| value.as_ref())
+                            .map(PathBuf::as_path);
+                        let context = text_template::TemplateContext::from_path_metadata(
+                            &template_metadata.title,
+                            &template_metadata.artist,
+                            &template_metadata.album,
+                            &template_metadata.album_artist,
+                            &template_metadata.date,
+                            &template_metadata.year,
+                            &template_metadata.genre,
+                            &template_metadata.track_number,
+                            display_path,
+                        );
+                        let content_inset_px = Self::text_panel_content_inset_px(
+                            row_data.width_px,
+                            row_data.height_px,
+                        );
+                        let content_width_px = row_data
+                            .width_px
+                            .saturating_sub(content_inset_px.saturating_mul(2));
+                        let content_height_px = row_data
+                            .height_px
+                            .saturating_sub(content_inset_px.saturating_mul(2));
+                        Self::fit_text_panel_rendered_text(
+                            &template_source,
+                            &context,
+                            content_width_px,
+                            content_height_px,
+                        )
                     } else {
-                        row_data.display_title = "".into();
-                        row_data.display_artist = "".into();
-                        row_data.display_album = "".into();
-                        row_data.display_date = "".into();
-                        row_data.display_genre = "".into();
-                    }
+                        FittedTextPanelRender {
+                            rendered: UiManager::empty_rendered_text(),
+                            full_plain_text: String::new(),
+                            was_elided: false,
+                        }
+                    };
+                    row_data.display_text = UiManager::to_ui_rich_text_block(&fitted_text.rendered);
+                    row_data.display_text_full = fitted_text.full_plain_text.as_str().into();
+                    row_data.display_text_elided = fitted_text.was_elided;
                     vec_model.set_row_data(row_index, row_data);
                 }
             }
@@ -3897,6 +4729,7 @@ impl UiManager {
             VIEWER_DISPLAY_PRIORITY_NOW_PLAYING_ONLY,
         ];
         let mut track_metadata_by_priority = Vec::with_capacity(priority_codes.len());
+        let mut template_metadata_by_priority = Vec::with_capacity(priority_codes.len());
         let mut display_paths_by_priority = Vec::with_capacity(priority_codes.len());
         let mut display_contexts_by_priority = Vec::with_capacity(priority_codes.len());
         let mut album_entities_by_priority = Vec::with_capacity(priority_codes.len());
@@ -3916,10 +4749,15 @@ impl UiManager {
                 display_path.as_ref(),
                 display_metadata.as_ref(),
             );
+            let template_metadata = self.viewer_template_metadata_for_display_target(
+                display_path.as_ref(),
+                display_metadata.as_ref(),
+            );
             let album_entity = Self::viewer_album_entity_for_track_context(&display_context);
             let artist_entity = Self::viewer_artist_entity_for_track_context(&display_context);
             display_paths_by_priority.push(display_path);
             track_metadata_by_priority.push(display_metadata);
+            template_metadata_by_priority.push(template_metadata);
             display_contexts_by_priority.push(display_context);
             album_entities_by_priority.push(album_entity);
             artist_entities_by_priority.push(artist_entity);
@@ -3990,6 +4828,8 @@ impl UiManager {
 
         self.refresh_viewer_panel_models(
             track_metadata_by_priority,
+            template_metadata_by_priority,
+            display_paths_by_priority,
             album_description_by_priority,
             artist_bio_by_priority,
             album_art_paths_by_priority,
@@ -4986,37 +5826,45 @@ impl UiManager {
 
         struct ViewRow {
             source_index: usize,
-            values: Vec<String>,
+            rendered_values: Vec<RenderedColumnValue>,
             sort_key: String,
         }
 
         let mut rows: Vec<ViewRow> = Vec::with_capacity(self.track_metadata.len());
         for (source_index, metadata) in self.track_metadata.iter().enumerate() {
-            let mut values = Self::build_playlist_row_values(metadata, &self.playlist_columns);
+            let track_path = self.track_paths.get(source_index).map(PathBuf::as_path);
+            let mut rendered_values =
+                Self::build_playlist_row_values(metadata, track_path, &self.playlist_columns);
             let track_unavailable = self
                 .track_ids
                 .get(source_index)
                 .map(|track_id| self.unavailable_track_ids.contains(track_id))
                 .unwrap_or(false);
             if track_unavailable {
-                Self::apply_unavailable_title_override(&mut values, &self.playlist_columns);
+                Self::apply_unavailable_title_override(
+                    &mut rendered_values,
+                    &self.playlist_columns,
+                );
             }
             if !normalized_query.is_empty()
-                && !values
-                    .iter()
-                    .any(|value| value.to_ascii_lowercase().contains(&normalized_query))
+                && !rendered_values.iter().any(|value| {
+                    value
+                        .plain_text
+                        .to_ascii_lowercase()
+                        .contains(&normalized_query)
+                })
             {
                 continue;
             }
 
             let sort_key = active_sort_index
-                .and_then(|index| values.get(index))
-                .map(|value| value.to_ascii_lowercase())
+                .and_then(|index| rendered_values.get(index))
+                .map(|value| value.plain_text.to_ascii_lowercase())
                 .unwrap_or_default();
 
             rows.push(ViewRow {
                 source_index,
-                values,
+                rendered_values,
                 sort_key,
             });
         }
@@ -5054,6 +5902,7 @@ impl UiManager {
         let (cover_decode_start, cover_decode_end) = self.playlist_cover_decode_window(rows.len());
         type TrackRowPayload = (
             Vec<String>,
+            Vec<text_template::RenderedText>,
             Option<PathBuf>,
             String,
             bool,
@@ -5106,8 +5955,19 @@ impl UiManager {
                     .map(|path| Self::favorite_key_for_track_path(path.as_path()))
                     .map(|key| self.favorites_by_key.contains_key(&key))
                     .unwrap_or(false);
+                let plain_values: Vec<String> = row
+                    .rendered_values
+                    .iter()
+                    .map(|value| value.plain_text.clone())
+                    .collect();
+                let rich_values: Vec<text_template::RenderedText> = row
+                    .rendered_values
+                    .iter()
+                    .map(|value| value.rich_text.clone())
+                    .collect();
                 (
-                    row.values,
+                    plain_values,
+                    rich_values,
                     album_art_path,
                     source_badge,
                     favorited,
@@ -5120,14 +5980,27 @@ impl UiManager {
 
         let _ = self.ui.upgrade_in_event_loop(move |ui| {
             let mut rows = Vec::with_capacity(row_data.len());
-            for (values, album_art_path, source_badge, favorited, selected, status, unavailable) in
-                row_data
+            for (
+                values,
+                rich_values,
+                album_art_path,
+                source_badge,
+                favorited,
+                selected,
+                status,
+                unavailable,
+            ) in row_data
             {
                 let values_shared: Vec<slint::SharedString> =
                     values.into_iter().map(Into::into).collect();
+                let rich_values_ui: Vec<UiRichTextBlock> = rich_values
+                    .iter()
+                    .map(UiManager::to_ui_rich_text_block)
+                    .collect();
                 rows.push(TrackRowData {
                     status: status.into(),
                     values: ModelRc::from(values_shared.as_slice()),
+                    rich_values: ModelRc::from(Rc::new(VecModel::from(rich_values_ui))),
                     album_art: UiManager::load_track_row_cover_art_image(album_art_path.as_ref()),
                     source_badge: source_badge.into(),
                     favorited,
@@ -9109,6 +9982,8 @@ impl UiManager {
 
         let mut playlist_columns_changed = false;
         let mut album_art_column_width_limits_changed = false;
+        let mut layout_changed = false;
+        let mut window_size_patch_received = false;
         if let Some(ui_config) = ui_update {
             let has_playlist_columns_patch = ui_config.playlist_columns.is_some();
             let has_layout_patch = ui_config.layout.is_some();
@@ -9116,6 +9991,9 @@ impl UiManager {
                 ui_config.playlist_album_art_column_min_width_px.is_some();
             let has_album_art_max_patch =
                 ui_config.playlist_album_art_column_max_width_px.is_some();
+            let has_window_width_patch = ui_config.window_width.is_some();
+            let has_window_height_patch = ui_config.window_height.is_some();
+            window_size_patch_received = has_window_width_patch || has_window_height_patch;
             if let Some(auto_scroll_to_playing_track) = ui_config.auto_scroll_to_playing_track {
                 self.auto_scroll_to_playing_track = auto_scroll_to_playing_track;
             }
@@ -9140,6 +10018,7 @@ impl UiManager {
             if let Some(layout) = ui_config.layout {
                 self.apply_layout_column_width_overrides(&layout.playlist_column_width_overrides);
             }
+            layout_changed = has_layout_patch;
             self.playlist_column_target_widths_px
                 .retain(|key, _| valid_column_keys.contains(key));
             let playlist_layout_affected = has_playlist_columns_patch
@@ -9201,8 +10080,11 @@ impl UiManager {
             || online_metadata_enabled_changed
             || online_metadata_prompt_changed;
         let rebuild_playlist_rows = list_image_max_edge_changed || playlist_columns_changed;
-        let refresh_display_target =
-            refresh_library_ui || playlist_columns_changed || album_art_column_width_limits_changed;
+        let refresh_display_target = refresh_library_ui
+            || playlist_columns_changed
+            || album_art_column_width_limits_changed
+            || layout_changed
+            || window_size_patch_received;
         if refresh_library_ui {
             self.sync_library_ui();
         }
@@ -10650,9 +11532,10 @@ mod tests {
         fit_column_widths_deterministic, ColumnWidthProfile, CoverArtLookupRequest,
         DeterministicColumnLayoutSpec, LibraryEntry, LibraryViewState, PathImageCache,
         PlaylistColumnClass, PlaylistSortDirection, TrackMetadata, UiManager,
-        ENRICHMENT_FAILED_ATTEMPT_CAP,
+        ENRICHMENT_FAILED_ATTEMPT_CAP, TEXT_PANEL_WIDTH_ESTIMATE_GRACE_PX,
+        TEXT_PANEL_WIDTH_OVERFLOW_THRESHOLD_PX,
     };
-    use crate::{config::PlaylistColumnConfig, protocol};
+    use crate::{config::PlaylistColumnConfig, protocol, text_template};
     use std::collections::{HashMap, HashSet};
     use std::path::PathBuf;
     use std::sync::mpsc;
@@ -10728,6 +11611,44 @@ mod tests {
         }
     }
 
+    fn rendered_with_line_font_sizes(font_sizes: &[u32]) -> text_template::RenderedText {
+        let plain_text = (0..font_sizes.len())
+            .map(|index| format!("line-{index}"))
+            .collect::<Vec<String>>()
+            .join("\n");
+        let lines = font_sizes
+            .iter()
+            .enumerate()
+            .map(|(index, size)| text_template::RichTextLine {
+                runs: vec![text_template::RichTextRun {
+                    text: format!("line-{index}"),
+                    bold: false,
+                    italic: false,
+                    underline: false,
+                    font_size_px: *size,
+                    font_family: String::new(),
+                    color: None,
+                }],
+            })
+            .collect();
+        text_template::RenderedText { plain_text, lines }
+    }
+
+    fn test_template_context<'a>() -> text_template::TemplateContext<'a> {
+        text_template::TemplateContext {
+            title: "Example Song",
+            artist: "Artist",
+            album: "Album",
+            album_artist: "Album Artist",
+            date: "2026-01-01",
+            year: "2026",
+            genre: "Synthwave",
+            track_number: "1",
+            file_name: Some("example.mp3"),
+            path: Some("/music/example.mp3"),
+        }
+    }
+
     fn default_album_art_profile() -> ColumnWidthProfile {
         ColumnWidthProfile {
             min_px: crate::config::default_playlist_album_art_column_min_width_px(),
@@ -10753,6 +11674,137 @@ mod tests {
         let first = rx.recv().expect("expected first request");
         let latest = UiManager::coalesce_cover_art_requests(first, &rx);
         assert_eq!(latest.track_path, None);
+    }
+
+    #[test]
+    fn test_text_panel_content_inset_matches_thresholds() {
+        assert_eq!(UiManager::text_panel_content_inset_px(400, 300), 10);
+        assert_eq!(UiManager::text_panel_content_inset_px(160, 300), 4);
+        assert_eq!(UiManager::text_panel_content_inset_px(400, 110), 4);
+    }
+
+    #[test]
+    fn test_text_panel_visible_line_count_uses_full_lines_only() {
+        let rendered = rendered_with_line_font_sizes(&[16, 16, 16]);
+        let compact = true;
+        let line_height = UiManager::text_panel_estimated_line_height_px(&rendered.lines[0], 16);
+        let spacing = UiManager::text_panel_line_spacing_px(compact);
+        let two_full_lines_height = line_height * 2 + spacing;
+        assert_eq!(
+            UiManager::text_panel_visible_line_count(&rendered, two_full_lines_height, compact, 16),
+            2
+        );
+        assert_eq!(
+            UiManager::text_panel_visible_line_count(
+                &rendered,
+                two_full_lines_height - 1,
+                compact,
+                16
+            ),
+            1
+        );
+    }
+
+    #[test]
+    fn test_text_panel_wrap_rendered_text_for_width_wraps_long_line() {
+        let rendered = text_template::RenderedText {
+            plain_text: "this is a very long line".to_string(),
+            lines: vec![text_template::RichTextLine {
+                runs: vec![text_template::RichTextRun {
+                    text: "this is a very long line".to_string(),
+                    bold: false,
+                    italic: false,
+                    underline: false,
+                    font_size_px: 13,
+                    font_family: String::new(),
+                    color: None,
+                }],
+            }],
+        };
+        let wrapped = UiManager::text_panel_wrap_rendered_text_for_width(&rendered, 80);
+        assert!(wrapped.lines.len() > 1);
+        let wrapped_compact: String = wrapped
+            .plain_text
+            .chars()
+            .filter(|ch| !ch.is_whitespace())
+            .collect();
+        let source_compact: String = rendered
+            .plain_text
+            .chars()
+            .filter(|ch| !ch.is_whitespace())
+            .collect();
+        assert_eq!(wrapped_compact, source_compact);
+    }
+
+    #[test]
+    fn test_fit_text_panel_rendered_text_marks_elided_when_vertical_space_is_limited() {
+        let fitted = UiManager::fit_text_panel_rendered_text(
+            "{title}\\n{artist}\\n{album}",
+            &test_template_context(),
+            220,
+            22,
+        );
+        assert!(fitted.was_elided);
+        let displayed_plain = fitted.rendered.plain_text.trim();
+        assert!(!displayed_plain.is_empty());
+        assert!(!displayed_plain.ends_with('…'));
+        assert!(fitted.full_plain_text.contains("Example Song"));
+    }
+
+    #[test]
+    fn test_fit_text_panel_rendered_text_wraps_without_eliding_when_vertical_space_allows() {
+        let fitted = UiManager::fit_text_panel_rendered_text(
+            "{title}",
+            &text_template::TemplateContext {
+                title: "A very long title that should wrap when there is enough room",
+                ..test_template_context()
+            },
+            120,
+            120,
+        );
+        assert!(!fitted.was_elided);
+        assert!(fitted.rendered.lines.len() > 1);
+        assert!(!fitted.rendered.plain_text.contains('…'));
+    }
+
+    #[test]
+    fn test_fit_text_panel_rendered_text_elides_without_wrapping_when_vertical_space_is_tight() {
+        let fitted = UiManager::fit_text_panel_rendered_text(
+            "{title}",
+            &text_template::TemplateContext {
+                title: "A very long title that should elide when vertical room is tight",
+                ..test_template_context()
+            },
+            120,
+            16,
+        );
+        assert!(fitted.was_elided);
+        assert_eq!(fitted.rendered.lines.len(), 1);
+        assert!(fitted.rendered.plain_text.contains('…'));
+    }
+
+    #[test]
+    fn test_text_panel_line_exceeds_width_ignores_small_estimation_overflow() {
+        let line = text_template::RichTextLine {
+            runs: vec![text_template::RichTextRun {
+                text: "Example Title".to_string(),
+                bold: false,
+                italic: false,
+                underline: false,
+                font_size_px: 13,
+                font_family: String::new(),
+                color: None,
+            }],
+        };
+        let effective_width = UiManager::text_panel_estimated_line_width_px(&line)
+            .saturating_sub(TEXT_PANEL_WIDTH_OVERFLOW_THRESHOLD_PX - 1);
+        let test_width = effective_width
+            .saturating_sub(TEXT_PANEL_WIDTH_ESTIMATE_GRACE_PX)
+            .max(1);
+        assert!(
+            !UiManager::text_panel_line_exceeds_width(&line, test_width),
+            "small overflow should not force ellipsis"
+        );
     }
 
     #[test]
@@ -11738,15 +12790,22 @@ mod tests {
     #[test]
     fn test_render_column_value_replaces_placeholders() {
         let metadata = make_meta("Track");
-        let rendered = UiManager::render_column_value(&metadata, "{album} ({year})");
+        let rendered = UiManager::render_column_value(&metadata, None, "{album} ({year})");
         assert_eq!(rendered, "Track-album (2026)");
     }
 
     #[test]
     fn test_render_column_value_handles_escaping_and_unknown_fields() {
         let metadata = make_meta("Track");
-        let rendered = UiManager::render_column_value(&metadata, "{{{unknown}}} - {artist}");
-        assert_eq!(rendered, "{} - Track-artist");
+        let rendered = UiManager::render_column_value(
+            &metadata,
+            None,
+            "\\{artist\\} \\[b\\]x\\[/b\\] \\\\ {bad field name} - {artist}",
+        );
+        assert_eq!(
+            rendered,
+            "{artist} [b]x[/b] \\ {bad field name} - Track-artist"
+        );
     }
 
     #[test]
@@ -11792,10 +12851,10 @@ mod tests {
             },
         ];
 
-        let values = UiManager::build_playlist_row_values(&metadata, &columns);
-        assert_eq!(values[0], "Track");
-        assert_eq!(values[1], "");
-        assert_eq!(values[2], "");
+        let values = UiManager::build_playlist_row_values(&metadata, None, &columns);
+        assert_eq!(values[0].plain_text, "Track");
+        assert_eq!(values[1].plain_text, "");
+        assert_eq!(values[2].plain_text, "");
     }
 
     #[test]
@@ -11881,6 +12940,21 @@ mod tests {
     }
 
     #[test]
+    fn test_playlist_column_class_treats_track_details_as_title_family() {
+        let track_details = PlaylistColumnConfig {
+            name: "Track Details".to_string(),
+            format: crate::config::BUILTIN_TRACK_DETAILS_COLUMN_FORMAT.to_string(),
+            enabled: true,
+            custom: false,
+        };
+
+        assert_eq!(
+            UiManager::playlist_column_class(&track_details),
+            PlaylistColumnClass::Title
+        );
+    }
+
+    #[test]
     fn test_compute_playlist_row_height_without_album_art_column_uses_base_height() {
         let columns = [
             PlaylistColumnConfig {
@@ -11933,6 +13007,25 @@ mod tests {
                 default_album_art_profile(),
             ),
             72
+        );
+    }
+
+    #[test]
+    fn test_compute_playlist_row_height_with_multiline_template_grows_text_height() {
+        let columns = [PlaylistColumnConfig {
+            name: "Custom".to_string(),
+            format: "{title}[br]{artist}[br]{album}".to_string(),
+            enabled: true,
+            custom: true,
+        }];
+        let visible_columns: Vec<&PlaylistColumnConfig> = columns.iter().collect();
+
+        assert!(
+            UiManager::compute_playlist_row_height_px_for_visible_columns(
+                &visible_columns,
+                &[240],
+                default_album_art_profile(),
+            ) > 30
         );
     }
 

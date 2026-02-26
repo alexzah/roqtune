@@ -1,4 +1,4 @@
-import { Button, ComboBox, VerticalBox, StandardTableView, ScrollView, LineEdit, ListView, Switch, Slider } from "std-widgets.slint";
+import { Button, ComboBox, VerticalBox, StandardTableView, ScrollView, LineEdit, TextEdit, ListView, Switch, Slider } from "std-widgets.slint";
 
 import {
     LayoutAlbumArtViewerPanelModel,
@@ -11,7 +11,7 @@ import {
 } from "ui/types.slint";
 import { ColumnHeaderMenu, ConfirmationDialog, InfoDialog } from "ui/components/menus.slint";
 import { PlayerButton, ButtonCluster, TooltipHoverArea } from "ui/components/controls.slint";
-import { VolumeSliderControl, SeekBarControl, MetadataViewer, AlbumArtViewer } from "ui/components/media.slint";
+import { VolumeSliderControl, SeekBarControl, TextPanel, ImagePanel } from "ui/components/media.slint";
 import { PlaylistRow, TrackRow } from "ui/components/playlist.slint";
 import { ModeTabs } from "ui/components/tabs.slint";
 import { LibraryRow } from "ui/components/library.slint";
@@ -132,6 +132,10 @@ export component AppWindow inherits Window {
             }
             if (event.text == Key.Escape && root.show_viewer_panel_settings_menu) {
                 root.show_viewer_panel_settings_menu = false;
+                return accept;
+            }
+            if (event.text == Key.Escape && root.show_template_language_reference) {
+                root.show_template_language_reference = false;
                 return accept;
             }
             if (event.text == Key.Escape && root.show_library_context_menu) {
@@ -289,6 +293,7 @@ export component AppWindow inherits Window {
     in-out property <bool> show_custom_column_dialog: false;
     in-out property <string> custom_column_name: "";
     in-out property <string> custom_column_format: "";
+    in-out property <bool> show_template_language_reference: false;
     in-out property <[int]> playlist_column_widths_px: [];
     in-out property <[int]> playlist_column_gap_positions_px: [];
     in-out property <int> playlist_columns_content_width_px: 0;
@@ -325,6 +330,7 @@ export component AppWindow inherits Window {
     in-out property <int> viewer_panel_settings_target_panel_kind: root.panel_kind_none;
     in-out property <int> viewer_panel_settings_display_priority_index: 0;
     in-out property <int> viewer_panel_settings_metadata_source_index: 0;
+    in-out property <string> viewer_panel_settings_metadata_text_format: "";
     in-out property <int> viewer_panel_settings_image_source_index: 0;
     in-out property <length> viewer_panel_settings_x: 0px;
     in-out property <length> viewer_panel_settings_y: 0px;
@@ -338,12 +344,49 @@ export component AppWindow inherits Window {
     property <[string]> viewer_panel_metadata_source_options: [
         "Track (Default)",
         "Album Description",
-        "Artist Bio"
+        "Artist Bio",
+        "Custom Text"
     ];
     property <[string]> viewer_panel_image_source_options: [
         "Album Art (Default)",
         "Artist Image"
     ];
+    property <string> template_language_reference_text:
+        "Template Language Reference\n\n"
+        + "Plain text\n"
+        + "Any characters outside placeholders/tags are emitted unchanged.\n\n"
+        + "Escaping\n"
+        + "Use backslash to force literal output: \\{ \\} \\[ \\] \\\\.\n"
+        + "Example: \\{artist\\} \\[b\\]x\\[/b\\] \\\\ -> {artist} [b]x[/b] \\\n\n"
+        + "Line breaks\n"
+        + "Use either \\n or [br]. Both render one new line.\n\n"
+        + "Placeholders\n"
+        + "Syntax: {field} or {field1;field2;field3}\n"
+        + "Fallback chains return the first non-empty field.\n"
+        + "Supported fields: title, artist, album, album_artist, date, year, genre,\n"
+        + "track_number, file_name, path.\n"
+        + "Unknown/invalid placeholders are rendered literally.\n\n"
+        + "Style tags\n"
+        + "[b] [/b] bold\n"
+        + "[i] [/i] italic\n"
+        + "[u] [/u] underline\n"
+        + "[font=Family Name] [/font] font family\n"
+        + "[color=name] [/color] palette color key (for example accent, text_muted)\n"
+        + "[color=#rrggbb] [/color] hex color\n"
+        + "Tags are nestable and apply to enclosed content only.\n\n"
+        + "Size tags\n"
+        + "[size=<value>] [/size]\n"
+        + "Numeric values (for example 18) are fixed px and non-responsive.\n"
+        + "Role values are responsive relative scales:\n"
+        + "micro=70%, caption=82%, body=100%, body_large=115%,\n"
+        + "title=130%, h3=150%, h2=175%, h1=205%, spotlight=245%\n\n"
+        + "Lenient parsing\n"
+        + "Unknown tags, mismatched closing tags, and malformed placeholders\n"
+        + "never crash rendering. Invalid pieces are shown as literal text.\n\n"
+        + "Examples\n"
+        + "[b][size=title]{title;file_name}[/size][/b]\\n"
+        + "[i]{artist;album_artist}[/i] • {album}\\n"
+        + "[color=text_muted]{date;year} • {genre}[/color]";
     in-out property <int> sidebar_width_px: 220;
     in-out property <int> collection_mode: 0; // 0: Playlist, 1: Library
     property <int> playlist-visible-row-count: 1;
@@ -418,6 +461,13 @@ export component AppWindow inherits Window {
     property <length> layout_leaf_context_menu_y: 0px;
     property <length> layout_splitter_context_menu_x: 0px;
     property <length> layout_splitter_context_menu_y: 0px;
+    property <length> layout_exit_editor_button_width: 114px;
+    property <length> layout_exit_editor_button_height: 24px;
+    in-out property <length> layout_exit_editor_button_x: 0px;
+    in-out property <length> layout_exit_editor_button_y: 8px;
+    property <length> layout_exit_editor_drag_last_abs_x: 0px;
+    property <length> layout_exit_editor_drag_last_abs_y: 0px;
+    in-out property <bool> layout_exit_editor_dragging: false;
     property <int> panel_kind_none: 0;
     property <int> panel_kind_button_cluster: 1;
     property <int> panel_kind_transport_button_cluster: 2;
@@ -450,8 +500,8 @@ export component AppWindow inherits Window {
         "Seek Bar",
         "Playlist Switcher",
         "Track List",
-        "Metadata Viewer",
-        "Image Metadata Viewer",
+        "Text Panel",
+        "Image Panel",
         "Status Bar"
     ];
     property <[int]> layout_panel_submenu_codes: [
@@ -564,10 +614,10 @@ export component AppWindow inherits Window {
             return "Track List";
         }
         if panel-kind == root.panel_kind_metadata_viewer {
-            return "Metadata Viewer";
+            return "Text Panel";
         }
         if panel-kind == root.panel_kind_album_art_viewer {
-            return "Image Metadata Viewer";
+            return "Image Panel";
         }
         if panel-kind == root.panel_kind_spacer {
             return "Spacer";
@@ -614,9 +664,17 @@ export component AppWindow inherits Window {
     }
 
     changed width => {
+        root.layout_exit_editor_button_x = min(
+            max(0px, root.layout_exit_editor_button_x),
+            max(0px, root.width - root.layout_exit_editor_button_width)
+        );
         root.window_resized(max(0, floor(self.width / 1px)), max(0, floor(self.height / 1px)));
     }
     changed height => {
+        root.layout_exit_editor_button_y = min(
+            max(0px, root.layout_exit_editor_button_y),
+            max(0px, root.height - root.layout_exit_editor_button_height)
+        );
         root.window_resized(max(0, floor(self.width / 1px)), max(0, floor(self.height / 1px)));
     }
 
@@ -779,10 +837,12 @@ export component AppWindow inherits Window {
                 clip: true;
                 background: root.theme_surface_bg;
                 property <length> content-height: min(30px, parent.height);
+                property <length> horizontal-inset: min(16px, max(8px, self.width / 24));
+                property <length> content-width: max(0px, self.width - self.horizontal-inset * 2);
                 SeekBarControl {
-                    x: 0px;
+                    x: (parent.width - self.width) / 2;
                     y: (parent.height - self.height) / 2;
-                    width: parent.width;
+                    width: parent.content-width;
                     height: parent.content-height;
                     position-percentage: root.position-percentage;
                     elapsed-text: root.format-time(root.elapsed-ms);
@@ -1036,7 +1096,7 @@ export component AppWindow inherits Window {
                 property <length> content-inset: panel.width_px < 180 || panel.height_px < 120
                     ? 4px
                     : 10px;
-                MetadataViewer {
+                TextPanel {
                     x: parent.content-inset;
                     y: parent.content-inset;
                     width: max(0px, parent.width - parent.content-inset * 2);
@@ -1045,11 +1105,12 @@ export component AppWindow inherits Window {
                     text-secondary: AppPalette.text-secondary;
                     text-muted: AppPalette.text-muted;
                     text-disabled: AppPalette.text-disabled;
-                    display-title: panel.display_title;
-                    display-artist: panel.display_artist;
-                    display-album: panel.display_album;
-                    display-date: panel.display_date;
-                    display-genre: panel.display_genre;
+                    display-text: panel.display_text;
+                    tooltip-text: panel.display_text_full;
+                    tooltip-enabled: panel.display_text_elided;
+                    tooltip_hover_changed(is-hovered, tooltip, anchor-x-px, anchor-y-px) => {
+                        root.tooltip_hover_changed(is-hovered, tooltip, anchor-x-px, anchor-y-px);
+                    }
                 }
             }
 
@@ -1064,7 +1125,7 @@ export component AppWindow inherits Window {
                 property <length> content-inset: panel.width_px < 180 || panel.height_px < 120
                     ? 4px
                     : 10px;
-                AlbumArtViewer {
+                ImagePanel {
                     x: parent.content-inset;
                     y: parent.content-inset;
                     width: max(0px, parent.width - parent.content-inset * 2);
@@ -2318,7 +2379,9 @@ export component AppWindow inherits Window {
                 visible: root.layout_edit_mode
                     && root.layout-region-is-visible(i)
                     && self.panel-kind != root.panel_kind_none;
-                background: leaf-select-ta.has-hover ? AppPalette.control-hover-bg : transparent;
+                background: leaf-select-ta.has-hover
+                    ? AppPalette.control-hover-bg.mix(transparent, 0.55)
+                    : transparent;
                 border-width: 1px;
                 border-color: i == root.layout_selected_leaf_index ? AppPalette.selection-border : AppPalette.border;
                 z: 100;
@@ -2336,9 +2399,7 @@ export component AppWindow inherits Window {
                     x: 0px;
                     y: 0px;
                     width: parent.width;
-                    height: parent.panel-kind == root.panel_kind_button_cluster
-                        ? min(parent.height, 22px)
-                        : parent.height;
+                    height: parent.height;
                     pointer-event(event) => {
                         if (event.kind == PointerEventKind.down && event.button == PointerEventButton.right) {
                             root.layout_select_leaf(leaf-id);
@@ -2486,6 +2547,115 @@ export component AppWindow inherits Window {
                 root.layout_leaf_presets_submenu_hover = false;
                 root.show_layout_leaf_context_menu = false;
                 root.show_layout_splitter_context_menu = false;
+            }
+        }
+    }
+
+    if root.layout_edit_mode : Rectangle {
+        z: 128;
+        width: root.layout_exit_editor_button_width;
+        height: root.layout_exit_editor_button_height;
+        x: min(max(0px, root.layout_exit_editor_button_x), max(0px, root.width - self.width));
+        y: min(max(0px, root.layout_exit_editor_button_y), max(0px, root.height - self.height));
+        background: transparent;
+
+        drag-handle-chip := Rectangle {
+            x: 0px;
+            y: 0px;
+            width: 20px;
+            height: parent.height;
+            border-radius: 4px;
+            border-width: 1px;
+            border-color: AppPalette.warning;
+            background: root.layout_exit_editor_dragging || drag-handle-ta.has-hover
+                ? AppPalette.warning.mix(AppPalette.panel-bg-elevated, 0.34)
+                : AppPalette.warning.mix(AppPalette.panel-bg-elevated, 0.46);
+
+            Rectangle {
+                width: 3px;
+                height: 3px;
+                border-radius: 1px;
+                x: (parent.width - self.width) / 2;
+                y: (parent.height - 11px) / 2;
+                background: AppPalette.text-primary;
+            }
+            Rectangle {
+                width: 3px;
+                height: 3px;
+                border-radius: 1px;
+                x: (parent.width - self.width) / 2;
+                y: (parent.height - 11px) / 2 + 4px;
+                background: AppPalette.text-primary;
+            }
+            Rectangle {
+                width: 3px;
+                height: 3px;
+                border-radius: 1px;
+                x: (parent.width - self.width) / 2;
+                y: (parent.height - 11px) / 2 + 8px;
+                background: AppPalette.text-primary;
+            }
+
+            drag-handle-ta := TouchArea {
+                mouse-cursor: root.layout_exit_editor_dragging ? grabbing : grab;
+                pointer-event(event) => {
+                    if (event.button == PointerEventButton.left && event.kind == PointerEventKind.down) {
+                        root.layout_exit_editor_dragging = true;
+                        root.layout_exit_editor_drag_last_abs_x = root.layout_exit_editor_button_x + self.mouse-x;
+                        root.layout_exit_editor_drag_last_abs_y = root.layout_exit_editor_button_y + self.mouse-y;
+                    }
+                    if (event.button == PointerEventButton.left
+                            && (event.kind == PointerEventKind.up || event.kind == PointerEventKind.cancel)) {
+                        root.layout_exit_editor_dragging = false;
+                    }
+                }
+                moved => {
+                    if (root.layout_exit_editor_dragging && self.pressed) {
+                        let current-abs-x = root.layout_exit_editor_button_x + self.mouse-x;
+                        let current-abs-y = root.layout_exit_editor_button_y + self.mouse-y;
+                        let delta-x = current-abs-x - root.layout_exit_editor_drag_last_abs_x;
+                        let delta-y = current-abs-y - root.layout_exit_editor_drag_last_abs_y;
+                        root.layout_exit_editor_button_x = min(
+                            max(0px, root.layout_exit_editor_button_x + delta-x),
+                            max(0px, root.width - root.layout_exit_editor_button_width)
+                        );
+                        root.layout_exit_editor_button_y = min(
+                            max(0px, root.layout_exit_editor_button_y + delta-y),
+                            max(0px, root.height - root.layout_exit_editor_button_height)
+                        );
+                        root.layout_exit_editor_drag_last_abs_x = current-abs-x;
+                        root.layout_exit_editor_drag_last_abs_y = current-abs-y;
+                    }
+                }
+            }
+        }
+
+        exit-editor-chip := Rectangle {
+            x: drag-handle-chip.width + 4px;
+            y: 0px;
+            width: max(0px, parent.width - self.x);
+            height: parent.height;
+            border-radius: 4px;
+            border-width: 1px;
+            border-color: AppPalette.warning;
+            background: exit-editor-ta.has-hover
+                ? AppPalette.warning.mix(AppPalette.panel-bg-elevated, 0.28)
+                : AppPalette.warning.mix(AppPalette.panel-bg-elevated, 0.40);
+
+            Text {
+                text: "Exit editor";
+                color: AppPalette.text-primary;
+                font-size: 11px;
+                font-weight: 700;
+                horizontal-alignment: center;
+                vertical-alignment: center;
+            }
+
+            exit-editor-ta := TouchArea {
+                mouse-cursor: pointer;
+                clicked => {
+                    root.open_layout_editor();
+                }
             }
         }
     }
@@ -2707,16 +2877,16 @@ export component AppWindow inherits Window {
                             if (selected-panel-kind == root.panel_kind_button_cluster) {
                                 root.open_control_cluster_menu_for_leaf(
                                     root.layout_leaf_ids[root.layout_selected_leaf_index],
-                                    max(8, floor((root.layout_leaf_context_menu_x + parent.width + 6px) / 1px)),
-                                    max(8, floor((root.layout_leaf_context_menu_y + 6px) / 1px))
+                                    max(8, floor(root.layout_leaf_context_menu_x / 1px)),
+                                    max(8, floor(root.layout_leaf_context_menu_y / 1px))
                                 );
                             } else if (selected-panel-kind == root.panel_kind_metadata_viewer
                                     || selected-panel-kind == root.panel_kind_album_art_viewer) {
                                 root.open_viewer_panel_settings_for_leaf(
                                     root.layout_leaf_ids[root.layout_selected_leaf_index],
                                     selected-panel-kind,
-                                    max(8, floor((root.layout_leaf_context_menu_x + parent.width + 6px) / 1px)),
-                                    max(8, floor((root.layout_leaf_context_menu_y + 6px) / 1px))
+                                    max(8, floor(root.layout_leaf_context_menu_x / 1px)),
+                                    max(8, floor(root.layout_leaf_context_menu_y / 1px))
                                 );
                             }
                         }
@@ -3060,6 +3230,7 @@ export component AppWindow inherits Window {
         TouchArea {
             clicked => {
                 root.show_viewer_panel_settings_menu = false;
+                root.show_template_language_reference = false;
             }
         }
     }
@@ -3069,20 +3240,23 @@ export component AppWindow inherits Window {
         x: root.viewer_panel_settings_x;
         y: root.viewer_panel_settings_y;
         width: 360px;
-        height: 176px;
+        height: root.viewer_panel_settings_target_panel_kind == root.panel_kind_metadata_viewer
+            ? (root.viewer_panel_settings_metadata_source_index == 3 ? 304px : 126px)
+            : 126px;
         border-radius: 6px;
         background: AppPalette.panel-bg-elevated;
         border-width: 1px;
         border-color: AppPalette.border;
 
         VerticalLayout {
+            alignment: start;
             padding: 10px;
             spacing: 8px;
 
             Text {
                 text: (root.viewer_panel_settings_target_panel_kind == root.panel_kind_album_art_viewer
-                    ? "Image Metadata Viewer"
-                    : "Metadata Viewer") + " Settings";
+                    ? "Image Panel"
+                    : "Text Panel") + " Settings";
                 color: AppPalette.text-primary;
                 font-size: 13px;
                 font-weight: 700;
@@ -3138,7 +3312,7 @@ export component AppWindow inherits Window {
                     height: 24px;
                     background: transparent;
                     Text {
-                        text: "Metadata Source";
+                        text: "Text Source";
                         color: AppPalette.text-primary;
                         font-size: 12px;
                         vertical-alignment: center;
@@ -3158,6 +3332,52 @@ export component AppWindow inherits Window {
                             root.set_viewer_panel_metadata_source(
                                 root.viewer_panel_settings_target_leaf_id,
                                 root.viewer_panel_settings_metadata_source_index
+                            );
+                        }
+                    }
+                }
+            }
+
+            if root.viewer_panel_settings_target_panel_kind == root.panel_kind_metadata_viewer
+                    && root.viewer_panel_settings_metadata_source_index == 3 : VerticalLayout {
+                spacing: 6px;
+                Rectangle {
+                    height: 24px;
+                    background: transparent;
+                    HorizontalLayout {
+                        spacing: 8px;
+                        Text {
+                            horizontal-stretch: 1;
+                            text: "Custom Text Format";
+                            color: AppPalette.text-primary;
+                            font-size: 12px;
+                            vertical-alignment: center;
+                            horizontal-alignment: left;
+                        }
+                        Button {
+                            width: 28px;
+                            text: "?";
+                            clicked => {
+                                root.show_template_language_reference = true;
+                            }
+                        }
+                    }
+                }
+                Rectangle {
+                    height: 138px;
+                    background: transparent;
+                    TextEdit {
+                        width: parent.width;
+                        height: parent.height;
+                        enabled: true;
+                        wrap: word-wrap;
+                        text: root.viewer_panel_settings_metadata_text_format;
+                        placeholder-text: "[size=title][b]{title}[/b][/size]\\n[size=body]{artist}[/size]\\n[size=body]{album}[/size]\\n[size=caption]{date;year} • {genre}[/size]";
+                        edited => {
+                            root.viewer_panel_settings_metadata_text_format = self.text;
+                            root.set_viewer_panel_metadata_text_format(
+                                root.viewer_panel_settings_target_leaf_id,
+                                self.text
                             );
                         }
                     }
@@ -4323,8 +4543,8 @@ export component AppWindow inherits Window {
         TouchArea {}
 
         Rectangle {
-            width: min(root.width - 40px, 420px);
-            height: 220px;
+            width: min(root.width - 40px, 560px);
+            height: min(root.height - 40px, 420px);
             x: (parent.width - self.width) / 2;
             y: (parent.height - self.height) / 2;
             border-radius: 6px;
@@ -4360,9 +4580,28 @@ export component AppWindow inherits Window {
                     font-size: 12px;
                 }
 
-                LineEdit {
-                    text <=> root.custom_column_format;
-                    placeholder-text: "Example: {album} ({year})";
+                HorizontalLayout {
+                    spacing: 8px;
+                    Rectangle { horizontal-stretch: 1; }
+                    Button {
+                        width: 28px;
+                        text: "?";
+                        clicked => {
+                            root.show_template_language_reference = true;
+                        }
+                    }
+                }
+
+                Rectangle {
+                    height: 112px;
+                    background: transparent;
+                    TextEdit {
+                        width: parent.width;
+                        height: parent.height;
+                        wrap: word-wrap;
+                        text <=> root.custom_column_format;
+                        placeholder-text: "Example: [size=body]{album}[/size]\\n[size=caption]{year} - {genre}[/size]";
+                    }
                 }
 
                 Rectangle { vertical-stretch: 1; }
@@ -4374,6 +4613,7 @@ export component AppWindow inherits Window {
                         text: "Cancel";
                         clicked => {
                             root.show_custom_column_dialog = false;
+                            root.show_template_language_reference = false;
                         }
                     }
                     Button {
@@ -4382,7 +4622,61 @@ export component AppWindow inherits Window {
                         clicked => {
                             root.add_custom_playlist_column(root.custom_column_name, root.custom_column_format);
                             root.show_custom_column_dialog = false;
+                            root.show_template_language_reference = false;
                         }
+                    }
+                }
+            }
+        }
+    }
+
+    if root.show_template_language_reference : Rectangle {
+        z: 170;
+        width: min(root.width - 24px, 560px);
+        height: min(root.height - 24px, 460px);
+        x: max(12px, root.width - self.width - 12px);
+        y: 12px;
+        border-radius: 6px;
+        background: AppPalette.panel-bg-elevated;
+        border-width: 1px;
+        border-color: AppPalette.border;
+
+        VerticalLayout {
+            padding: 12px;
+            spacing: 8px;
+
+            HorizontalLayout {
+                spacing: 10px;
+                Text {
+                    horizontal-stretch: 1;
+                    text: "Template Reference";
+                    color: AppPalette.text-primary;
+                    font-size: 14px;
+                    font-weight: 700;
+                    vertical-alignment: center;
+                    horizontal-alignment: left;
+                }
+                Button {
+                    text: "Close";
+                    clicked => {
+                        root.show_template_language_reference = false;
+                    }
+                }
+            }
+
+            Rectangle { height: 1px; background: AppPalette.separator; }
+
+            ScrollView {
+                vertical-stretch: 1;
+                Rectangle {
+                    background: transparent;
+                    width: max(parent.width - 12px, 0px);
+                    Text {
+                        width: parent.width;
+                        text: root.template_language_reference_text;
+                        color: AppPalette.text-primary;
+                        font-size: 12px;
+                        wrap: word-wrap;
                     }
                 }
             }
@@ -5996,6 +6290,16 @@ export component AppWindow inherits Window {
             root.show_custom_color_picker_dialog = false;
         }
     }
+
+    changed layout_edit_mode => {
+        if (root.layout_edit_mode) {
+            root.layout_exit_editor_button_x =
+                min(max(0px, (root.width - root.layout_exit_editor_button_width) / 2), max(0px, root.width - root.layout_exit_editor_button_width));
+            root.layout_exit_editor_button_y = 8px;
+        } else {
+            root.layout_exit_editor_dragging = false;
+        }
+    }
     
     // Computed time display strings (derived from integer ms values)
     // These are computed in Slint to avoid Rust string allocations
@@ -6129,6 +6433,7 @@ export component AppWindow inherits Window {
     callback remove_control_cluster_button(string, int);
     callback set_viewer_panel_display_priority(string, int);
     callback set_viewer_panel_metadata_source(string, int);
+    callback set_viewer_panel_metadata_text_format(string, string);
     callback set_viewer_panel_image_source(string, int);
     callback window_resized(int, int);
     callback layout_workspace_resized(int, int);

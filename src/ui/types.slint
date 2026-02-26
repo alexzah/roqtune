@@ -1,6 +1,28 @@
+export struct RichTextRun {
+    text: string,
+    bold: bool,
+    italic: bool,
+    underline: bool,
+    font_size_px: int,
+    font_family: string,
+    color_mode: int, // 0 default, 1 palette, 2 rgba
+    palette_color: int,
+    color_rgba: color,
+}
+
+export struct RichTextLine {
+    runs: [RichTextRun],
+}
+
+export struct RichTextBlock {
+    plain_text: string,
+    lines: [RichTextLine],
+}
+
 export struct TrackRowData {
     status: string,
     values: [string],
+    rich_values: [RichTextBlock],
     album_art: image,
     source_badge: string,
     favorited: bool,
@@ -62,11 +84,10 @@ export struct LayoutMetadataViewerPanelModel {
     visible: bool,
     display_priority: int,
     metadata_source: int,
-    display_title: string,
-    display_artist: string,
-    display_album: string,
-    display_date: string,
-    display_genre: string,
+    metadata_text_format: string,
+    display_text: RichTextBlock,
+    display_text_full: string,
+    display_text_elided: bool,
 }
 
 export struct LayoutAlbumArtViewerPanelModel {

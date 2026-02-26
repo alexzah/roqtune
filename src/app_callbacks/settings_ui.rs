@@ -581,6 +581,7 @@ pub(crate) fn register_settings_ui_callbacks(ui: &AppWindow, shared_state: &AppS
     let config_state_clone = shared_state.config_state.clone();
     let layout_workspace_size_clone = shared_state.ui_handles.layout_workspace_size.clone();
     let ui_handle_clone = shared_state.ui_handles.ui_handle.clone();
+    let bus_sender_clone = shared_state.bus_sender.clone();
     ui.on_window_resized(move |width_px, height_px| {
         let width = (width_px.max(600) as u32).min(10_000);
         let height = (height_px.max(400) as u32).min(10_000);
@@ -592,6 +593,7 @@ pub(crate) fn register_settings_ui_callbacks(ui: &AppWindow, shared_state: &AppS
                 .expect("layout workspace size lock poisoned");
             *workspace_size = (workspace_width_px, workspace_height_px);
         }
+        let mut window_size_changed = false;
         let config_snapshot = {
             let mut state = config_state_clone
                 .lock()
@@ -599,6 +601,7 @@ pub(crate) fn register_settings_ui_callbacks(ui: &AppWindow, shared_state: &AppS
             if state.ui.window_width != width || state.ui.window_height != height {
                 state.ui.window_width = width;
                 state.ui.window_height = height;
+                window_size_changed = true;
             }
             state.clone()
         };
@@ -611,11 +614,21 @@ pub(crate) fn register_settings_ui_callbacks(ui: &AppWindow, shared_state: &AppS
                 workspace_height_px,
             );
         }
+        if window_size_changed {
+            let _ = bus_sender_clone.send(Message::Config(protocol::ConfigMessage::ConfigChanged(
+                vec![protocol::ConfigDeltaEntry::Ui(protocol::UiConfigDelta {
+                    window_width: Some(width),
+                    window_height: Some(height),
+                    ..Default::default()
+                })],
+            )));
+        }
     });
 
     let config_state_clone = shared_state.config_state.clone();
     let layout_workspace_size_clone = shared_state.ui_handles.layout_workspace_size.clone();
     let ui_handle_clone = shared_state.ui_handles.ui_handle.clone();
+    let bus_sender_clone = shared_state.bus_sender.clone();
     ui.on_layout_workspace_resized(move |width_px, height_px| {
         let workspace_width_px = width_px.max(1) as u32;
         let workspace_height_px = height_px.max(1) as u32;
@@ -639,5 +652,12 @@ pub(crate) fn register_settings_ui_callbacks(ui: &AppWindow, shared_state: &AppS
                 workspace_height_px,
             );
         }
+        let _ = bus_sender_clone.send(Message::Config(protocol::ConfigMessage::ConfigChanged(
+            vec![protocol::ConfigDeltaEntry::Ui(protocol::UiConfigDelta {
+                window_width: Some(config_snapshot.ui.window_width),
+                window_height: Some(config_snapshot.ui.window_height),
+                ..Default::default()
+            })],
+        )));
     });
 }

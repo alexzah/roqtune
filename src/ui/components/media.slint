@@ -1,5 +1,7 @@
 import { AppIcons } from "../icons.slint";
 import { AppPalette } from "../theme_palette.slint";
+import { RichTextBlock } from "../types.slint";
+import { TooltipHoverArea } from "controls.slint";
 
 export component VolumeSliderControl inherits Rectangle {
     in-out property <float> value: 1.0;
@@ -166,7 +168,11 @@ export component SeekBarControl inherits Rectangle {
     }
 
     background: root.panel-bg;
-    HorizontalLayout {
+    bar-row := HorizontalLayout {
+        private property <length> time-slot-width: max(
+            root.label-width,
+            max(elapsed-label.preferred-width + 6px, total-label.preferred-width + 6px)
+        );
         padding-left: root.side-padding;
         padding-right: root.side-padding;
         padding-top: root.vertical-padding;
@@ -179,7 +185,7 @@ export component SeekBarControl inherits Rectangle {
             font-size: root.time-font-size;
             vertical-alignment: center;
             horizontal-alignment: right;
-            width: max(root.label-width, self.preferred-width + 6px);
+            width: bar-row.time-slot-width;
         }
 
         seekbar := Rectangle {
@@ -255,76 +261,122 @@ export component SeekBarControl inherits Rectangle {
             color: root.text-muted;
             font-size: root.time-font-size;
             vertical-alignment: center;
-            horizontal-alignment: right;
-            width: max(root.label-width, self.preferred-width + 6px);
+            horizontal-alignment: left;
+            width: bar-row.time-slot-width;
         }
     }
 }
 
-export component MetadataViewer inherits Rectangle {
-    in property <string> display-title: "";
-    in property <string> display-artist: "";
-    in property <string> display-album: "";
-    in property <string> display-date: "";
-    in property <string> display-genre: "";
-    private property <bool> has-metadata: root.display-title != ""
-        || root.display-artist != ""
-        || root.display-album != ""
-        || root.display-date != ""
-        || root.display-genre != "";
+export component RichTextBlockView inherits Rectangle {
+    in property <RichTextBlock> block;
+    in property <color> default-color: AppPalette.text-secondary;
+    in property <bool> compact: false;
+    in property <int> max-lines: 0; // 0 means no limit
+    in property <bool> clip-lines: true;
+
+    pure function color-from-palette(code: int) -> color {
+        if code == 1 {
+            return AppPalette.accent;
+        } else if code == 2 {
+            return AppPalette.accent-on;
+        } else if code == 3 {
+            return AppPalette.warning;
+        } else if code == 4 {
+            return AppPalette.danger;
+        } else if code == 5 {
+            return AppPalette.success;
+        } else if code == 6 {
+            return AppPalette.text-primary;
+        } else if code == 7 {
+            return AppPalette.text-secondary;
+        } else if code == 8 {
+            return AppPalette.text-muted;
+        } else if code == 9 {
+            return AppPalette.text-disabled;
+        } else if code == 10 {
+            return AppPalette.border;
+        } else if code == 11 {
+            return AppPalette.panel-bg;
+        } else if code == 12 {
+            return AppPalette.panel-bg-alt;
+        } else if code == 13 {
+            return AppPalette.window-bg;
+        } else if code == 14 {
+            return AppPalette.selection-bg;
+        } else if code == 15 {
+            return AppPalette.selection-border;
+        } else if code == 16 {
+            return AppPalette.control-hover-bg;
+        }
+        return root.default-color;
+    }
+
+    pure function run-color(color-mode: int, palette-color: int, color-rgba: color) -> color {
+        if color-mode == 2 {
+            return color-rgba;
+        } else if color-mode == 1 {
+            return root.color-from-palette(palette-color);
+        }
+        return root.default-color;
+    }
+
+    background: transparent;
+    clip: root.clip-lines;
+    VerticalLayout {
+        spacing: root.compact ? 1px : 2px;
+        for line[index] in root.block.lines : Rectangle {
+            visible: root.max-lines <= 0 || index < root.max-lines;
+            clip: root.clip-lines;
+            HorizontalLayout {
+                spacing: 0px;
+                for run in line.runs : Rectangle {
+                    width: run-text.preferred-width;
+                    height: run-text.preferred-height;
+                    run-text := Text {
+                        text: run.text;
+                        color: root.run-color(run.color_mode, run.palette_color, run.color_rgba);
+                        font-size: max(1px, run.font_size_px * 1px);
+                        font-family: run.font_family;
+                        font-weight: run.bold ? 700 : 400;
+                        font-italic: run.italic;
+                        vertical-alignment: center;
+                        horizontal-alignment: left;
+                        overflow: clip;
+                    }
+                    if run.underline : Rectangle {
+                        y: run-text.y + run-text.height - 1px;
+                        width: run-text.preferred-width;
+                        height: 1px;
+                        background: root.run-color(run.color_mode, run.palette_color, run.color_rgba);
+                    }
+                }
+                Rectangle { horizontal-stretch: 1; }
+            }
+        }
+    }
+}
+
+export component TextPanel inherits Rectangle {
+    in property <RichTextBlock> display-text;
+    in property <string> tooltip-text: "";
+    in property <bool> tooltip-enabled: false;
+    callback tooltip_hover_changed(bool, string, int, int);
+    private property <bool> has-metadata: root.display-text.plain_text != "" || root.tooltip-text != "";
     private property <bool> compact: root.width < 220px || root.height < 120px;
-    private property <bool> dense: root.width < 170px || root.height < 90px;
     in property <color> text-primary: AppPalette.text-primary;
     in property <color> text-secondary: AppPalette.text-secondary;
     in property <color> text-muted: AppPalette.text-muted;
     in property <color> text-disabled: AppPalette.text-disabled;
-    private property <length> title-font-size: root.dense ? 11px : root.compact ? 12px : 14px;
-    private property <length> line-font-size: root.dense ? 10px : root.compact ? 11px : 13px;
-    private property <length> minor-font-size: root.dense ? 9px : root.compact ? 10px : 11px;
-    private property <length> block-spacing: root.dense ? 1px : root.compact ? 2px : 4px;
-    private property <length> meta-spacing: root.dense ? 4px : root.compact ? 6px : 8px;
 
     background: transparent;
-    if root.has-metadata : VerticalLayout {
-        alignment: center;
-        spacing: root.block-spacing;
-        if root.display-title != "" : Text {
-            text: root.display-title;
-            color: root.text-primary;
-            font-size: root.title-font-size;
-            font-weight: 700;
-            wrap: root.compact ? no-wrap : word-wrap;
-            overflow: elide;
-        }
-        if root.display-artist != "" : Text {
-            text: root.display-artist;
-            color: root.text-secondary;
-            font-size: root.line-font-size;
-            wrap: root.dense ? no-wrap : word-wrap;
-            overflow: elide;
-        }
-        if root.display-album != "" : Text {
-            text: root.display-album;
-            color: root.text-muted;
-            font-size: root.line-font-size;
-            wrap: root.dense ? no-wrap : word-wrap;
-            overflow: elide;
-        }
-        HorizontalLayout {
-            spacing: root.meta-spacing;
-            if root.display-date != "" : Text {
-                text: root.display-date;
-                color: root.text-muted;
-                font-size: root.minor-font-size;
-            }
-            if root.display-genre != "" : Text {
-                text: root.display-genre;
-                color: root.text-muted;
-                font-size: root.minor-font-size;
-                horizontal-stretch: 1;
-                overflow: elide;
-            }
-        }
+    if root.has-metadata : RichTextBlockView {
+        width: parent.width;
+        height: min(parent.height, self.preferred-height);
+        y: (parent.height - self.height) / 2;
+        block: root.display-text;
+        compact: root.compact;
+        default-color: root.text-secondary;
+        clip-lines: true;
     }
 
     if !root.has-metadata : Rectangle {
@@ -341,9 +393,21 @@ export component MetadataViewer inherits Rectangle {
             vertical-alignment: center;
         }
     }
+
+    tooltip-hover-area := TooltipHoverArea {
+        x: 0px;
+        y: 0px;
+        width: root.width;
+        height: root.height;
+        tooltip-text: root.tooltip-text;
+        tooltip-enabled: root.tooltip-enabled && root.tooltip-text != "";
+        tooltip_hover_changed(is-hovered, tooltip, anchor-x-px, anchor-y-px) => {
+            root.tooltip_hover_changed(is-hovered, tooltip, anchor-x-px, anchor-y-px);
+        }
+    }
 }
 
-export component AlbumArtViewer inherits Rectangle {
+export component ImagePanel inherits Rectangle {
     in property <image> art-source;
     in property <bool> has-art: false;
     in property <color> panel-bg: AppPalette.panel-bg-alt;

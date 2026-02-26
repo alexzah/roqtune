@@ -353,6 +353,9 @@ pub fn default_playlist_album_art_column_max_width_px() -> u32 {
     480
 }
 
+pub const BUILTIN_TRACK_DETAILS_COLUMN_FORMAT: &str =
+    "[size=body][color=text_primary]{title;file_name}[/color][/size]\\n[size=caption][color=text_secondary]{artist;album_artist} • {album}[/color][/size]";
+
 /// Returns the built-in playlist column set used for new configs.
 pub fn default_playlist_columns() -> Vec<PlaylistColumnConfig> {
     vec![
@@ -360,6 +363,12 @@ pub fn default_playlist_columns() -> Vec<PlaylistColumnConfig> {
             name: "Title".to_string(),
             format: "{title}".to_string(),
             enabled: true,
+            custom: false,
+        },
+        PlaylistColumnConfig {
+            name: "Track Details".to_string(),
+            format: BUILTIN_TRACK_DETAILS_COLUMN_FORMAT.to_string(),
+            enabled: false,
             custom: false,
         },
         PlaylistColumnConfig {
@@ -418,6 +427,7 @@ mod tests {
     use super::{
         default_playlist_columns, BufferingConfig, Config, IntegrationBackendKind, LayoutConfig,
         ResamplerQuality, UiConfig, UiPlaybackOrder, UiRepeatMode,
+        BUILTIN_TRACK_DETAILS_COLUMN_FORMAT,
     };
 
     #[test]
@@ -533,6 +543,22 @@ decoder_request_chunk_ms = 1500
         assert_eq!(album_art_column.name, "Album Art");
         assert!(!album_art_column.enabled);
         assert!(!album_art_column.custom);
+    }
+
+    #[test]
+    fn test_default_playlist_columns_include_track_details_builtin_disabled() {
+        let columns = default_playlist_columns();
+        let track_details_column = columns
+            .iter()
+            .find(|column| column.name == "Track Details")
+            .expect("track details built-in column should exist");
+
+        assert_eq!(
+            track_details_column.format,
+            BUILTIN_TRACK_DETAILS_COLUMN_FORMAT
+        );
+        assert!(!track_details_column.enabled);
+        assert!(!track_details_column.custom);
     }
 
     #[test]
