@@ -353,42 +353,40 @@ export component AppWindow inherits Window {
     ];
     property <string> template_language_reference_text:
         "Template Language Reference\n\n"
-        + "1) Plain text and escaping\n"
-        + "- Any text outside tags/placeholders is copied as-is.\n"
-        + "- Escape special characters with backslash: \\{ \\} \\[ \\] \\\\.\n"
-        + "- Escaped markup is literal text, not formatting.\n\n"
-        + "2) Line breaks\n"
-        + "- Use \\n for a newline.\n"
-        + "- Use [br] for an explicit line break token.\n"
-        + "- Both forms produce a new rendered line.\n\n"
-        + "3) Placeholders\n"
-        + "- Supported keys: title, artist, album, album_artist, date, year, genre,\n"
-        + "  track_number, file_name, path.\n"
-        + "- Use fallback chains with semicolons: {artist;album_artist}.\n"
-        + "- A chain resolves to the first non-empty value.\n"
-        + "- Unknown placeholder keys render literally.\n\n"
-        + "4) Style tags\n"
-        + "- [b] [/b] bold, [i] [/i] italic, [u] [/u] underline.\n"
-        + "- Styles can be nested.\n"
-        + "- [font=Inter] sets font family for enclosed text.\n"
-        + "- [color=accent] uses palette color names.\n"
-        + "- [color=#ffcc00] uses hex RGB.\n\n"
-        + "5) Font size\n"
-        + "- Numeric: [size=18] means fixed 18px (not responsive).\n"
-        + "- Role-based (responsive):\n"
-        + "  micro=70%, caption=82%, body=100%, body_large=115%,\n"
-        + "  title=130%, h3=150%, h2=175%, h1=205%, spotlight=245%\n"
-        + "  (relative to panel base font size).\n\n"
-        + "6) Error handling (lenient)\n"
-        + "- Unknown tags render literally.\n"
-        + "- Mismatched closing tags render literally.\n"
-        + "- Invalid placeholder syntax renders literally.\n"
-        + "- Parsing errors never crash rendering.\n\n"
+        + "Plain text\n"
+        + "Any characters outside placeholders/tags are emitted unchanged.\n\n"
+        + "Escaping\n"
+        + "Use backslash to force literal output: \\{ \\} \\[ \\] \\\\.\n"
+        + "Example: \\{artist\\} \\[b\\]x\\[/b\\] \\\\ -> {artist} [b]x[/b] \\\n\n"
+        + "Line breaks\n"
+        + "Use either \\n or [br]. Both render one new line.\n\n"
+        + "Placeholders\n"
+        + "Syntax: {field} or {field1;field2;field3}\n"
+        + "Fallback chains return the first non-empty field.\n"
+        + "Supported fields: title, artist, album, album_artist, date, year, genre,\n"
+        + "track_number, file_name, path.\n"
+        + "Unknown/invalid placeholders are rendered literally.\n\n"
+        + "Style tags\n"
+        + "[b] [/b] bold\n"
+        + "[i] [/i] italic\n"
+        + "[u] [/u] underline\n"
+        + "[font=Family Name] [/font] font family\n"
+        + "[color=name] [/color] palette color key (for example accent, text_muted)\n"
+        + "[color=#rrggbb] [/color] hex color\n"
+        + "Tags are nestable and apply to enclosed content only.\n\n"
+        + "Size tags\n"
+        + "[size=<value>] [/size]\n"
+        + "Numeric values (for example 18) are fixed px and non-responsive.\n"
+        + "Role values are responsive relative scales:\n"
+        + "micro=70%, caption=82%, body=100%, body_large=115%,\n"
+        + "title=130%, h3=150%, h2=175%, h1=205%, spotlight=245%\n\n"
+        + "Lenient parsing\n"
+        + "Unknown tags, mismatched closing tags, and malformed placeholders\n"
+        + "never crash rendering. Invalid pieces are shown as literal text.\n\n"
         + "Examples\n"
-        + "- [b][size=title]{title;file_name}[/size][/b]\\n"
-        + "  [i]{artist;album_artist}[/i] - {album}\\n"
-        + "  [color=text_muted]{date;year} - {genre}[/color]\n"
-        + "- [size=body]{title}[/size]\\n[size=caption]{artist}[/size]";
+        + "[b][size=title]{title;file_name}[/size][/b]\\n"
+        + "[i]{artist;album_artist}[/i] • {album}\\n"
+        + "[color=text_muted]{date;year} • {genre}[/color]";
     in-out property <int> sidebar_width_px: 220;
     in-out property <int> collection_mode: 0; // 0: Playlist, 1: Library
     property <int> playlist-visible-row-count: 1;
@@ -2386,9 +2384,7 @@ export component AppWindow inherits Window {
                     x: 0px;
                     y: 0px;
                     width: parent.width;
-                    height: parent.panel-kind == root.panel_kind_button_cluster
-                        ? min(parent.height, 22px)
-                        : parent.height;
+                    height: parent.height;
                     pointer-event(event) => {
                         if (event.kind == PointerEventKind.down && event.button == PointerEventButton.right) {
                             root.layout_select_leaf(leaf-id);
@@ -2520,6 +2516,26 @@ export component AppWindow inherits Window {
             root.custom_column_name = "";
             root.custom_column_format = "";
             column-header-menu.close();
+        }
+    }
+
+    if root.layout_edit_mode : Rectangle {
+        z: 126;
+        width: 220px;
+        height: 34px;
+        x: max(8px, root.width - self.width - 12px);
+        y: 12px;
+        background: AppPalette.panel-bg-elevated;
+        border-width: 1px;
+        border-color: AppPalette.border;
+        border-radius: 4px;
+        Button {
+            width: parent.width;
+            height: parent.height;
+            text: "Exit Layout Editing Mode";
+            clicked => {
+                root.open_layout_editor();
+            }
         }
     }
 
@@ -2757,16 +2773,16 @@ export component AppWindow inherits Window {
                             if (selected-panel-kind == root.panel_kind_button_cluster) {
                                 root.open_control_cluster_menu_for_leaf(
                                     root.layout_leaf_ids[root.layout_selected_leaf_index],
-                                    max(8, floor((root.layout_leaf_context_menu_x + parent.width + 6px) / 1px)),
-                                    max(8, floor((root.layout_leaf_context_menu_y + 6px) / 1px))
+                                    max(8, floor((panel-settings-ta.absolute-position.x + panel-settings-ta.mouse-x) / 1px)),
+                                    max(8, floor((panel-settings-ta.absolute-position.y + panel-settings-ta.mouse-y + 6px) / 1px))
                                 );
                             } else if (selected-panel-kind == root.panel_kind_metadata_viewer
                                     || selected-panel-kind == root.panel_kind_album_art_viewer) {
                                 root.open_viewer_panel_settings_for_leaf(
                                     root.layout_leaf_ids[root.layout_selected_leaf_index],
                                     selected-panel-kind,
-                                    max(8, floor((root.layout_leaf_context_menu_x + parent.width + 6px) / 1px)),
-                                    max(8, floor((root.layout_leaf_context_menu_y + 6px) / 1px))
+                                    max(8, floor((panel-settings-ta.absolute-position.x + panel-settings-ta.mouse-x) / 1px)),
+                                    max(8, floor((panel-settings-ta.absolute-position.y + panel-settings-ta.mouse-y + 6px) / 1px))
                                 );
                             }
                         }
@@ -3121,14 +3137,15 @@ export component AppWindow inherits Window {
         y: root.viewer_panel_settings_y;
         width: 360px;
         height: root.viewer_panel_settings_target_panel_kind == root.panel_kind_metadata_viewer
-            ? (root.viewer_panel_settings_metadata_source_index == 3 ? 392px : 176px)
-            : 176px;
+            ? (root.viewer_panel_settings_metadata_source_index == 3 ? 304px : 126px)
+            : 126px;
         border-radius: 6px;
         background: AppPalette.panel-bg-elevated;
         border-width: 1px;
         border-color: AppPalette.border;
 
         VerticalLayout {
+            alignment: start;
             padding: 10px;
             spacing: 8px;
 
@@ -4545,12 +4562,19 @@ export component AppWindow inherits Window {
 
             Rectangle { height: 1px; background: AppPalette.separator; }
 
-            TextEdit {
+            ScrollView {
                 vertical-stretch: 1;
-                read-only: true;
-                enabled: true;
-                wrap: word-wrap;
-                text: root.template_language_reference_text;
+                Rectangle {
+                    background: transparent;
+                    width: max(parent.width - 12px, 0px);
+                    Text {
+                        width: parent.width;
+                        text: root.template_language_reference_text;
+                        color: AppPalette.text-primary;
+                        font-size: 12px;
+                        wrap: word-wrap;
+                    }
+                }
             }
         }
     }
