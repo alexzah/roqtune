@@ -427,18 +427,25 @@ mod tests {
     };
 
     #[test]
-    fn test_theme_preset_catalog_contains_expected_compact_set() {
+    fn test_theme_preset_catalog_contains_expected_builtins() {
         let options: Vec<String> = theme_preset_catalog()
             .presets()
             .iter()
             .map(|preset| preset.id.clone())
             .collect();
+        assert_eq!(options.len(), 12);
         assert!(options.contains(&"roqtune_dark".to_string()));
         assert!(options.contains(&"roqtune_light".to_string()));
         assert!(options.contains(&"solarized_dark".to_string()));
         assert!(options.contains(&"solarized_light".to_string()));
         assert!(options.contains(&"dracula_dark".to_string()));
         assert!(options.contains(&"nord_dark".to_string()));
+        assert!(options.contains(&"gruvbox_dark".to_string()));
+        assert!(options.contains(&"gruvbox_light".to_string()));
+        assert!(options.contains(&"catppuccin_mocha".to_string()));
+        assert!(options.contains(&"catppuccin_latte".to_string()));
+        assert!(options.contains(&"tokyonight_night".to_string()));
+        assert!(options.contains(&"tokyonight_day".to_string()));
     }
 
     #[test]

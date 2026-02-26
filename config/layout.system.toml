@@ -29,6 +29,12 @@ playlist_album_art_column_max_width_px = 480
 # - solarized_light
 # - dracula_dark
 # - nord_dark
+# - gruvbox_dark
+# - gruvbox_light
+# - catppuccin_mocha
+# - catppuccin_latte
+# - tokyonight_night
+# - tokyonight_day
 # Use `custom` to activate [custom_colors] overrides below.
 color_scheme = "roqtune_dark"
 
