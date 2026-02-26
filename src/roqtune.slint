@@ -353,28 +353,42 @@ export component AppWindow inherits Window {
     ];
     property <string> template_language_reference_text:
         "Template Language Reference\n\n"
-        + "Text and line breaks\n"
-        + "- Plain text passes through as-is.\n"
-        + "- New line: \\n or [br].\n"
-        + "- Escapes: \\{  \\}  \\[  \\]  \\\\\n\n"
-        + "Metadata placeholders\n"
-        + "- {title}, {artist}, {album}, {album_artist}\n"
-        + "- {date}, {year}, {genre}, {track_number}\n"
-        + "- {file_name}, {path}\n"
-        + "- Fallback chain: {artist;album_artist}\n\n"
-        + "Style tags\n"
-        + "- [b]...[/b], [i]...[/i], [u]...[/u]\n"
-        + "- [size=micro|caption|body|body_large|title|h2|h1|spotlight]\n"
-        + "- [size=18] (fixed px)\n"
-        + "- [font=Inter]\n"
-        + "- [color=accent] or [color=#ffcc00]\n\n"
-        + "Lenient parsing\n"
-        + "- Unknown tags/placeholders render literally.\n"
-        + "- Mismatched close tags render literally.\n\n"
-        + "Example\n"
-        + "[b][size=title]{title;file_name}[/size][/b]\\n"
-        + "[i]{artist;album_artist}[/i] - {album}\\n"
-        + "[color=text_muted]{date;year} - {genre}[/color]";
+        + "1) Plain text and escaping\n"
+        + "- Any text outside tags/placeholders is copied as-is.\n"
+        + "- Escape special characters with backslash: \\{ \\} \\[ \\] \\\\.\n"
+        + "- Escaped markup is literal text, not formatting.\n\n"
+        + "2) Line breaks\n"
+        + "- Use \\n for a newline.\n"
+        + "- Use [br] for an explicit line break token.\n"
+        + "- Both forms produce a new rendered line.\n\n"
+        + "3) Placeholders\n"
+        + "- Supported keys: title, artist, album, album_artist, date, year, genre,\n"
+        + "  track_number, file_name, path.\n"
+        + "- Use fallback chains with semicolons: {artist;album_artist}.\n"
+        + "- A chain resolves to the first non-empty value.\n"
+        + "- Unknown placeholder keys render literally.\n\n"
+        + "4) Style tags\n"
+        + "- [b] [/b] bold, [i] [/i] italic, [u] [/u] underline.\n"
+        + "- Styles can be nested.\n"
+        + "- [font=Inter] sets font family for enclosed text.\n"
+        + "- [color=accent] uses palette color names.\n"
+        + "- [color=#ffcc00] uses hex RGB.\n\n"
+        + "5) Font size\n"
+        + "- Numeric: [size=18] means fixed 18px (not responsive).\n"
+        + "- Role-based (responsive):\n"
+        + "  micro=70%, caption=82%, body=100%, body_large=115%,\n"
+        + "  title=130%, h3=150%, h2=175%, h1=205%, spotlight=245%\n"
+        + "  (relative to panel base font size).\n\n"
+        + "6) Error handling (lenient)\n"
+        + "- Unknown tags render literally.\n"
+        + "- Mismatched closing tags render literally.\n"
+        + "- Invalid placeholder syntax renders literally.\n"
+        + "- Parsing errors never crash rendering.\n\n"
+        + "Examples\n"
+        + "- [b][size=title]{title;file_name}[/size][/b]\\n"
+        + "  [i]{artist;album_artist}[/i] - {album}\\n"
+        + "  [color=text_muted]{date;year} - {genre}[/color]\n"
+        + "- [size=body]{title}[/size]\\n[size=caption]{artist}[/size]";
     in-out property <int> sidebar_width_px: 220;
     in-out property <int> collection_mode: 0; // 0: Playlist, 1: Library
     property <int> playlist-visible-row-count: 1;
@@ -4506,8 +4520,6 @@ export component AppWindow inherits Window {
         border-width: 1px;
         border-color: AppPalette.border;
 
-        TouchArea {}
-
         VerticalLayout {
             padding: 12px;
             spacing: 8px;
@@ -4533,22 +4545,12 @@ export component AppWindow inherits Window {
 
             Rectangle { height: 1px; background: AppPalette.separator; }
 
-            ScrollView {
+            TextEdit {
                 vertical-stretch: 1;
-                Rectangle {
-                    width: max(parent.width, 420px);
-                    height: reference-text.preferred-height + 8px;
-                    background: transparent;
-                    reference-text := Text {
-                        width: parent.width;
-                        text: root.template_language_reference_text;
-                        color: AppPalette.text-secondary;
-                        font-size: 12px;
-                        wrap: word-wrap;
-                        horizontal-alignment: left;
-                        vertical-alignment: top;
-                    }
-                }
+                read-only: true;
+                enabled: true;
+                wrap: word-wrap;
+                text: root.template_language_reference_text;
             }
         }
     }

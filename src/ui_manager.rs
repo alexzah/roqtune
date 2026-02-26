@@ -4292,11 +4292,13 @@ impl UiManager {
         if unwrapped_visible_line_count < rendered.lines.len() {
             rendered.lines.truncate(unwrapped_visible_line_count);
             if let Some(last_visible_line) = rendered.lines.last_mut() {
-                Self::text_panel_apply_ellipsis_to_line(
-                    last_visible_line,
-                    width_px,
-                    base_font_size_px,
-                );
+                if Self::text_panel_line_exceeds_width(last_visible_line, width_px) {
+                    Self::text_panel_apply_ellipsis_to_line(
+                        last_visible_line,
+                        width_px,
+                        base_font_size_px,
+                    );
+                }
             }
             rendered.plain_text = Self::rendered_plain_text_for_lines(&rendered.lines);
             was_elided = true;
@@ -11745,7 +11747,7 @@ mod tests {
         assert!(fitted.was_elided);
         let displayed_plain = fitted.rendered.plain_text.trim();
         assert!(!displayed_plain.is_empty());
-        assert!(displayed_plain.ends_with('…'));
+        assert!(!displayed_plain.ends_with('…'));
         assert!(fitted.full_plain_text.contains("Example Song"));
     }
 
