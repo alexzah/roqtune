@@ -1192,7 +1192,7 @@ fn probe_track_technical_metadata(path: &Path) -> Option<TechnicalMetadata> {
     let mut sample_rate_hz = 44_100u32;
     let mut channel_count = 2u16;
     let mut bits_per_sample = 16u16;
-    let mut duration_ms = 0u64;
+    let mut codec_duration_ms = 0u64;
 
     let file = File::open(path).ok()?;
     let mss = MediaSourceStream::new(Box::new(file), Default::default());
@@ -1216,20 +1216,30 @@ fn probe_track_technical_metadata(path: &Path) -> Option<TechnicalMetadata> {
         if let Some(bits) = codec.bits_per_sample {
             bits_per_sample = (bits as u16).max(1);
         }
-        if let (Some(sample_rate), Some(n_frames)) = (codec.sample_rate, codec.n_frames) {
-            if sample_rate > 0 && n_frames > 0 {
-                duration_ms = (n_frames as f64 * 1000.0 / sample_rate as f64).round() as u64;
+        if let (Some(time_base), Some(n_frames)) = (codec.time_base, codec.n_frames) {
+            if n_frames > 0 {
+                let stream_time = time_base.calc_time(n_frames);
+                let duration = stream_time.seconds as f64 * 1000.0 + stream_time.frac * 1000.0;
+                if duration.is_finite() && duration > 0.0 {
+                    codec_duration_ms = duration.round() as u64;
+                }
+            }
+        }
+        if codec_duration_ms == 0 {
+            if let (Some(sample_rate), Some(n_frames)) = (codec.sample_rate, codec.n_frames) {
+                if sample_rate > 0 && n_frames > 0 {
+                    codec_duration_ms =
+                        (n_frames as f64 * 1000.0 / sample_rate as f64).round() as u64;
+                }
             }
         }
     }
 
-    if duration_ms == 0 {
-        duration_ms = lofty::read_from_path(path)
-            .ok()
-            .map(|tagged| tagged.properties().duration().as_millis() as u64)
-            .filter(|value| *value > 0)
-            .unwrap_or(0);
-    }
+    let duration_ms = lofty::read_from_path(path)
+        .ok()
+        .map(|tagged| tagged.properties().duration().as_millis() as u64)
+        .filter(|value| *value > 0)
+        .unwrap_or(codec_duration_ms);
 
     let bitrate_kbps = if duration_ms > 0 {
         std::fs::metadata(path)

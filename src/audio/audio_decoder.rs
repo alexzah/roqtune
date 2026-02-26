@@ -1287,40 +1287,79 @@ Check Settings -> OpenSubsonic status and re-save credentials if needed.",
             })
             .unwrap_or_else(|| "AUDIO".to_string());
 
-        let n_frames = codec_params.n_frames.unwrap_or(0);
-        let duration_ms = if n_frames > 0 {
-            (n_frames as f64 * 1000.0) / sample_rate as f64
-        } else {
-            0.0
+        let duration_ms = {
+            let lofty_duration_ms = duration_ms_from_lofty_properties(path);
+            if lofty_duration_ms > 0 {
+                lofty_duration_ms
+            } else {
+                duration_ms_from_codec_params(codec_params, sample_rate)
+            }
         };
 
-        let mut bitrate = 0;
-        if let Ok(file_metadata) = std::fs::metadata(path) {
-            let file_size = file_metadata.len();
-            let metadata_size = get_metadata_size(path);
-            let audio_data_size = if file_size > metadata_size {
-                file_size - metadata_size
-            } else {
-                file_size
-            };
-
-            if duration_ms > 0.0 {
-                bitrate = ((audio_data_size as f64 * 8.0) / (duration_ms / 1000.0)) as u32;
-            }
-        }
+        let bitrate_kbps = audio_data_size_bytes(path)
+            .and_then(|audio_data_size| implied_bitrate_kbps(audio_data_size, duration_ms))
+            .map(|value| value.round() as u32)
+            .unwrap_or(0);
 
         protocol::TechnicalMetadata {
             format: format_name,
-            bitrate_kbps: (bitrate as f32 / 1000.0).round() as u32,
+            bitrate_kbps,
             sample_rate_hz: sample_rate,
             channel_count: codec_params
                 .channels
                 .map(|channels| channels.count() as u16)
                 .unwrap_or(2),
-            duration_ms: duration_ms as u64,
+            duration_ms,
             bits_per_sample: codec_params.bits_per_sample.unwrap_or(16) as u16,
         }
     }
+}
+
+fn duration_ms_from_codec_params(codec_params: &CodecParameters, sample_rate: u32) -> u64 {
+    if let (Some(time_base), Some(n_frames)) = (codec_params.time_base, codec_params.n_frames) {
+        if n_frames > 0 {
+            let stream_time = time_base.calc_time(n_frames);
+            let duration_ms = stream_time.seconds as f64 * 1000.0 + stream_time.frac * 1000.0;
+            if duration_ms.is_finite() && duration_ms > 0.0 {
+                return duration_ms.round() as u64;
+            }
+        }
+    }
+
+    let n_frames = codec_params.n_frames.unwrap_or(0);
+    if n_frames > 0 && sample_rate > 0 {
+        ((n_frames as f64 * 1000.0) / sample_rate as f64).round() as u64
+    } else {
+        0
+    }
+}
+
+fn duration_ms_from_lofty_properties(path: &PathBuf) -> u64 {
+    use lofty::file::AudioFile;
+
+    lofty::read_from_path(path)
+        .ok()
+        .map(|tagged| tagged.properties().duration().as_millis() as u64)
+        .filter(|value| *value > 0)
+        .unwrap_or(0)
+}
+
+fn implied_bitrate_kbps(audio_data_size_bytes: u64, duration_ms: u64) -> Option<f64> {
+    if audio_data_size_bytes == 0 || duration_ms == 0 {
+        return None;
+    }
+    let duration_seconds = duration_ms as f64 / 1000.0;
+    if duration_seconds <= f64::EPSILON {
+        return None;
+    }
+    Some(((audio_data_size_bytes as f64 * 8.0) / duration_seconds) / 1000.0)
+}
+
+fn audio_data_size_bytes(path: &PathBuf) -> Option<u64> {
+    let file_size = std::fs::metadata(path).ok()?.len();
+    let metadata_size = get_metadata_size(path);
+    let audio_data_size = file_size.saturating_sub(metadata_size);
+    (audio_data_size > 0).then_some(audio_data_size)
 }
 
 fn get_metadata_size(path: &PathBuf) -> u64 {
