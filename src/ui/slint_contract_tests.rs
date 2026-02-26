@@ -105,8 +105,9 @@ mod tests {
             "Settings dialog should expose auto-scroll playing-track setting"
         );
         assert!(
-            slint_ui.contains("in-out property <bool> settings_dark_mode: true;"),
-            "Settings dialog should expose persisted dark-mode setting"
+            slint_ui.contains("in-out property <[string]> settings_color_scheme_options: [];")
+                && slint_ui.contains("in-out property <int> settings_color_scheme_index: 0;"),
+            "Settings dialog should expose color scheme options and selected index"
         );
         assert!(
             slint_ui.contains("in-out property <int> settings_dialog_tab_index: 0;")
@@ -148,15 +149,15 @@ mod tests {
         );
         assert!(
             slint_ui.contains("text: \"Appearance\"")
-                && slint_ui.contains("text: \"Dark mode\"")
-                && slint_ui.contains("checked <=> root.settings_dark_mode;"),
-            "General tab should expose appearance section with dark-mode toggle"
+                && slint_ui.contains("text: \"Color Scheme\"")
+                && slint_ui.contains("settings-theme-picker := ComboBox"),
+            "General tab should expose appearance section with color scheme picker"
         );
         assert!(
             slint_ui.contains(
-                "callback apply_settings(int, int, int, int, string, string, string, string, bool, bool, bool, bool, int, int, bool, bool, bool);"
+                "callback apply_settings(int, int, int, int, string, string, string, string, bool, bool, bool, int, int, bool, bool, bool, int, [string]);"
             ),
-            "Apply settings callback should include auto-scroll, dark mode, sample-rate mode, resampler quality, dither, and downmix controls"
+            "Apply settings callback should include color scheme selection and custom color values"
         );
         assert!(
             slint_ui.contains("label: \"Output Sample Rate\"")
@@ -235,8 +236,10 @@ mod tests {
         );
         assert!(
             menu_ui.contains("source: AppIcons.close;")
-                && menu_ui.contains("colorize: delete-column-ta.has-hover ? #ff5c5c : #db3f3f;"),
-            "Custom columns should render a red SVG delete icon"
+                && menu_ui.contains("colorize: delete-column-ta.has-hover")
+                && menu_ui.contains("? AppPalette.danger")
+                && menu_ui.contains(": AppPalette.danger.mix(AppPalette.text-muted, 0.4);"),
+            "Custom columns should render a theme-danger SVG delete icon"
         );
         assert!(
             slint_ui.contains("show_delete_custom_column_confirm"),

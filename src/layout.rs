@@ -36,6 +36,8 @@ pub const PANEL_CODE_SPACER: i32 = 10;
 pub const PANEL_CODE_STATUS_BAR: i32 = 11;
 /// Stable panel kind code for `LayoutPanelKind::ImportButtonCluster`.
 pub const PANEL_CODE_IMPORT_BUTTON_CLUSTER: i32 = 12;
+/// Stable ID for the built-in default color scheme.
+pub const DEFAULT_COLOR_SCHEME_ID: &str = "roqtune_dark";
 
 const BUTTON_CLUSTER_BUTTON_SIZE_PX: u32 = 32;
 const BUTTON_CLUSTER_BUTTON_SPACING_PX: u32 = 8;
@@ -274,6 +276,29 @@ pub struct PlaylistColumnWidthOverrideConfig {
     pub width_px: u32,
 }
 
+/// Named theme color components used across the UI.
+#[derive(Debug, Clone, serde::Deserialize, serde::Serialize, PartialEq, Eq)]
+pub struct ThemeColorComponents {
+    pub window_bg: String,
+    pub panel_bg: String,
+    pub panel_bg_alt: String,
+    pub border: String,
+    pub text_primary: String,
+    pub text_secondary: String,
+    pub text_muted: String,
+    pub accent: String,
+    pub accent_on: String,
+    pub warning: String,
+    pub danger: String,
+    pub success: String,
+    #[serde(default)]
+    pub control_hover_bg: String,
+    #[serde(default)]
+    pub selection_bg: String,
+    #[serde(default)]
+    pub selection_border: String,
+}
+
 /// Persistent layout preferences.
 /// This is the only persisted home for layout-owned settings (`layout.toml`).
 #[derive(Debug, Clone, PartialEq)]
@@ -284,6 +309,10 @@ pub struct LayoutConfig {
     pub playlist_album_art_column_min_width_px: u32,
     /// Built-in Album Art playlist-column width maximum.
     pub playlist_album_art_column_max_width_px: u32,
+    /// Selected color scheme identifier from preset catalog, or `custom`.
+    pub color_scheme: String,
+    /// User-customized color component values used when `color_scheme = "custom"`.
+    pub custom_colors: Option<ThemeColorComponents>,
     /// Ordered playlist column list (built-ins + custom columns), shared by all playlists.
     /// Do not reintroduce per-playlist column ordering from playlist storage.
     pub playlist_columns: Vec<PlaylistColumnConfig>,
@@ -307,6 +336,8 @@ impl Default for LayoutConfig {
             ),
             playlist_album_art_column_max_width_px: default_playlist_album_art_column_max_width_px(
             ),
+            color_scheme: default_color_scheme_id(),
+            custom_colors: None,
             playlist_columns: default_playlist_columns(),
             playlist_column_width_overrides: Vec::new(),
             button_cluster_instances: Vec::new(),
@@ -343,6 +374,10 @@ struct LayoutConfigWire {
     playlist_album_art_column_min_width_px: u32,
     #[serde(default = "default_playlist_album_art_column_max_width_px")]
     playlist_album_art_column_max_width_px: u32,
+    #[serde(default = "default_color_scheme_id")]
+    color_scheme: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    custom_colors: Option<ThemeColorComponents>,
     #[serde(default = "default_playlist_columns_wire")]
     playlist_columns: Vec<LayoutPlaylistColumnWire>,
     // Legacy top-level key kept for backwards-compatibility while migrating to
@@ -393,6 +428,15 @@ impl<'de> serde::Deserialize<'de> for LayoutConfig {
             version: LAYOUT_VERSION,
             playlist_album_art_column_min_width_px: v2.playlist_album_art_column_min_width_px,
             playlist_album_art_column_max_width_px: v2.playlist_album_art_column_max_width_px,
+            color_scheme: {
+                let trimmed = v2.color_scheme.trim();
+                if trimmed.is_empty() {
+                    default_color_scheme_id()
+                } else {
+                    trimmed.to_string()
+                }
+            },
+            custom_colors: v2.custom_colors,
             playlist_columns,
             playlist_column_width_overrides,
             button_cluster_instances: v2.button_cluster_instances,
@@ -432,6 +476,12 @@ impl serde::Serialize for LayoutConfig {
             _version: LAYOUT_VERSION,
             playlist_album_art_column_min_width_px: self.playlist_album_art_column_min_width_px,
             playlist_album_art_column_max_width_px: self.playlist_album_art_column_max_width_px,
+            color_scheme: if self.color_scheme.trim().is_empty() {
+                default_color_scheme_id()
+            } else {
+                self.color_scheme.clone()
+            },
+            custom_colors: self.custom_colors.clone(),
             playlist_columns,
             playlist_column_width_overrides: Vec::new(),
             button_cluster_instances: self.button_cluster_instances.clone(),
@@ -478,6 +528,10 @@ pub struct TreeLayoutMetrics {
 
 fn default_layout_version() -> u32 {
     LAYOUT_VERSION
+}
+
+fn default_color_scheme_id() -> String {
+    DEFAULT_COLOR_SCHEME_ID.to_string()
 }
 
 fn default_layout_root_for_wire() -> LayoutNode {
@@ -825,6 +879,12 @@ pub fn sanitize_layout_config(
         version: LAYOUT_VERSION,
         playlist_album_art_column_min_width_px: config.playlist_album_art_column_min_width_px,
         playlist_album_art_column_max_width_px: config.playlist_album_art_column_max_width_px,
+        color_scheme: if config.color_scheme.trim().is_empty() {
+            default_color_scheme_id()
+        } else {
+            config.color_scheme.clone()
+        },
+        custom_colors: config.custom_colors.clone(),
         playlist_columns: config.playlist_columns.clone(),
         playlist_column_width_overrides: config.playlist_column_width_overrides.clone(),
         button_cluster_instances: config.button_cluster_instances.clone(),
@@ -1032,6 +1092,12 @@ pub fn add_root_leaf_if_empty(layout: &LayoutConfig, panel: LayoutPanelKind) -> 
             version: LAYOUT_VERSION,
             playlist_album_art_column_min_width_px: layout.playlist_album_art_column_min_width_px,
             playlist_album_art_column_max_width_px: layout.playlist_album_art_column_max_width_px,
+            color_scheme: if layout.color_scheme.trim().is_empty() {
+                default_color_scheme_id()
+            } else {
+                layout.color_scheme.clone()
+            },
+            custom_colors: layout.custom_colors.clone(),
             playlist_columns: layout.playlist_columns.clone(),
             playlist_column_width_overrides: layout.playlist_column_width_overrides.clone(),
             button_cluster_instances: layout.button_cluster_instances.clone(),
@@ -1267,7 +1333,7 @@ mod tests {
         compute_tree_layout_metrics, delete_leaf, first_leaf_id, replace_leaf_panel,
         sanitize_layout_config, set_split_ratio, split_leaf, LayoutConfig, LayoutNode,
         LayoutPanelKind, LayoutSplitterItem, PlaylistColumnWidthOverrideConfig, SplitAxis,
-        LAYOUT_VERSION, SPLITTER_THICKNESS_PX,
+        DEFAULT_COLOR_SCHEME_ID, LAYOUT_VERSION, SPLITTER_THICKNESS_PX,
     };
 
     fn splitter_by_id<'a>(splitters: &'a [LayoutSplitterItem], id: &str) -> &'a LayoutSplitterItem {
@@ -1298,6 +1364,8 @@ mod tests {
                 crate::config::default_playlist_album_art_column_min_width_px(),
             playlist_album_art_column_max_width_px:
                 crate::config::default_playlist_album_art_column_max_width_px(),
+            color_scheme: DEFAULT_COLOR_SCHEME_ID.to_string(),
+            custom_colors: None,
             playlist_columns: crate::config::default_playlist_columns(),
             playlist_column_width_overrides: Vec::new(),
             button_cluster_instances: vec![crate::config::ButtonClusterInstanceConfig {
@@ -1343,6 +1411,8 @@ mod tests {
                 crate::config::default_playlist_album_art_column_min_width_px(),
             playlist_album_art_column_max_width_px:
                 crate::config::default_playlist_album_art_column_max_width_px(),
+            color_scheme: DEFAULT_COLOR_SCHEME_ID.to_string(),
+            custom_colors: None,
             playlist_columns: crate::config::default_playlist_columns(),
             playlist_column_width_overrides: Vec::new(),
             button_cluster_instances: Vec::new(),
@@ -1449,6 +1519,8 @@ mod tests {
                 crate::config::default_playlist_album_art_column_min_width_px(),
             playlist_album_art_column_max_width_px:
                 crate::config::default_playlist_album_art_column_max_width_px(),
+            color_scheme: DEFAULT_COLOR_SCHEME_ID.to_string(),
+            custom_colors: None,
             playlist_columns: crate::config::default_playlist_columns(),
             playlist_column_width_overrides: Vec::new(),
             button_cluster_instances: Vec::new(),

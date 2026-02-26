@@ -1,4 +1,4 @@
-import { Button, ComboBox, VerticalBox, StandardTableView, ScrollView, LineEdit, ListView, Switch, Palette } from "std-widgets.slint";
+import { Button, ComboBox, VerticalBox, StandardTableView, ScrollView, LineEdit, ListView, Switch, Slider } from "std-widgets.slint";
 
 import {
     LayoutAlbumArtViewerPanelModel,
@@ -18,10 +18,8 @@ import { LibraryRow } from "ui/components/library.slint";
 import { SettingsDropdownControl } from "ui/components/settings.slint";
 import { StatusBar } from "ui/components/status.slint";
 import { AppIcons } from "ui/icons.slint";
-
-export global AppPalette {
-    in-out property <ColorScheme> color-scheme <=> Palette.color-scheme;
-}
+import { AppPalette } from "ui/theme_palette.slint";
+export { AppPalette } from "ui/theme_palette.slint";
 
 export component AppWindow inherits Window {
     preferred-width: 900px;
@@ -30,14 +28,14 @@ export component AppWindow inherits Window {
     min-height: 400px;
     title: "roqtune";
     in-out property <bool> ui_dark_mode: true;
-    property <brush> theme_window_bg: root.ui_dark_mode ? #282828 : #eff3f9;
-    property <brush> theme_surface_bg: root.ui_dark_mode ? #202020 : #ffffff;
-    property <brush> theme_surface_alt_bg: root.ui_dark_mode ? #252525 : #eef3f9;
-    property <brush> theme_border: root.ui_dark_mode ? #3a3a3a : #c7d1dd;
-    property <brush> theme_separator: root.ui_dark_mode ? #333 : #d4dde8;
-    property <brush> theme_text_primary: root.ui_dark_mode ? #eee : #253444;
-    property <brush> theme_text_secondary: root.ui_dark_mode ? #aaa : #556576;
-    property <brush> theme_text_muted: root.ui_dark_mode ? #888 : #6c7a89;
+    property <brush> theme_window_bg: AppPalette.window-bg;
+    property <brush> theme_surface_bg: AppPalette.panel-bg;
+    property <brush> theme_surface_alt_bg: AppPalette.panel-bg-alt;
+    property <brush> theme_border: AppPalette.border;
+    property <brush> theme_separator: AppPalette.separator;
+    property <brush> theme_text_primary: AppPalette.text-primary;
+    property <brush> theme_text_secondary: AppPalette.text-secondary;
+    property <brush> theme_text_muted: AppPalette.text-muted;
     background: root.theme_window_bg;
 
     key-handler := FocusScope {
@@ -645,7 +643,7 @@ export component AppWindow inherits Window {
                 height: root.layout-region-height(i);
                 visible: root.layout-region-is-visible(i)
                     && root.layout-region-panel-kind(i) == root.panel_kind_spacer;
-                background: root.layout_edit_mode ? #252525 : #202020;
+                background: root.layout_edit_mode ? AppPalette.panel-bg-alt : AppPalette.panel-bg;
                 border-width: root.layout_edit_mode ? 1px : 0px;
                 border-color: root.theme_border;
                 if root.layout_edit_mode : Text {
@@ -789,6 +787,13 @@ export component AppWindow inherits Window {
                     position-percentage: root.position-percentage;
                     elapsed-text: root.format-time(root.elapsed-ms);
                     total-text: root.format-time(root.total-ms);
+                    panel-bg: AppPalette.panel-bg;
+                    text-muted: AppPalette.text-muted;
+                    track-bg: AppPalette.separator;
+                    progress-bg: AppPalette.accent;
+                    handle-bg: AppPalette.text-primary;
+                    handle-border: AppPalette.border;
+                    handle-shadow: AppPalette.overlay-scrim;
                     seek-requested(next-pos) => { root.seek-to(next-pos); }
                 }
             }
@@ -968,9 +973,9 @@ export component AppWindow inherits Window {
                                 height: 24px;
                                 border-radius: 2px;
                                 background: root.library_root_index == index
-                                    ? (root.ui_dark_mode ? #3d3d3d : #d8e6f7)
+                                    ? AppPalette.selection-bg
                                     : library-root-ta.has-hover
-                                        ? (root.ui_dark_mode ? #333 : #e4ebf5)
+                                        ? AppPalette.control-hover-bg
                                         : transparent;
 
                                 HorizontalLayout {
@@ -992,8 +997,8 @@ export component AppWindow inherits Window {
                                     Text {
                                         text: root-count + "";
                                         color: root.library_root_index == index
-                                            ? (root.ui_dark_mode ? #cfd4de : #4f637a)
-                                            : (root.ui_dark_mode ? #8b8f99 : #6a7989);
+                                            ? AppPalette.text-secondary
+                                            : AppPalette.text-muted;
                                         font-size: 12px;
                                         vertical-alignment: center;
                                         horizontal-alignment: right;
@@ -1010,7 +1015,7 @@ export component AppWindow inherits Window {
 
                         if root.library_scan_in_progress : Text {
                             text: "Scanning library...";
-                            color: root.ui_dark_mode ? #7f8ea3 : #4f6f93;
+                            color: AppPalette.text-secondary;
                             font-size: 11px;
                             height: 16px;
                             overflow: elide;
@@ -1036,6 +1041,10 @@ export component AppWindow inherits Window {
                     y: parent.content-inset;
                     width: max(0px, parent.width - parent.content-inset * 2);
                     height: max(0px, parent.height - parent.content-inset * 2);
+                    text-primary: AppPalette.text-primary;
+                    text-secondary: AppPalette.text-secondary;
+                    text-muted: AppPalette.text-muted;
+                    text-disabled: AppPalette.text-disabled;
                     display-title: panel.display_title;
                     display-artist: panel.display_artist;
                     display-album: panel.display_album;
@@ -1060,6 +1069,13 @@ export component AppWindow inherits Window {
                     y: parent.content-inset;
                     width: max(0px, parent.width - parent.content-inset * 2);
                     height: max(0px, parent.height - parent.content-inset * 2);
+                    panel-bg: AppPalette.panel-bg-alt;
+                    frame-border: AppPalette.border;
+                    frame-bg: AppPalette.panel-bg-elevated;
+                    frame-inner-border: AppPalette.separator;
+                    frame-inner-bg: AppPalette.panel-bg-alt;
+                    placeholder-icon: AppPalette.text-muted;
+                    placeholder-text: AppPalette.text-disabled;
                     art-source: panel.art_source;
                     has-art: panel.has_art;
                 }
@@ -1118,13 +1134,15 @@ export component AppWindow inherits Window {
                                 property <bool> is-favorite-column: i < root.playlist_visible_column_kinds.length
                                     && root.playlist_visible_column_kinds[i] == 2;
                                 property <color> header-color: (self.is-drag-source || self.is-resize-target || self.sort-state != 0)
-                                    ? (root.ui_dark_mode ? #afc4de : #365a81)
+                                    ? AppPalette.accent
                                     : root.theme_text_muted;
                                 width: root.playlist-column-width(i);
                                 border-radius: 2px;
-                                background: self.is-drag-source ? #2f3b4d : self.is-resize-target ? #243247 : self.sort-state != 0 ? #263546 : transparent;
+                                background: self.is-drag-source || self.is-resize-target || self.sort-state != 0
+                                    ? AppPalette.selection-bg
+                                    : transparent;
                                 border-width: (self.is-drag-source || self.is-resize-target) ? 1px : 0px;
-                                border-color: #496180;
+                                border-color: AppPalette.selection-border;
                                 if !(i < root.playlist_visible_column_kinds.length
                                         && root.playlist_visible_column_kinds[i] == 2) : Text {
                                     text: parent.sort-state == 1 ? column-header + " ▲"
@@ -1155,7 +1173,7 @@ export component AppWindow inherits Window {
                                     height: parent.height - 8px;
                                     background: (root.column_resize_active && root.column_resize_index == i)
                                         || (!root.column_resize_active && root.column_hover_divider == i)
-                                        ? #5da8ff
+                                        ? AppPalette.accent
                                         : root.theme_border;
                                 }
                             }
@@ -1314,7 +1332,7 @@ export component AppWindow inherits Window {
                             width: 2px;
                             height: parent.height - 6px;
                             border-radius: 1px;
-                            background: #5da8ff;
+                            background: AppPalette.accent;
                         }
 
                         if root.column_resize_active
@@ -1326,7 +1344,7 @@ export component AppWindow inherits Window {
                             width: 2px;
                             height: parent.height - 6px;
                             border-radius: 1px;
-                            background: #5da8ff;
+                            background: AppPalette.accent;
                         }
 
                     }
@@ -1371,9 +1389,11 @@ export component AppWindow inherits Window {
                             width: 156px;
                             height: 26px;
                             border-radius: 4px;
-                            background: root.playlist_filter_blocked_feedback ? #3d2f19f0 : #1f2f3fe6;
+                            background: root.playlist_filter_blocked_feedback
+                                ? AppPalette.warning.mix(AppPalette.panel-bg, 0.78)
+                                : AppPalette.accent-soft-bg;
                             border-width: 1px;
-                            border-color: root.playlist_filter_blocked_feedback ? #dca95a : #4a6684;
+                            border-color: root.playlist_filter_blocked_feedback ? AppPalette.warning : AppPalette.accent-soft-border;
                             z: 6;
                             animate background { duration: 120ms; }
                             animate border-color { duration: 120ms; }
@@ -1383,7 +1403,7 @@ export component AppWindow inherits Window {
                                 width: 90px;
                                 height: parent.height;
                                 text: "Read only view";
-                                color: root.playlist_filter_blocked_feedback ? #ffe2b8 : #d6e4f5;
+                                color: root.playlist_filter_blocked_feedback ? AppPalette.warning : AppPalette.text-primary;
                                 font-size: 11px;
                                 vertical-alignment: center;
                                 horizontal-alignment: left;
@@ -1396,9 +1416,9 @@ export component AppWindow inherits Window {
                                 width: 16px;
                                 height: 16px;
                                 border-radius: 2px;
-                                background: save-view-ta.has-hover ? #2f4b67 : #29425b;
+                                background: save-view-ta.has-hover ? AppPalette.control-pressed-bg : AppPalette.control-hover-bg;
                                 border-width: 1px;
-                                border-color: #5d7ea0;
+                                border-color: AppPalette.accent-soft-border;
                                 Image {
                                     source: AppIcons.pencil-down;
                                     width: 12px;
@@ -1406,7 +1426,7 @@ export component AppWindow inherits Window {
                                     x: (parent.width - self.width) / 2;
                                     y: (parent.height - self.height) / 2;
                                     image-fit: contain;
-                                    colorize: #d9e8f8;
+                                    colorize: AppPalette.text-primary;
                                 }
                                 save-view-ta := TouchArea {
                                     clicked => {
@@ -1421,9 +1441,9 @@ export component AppWindow inherits Window {
                                 width: 16px;
                                 height: 16px;
                                 border-radius: 2px;
-                                background: clear-view-ta.has-hover ? #2f4b67 : #29425b;
+                                background: clear-view-ta.has-hover ? AppPalette.control-pressed-bg : AppPalette.control-hover-bg;
                                 border-width: 1px;
-                                border-color: #5d7ea0;
+                                border-color: AppPalette.accent-soft-border;
                                 Image {
                                     source: AppIcons.close;
                                     width: 10px;
@@ -1431,7 +1451,7 @@ export component AppWindow inherits Window {
                                     x: (parent.width - self.width) / 2;
                                     y: (parent.height - self.height) / 2;
                                     image-fit: contain;
-                                    colorize: #d9e8f8;
+                                    colorize: AppPalette.text-primary;
                                 }
                                 clear-view-ta := TouchArea {
                                     clicked => {
@@ -1449,9 +1469,9 @@ export component AppWindow inherits Window {
                             width: 320px;
                             height: 30px;
                             border-radius: 4px;
-                            background: #1c1c1cec;
+                            background: AppPalette.panel-bg-elevated;
                             border-width: 1px;
-                            border-color: #3f3f3f;
+                            border-color: AppPalette.border;
                             z: 6;
 
                             HorizontalLayout {
@@ -1470,7 +1490,7 @@ export component AppWindow inherits Window {
                                 }
                                 Text {
                                     text: root.playlist_search_result_text;
-                                    color: #a5a5a5;
+                                    color: AppPalette.text-muted;
                                     font-size: 11px;
                                     width: 54px;
                                     horizontal-alignment: right;
@@ -1500,13 +1520,13 @@ export component AppWindow inherits Window {
                             height: 26px;
                             border-radius: 4px;
                             border-width: 1px;
-                            border-color: #4d6f90;
-                            background: #1f3347e8;
+                            border-color: AppPalette.accent-soft-border;
+                            background: AppPalette.accent-soft-bg;
                             z: 6;
 
                             playlist-scroll-toast-text := Text {
                                 text: (track-list-container.playing-above-viewport ? "▲ " : "▼ ") + "Scroll to playing";
-                                color: #dcecff;
+                                color: AppPalette.text-primary;
                                 font-size: 11px;
                                 horizontal-alignment: center;
                                 vertical-alignment: center;
@@ -1731,7 +1751,7 @@ export component AppWindow inherits Window {
                             y: max(0 , track-list.header-height + (root.drop-index - 1) * track-list.row-height) + track-list.viewport-y;
                             width: 100%;
                             height: 2px;
-                            background: #2a6def;
+                            background: AppPalette.accent;
                         }
                     }
                 }
@@ -1756,7 +1776,7 @@ export component AppWindow inherits Window {
                         }
                         if root.library_album_header_visible && root.library_can_go_back : Text {
                             text: root.library_root_index == 1 ? "Back to Artists" : "Back to Albums";
-                            color: root.ui_dark_mode ? #8fa7c6 : #466a92;
+                            color: AppPalette.text-secondary;
                             font-size: 11px;
                             vertical-alignment: center;
                         }
@@ -1772,7 +1792,7 @@ export component AppWindow inherits Window {
                         }
                         if root.library_scan_in_progress : Text {
                             text: "Scanning...";
-                            color: root.ui_dark_mode ? #7f8ea3 : #4f6f93;
+                            color: AppPalette.text-secondary;
                             font-size: 11px;
                             vertical-alignment: center;
                         }
@@ -1796,7 +1816,7 @@ export component AppWindow inherits Window {
                                 border-radius: 4px;
                                 border-width: 1px;
                                 border-color: root.theme_border;
-                                background: root.ui_dark_mode ? #1f1f1f : #f4f7fb;
+                                background: AppPalette.panel-bg-elevated;
                                 if root.library_album_header_has_art : Image {
                                     width: parent.width;
                                     height: parent.height;
@@ -1810,7 +1830,7 @@ export component AppWindow inherits Window {
                                     x: (parent.width - self.width) / 2;
                                     y: (parent.height - self.height) / 2;
                                     image-fit: contain;
-                                    colorize: root.ui_dark_mode ? #8fa7c6 : #466a92;
+                                    colorize: AppPalette.text-secondary;
                                 }
                             }
                             Rectangle {
@@ -1835,7 +1855,7 @@ export component AppWindow inherits Window {
                                     }
                                     Text {
                                         text: root.library_album_header_meta;
-                                        color: root.ui_dark_mode ? #8fa7c6 : #466a92;
+                                        color: AppPalette.text-secondary;
                                         font-size: 11px;
                                         overflow: elide;
                                         horizontal-alignment: left;
@@ -1844,7 +1864,7 @@ export component AppWindow inherits Window {
                                         text: root.library_detail_header_loading
                                             ? "Loading internet metadata..."
                                             : root.library_detail_header_blurb;
-                                        color: root.ui_dark_mode ? #c7c7c7 : #5c6b7a;
+                                        color: AppPalette.text-secondary;
                                         font-size: 11px;
                                         wrap: word-wrap;
                                         max-height: 76px;
@@ -1854,14 +1874,14 @@ export component AppWindow inherits Window {
                                     if root.library_detail_header_source_visible : Rectangle {
                                         height: 18px;
                                         background: library-source-link-ta.has-hover
-                                            ? (root.ui_dark_mode ? #2b2b2b : #e4ebf5)
+                                            ? AppPalette.control-hover-bg
                                             : transparent;
                                         border-radius: 3px;
                                         Text {
                                             x: 6px;
                                             width: max(0px, parent.width - 12px);
                                             text: "Source: " + root.library_detail_header_source_name;
-                                            color: root.ui_dark_mode ? #9fbedf : #3f648c;
+                                            color: AppPalette.accent;
                                             font-size: 10px;
                                             vertical-alignment: center;
                                             overflow: elide;
@@ -1890,7 +1910,7 @@ export component AppWindow inherits Window {
                             }
                         }
                         border-radius: 4px;
-                        background: root.ui_dark_mode ? #1c1c1cec : #f4f7fbec;
+                        background: AppPalette.panel-bg-elevated;
                         border-width: 1px;
                         border-color: root.theme_border;
 
@@ -2092,8 +2112,8 @@ export component AppWindow inherits Window {
                             height: max(0px, parent.height - 24px);
                             border-radius: 8px;
                             border-width: 1px;
-                            border-color: #3c3c3c;
-                            background: #202020;
+                            border-color: AppPalette.border;
+                            background: AppPalette.panel-bg;
 
                             Rectangle {
                                 width: min(parent.width - 28px, 540px);
@@ -2106,7 +2126,7 @@ export component AppWindow inherits Window {
 
                                     Text {
                                         text: "Add folders to get started";
-                                        color: #f0f0f0;
+                                        color: AppPalette.text-primary;
                                         font-size: 26px;
                                         font-weight: 800;
                                         horizontal-alignment: center;
@@ -2114,7 +2134,7 @@ export component AppWindow inherits Window {
 
                                     Text {
                                         text: "Library mode stays empty until at least one music folder is configured.";
-                                        color: #adadad;
+                                        color: AppPalette.text-secondary;
                                         font-size: 13px;
                                         horizontal-alignment: center;
                                         wrap: word-wrap;
@@ -2143,13 +2163,13 @@ export component AppWindow inherits Window {
                             height: 26px;
                             border-radius: 4px;
                             border-width: 1px;
-                            border-color: #4d6f90;
-                            background: #1f3347e8;
+                            border-color: AppPalette.accent-soft-border;
+                            background: AppPalette.accent-soft-bg;
                             z: 6;
 
                             library-scroll-toast-text := Text {
                                 text: (library-list-container.playing-above-viewport ? "▲ " : "▼ ") + "Scroll to playing";
-                                color: #dcecff;
+                                color: AppPalette.text-primary;
                                 font-size: 11px;
                                 horizontal-alignment: center;
                                 vertical-alignment: center;
@@ -2186,8 +2206,8 @@ export component AppWindow inherits Window {
                             height: 34px;
                             border-radius: 4px;
                             border-width: 1px;
-                            border-color: #3a4f68;
-                            background: #18314adf;
+                            border-color: AppPalette.accent-soft-border;
+                            background: AppPalette.accent-soft-bg;
 
                             HorizontalLayout {
                                 spacing: 8px;
@@ -2196,7 +2216,7 @@ export component AppWindow inherits Window {
 
                                 Text {
                                     text: "Fetch artist/album page metadata from internet";
-                                    color: #dbe9f8;
+                                    color: AppPalette.text-primary;
                                     font-size: 11px;
                                     horizontal-stretch: 1;
                                     vertical-alignment: center;
@@ -2207,7 +2227,9 @@ export component AppWindow inherits Window {
                                     width: 22px;
                                     height: 22px;
                                     border-radius: 3px;
-                                    background: prompt-accept-ta.has-hover ? #2c5c86 : #234a6c;
+                                    background: prompt-accept-ta.has-hover
+                                        ? AppPalette.control-pressed-bg
+                                        : AppPalette.control-hover-bg;
                                     Image {
                                         source: AppIcons.check;
                                         width: 12px;
@@ -2215,7 +2237,7 @@ export component AppWindow inherits Window {
                                         x: (parent.width - self.width) / 2;
                                         y: (parent.height - self.height) / 2;
                                         image-fit: contain;
-                                        colorize: #e8f3ff;
+                                        colorize: AppPalette.text-primary;
                                     }
                                     prompt-accept-ta := TouchArea {
                                         clicked => { root.library_online_metadata_prompt_accept(); }
@@ -2226,7 +2248,9 @@ export component AppWindow inherits Window {
                                     width: 22px;
                                     height: 22px;
                                     border-radius: 3px;
-                                    background: prompt-deny-ta.has-hover ? #663838 : #4f2e2e;
+                                    background: prompt-deny-ta.has-hover
+                                        ? AppPalette.danger.mix(AppPalette.panel-bg, 0.72)
+                                        : AppPalette.danger.mix(AppPalette.panel-bg, 0.82);
                                     Image {
                                         source: AppIcons.close;
                                         width: 11px;
@@ -2234,7 +2258,7 @@ export component AppWindow inherits Window {
                                         x: (parent.width - self.width) / 2;
                                         y: (parent.height - self.height) / 2;
                                         image-fit: contain;
-                                        colorize: #ffe8e8;
+                                        colorize: AppPalette.danger;
                                     }
                                     prompt-deny-ta := TouchArea {
                                         clicked => { root.library_online_metadata_prompt_deny(); }
@@ -2255,15 +2279,15 @@ export component AppWindow inherits Window {
                     height: 30px;
                     border-radius: 4px;
                     border-width: 1px;
-                    border-color: #3a3a3a;
-                    background: #1a1a1adf;
+                    border-color: AppPalette.border;
+                    background: AppPalette.panel-bg-elevated;
                     opacity: root.library_toast_visible ? 1 : 0;
                     visible: root.library_toast_visible;
                     animate opacity { duration: 220ms; easing: ease-in-out; }
 
                     track-panel-toast-text := Text {
                         text: root.library_toast_text;
-                        color: #e3e3e3;
+                        color: AppPalette.text-primary;
                         font-size: 12px;
                         horizontal-alignment: center;
                         vertical-alignment: center;
@@ -2294,14 +2318,14 @@ export component AppWindow inherits Window {
                 visible: root.layout_edit_mode
                     && root.layout-region-is-visible(i)
                     && self.panel-kind != root.panel_kind_none;
-                background: leaf-select-ta.has-hover ? #4b84c91f : transparent;
+                background: leaf-select-ta.has-hover ? AppPalette.control-hover-bg : transparent;
                 border-width: 1px;
-                border-color: i == root.layout_selected_leaf_index ? #4b84c9 : #3a3a3a;
+                border-color: i == root.layout_selected_leaf_index ? AppPalette.selection-border : AppPalette.border;
                 z: 100;
                 Text {
                     visible: leaf-select-ta.has-hover || i == root.layout_selected_leaf_index;
                     text: root.layout-panel-label(parent.panel-kind);
-                    color: i == root.layout_selected_leaf_index ? #9fc3ff : #777;
+                    color: i == root.layout_selected_leaf_index ? AppPalette.text-primary : AppPalette.text-disabled;
                     font-size: 11px;
                     x: 6px;
                     y: 4px;
@@ -2350,7 +2374,9 @@ export component AppWindow inherits Window {
                 width: splitter.width_px * 1px;
                 height: splitter.height_px * 1px;
                 z: 120;
-                background: splitter-ta.has-hover || root.layout_active_splitter_index == i ? #4b84c9a8 : #2f2f2f88;
+                background: splitter-ta.has-hover || root.layout_active_splitter_index == i
+                    ? AppPalette.selection-border
+                    : AppPalette.separator;
                 splitter-ta := TouchArea {
                     x: splitter.axis == 1 ? -4px : 0px;
                     y: splitter.axis == 0 ? -4px : 0px;
@@ -2465,7 +2491,7 @@ export component AppWindow inherits Window {
     }
 
     if root.show_layout_editor_dialog : Rectangle {
-        background: #00000088;
+        background: AppPalette.overlay-scrim;
         z: 130;
 
         TouchArea {}
@@ -2476,9 +2502,9 @@ export component AppWindow inherits Window {
             x: (parent.width - self.width) / 2;
             y: (parent.height - self.height) / 2;
             border-radius: 6px;
-            background: #242424;
+            background: AppPalette.panel-bg-elevated;
             border-width: 1px;
-            border-color: #3b3b3b;
+            border-color: AppPalette.border;
 
             VerticalLayout {
                 padding: 16px;
@@ -2487,7 +2513,7 @@ export component AppWindow inherits Window {
                 HorizontalLayout {
                     Text {
                         text: "Layout Edit Mode";
-                        color: #eee;
+                        color: AppPalette.text-primary;
                         font-size: 16px;
                         font-weight: 700;
                         vertical-alignment: center;
@@ -2495,11 +2521,11 @@ export component AppWindow inherits Window {
                     Rectangle { horizontal-stretch: 1; }
                 }
 
-                Rectangle { height: 1px; background: #343434; }
+                Rectangle { height: 1px; background: AppPalette.separator; }
 
                 Text {
                     text: "You are entering layout editing mode. Right-click a panel to replace, split, or delete it. Drag splitters to resize. Right-click a splitter for divider actions.";
-                    color: #bbb;
+                    color: AppPalette.text-secondary;
                     font-size: 12px;
                     wrap: word-wrap;
                 }
@@ -2513,8 +2539,8 @@ export component AppWindow inherits Window {
                         height: 16px;
                         border-radius: 3px;
                         border-width: 1px;
-                        border-color: #5a5a5a;
-                        background: layout-intro-checkbox-ta.has-hover ? #363636 : #2d2d2d;
+                        border-color: AppPalette.border;
+                        background: layout-intro-checkbox-ta.has-hover ? AppPalette.control-hover-bg : AppPalette.panel-bg-alt;
                         if root.layout_intro_dont_show_again : Image {
                             source: AppIcons.check;
                             width: 10px;
@@ -2522,7 +2548,7 @@ export component AppWindow inherits Window {
                             x: (parent.width - self.width) / 2;
                             y: (parent.height - self.height) / 2;
                             image-fit: contain;
-                            colorize: #8cb1ff;
+                            colorize: AppPalette.accent;
                         }
                         layout-intro-checkbox-ta := TouchArea {
                             clicked => {
@@ -2532,7 +2558,7 @@ export component AppWindow inherits Window {
                     }
                     Text {
                         text: "Don't show this again";
-                        color: #ccc;
+                        color: AppPalette.text-primary;
                         font-size: 12px;
                         vertical-alignment: center;
                     }
@@ -2569,9 +2595,9 @@ export component AppWindow inherits Window {
         width: 236px;
         height: root.layout-selected-panel-has-settings() ? 142px : 116px;
         border-radius: 6px;
-        background: #262626;
+        background: AppPalette.panel-bg-elevated;
         border-width: 1px;
-        border-color: #3d3d3d;
+        border-color: AppPalette.border;
 
         VerticalLayout {
             padding: 6px;
@@ -2580,10 +2606,10 @@ export component AppWindow inherits Window {
             Rectangle {
                 height: 24px;
                 border-radius: 3px;
-                background: replace-action-ta.has-hover || root.show_layout_leaf_replace_submenu ? #363636 : transparent;
+                background: replace-action-ta.has-hover || root.show_layout_leaf_replace_submenu ? AppPalette.control-hover-bg : transparent;
                 Text {
                     text: "Replace panel with";
-                    color: #ddd;
+                    color: AppPalette.text-primary;
                     font-size: 12px;
                     x: 8px;
                     vertical-alignment: center;
@@ -2595,7 +2621,7 @@ export component AppWindow inherits Window {
                     x: parent.width - self.width - 8px;
                     y: (parent.height - self.height) / 2;
                     image-fit: contain;
-                    colorize: #888;
+                    colorize: AppPalette.text-muted;
                 }
                 replace-action-ta := TouchArea {
                     changed has-hover => {
@@ -2615,10 +2641,10 @@ export component AppWindow inherits Window {
             Rectangle {
                 height: 24px;
                 border-radius: 3px;
-                background: split-vertical-ta.has-hover ? #363636 : transparent;
+                background: split-vertical-ta.has-hover ? AppPalette.control-hover-bg : transparent;
                 Text {
                     text: "Split panel vertically";
-                    color: #ddd;
+                    color: AppPalette.text-primary;
                     font-size: 12px;
                     x: 8px;
                     vertical-alignment: center;
@@ -2640,10 +2666,10 @@ export component AppWindow inherits Window {
             Rectangle {
                 height: 24px;
                 border-radius: 3px;
-                background: split-horizontal-ta.has-hover ? #363636 : transparent;
+                background: split-horizontal-ta.has-hover ? AppPalette.control-hover-bg : transparent;
                 Text {
                     text: "Split panel horizontally";
-                    color: #ddd;
+                    color: AppPalette.text-primary;
                     font-size: 12px;
                     x: 8px;
                     vertical-alignment: center;
@@ -2665,10 +2691,10 @@ export component AppWindow inherits Window {
             if root.layout-selected-panel-has-settings() : Rectangle {
                 height: 24px;
                 border-radius: 3px;
-                background: panel-settings-ta.has-hover ? #363636 : transparent;
+                background: panel-settings-ta.has-hover ? AppPalette.control-hover-bg : transparent;
                 Text {
                     text: "Panel Settings...";
-                    color: #ddd;
+                    color: AppPalette.text-primary;
                     font-size: 12px;
                     x: 8px;
                     vertical-alignment: center;
@@ -2707,16 +2733,16 @@ export component AppWindow inherits Window {
 
             Rectangle {
                 height: 1px;
-                background: #3a3a3a;
+                background: AppPalette.separator;
             }
 
             Rectangle {
                 height: 24px;
                 border-radius: 3px;
-                background: delete-panel-ta.has-hover ? #4a2a2a : transparent;
+                background: delete-panel-ta.has-hover ? AppPalette.danger.mix(AppPalette.panel-bg, 0.82) : transparent;
                 Text {
                     text: "Delete panel";
-                    color: #ffb4b4;
+                    color: AppPalette.danger;
                     font-size: 12px;
                     x: 8px;
                     vertical-alignment: center;
@@ -2744,9 +2770,9 @@ export component AppWindow inherits Window {
             width: 268px;
             height: 92px;
             border-radius: 6px;
-            background: #262626;
+            background: AppPalette.panel-bg-elevated;
             border-width: 1px;
-            border-color: #3d3d3d;
+            border-color: AppPalette.border;
 
             submenu-hover-ta := TouchArea {
                 changed has-hover => {
@@ -2760,10 +2786,10 @@ export component AppWindow inherits Window {
                 Rectangle {
                     height: 24px;
                     border-radius: 3px;
-                    background: spacer-action-ta.has-hover ? #363636 : transparent;
+                    background: spacer-action-ta.has-hover ? AppPalette.control-hover-bg : transparent;
                     Text {
                         text: "Spacer";
-                        color: #ddd;
+                        color: AppPalette.text-primary;
                         font-size: 12px;
                         x: 8px;
                         vertical-alignment: center;
@@ -2786,10 +2812,10 @@ export component AppWindow inherits Window {
                 Rectangle {
                     height: 24px;
                     border-radius: 3px;
-                    background: panels-action-ta.has-hover || root.show_layout_leaf_panels_submenu ? #363636 : transparent;
+                    background: panels-action-ta.has-hover || root.show_layout_leaf_panels_submenu ? AppPalette.control-hover-bg : transparent;
                     Text {
                         text: "Panels";
-                        color: #ddd;
+                        color: AppPalette.text-primary;
                         font-size: 12px;
                         x: 8px;
                         vertical-alignment: center;
@@ -2801,7 +2827,7 @@ export component AppWindow inherits Window {
                         x: parent.width - self.width - 8px;
                         y: (parent.height - self.height) / 2;
                         image-fit: contain;
-                        colorize: #888;
+                        colorize: AppPalette.text-muted;
                     }
                     panels-action-ta := TouchArea {
                         changed has-hover => {
@@ -2824,10 +2850,10 @@ export component AppWindow inherits Window {
                 Rectangle {
                     height: 24px;
                     border-radius: 3px;
-                    background: presets-action-ta.has-hover || root.show_layout_leaf_presets_submenu ? #363636 : transparent;
+                    background: presets-action-ta.has-hover || root.show_layout_leaf_presets_submenu ? AppPalette.control-hover-bg : transparent;
                     Text {
                         text: "Presets";
-                        color: #ddd;
+                        color: AppPalette.text-primary;
                         font-size: 12px;
                         x: 8px;
                         vertical-alignment: center;
@@ -2839,7 +2865,7 @@ export component AppWindow inherits Window {
                         x: parent.width - self.width - 8px;
                         y: (parent.height - self.height) / 2;
                         image-fit: contain;
-                        colorize: #888;
+                        colorize: AppPalette.text-muted;
                     }
                     presets-action-ta := TouchArea {
                         changed has-hover => {
@@ -2867,9 +2893,9 @@ export component AppWindow inherits Window {
                 width: 252px;
                 height: min(220px, root.layout_panel_submenu_labels.length * 24px + 12px);
                 border-radius: 6px;
-                background: #262626;
+                background: AppPalette.panel-bg-elevated;
                 border-width: 1px;
-                border-color: #3d3d3d;
+                border-color: AppPalette.border;
 
                 panels-submenu-hover-ta := TouchArea {
                     changed has-hover => {
@@ -2893,10 +2919,10 @@ export component AppWindow inherits Window {
                                 width: parent.width;
                                 height: 24px;
                                 border-radius: 3px;
-                                background: panel-option-ta.has-hover ? #363636 : transparent;
+                                background: panel-option-ta.has-hover ? AppPalette.control-hover-bg : transparent;
                                 Text {
                                     text: panel-option;
-                                    color: #ddd;
+                                    color: AppPalette.text-primary;
                                     font-size: 12px;
                                     x: 10px;
                                     width: max(0px, parent.width - 20px);
@@ -2932,9 +2958,9 @@ export component AppWindow inherits Window {
                 width: 252px;
                 height: min(140px, root.layout_replace_preset_labels.length * 24px + 12px);
                 border-radius: 6px;
-                background: #262626;
+                background: AppPalette.panel-bg-elevated;
                 border-width: 1px;
-                border-color: #3d3d3d;
+                border-color: AppPalette.border;
 
                 presets-submenu-hover-ta := TouchArea {
                     changed has-hover => {
@@ -2948,10 +2974,10 @@ export component AppWindow inherits Window {
                     for preset-option[index] in root.layout_replace_preset_labels : Rectangle {
                         height: 24px;
                         border-radius: 3px;
-                        background: preset-option-ta.has-hover ? #363636 : transparent;
+                        background: preset-option-ta.has-hover ? AppPalette.control-hover-bg : transparent;
                         Text {
                             text: preset-option;
-                            color: #ddd;
+                            color: AppPalette.text-primary;
                             font-size: 12px;
                             x: 10px;
                             width: max(0px, parent.width - 20px);
@@ -2985,9 +3011,9 @@ export component AppWindow inherits Window {
         width: 210px;
         height: 102px;
         border-radius: 6px;
-        background: #262626;
+        background: AppPalette.panel-bg-elevated;
         border-width: 1px;
-        border-color: #3d3d3d;
+        border-color: AppPalette.border;
 
         VerticalLayout {
             padding: 10px;
@@ -2995,7 +3021,7 @@ export component AppWindow inherits Window {
 
             Text {
                 text: "Divider Actions";
-                color: #eee;
+                color: AppPalette.text-primary;
                 font-size: 13px;
                 font-weight: 700;
             }
@@ -3045,9 +3071,9 @@ export component AppWindow inherits Window {
         width: 360px;
         height: 176px;
         border-radius: 6px;
-        background: #262626;
+        background: AppPalette.panel-bg-elevated;
         border-width: 1px;
-        border-color: #3d3d3d;
+        border-color: AppPalette.border;
 
         VerticalLayout {
             padding: 10px;
@@ -3057,12 +3083,12 @@ export component AppWindow inherits Window {
                 text: (root.viewer_panel_settings_target_panel_kind == root.panel_kind_album_art_viewer
                     ? "Image Metadata Viewer"
                     : "Metadata Viewer") + " Settings";
-                color: #eee;
+                color: AppPalette.text-primary;
                 font-size: 13px;
                 font-weight: 700;
             }
 
-            Rectangle { height: 1px; background: #3a3a3a; }
+            Rectangle { height: 1px; background: AppPalette.separator; }
 
             HorizontalLayout {
                 spacing: 8px;
@@ -3072,7 +3098,7 @@ export component AppWindow inherits Window {
                     background: transparent;
                     Text {
                         text: "Display Priority";
-                        color: #ddd;
+                        color: AppPalette.text-primary;
                         font-size: 12px;
                         vertical-alignment: center;
                         horizontal-alignment: left;
@@ -3113,7 +3139,7 @@ export component AppWindow inherits Window {
                     background: transparent;
                     Text {
                         text: "Metadata Source";
-                        color: #ddd;
+                        color: AppPalette.text-primary;
                         font-size: 12px;
                         vertical-alignment: center;
                         horizontal-alignment: left;
@@ -3146,7 +3172,7 @@ export component AppWindow inherits Window {
                     background: transparent;
                     Text {
                         text: "Image Source";
-                        color: #ddd;
+                        color: AppPalette.text-primary;
                         font-size: 12px;
                         vertical-alignment: center;
                         horizontal-alignment: left;
@@ -3190,7 +3216,7 @@ export component AppWindow inherits Window {
         width: 210px;
         height: 70px;
         border-radius: 6px;
-        background: root.ui_dark_mode ? #262626 : #f4f7fb;
+        background: AppPalette.panel-bg-elevated;
         border-width: 1px;
         border-color: root.theme_border;
 
@@ -3202,7 +3228,7 @@ export component AppWindow inherits Window {
                 height: 28px;
                 border-radius: 4px;
                 background: layout-edit-toggle-ta.has-hover
-                    ? (root.ui_dark_mode ? #363636 : #dbe5f1)
+                    ? AppPalette.control-hover-bg
                     : transparent;
                 HorizontalLayout {
                     padding-left: 10px;
@@ -3239,7 +3265,7 @@ export component AppWindow inherits Window {
                 height: 28px;
                 border-radius: 4px;
                 background: open-settings-ta.has-hover
-                    ? (root.ui_dark_mode ? #363636 : #dbe5f1)
+                    ? AppPalette.control-hover-bg
                     : transparent;
                 Text {
                     x: 10px;
@@ -3286,7 +3312,7 @@ export component AppWindow inherits Window {
         width: 300px;
         height: 250px;
         border-radius: 6px;
-        background: root.ui_dark_mode ? #262626 : #f4f7fb;
+        background: AppPalette.panel-bg-elevated;
         border-width: 1px;
         border-color: root.theme_border;
 
@@ -3330,7 +3356,7 @@ export component AppWindow inherits Window {
                         height: 26px;
                         border-radius: 4px;
                         background: cast-device-ta.has-hover
-                            ? (root.ui_dark_mode ? #363636 : #dbe5f1)
+                            ? AppPalette.control-hover-bg
                             : transparent;
                         Text {
                             x: 8px;
@@ -3381,7 +3407,7 @@ export component AppWindow inherits Window {
         width: root.library_folder_menu_width;
         height: root.library_folder_menu_height;
         border-radius: 6px;
-        background: root.ui_dark_mode ? #262626 : #f4f7fb;
+        background: AppPalette.panel-bg-elevated;
         border-width: 1px;
         border-color: root.theme_border;
 
@@ -3393,7 +3419,7 @@ export component AppWindow inherits Window {
                 height: 28px;
                 border-radius: 4px;
                 background: library-menu-add-folder-ta.has-hover
-                    ? (root.ui_dark_mode ? #363636 : #dbe5f1)
+                    ? AppPalette.control-hover-bg
                     : transparent;
                 Text {
                     x: 10px;
@@ -3415,7 +3441,7 @@ export component AppWindow inherits Window {
                 height: 28px;
                 border-radius: 4px;
                 background: library-menu-configure-folders-ta.has-hover
-                    ? (root.ui_dark_mode ? #363636 : #dbe5f1)
+                    ? AppPalette.control-hover-bg
                     : transparent;
                 Text {
                     x: 10px;
@@ -3453,9 +3479,9 @@ export component AppWindow inherits Window {
         width: root.import_menu_width;
         height: root.import_menu_height;
         border-radius: 6px;
-        background: #262626;
+        background: AppPalette.panel-bg-elevated;
         border-width: 1px;
-        border-color: #3d3d3d;
+        border-color: AppPalette.border;
 
         VerticalLayout {
             padding: 4px;
@@ -3464,12 +3490,12 @@ export component AppWindow inherits Window {
             Rectangle {
                 height: 28px;
                 border-radius: 4px;
-                background: add-files-ta.has-hover ? #363636 : transparent;
+                background: add-files-ta.has-hover ? AppPalette.control-hover-bg : transparent;
                 Text {
                     x: 10px;
                     width: parent.width - 20px;
                     text: "Add files";
-                    color: #ddd;
+                    color: AppPalette.text-primary;
                     font-size: 12px;
                     vertical-alignment: center;
                 }
@@ -3484,12 +3510,12 @@ export component AppWindow inherits Window {
             Rectangle {
                 height: 28px;
                 border-radius: 4px;
-                background: add-folder-ta.has-hover ? #363636 : transparent;
+                background: add-folder-ta.has-hover ? AppPalette.control-hover-bg : transparent;
                 Text {
                     x: 10px;
                     width: parent.width - 20px;
                     text: "Add folders";
-                    color: #ddd;
+                    color: AppPalette.text-primary;
                     font-size: 12px;
                     vertical-alignment: center;
                 }
@@ -3504,12 +3530,12 @@ export component AppWindow inherits Window {
             Rectangle {
                 height: 28px;
                 border-radius: 4px;
-                background: create-playlist-ta.has-hover ? #363636 : transparent;
+                background: create-playlist-ta.has-hover ? AppPalette.control-hover-bg : transparent;
                 Text {
                     x: 10px;
                     width: parent.width - 20px;
                     text: "Create new playlist";
-                    color: #ddd;
+                    color: AppPalette.text-primary;
                     font-size: 12px;
                     vertical-alignment: center;
                 }
@@ -3540,9 +3566,9 @@ export component AppWindow inherits Window {
         width: 170px;
         height: root.context-menu-height;
         border-radius: 6px;
-        background: #262626;
+        background: AppPalette.panel-bg-elevated;
         border-width: 1px;
-        border-color: #3d3d3d;
+        border-color: AppPalette.border;
 
         VerticalLayout {
             padding: 4px;
@@ -3550,12 +3576,12 @@ export component AppWindow inherits Window {
             Rectangle {
                 height: 24px;
                 border-radius: 4px;
-                background: playlist-properties-ta.has-hover && root.playlist_properties_enabled ? #363636 : transparent;
+                background: playlist-properties-ta.has-hover && root.playlist_properties_enabled ? AppPalette.control-hover-bg : transparent;
                 Text {
                     x: 10px;
                     width: parent.width - 20px;
                     text: "Properties";
-                    color: root.playlist_properties_enabled ? #ddd : #777;
+                    color: root.playlist_properties_enabled ? AppPalette.text-primary : AppPalette.text-disabled;
                     font-size: 12px;
                     vertical-alignment: center;
                     overflow: elide;
@@ -3571,12 +3597,12 @@ export component AppWindow inherits Window {
             Rectangle {
                 height: 24px;
                 border-radius: 4px;
-                background: playlist-open-location-ta.has-hover && root.playlist_properties_enabled ? #363636 : transparent;
+                background: playlist-open-location-ta.has-hover && root.playlist_properties_enabled ? AppPalette.control-hover-bg : transparent;
                 Text {
                     x: 10px;
                     width: parent.width - 20px;
                     text: "Open File Location";
-                    color: root.playlist_properties_enabled ? #ddd : #777;
+                    color: root.playlist_properties_enabled ? AppPalette.text-primary : AppPalette.text-disabled;
                     font-size: 12px;
                     vertical-alignment: center;
                     overflow: elide;
@@ -3592,12 +3618,12 @@ export component AppWindow inherits Window {
             Rectangle {
                 height: 24px;
                 border-radius: 4px;
-                background: playlist-cut-ta.has-hover ? #363636 : transparent;
+                background: playlist-cut-ta.has-hover ? AppPalette.control-hover-bg : transparent;
                 Text {
                     x: 10px;
                     width: parent.width - 20px;
                     text: "Cut";
-                    color: #ddd;
+                    color: AppPalette.text-primary;
                     font-size: 12px;
                     vertical-alignment: center;
                     overflow: elide;
@@ -3612,12 +3638,12 @@ export component AppWindow inherits Window {
             Rectangle {
                 height: 24px;
                 border-radius: 4px;
-                background: playlist-copy-ta.has-hover ? #363636 : transparent;
+                background: playlist-copy-ta.has-hover ? AppPalette.control-hover-bg : transparent;
                 Text {
                     x: 10px;
                     width: parent.width - 20px;
                     text: "Copy";
-                    color: #ddd;
+                    color: AppPalette.text-primary;
                     font-size: 12px;
                     vertical-alignment: center;
                     overflow: elide;
@@ -3632,12 +3658,12 @@ export component AppWindow inherits Window {
             Rectangle {
                 height: 24px;
                 border-radius: 4px;
-                background: playlist-paste-ta.has-hover ? #363636 : transparent;
+                background: playlist-paste-ta.has-hover ? AppPalette.control-hover-bg : transparent;
                 Text {
                     x: 10px;
                     width: parent.width - 20px;
                     text: "Paste";
-                    color: #ddd;
+                    color: AppPalette.text-primary;
                     font-size: 12px;
                     vertical-alignment: center;
                     overflow: elide;
@@ -3652,12 +3678,12 @@ export component AppWindow inherits Window {
             Rectangle {
                 height: 24px;
                 border-radius: 4px;
-                background: playlist-delete-ta.has-hover ? #4a2a2a : transparent;
+                background: playlist-delete-ta.has-hover ? AppPalette.danger.mix(AppPalette.panel-bg, 0.82) : transparent;
                 Text {
                     x: 10px;
                     width: parent.width - 20px;
                     text: "Delete";
-                    color: #db6f6f;
+                    color: AppPalette.danger;
                     font-size: 12px;
                     vertical-alignment: center;
                     overflow: elide;
@@ -3689,9 +3715,9 @@ export component AppWindow inherits Window {
         width: 190px;
         height: root.context-menu-height;
         border-radius: 6px;
-        background: #262626;
+        background: AppPalette.panel-bg-elevated;
         border-width: 1px;
-        border-color: #3d3d3d;
+        border-color: AppPalette.border;
 
         VerticalLayout {
             padding: 4px;
@@ -3699,12 +3725,12 @@ export component AppWindow inherits Window {
             Rectangle {
                 height: 24px;
                 border-radius: 4px;
-                background: library-properties-ta.has-hover && root.library_properties_enabled ? #363636 : transparent;
+                background: library-properties-ta.has-hover && root.library_properties_enabled ? AppPalette.control-hover-bg : transparent;
                 Text {
                     x: 10px;
                     width: parent.width - 20px;
                     text: "Properties";
-                    color: root.library_properties_enabled ? #ddd : #777;
+                    color: root.library_properties_enabled ? AppPalette.text-primary : AppPalette.text-disabled;
                     font-size: 12px;
                     vertical-alignment: center;
                     overflow: elide;
@@ -3720,12 +3746,12 @@ export component AppWindow inherits Window {
             Rectangle {
                 height: 24px;
                 border-radius: 4px;
-                background: library-open-location-ta.has-hover && root.library_properties_enabled ? #363636 : transparent;
+                background: library-open-location-ta.has-hover && root.library_properties_enabled ? AppPalette.control-hover-bg : transparent;
                 Text {
                     x: 10px;
                     width: parent.width - 20px;
                     text: "Open File Location";
-                    color: root.library_properties_enabled ? #ddd : #777;
+                    color: root.library_properties_enabled ? AppPalette.text-primary : AppPalette.text-disabled;
                     font-size: 12px;
                     vertical-alignment: center;
                     overflow: elide;
@@ -3741,12 +3767,12 @@ export component AppWindow inherits Window {
             Rectangle {
                 height: 24px;
                 border-radius: 4px;
-                background: add-to-playlists-ta.has-hover ? #363636 : transparent;
+                background: add-to-playlists-ta.has-hover ? AppPalette.control-hover-bg : transparent;
                 Text {
                     x: 10px;
                     width: parent.width - 20px;
                     text: "Add to playlists...";
-                    color: #ddd;
+                    color: AppPalette.text-primary;
                     font-size: 12px;
                     vertical-alignment: center;
                     overflow: elide;
@@ -3761,12 +3787,12 @@ export component AppWindow inherits Window {
             Rectangle {
                 height: 24px;
                 border-radius: 4px;
-                background: library-cut-ta.has-hover ? #363636 : transparent;
+                background: library-cut-ta.has-hover ? AppPalette.control-hover-bg : transparent;
                 Text {
                     x: 10px;
                     width: parent.width - 20px;
                     text: "Cut";
-                    color: #ddd;
+                    color: AppPalette.text-primary;
                     font-size: 12px;
                     vertical-alignment: center;
                     overflow: elide;
@@ -3781,12 +3807,12 @@ export component AppWindow inherits Window {
             Rectangle {
                 height: 24px;
                 border-radius: 4px;
-                background: library-copy-ta.has-hover ? #363636 : transparent;
+                background: library-copy-ta.has-hover ? AppPalette.control-hover-bg : transparent;
                 Text {
                     x: 10px;
                     width: parent.width - 20px;
                     text: "Copy";
-                    color: #ddd;
+                    color: AppPalette.text-primary;
                     font-size: 12px;
                     vertical-alignment: center;
                     overflow: elide;
@@ -3801,12 +3827,12 @@ export component AppWindow inherits Window {
             Rectangle {
                 height: 24px;
                 border-radius: 4px;
-                background: library-delete-ta.has-hover ? #4a2a2a : transparent;
+                background: library-delete-ta.has-hover ? AppPalette.danger.mix(AppPalette.panel-bg, 0.82) : transparent;
                 Text {
                     x: 10px;
                     width: parent.width - 20px;
                     text: "Remove from library";
-                    color: #db6f6f;
+                    color: AppPalette.danger;
                     font-size: 12px;
                     vertical-alignment: center;
                     overflow: elide;
@@ -3823,7 +3849,7 @@ export component AppWindow inherits Window {
 
     if root.library_add_to_dialog_visible : Rectangle {
         z: 155;
-        background: #00000080;
+        background: AppPalette.overlay-scrim;
         TouchArea {
             clicked => {
                 root.library_cancel_add_to_playlists();
@@ -3838,9 +3864,9 @@ export component AppWindow inherits Window {
         x: (root.width - self.width) / 2;
         y: (root.height - self.height) / 2;
         border-radius: 6px;
-        background: #262626;
+        background: AppPalette.panel-bg-elevated;
         border-width: 1px;
-        border-color: #3d3d3d;
+        border-color: AppPalette.border;
 
         VerticalLayout {
             padding: 14px;
@@ -3848,7 +3874,7 @@ export component AppWindow inherits Window {
 
             Text {
                 text: "Add To Playlists";
-                color: #eee;
+                color: AppPalette.text-primary;
                 font-size: 15px;
                 font-weight: 700;
             }
@@ -3857,11 +3883,11 @@ export component AppWindow inherits Window {
                 text: root.library_selected_count == 1
                     ? "1 library item selected"
                     : root.library_selected_count + " library items selected";
-                color: #a9a9a9;
+                color: AppPalette.text-muted;
                 font-size: 11px;
             }
 
-            Rectangle { height: 1px; background: #3a3a3a; }
+            Rectangle { height: 1px; background: AppPalette.separator; }
 
             ScrollView {
                 vertical-stretch: 1;
@@ -3874,7 +3900,7 @@ export component AppWindow inherits Window {
                             : false;
                         height: 28px;
                         border-radius: 3px;
-                        background: playlist-option-ta.has-hover ? #343434 : transparent;
+                        background: playlist-option-ta.has-hover ? AppPalette.control-hover-bg : transparent;
                         HorizontalLayout {
                             padding-left: 8px;
                             padding-right: 8px;
@@ -3889,7 +3915,7 @@ export component AppWindow inherits Window {
                             }
                             Text {
                                 text: playlist-label;
-                                color: #ddd;
+                                color: AppPalette.text-primary;
                                 font-size: 12px;
                                 vertical-alignment: center;
                                 overflow: elide;
@@ -3907,7 +3933,7 @@ export component AppWindow inherits Window {
                 }
             }
 
-            Rectangle { height: 1px; background: #3a3a3a; }
+            Rectangle { height: 1px; background: AppPalette.separator; }
 
             HorizontalLayout {
                 spacing: 10px;
@@ -3938,9 +3964,9 @@ export component AppWindow inherits Window {
         width: 300px;
         height: 340px;
         border-radius: 6px;
-        background: #262626;
+        background: AppPalette.panel-bg-elevated;
         border-width: 1px;
-        border-color: #3d3d3d;
+        border-color: AppPalette.border;
 
         VerticalLayout {
             padding: 10px;
@@ -3948,12 +3974,12 @@ export component AppWindow inherits Window {
 
             Text {
                 text: root.control-cluster-label() + " Buttons";
-                color: #eee;
+                color: AppPalette.text-primary;
                 font-size: 13px;
                 font-weight: 700;
             }
 
-            Rectangle { height: 1px; background: #3a3a3a; }
+            Rectangle { height: 1px; background: AppPalette.separator; }
 
             ScrollView {
                 vertical-stretch: 1;
@@ -3979,7 +4005,7 @@ export component AppWindow inherits Window {
                                         spacing: 8px;
                                         Text {
                                             text: root.control-action-label(action-id);
-                                            color: #ddd;
+                                            color: AppPalette.text-primary;
                                             font-size: 12px;
                                             vertical-alignment: center;
                                             horizontal-stretch: 1;
@@ -3989,7 +4015,7 @@ export component AppWindow inherits Window {
                                             width: 18px;
                                             height: 18px;
                                             border-radius: 2px;
-                                            background: delete-action-ta.has-hover ? #4a2a2a : transparent;
+                                            background: delete-action-ta.has-hover ? AppPalette.danger.mix(AppPalette.panel-bg, 0.82) : transparent;
                                             Image {
                                                 source: AppIcons.close;
                                                 width: 10px;
@@ -3997,7 +4023,7 @@ export component AppWindow inherits Window {
                                                 x: (parent.width - self.width) / 2;
                                                 y: (parent.height - self.height) / 2;
                                                 image-fit: contain;
-                                                colorize: #ffb4b4;
+                                                colorize: AppPalette.danger;
                                             }
                                             delete-action-ta := TouchArea {
                                                 clicked => {
@@ -4021,7 +4047,7 @@ export component AppWindow inherits Window {
                 }
             }
 
-            Rectangle { height: 1px; background: #3a3a3a; }
+            Rectangle { height: 1px; background: AppPalette.separator; }
 
             HorizontalLayout {
                 spacing: 8px;
@@ -4160,7 +4186,7 @@ export component AppWindow inherits Window {
     }
 
     if root.show_subsonic_session_password_prompt : Rectangle {
-        background: #00000088;
+        background: AppPalette.overlay-scrim;
         z: 112;
 
         TouchArea {}
@@ -4171,9 +4197,9 @@ export component AppWindow inherits Window {
             x: (parent.width - self.width) / 2;
             y: (parent.height - self.height) / 2;
             border-radius: 6px;
-            background: root.ui_dark_mode ? #242424 : #f6f8fc;
+            background: AppPalette.panel-bg-elevated;
             border-width: 1px;
-            border-color: root.ui_dark_mode ? #3b3b3b : #c7d1dd;
+            border-color: AppPalette.border;
 
             VerticalLayout {
                 padding: 16px;
@@ -4186,9 +4212,9 @@ export component AppWindow inherits Window {
                         width: 36px;
                         height: 36px;
                         border-radius: 18px;
-                        background: root.ui_dark_mode ? #1f3248 : #e2eefb;
+                        background: AppPalette.accent-soft-bg;
                         border-width: 1px;
-                        border-color: root.ui_dark_mode ? #3f5470 : #b4cde8;
+                        border-color: AppPalette.accent-soft-border;
                         Image {
                             source: AppIcons.opensubsonic;
                             width: 18px;
@@ -4196,7 +4222,7 @@ export component AppWindow inherits Window {
                             x: (parent.width - self.width) / 2;
                             y: (parent.height - self.height) / 2;
                             image-fit: contain;
-                            colorize: root.ui_dark_mode ? #9fc3eb : #2d5f98;
+                            colorize: AppPalette.accent;
                         }
                     }
 
@@ -4263,7 +4289,7 @@ export component AppWindow inherits Window {
 
                 Text {
                     text: root.subsonic_session_prompt_status;
-                    color: root.ui_dark_mode ? #f0b27a : #9a4a00;
+                    color: AppPalette.warning;
                     font-size: 11px;
                     wrap: word-wrap;
                     vertical-stretch: 1;
@@ -4291,7 +4317,7 @@ export component AppWindow inherits Window {
     }
 
     if root.show_custom_column_dialog : Rectangle {
-        background: #00000088;
+        background: AppPalette.overlay-scrim;
         z: 110;
 
         TouchArea {}
@@ -4302,9 +4328,9 @@ export component AppWindow inherits Window {
             x: (parent.width - self.width) / 2;
             y: (parent.height - self.height) / 2;
             border-radius: 6px;
-            background: #242424;
+            background: AppPalette.panel-bg-elevated;
             border-width: 1px;
-            border-color: #3b3b3b;
+            border-color: AppPalette.border;
 
             VerticalLayout {
                 padding: 16px;
@@ -4312,14 +4338,14 @@ export component AppWindow inherits Window {
 
                 Text {
                     text: "Custom Playlist Column";
-                    color: #eee;
+                    color: AppPalette.text-primary;
                     font-size: 16px;
                     font-weight: 700;
                 }
 
                 Text {
                     text: "Column Name";
-                    color: #bbb;
+                    color: AppPalette.text-secondary;
                     font-size: 12px;
                 }
 
@@ -4330,7 +4356,7 @@ export component AppWindow inherits Window {
 
                 Text {
                     text: "Format String";
-                    color: #bbb;
+                    color: AppPalette.text-secondary;
                     font-size: 12px;
                 }
 
@@ -4364,7 +4390,7 @@ export component AppWindow inherits Window {
     }
 
     if root.show_properties_dialog : Rectangle {
-        background: #00000088;
+        background: AppPalette.overlay-scrim;
         z: 111;
 
         TouchArea {
@@ -4382,9 +4408,9 @@ export component AppWindow inherits Window {
             x: (parent.width - self.width) / 2;
             y: (parent.height - self.height) / 2;
             border-radius: 6px;
-            background: #242424;
+            background: AppPalette.panel-bg-elevated;
             border-width: 1px;
-            border-color: #3b3b3b;
+            border-color: AppPalette.border;
 
             // Consume clicks in the panel body so backdrop click handling only applies outside.
             TouchArea {}
@@ -4396,14 +4422,14 @@ export component AppWindow inherits Window {
                 HorizontalLayout {
                     Text {
                         text: "Properties";
-                        color: #eee;
+                        color: AppPalette.text-primary;
                         font-size: 16px;
                         font-weight: 700;
                     }
                     Rectangle { horizontal-stretch: 1; }
                     if root.properties_busy : Text {
                         text: "Working...";
-                        color: #9ab1ce;
+                        color: AppPalette.text-secondary;
                         font-size: 11px;
                         vertical-alignment: center;
                     }
@@ -4411,7 +4437,7 @@ export component AppWindow inherits Window {
 
                 Text {
                     text: root.properties_target_title;
-                    color: #aeb7c2;
+                    color: AppPalette.text-secondary;
                     font-size: 12px;
                     overflow: elide;
                 }
@@ -4419,7 +4445,7 @@ export component AppWindow inherits Window {
                 Rectangle {
                     height: 28px;
                     border-radius: 4px;
-                    background: #2c2c2c;
+                    background: AppPalette.panel-bg-alt;
                     HorizontalLayout {
                         padding-left: 8px;
                         padding-right: 10px;
@@ -4427,7 +4453,7 @@ export component AppWindow inherits Window {
                         Text {
                             width: 220px;
                             text: "Field";
-                            color: #cfd8e5;
+                            color: AppPalette.text-primary;
                             font-size: 12px;
                             font-weight: 700;
                             vertical-alignment: center;
@@ -4435,7 +4461,7 @@ export component AppWindow inherits Window {
                         }
                         Text {
                             text: "Value";
-                            color: #cfd8e5;
+                            color: AppPalette.text-primary;
                             font-size: 12px;
                             font-weight: 700;
                             horizontal-stretch: 1;
@@ -4452,7 +4478,7 @@ export component AppWindow inherits Window {
                         for field[index] in root.properties_fields : Rectangle {
                             height: 30px;
                             border-radius: 3px;
-                            background: Math.mod(index, 2) == 0 ? transparent : #2a2a2a80;
+                            background: Math.mod(index, 2) == 0 ? transparent : AppPalette.panel-bg-alt.mix(AppPalette.panel-bg-elevated, 0.5);
 
                             HorizontalLayout {
                                 padding-left: 8px;
@@ -4462,7 +4488,7 @@ export component AppWindow inherits Window {
                                 Text {
                                     width: 220px;
                                     text: field.field_name;
-                                    color: field.common ? #d8deea : #bec6d1;
+                                    color: field.common ? AppPalette.text-primary : AppPalette.text-secondary;
                                     font-size: 12px;
                                     vertical-alignment: center;
                                     overflow: elide;
@@ -4473,8 +4499,8 @@ export component AppWindow inherits Window {
                                     height: 24px;
                                     border-radius: 4px;
                                     border-width: 1px;
-                                    border-color: value-input.has-focus ? #5da8ff : #3b3b3b;
-                                    background: value-input.has-focus ? #1f2a36 : #202020;
+                                    border-color: value-input.has-focus ? AppPalette.focus-ring : AppPalette.border;
+                                    background: value-input.has-focus ? AppPalette.control-hover-bg : AppPalette.panel-bg;
 
                                     TouchArea {
                                         clicked => {
@@ -4503,7 +4529,7 @@ export component AppWindow inherits Window {
 
                 if root.properties_error_text != "" : Text {
                     text: root.properties_error_text;
-                    color: #f08f8f;
+                    color: AppPalette.danger;
                     font-size: 11px;
                     wrap: word-wrap;
                 }
@@ -4534,7 +4560,7 @@ export component AppWindow inherits Window {
     }
 
     if root.show_settings_dialog : Rectangle {
-        background: root.ui_dark_mode ? #00000088 : #0d1a2b33;
+        background: AppPalette.overlay-scrim;
         z: 100;
 
         TouchArea {}
@@ -4545,7 +4571,7 @@ export component AppWindow inherits Window {
             x: (parent.width - self.width) / 2;
             y: (parent.height - self.height) / 2;
             border-radius: 6px;
-            background: root.ui_dark_mode ? #242424 : #ffffff;
+            background: AppPalette.panel-bg-elevated;
             border-width: 1px;
             border-color: root.theme_border;
             property <length> label_column_width: 230px;
@@ -4614,7 +4640,7 @@ export component AppWindow inherits Window {
                             Rectangle {
                                 height: 32px;
                                 background: settings-layout-intro-toggle-ta.has-hover
-                                    ? (root.ui_dark_mode ? #2d2d2d : #e9f0f8)
+                                    ? AppPalette.control-hover-bg
                                     : transparent;
                                 border-radius: 4px;
                                 HorizontalLayout {
@@ -4651,7 +4677,7 @@ export component AppWindow inherits Window {
                             Rectangle {
                                 height: 32px;
                                 background: settings-tooltips-toggle-ta.has-hover
-                                    ? (root.ui_dark_mode ? #2d2d2d : #e9f0f8)
+                                    ? AppPalette.control-hover-bg
                                     : transparent;
                                 border-radius: 4px;
                                 HorizontalLayout {
@@ -4688,7 +4714,7 @@ export component AppWindow inherits Window {
                             Rectangle {
                                 height: 32px;
                                 background: settings-auto-scroll-toggle-ta.has-hover
-                                    ? (root.ui_dark_mode ? #2d2d2d : #e9f0f8)
+                                    ? AppPalette.control-hover-bg
                                     : transparent;
                                 border-radius: 4px;
                                 HorizontalLayout {
@@ -4747,18 +4773,16 @@ export component AppWindow inherits Window {
 
                             Rectangle {
                                 height: 32px;
-                                background: settings-theme-toggle-ta.has-hover
-                                    ? (root.ui_dark_mode ? #2d2d2d : #e9f0f8)
-                                    : transparent;
+                                background: transparent;
                                 border-radius: 4px;
                                 HorizontalLayout {
                                     spacing: 10px;
-                                    theme-label-host := Rectangle {
+                                    color-scheme-label-host := Rectangle {
                                         width: settings-dialog-panel.label_column_width + 24px;
                                         height: parent.height;
                                         background: transparent;
                                         Text {
-                                            text: "Dark mode";
+                                            text: "Color Scheme";
                                             color: root.theme_text_primary;
                                             font-size: 12px;
                                             width: parent.width;
@@ -4767,7 +4791,7 @@ export component AppWindow inherits Window {
                                             horizontal-alignment: left;
                                         }
                                         settings-theme-label-tooltip-ta := TooltipHoverArea {
-                                            tooltip-text: "Switches the entire app between dark and light mode.";
+                                            tooltip-text: "Choose a preset UI theme. Select Custom to edit named color components.";
                                             tooltip_hover_changed(is-hovered, tooltip, anchor-x-px, anchor-y-px) => {
                                                 root.tooltip_hover_changed(is-hovered, tooltip, anchor-x-px, anchor-y-px);
                                             }
@@ -4777,27 +4801,64 @@ export component AppWindow inherits Window {
                                         width: settings-dialog-panel.control_max_width;
                                         height: parent.height;
                                         background: transparent;
-                                        settings-theme-toggle := Switch {
-                                            x: parent.width - self.width - 8px;
+                                        settings-theme-picker := ComboBox {
+                                            x: max(0px, parent.width - self.width - 8px);
                                             y: (parent.height - self.height) / 2;
-                                            width: 36px;
-                                            text: "";
-                                            checked <=> root.settings_dark_mode;
+                                            width: min(parent.width - 8px, 220px);
+                                            model: root.settings_color_scheme_options;
+                                            current-index <=> root.settings_color_scheme_index;
+                                            selected(_) => {
+                                                if (root.settings_color_scheme_index == root.settings_color_scheme_options.length - 1) {
+                                                    root.settings_custom_color_draft_values = root.settings_custom_color_values;
+                                                    root.show_custom_color_scheme_dialog = true;
+                                                }
+                                            }
                                         }
                                     }
                                     Rectangle { horizontal-stretch: 1; }
                                 }
-                                settings-theme-toggle-ta := TouchArea {
-                                    changed has-hover => {
-                                        root.tooltip_hover_changed(
-                                            self.has-hover,
-                                            "Switches the entire app between dark and light mode.",
-                                            floor((theme-label-host.absolute-position.x + theme-label-host.width / 2) / 1px),
-                                            floor((theme-label-host.absolute-position.y + theme-label-host.height) / 1px)
-                                        );
+                            }
+
+                            if root.settings_color_scheme_index == root.settings_color_scheme_options.length - 1 : Rectangle {
+                                height: 32px;
+                                background: custom-theme-button-ta.has-hover
+                                    ? AppPalette.control-hover-bg
+                                    : transparent;
+                                border-radius: 4px;
+                                HorizontalLayout {
+                                    spacing: 10px;
+                                    Rectangle {
+                                        width: settings-dialog-panel.label_column_width + 24px;
+                                        height: parent.height;
+                                        Text {
+                                            text: "Custom Colors";
+                                            color: root.theme_text_primary;
+                                            font-size: 12px;
+                                            width: parent.width;
+                                            height: parent.height;
+                                            vertical-alignment: center;
+                                            horizontal-alignment: left;
+                                        }
                                     }
+                                    Rectangle {
+                                        width: settings-dialog-panel.control_max_width;
+                                        height: parent.height;
+                                        Button {
+                                            text: "Edit Components...";
+                                            x: max(0px, parent.width - self.width - 8px);
+                                            y: (parent.height - self.height) / 2;
+                                            clicked => {
+                                                root.settings_custom_color_draft_values = root.settings_custom_color_values;
+                                                root.show_custom_color_scheme_dialog = true;
+                                            }
+                                        }
+                                    }
+                                    Rectangle { horizontal-stretch: 1; }
+                                }
+                                custom-theme-button-ta := TouchArea {
                                     clicked => {
-                                        settings-theme-toggle.checked = !settings-theme-toggle.checked;
+                                        root.settings_custom_color_draft_values = root.settings_custom_color_values;
+                                        root.show_custom_color_scheme_dialog = true;
                                     }
                                 }
                             }
@@ -4815,7 +4876,7 @@ export component AppWindow inherits Window {
                             Text {
                                 width: settings-dialog-panel.settings_row_width;
                                 text: "Audio setting changes are staged during playback and only applied after playback is stopped and started again.";
-                                color: root.ui_dark_mode ? #d6b07a : #8a4f00;
+                                color: AppPalette.warning;
                                 font-size: 11px;
                                 wrap: word-wrap;
                             }
@@ -4874,7 +4935,7 @@ export component AppWindow inherits Window {
                             Text {
                                 width: settings-dialog-panel.settings_row_width;
                                 text: root.settings_verified_sample_rates_summary;
-                                color: root.ui_dark_mode ? #b8c8d6 : #527090;
+                                color: AppPalette.text-secondary;
                                 font-size: 11px;
                                 wrap: no-wrap;
                                 overflow: elide;
@@ -4934,7 +4995,7 @@ export component AppWindow inherits Window {
                             Rectangle {
                                 height: 32px;
                                 background: settings-dither-toggle-ta.has-hover
-                                    ? (root.ui_dark_mode ? #2d2d2d : #e9f0f8)
+                                    ? AppPalette.control-hover-bg
                                     : transparent;
                                 border-radius: 4px;
                                 HorizontalLayout {
@@ -4989,7 +5050,7 @@ export component AppWindow inherits Window {
                             Rectangle {
                                 height: 32px;
                                 background: settings-downmix-toggle-ta.has-hover
-                                    ? (root.ui_dark_mode ? #2d2d2d : #e9f0f8)
+                                    ? AppPalette.control-hover-bg
                                     : transparent;
                                 border-radius: 4px;
                                 HorizontalLayout {
@@ -5044,7 +5105,7 @@ export component AppWindow inherits Window {
                             Rectangle {
                                 height: 32px;
                                 background: settings-cast-fallback-toggle-ta.has-hover
-                                    ? (root.ui_dark_mode ? #2d2d2d : #e9f0f8)
+                                    ? AppPalette.control-hover-bg
                                     : transparent;
                                 border-radius: 4px;
                                 HorizontalLayout {
@@ -5115,7 +5176,7 @@ export component AppWindow inherits Window {
                             border-width: 1px;
                             border-color: root.theme_border;
                             border-radius: 4px;
-                            background: root.ui_dark_mode ? #1f1f1f : #f8fbff;
+                            background: AppPalette.panel-bg;
                             clip: true;
                             settings-library-folder-list := ListView {
                                 x: 1px;
@@ -5127,16 +5188,16 @@ export component AppWindow inherits Window {
                                     height: 26px;
                                     border-radius: 3px;
                                     background: root.settings_library_selected_folder_index == index
-                                        ? (root.ui_dark_mode ? #2f3f56 : #d9e8f8)
+                                        ? AppPalette.selection-bg
                                         : settings-library-folder-ta.has-hover
-                                            ? (root.ui_dark_mode ? #2c2c2c : #edf3fb)
+                                            ? AppPalette.control-hover-bg
                                             : transparent;
                                     Text {
                                         x: 8px;
                                         width: max(0px, parent.width - 16px);
                                         text: folder;
                                         color: root.settings_library_selected_folder_index == index
-                                            ? (root.ui_dark_mode ? #d7e6f8 : #2f587f)
+                                            ? AppPalette.text-primary
                                             : root.theme_text_secondary;
                                         font-size: 12px;
                                         vertical-alignment: center;
@@ -5190,7 +5251,7 @@ export component AppWindow inherits Window {
                         Rectangle {
                             height: 32px;
                             background: settings-library-online-toggle-ta.has-hover
-                                ? (root.ui_dark_mode ? #2d2d2d : #e9f0f8)
+                                ? AppPalette.control-hover-bg
                                 : transparent;
                             border-radius: 4px;
                             HorizontalLayout {
@@ -5271,8 +5332,8 @@ export component AppWindow inherits Window {
                                 height: 18px;
                                 border-radius: 9px;
                                 border-width: 1px;
-                                border-color: root.ui_dark_mode ? #3f5470 : #b4cde8;
-                                background: root.ui_dark_mode ? #1f3248 : #e2eefb;
+                                border-color: AppPalette.accent-soft-border;
+                                background: AppPalette.accent-soft-bg;
                                 Image {
                                     source: AppIcons.opensubsonic;
                                     width: 10px;
@@ -5280,7 +5341,7 @@ export component AppWindow inherits Window {
                                     x: (parent.width - self.width) / 2;
                                     y: (parent.height - self.height) / 2;
                                     image-fit: contain;
-                                    colorize: root.ui_dark_mode ? #9fc3eb : #2d5f98;
+                                    colorize: AppPalette.accent;
                                 }
                             }
                             Text {
@@ -5296,7 +5357,7 @@ export component AppWindow inherits Window {
                             width: settings-dialog-panel.settings_row_width;
                             height: 30px;
                             background: settings-subsonic-enabled-ta.has-hover
-                                ? (root.ui_dark_mode ? #2d2d2d : #e9f0f8)
+                                ? AppPalette.control-hover-bg
                                 : transparent;
                             border-radius: 4px;
                             HorizontalLayout {
@@ -5380,7 +5441,7 @@ export component AppWindow inherits Window {
                         Text {
                             width: settings-dialog-panel.settings_row_width;
                             text: root.settings_subsonic_status;
-                            color: root.ui_dark_mode ? #b8c8d6 : #4a6480;
+                            color: AppPalette.text-secondary;
                             font-size: 11px;
                             wrap: word-wrap;
                         }
@@ -5455,12 +5516,13 @@ export component AppWindow inherits Window {
                             root.settings_show_layout_edit_tutorial,
                             root.settings_show_tooltips,
                             root.settings_auto_scroll_to_playing_track,
-                            root.settings_dark_mode,
                             root.settings_sample_rate_mode_index,
                             root.settings_resampler_quality_index,
                             root.settings_dither_on_bitdepth_reduce,
                             root.settings_downmix_higher_channel_tracks,
-                            root.settings_cast_allow_transcode_fallback
+                            root.settings_cast_allow_transcode_fallback,
+                            root.settings_color_scheme_index,
+                            root.settings_custom_color_values
                         );
                         root.show_settings_dialog = false;
                     }
@@ -5468,6 +5530,299 @@ export component AppWindow inherits Window {
             }
         }
     }
+    }
+
+    if root.show_custom_color_scheme_dialog : Rectangle {
+        z: 155;
+        background: AppPalette.overlay-scrim;
+        TouchArea {}
+
+        Rectangle {
+            width: min(700px, max(420px, root.width - 24px));
+            height: min(560px, max(260px, root.height - 24px));
+            x: max(0px, (parent.width - self.width) / 2);
+            y: max(0px, (parent.height - self.height) / 2);
+            background: AppPalette.panel-bg-elevated;
+            border-width: 1px;
+            border-color: AppPalette.border;
+            border-radius: 6px;
+
+            VerticalLayout {
+                padding: 14px;
+                spacing: 10px;
+
+                Text {
+                    text: "Custom Color Components";
+                    color: AppPalette.text-primary;
+                    font-size: 15px;
+                    font-weight: 700;
+                }
+
+                Text {
+                    text: "Use Pick... for an interactive color editor, or type a hex color.";
+                    color: AppPalette.text-secondary;
+                    font-size: 11px;
+                }
+
+                Rectangle {
+                    horizontal-stretch: 1;
+                    vertical-stretch: 1;
+                    border-width: 1px;
+                    border-color: AppPalette.border;
+                    border-radius: 4px;
+                    background: AppPalette.panel-bg;
+
+                    ScrollView {
+                        width: parent.width;
+                        height: parent.height;
+                        VerticalLayout {
+                            padding: 8px;
+                            spacing: 6px;
+                            for label[i] in root.settings_custom_color_labels : HorizontalLayout {
+                                spacing: 8px;
+                                Rectangle {
+                                    width: 200px;
+                                    height: 30px;
+                                    Text {
+                                        text: label;
+                                        color: AppPalette.text-primary;
+                                        font-size: 12px;
+                                        vertical-alignment: center;
+                                        horizontal-alignment: left;
+                                        width: parent.width;
+                                        height: parent.height;
+                                    }
+                                }
+                                LineEdit {
+                                    width: 150px;
+                                    height: 30px;
+                                    text: i < root.settings_custom_color_draft_values.length
+                                        ? root.settings_custom_color_draft_values[i]
+                                        : "";
+                                    placeholder-text: "#RRGGBB";
+                                    edited => {
+                                        root.settings_custom_theme_color_draft_edited(i, self.text);
+                                    }
+                                }
+                                Rectangle {
+                                    width: 30px;
+                                    height: 30px;
+                                    border-radius: 4px;
+                                    border-width: 1px;
+                                    border-color: AppPalette.border;
+                                    background: i < root.settings_custom_color_draft_preview_colors.length
+                                        ? root.settings_custom_color_draft_preview_colors[i]
+                                        : AppPalette.panel-bg;
+                                }
+                                Button {
+                                    text: "Pick...";
+                                    width: 74px;
+                                    height: 30px;
+                                    clicked => {
+                                        root.settings_open_custom_color_picker(
+                                            i,
+                                            label,
+                                            i < root.settings_custom_color_draft_values.length
+                                                ? root.settings_custom_color_draft_values[i]
+                                                : ""
+                                        );
+                                    }
+                                }
+                                Rectangle { horizontal-stretch: 1; }
+                            }
+                        }
+                    }
+                }
+
+                HorizontalLayout {
+                    spacing: 10px;
+                    Button {
+                        text: "Reset...";
+                        clicked => {
+                            root.show_custom_color_reset_confirm = true;
+                        }
+                    }
+                    Rectangle { horizontal-stretch: 1; }
+                    Button {
+                        text: "Cancel";
+                        clicked => {
+                            root.show_custom_color_scheme_dialog = false;
+                            root.show_custom_color_picker_dialog = false;
+                            root.show_custom_color_reset_confirm = false;
+                            root.settings_custom_color_draft_values = root.settings_custom_color_values;
+                        }
+                    }
+                    Button {
+                        text: "Save";
+                        primary: true;
+                        clicked => {
+                            root.settings_custom_color_values = root.settings_custom_color_draft_values;
+                            root.show_custom_color_picker_dialog = false;
+                            root.show_custom_color_reset_confirm = false;
+                            root.show_custom_color_scheme_dialog = false;
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    custom_color_reset_overlay := ConfirmationDialog {
+        z: 157;
+        is-visible: root.show_custom_color_reset_confirm;
+        message: "Reset custom colors to roqtune (dark) defaults?\n\nThis discards unsaved color edits in this dialog.";
+        confirm-button-text: "Reset";
+        confirmed => {
+            root.settings_reset_custom_colors();
+            root.show_custom_color_reset_confirm = false;
+        }
+        cancelled => {
+            root.show_custom_color_reset_confirm = false;
+        }
+    }
+
+    if root.show_custom_color_picker_dialog : Rectangle {
+        z: 156;
+        background: AppPalette.overlay-scrim;
+        TouchArea {}
+
+        Rectangle {
+            width: min(520px, max(340px, root.width - 40px));
+            height: min(360px, max(240px, root.height - 40px));
+            x: max(0px, (parent.width - self.width) / 2);
+            y: max(0px, (parent.height - self.height) / 2);
+            background: AppPalette.panel-bg-elevated;
+            border-width: 1px;
+            border-color: AppPalette.border;
+            border-radius: 6px;
+
+            VerticalLayout {
+                padding: 14px;
+                spacing: 10px;
+
+                Text {
+                    text: root.settings_custom_color_picker_target_label == ""
+                        ? "Pick Color"
+                        : "Pick Color: " + root.settings_custom_color_picker_target_label;
+                    color: AppPalette.text-primary;
+                    font-size: 14px;
+                    font-weight: 700;
+                }
+
+                Rectangle {
+                    height: 58px;
+                    border-width: 1px;
+                    border-color: AppPalette.border;
+                    border-radius: 5px;
+                    background: rgb(
+                        root.color-picker-channel(root.settings_custom_color_picker_r),
+                        root.color-picker-channel(root.settings_custom_color_picker_g),
+                        root.color-picker-channel(root.settings_custom_color_picker_b)
+                    );
+                }
+
+                HorizontalLayout {
+                    spacing: 8px;
+                    Text {
+                        width: 20px;
+                        text: "R";
+                        color: AppPalette.text-primary;
+                        vertical-alignment: center;
+                    }
+                    Slider {
+                        horizontal-stretch: 1;
+                        minimum: 0;
+                        maximum: 255;
+                        step: 1;
+                        value: root.settings_custom_color_picker_r;
+                        changed(next-value) => { root.settings_custom_color_picker_r = next-value; }
+                    }
+                    Text {
+                        width: 34px;
+                        text: root.color-picker-channel(root.settings_custom_color_picker_r);
+                        color: AppPalette.text-secondary;
+                        horizontal-alignment: right;
+                        vertical-alignment: center;
+                    }
+                }
+
+                HorizontalLayout {
+                    spacing: 8px;
+                    Text {
+                        width: 20px;
+                        text: "G";
+                        color: AppPalette.text-primary;
+                        vertical-alignment: center;
+                    }
+                    Slider {
+                        horizontal-stretch: 1;
+                        minimum: 0;
+                        maximum: 255;
+                        step: 1;
+                        value: root.settings_custom_color_picker_g;
+                        changed(next-value) => { root.settings_custom_color_picker_g = next-value; }
+                    }
+                    Text {
+                        width: 34px;
+                        text: root.color-picker-channel(root.settings_custom_color_picker_g);
+                        color: AppPalette.text-secondary;
+                        horizontal-alignment: right;
+                        vertical-alignment: center;
+                    }
+                }
+
+                HorizontalLayout {
+                    spacing: 8px;
+                    Text {
+                        width: 20px;
+                        text: "B";
+                        color: AppPalette.text-primary;
+                        vertical-alignment: center;
+                    }
+                    Slider {
+                        horizontal-stretch: 1;
+                        minimum: 0;
+                        maximum: 255;
+                        step: 1;
+                        value: root.settings_custom_color_picker_b;
+                        changed(next-value) => { root.settings_custom_color_picker_b = next-value; }
+                    }
+                    Text {
+                        width: 34px;
+                        text: root.color-picker-channel(root.settings_custom_color_picker_b);
+                        color: AppPalette.text-secondary;
+                        horizontal-alignment: right;
+                        vertical-alignment: center;
+                    }
+                }
+
+                Rectangle { vertical-stretch: 1; }
+
+                HorizontalLayout {
+                    spacing: 10px;
+                    Rectangle { horizontal-stretch: 1; }
+                    Button {
+                        text: "Cancel";
+                        clicked => {
+                            root.show_custom_color_picker_dialog = false;
+                        }
+                    }
+                    Button {
+                        text: "Apply";
+                        primary: true;
+                        clicked => {
+                            root.settings_apply_custom_color_picker(
+                                root.settings_custom_color_picker_target_index,
+                                root.color-picker-channel(root.settings_custom_color_picker_r),
+                                root.color-picker-channel(root.settings_custom_color_picker_g),
+                                root.color-picker-channel(root.settings_custom_color_picker_b)
+                            );
+                            root.show_custom_color_picker_dialog = false;
+                        }
+                    }
+                }
+            }
+        }
     }
 
     if root.show_tooltip
@@ -5492,15 +5847,15 @@ export component AppWindow inherits Window {
         height: tooltip-text-block.preferred-height + 10px;
         border-radius: 4px;
         border-width: 1px;
-        border-color: #4c4c4c;
-        background: #101010eb;
+        border-color: AppPalette.tooltip-border;
+        background: AppPalette.tooltip-bg;
 
         tooltip-text-block := Text {
             x: 8px;
             y: 5px;
             width: max(0px, parent.width - 16px);
             text: root.tooltip_text;
-            color: #dedede;
+            color: AppPalette.tooltip-text;
             font-size: 11px;
             wrap: word-wrap;
             overflow: clip;
@@ -5600,7 +5955,20 @@ export component AppWindow inherits Window {
     in-out property <bool> settings_show_layout_edit_tutorial: true;
     in-out property <bool> settings_show_tooltips: true;
     in-out property <bool> settings_auto_scroll_to_playing_track: true;
-    in-out property <bool> settings_dark_mode: true;
+    in-out property <[string]> settings_color_scheme_options: [];
+    in-out property <int> settings_color_scheme_index: 0;
+    in-out property <[string]> settings_custom_color_labels: [];
+    in-out property <[string]> settings_custom_color_values: [];
+    in-out property <[string]> settings_custom_color_draft_values: [];
+    in-out property <[color]> settings_custom_color_draft_preview_colors: [];
+    in-out property <bool> show_custom_color_scheme_dialog: false;
+    in-out property <bool> show_custom_color_reset_confirm: false;
+    in-out property <bool> show_custom_color_picker_dialog: false;
+    in-out property <int> settings_custom_color_picker_target_index: -1;
+    in-out property <string> settings_custom_color_picker_target_label: "";
+    in-out property <float> settings_custom_color_picker_r: 42;
+    in-out property <float> settings_custom_color_picker_g: 109;
+    in-out property <float> settings_custom_color_picker_b: 239;
     in-out property <bool> settings_dither_on_bitdepth_reduce: true;
     in-out property <bool> settings_downmix_higher_channel_tracks: true;
     in-out property <bool> settings_cast_allow_transcode_fallback: false;
@@ -5615,6 +5983,19 @@ export component AppWindow inherits Window {
     in-out property <string> tooltip_text: "";
     in-out property <int> tooltip_anchor_x_px: 0;
     in-out property <int> tooltip_anchor_y_px: 0;
+
+    changed settings_custom_color_draft_values => {
+        root.settings_refresh_custom_color_previews();
+    }
+
+    changed show_custom_color_scheme_dialog => {
+        if (root.show_custom_color_scheme_dialog) {
+            root.settings_refresh_custom_color_previews();
+        } else {
+            root.show_custom_color_reset_confirm = false;
+            root.show_custom_color_picker_dialog = false;
+        }
+    }
     
     // Computed time display strings (derived from integer ms values)
     // These are computed in Slint to avoid Rust string allocations
@@ -5634,6 +6015,17 @@ export component AppWindow inherits Window {
     
     pure function format-time-range(elapsed: int, total: int) -> string {
         return root.format-time(elapsed) + " / " + root.format-time(total);
+    }
+
+    pure function color-picker-channel(value: float) -> int {
+        let rounded = floor(value + 0.5);
+        if rounded < 0 {
+            return 0;
+        }
+        if rounded > 255 {
+            return 255;
+        }
+        return rounded;
     }
 
     // Callback declarations
@@ -5759,5 +6151,10 @@ export component AppWindow inherits Window {
     callback cast_disconnect();
     callback open_external_url(string);
     callback tooltip_hover_changed(bool, string, int, int);
-    callback apply_settings(int, int, int, int, string, string, string, string, bool, bool, bool, bool, int, int, bool, bool, bool);
+    callback settings_custom_theme_color_draft_edited(int, string);
+    callback settings_open_custom_color_picker(int, string, string);
+    callback settings_apply_custom_color_picker(int, int, int, int);
+    callback settings_refresh_custom_color_previews();
+    callback settings_reset_custom_colors();
+    callback apply_settings(int, int, int, int, string, string, string, string, bool, bool, bool, int, int, bool, bool, bool, int, [string]);
 }

@@ -1,5 +1,5 @@
-import { Palette } from "std-widgets.slint";
 import { AppIcons } from "../icons.slint";
+import { AppPalette } from "../theme_palette.slint";
 
 export component TooltipHoverArea inherits TouchArea {
     in property <string> tooltip-text: "";
@@ -33,14 +33,13 @@ export component TooltipHoverArea inherits TouchArea {
 export component PlayerButton inherits Rectangle {
     width: 32px;
     height: 32px;
-    private property <bool> dark: Palette.color-scheme == ColorScheme.dark;
     background: touch-area.pressed
-        ? (root.dark ? #444 : #d4dde8)
+        ? AppPalette.control-pressed-bg
         : touch-area.has-hover
-            ? (root.dark ? #666 : #e2e9f1)
+            ? AppPalette.control-hover-bg
             : transparent;
     animate background { duration: 150ms; }
-    private property <brush> icon-color: root.is-primary ? #2a6def : (root.dark ? #eee : #263443);
+    private property <brush> icon-color: root.is-primary ? AppPalette.accent : AppPalette.text-primary;
     private property <bool> has-icon: root.icon-source.width > 0 && root.icon-source.height > 0;
     in property <string> icon-text;
     in property <image> icon-source;
@@ -218,10 +217,10 @@ export component ControlActionButton inherits Rectangle {
         x: 15px;
         y: 11px;
         border-radius: 5px;
-        background: #2a6def;
+        background: AppPalette.accent;
         Text {
             text: "?";
-            color: white;
+            color: AppPalette.accent-on;
             font-size: 7px;
             font-weight: 700;
             horizontal-alignment: center;
@@ -235,10 +234,10 @@ export component ControlActionButton inherits Rectangle {
         x: 15px;
         y: 11px;
         border-radius: 5px;
-        background: #2a6def;
+        background: AppPalette.accent;
         Text {
             text: "1";
-            color: white;
+            color: AppPalette.accent-on;
             font-size: 7px;
             font-weight: 700;
             horizontal-alignment: center;
@@ -261,7 +260,6 @@ export component ButtonCluster inherits Rectangle {
     callback action-invoked(int);
     callback request-add-menu(string);
     callback tooltip_hover_changed(bool, string, int, int);
-    private property <bool> dark: Palette.color-scheme == ColorScheme.dark;
 
     width: max(32px, button-actions.length * 32px + max(0, button-actions.length - 1) * 8px);
     height: 32px;
@@ -271,13 +269,13 @@ export component ButtonCluster inherits Rectangle {
         height: 32px;
         border-radius: 3px;
         border-width: 1px;
-        border-color: root.dark ? #3d3d3d : #c3cdd9;
+        border-color: AppPalette.border;
         background: empty-cluster-ta.has-hover
-            ? (root.dark ? #333 : #dde5ef)
-            : (root.dark ? #2a2a2a : #eef3f9);
+            ? AppPalette.control-hover-bg
+            : AppPalette.panel-bg-alt;
         Text {
             text: "...";
-            color: root.dark ? #999 : #5e6d7d;
+            color: AppPalette.text-muted;
             font-size: 16px;
             horizontal-alignment: center;
             vertical-alignment: center;

@@ -51,11 +51,9 @@ show_layout_edit_intro = true
 show_tooltips = true
 # Automatically scroll track-list views to keep the playing track centered.
 auto_scroll_to_playing_track = true
-# Controls Fluent widget theme palette.
-# true = dark mode, false = light mode
-dark_mode = true
 # Layout-owned settings are persisted separately in `layout.toml`:
 # split tree, panel instances, per-leaf button cluster actions, and playlist columns.
+# color scheme selection and custom color overrides.
 
 # Main window size on startup.
 window_width = 900

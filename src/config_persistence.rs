@@ -192,13 +192,7 @@ fn write_config_to_document(document: &mut DocumentMut, previous: &Config, confi
             config.ui.auto_scroll_to_playing_track,
             value,
         );
-        set_table_scalar_if_changed(
-            ui,
-            "dark_mode",
-            previous.ui.dark_mode,
-            config.ui.dark_mode,
-            value,
-        );
+        ui.remove("dark_mode");
         // Layout-owned state is persisted in layout.toml only.
         ui.remove("button_cluster_instances");
         ui.remove("playlist_columns");

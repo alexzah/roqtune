@@ -149,9 +149,6 @@ pub fn config_delta_entries(previous: &Config, next: &Config) -> Vec<ConfigDelta
     if previous.ui.auto_scroll_to_playing_track != next.ui.auto_scroll_to_playing_track {
         ui.auto_scroll_to_playing_track = Some(next.ui.auto_scroll_to_playing_track);
     }
-    if previous.ui.dark_mode != next.ui.dark_mode {
-        ui.dark_mode = Some(next.ui.dark_mode);
-    }
     if previous.ui.playlist_album_art_column_min_width_px
         != next.ui.playlist_album_art_column_min_width_px
     {

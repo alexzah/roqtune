@@ -1,11 +1,13 @@
 //! Callback registration for settings dialog, tooltip, and window-size UI events.
 
 use std::{
+    rc::Rc,
     sync::{atomic::Ordering, Arc, Mutex},
     time::Duration,
 };
 
 use log::debug;
+use slint::{Model, ModelRc, VecModel};
 
 use crate::{
     app_context::AppSharedState,
@@ -20,6 +22,61 @@ use crate::{
     },
     AppWindow,
 };
+
+fn shared_string_model_to_vec(model: ModelRc<slint::SharedString>) -> Vec<String> {
+    (0..model.row_count())
+        .filter_map(|index| model.row_data(index))
+        .map(|value| value.to_string())
+        .collect()
+}
+
+fn set_custom_color_draft_preview_colors(ui: &AppWindow) {
+    let draft_values = shared_string_model_to_vec(ui.get_settings_custom_color_draft_values());
+    let saved_values = shared_string_model_to_vec(ui.get_settings_custom_color_values());
+    let preview_len = draft_values.len().max(saved_values.len());
+    let fallback_color = slint::Color::from_rgb_u8(42, 109, 239);
+    let previews: Vec<slint::Color> = (0..preview_len)
+        .map(|index| {
+            draft_values
+                .get(index)
+                .and_then(|value| crate::theme::parse_slint_color(value))
+                .or_else(|| {
+                    saved_values
+                        .get(index)
+                        .and_then(|value| crate::theme::parse_slint_color(value))
+                })
+                .unwrap_or(fallback_color)
+        })
+        .collect();
+    ui.set_settings_custom_color_draft_preview_colors(ModelRc::from(Rc::new(VecModel::from(
+        previews,
+    ))));
+}
+
+fn set_custom_color_draft_value(ui: &AppWindow, index: usize, value: String) {
+    let mut draft_values = shared_string_model_to_vec(ui.get_settings_custom_color_draft_values());
+    if index >= draft_values.len() {
+        return;
+    }
+    draft_values[index] = value;
+    let next_values: Vec<slint::SharedString> = draft_values
+        .into_iter()
+        .map(slint::SharedString::from)
+        .collect();
+    ui.set_settings_custom_color_draft_values(ModelRc::from(Rc::new(VecModel::from(next_values))));
+    set_custom_color_draft_preview_colors(ui);
+}
+
+fn set_custom_color_draft_values(ui: &AppWindow, values: &[String]) {
+    let values_shared: Vec<slint::SharedString> = values
+        .iter()
+        .map(|value| slint::SharedString::from(value.as_str()))
+        .collect();
+    ui.set_settings_custom_color_draft_values(ModelRc::from(Rc::new(VecModel::from(
+        values_shared,
+    ))));
+    set_custom_color_draft_preview_colors(ui);
+}
 
 /// Registers callbacks that mutate persisted settings and runtime audio/UI state.
 pub(crate) fn register_settings_ui_callbacks(ui: &AppWindow, shared_state: &AppSharedState) {
@@ -214,6 +271,71 @@ pub(crate) fn register_settings_ui_callbacks(ui: &AppWindow, shared_state: &AppS
         );
     });
 
+    let ui_handle_clone = shared_state.ui_handles.ui_handle.clone();
+    ui.on_settings_custom_theme_color_draft_edited(move |component_index, value| {
+        let index = component_index.max(0) as usize;
+        if let Some(ui) = ui_handle_clone.upgrade() {
+            set_custom_color_draft_value(&ui, index, value.to_string());
+        }
+    });
+
+    let ui_handle_clone = shared_state.ui_handles.ui_handle.clone();
+    ui.on_settings_refresh_custom_color_previews(move || {
+        if let Some(ui) = ui_handle_clone.upgrade() {
+            set_custom_color_draft_preview_colors(&ui);
+        }
+    });
+
+    let ui_handle_clone = shared_state.ui_handles.ui_handle.clone();
+    ui.on_settings_open_custom_color_picker(move |component_index, label, value| {
+        let index = component_index.max(0) as usize;
+        if let Some(ui) = ui_handle_clone.upgrade() {
+            let draft_values =
+                shared_string_model_to_vec(ui.get_settings_custom_color_draft_values());
+            if index >= draft_values.len() {
+                return;
+            }
+            let active_value = if value.trim().is_empty() {
+                draft_values[index].clone()
+            } else {
+                value.to_string()
+            };
+            let parsed = crate::theme::parse_slint_color(&active_value)
+                .or_else(|| crate::theme::parse_slint_color(&draft_values[index]))
+                .unwrap_or_else(|| slint::Color::from_rgb_u8(42, 109, 239));
+            let rgba = parsed.to_argb_u8();
+            ui.set_settings_custom_color_picker_target_index(index as i32);
+            ui.set_settings_custom_color_picker_target_label(label);
+            ui.set_settings_custom_color_picker_r(f32::from(rgba.red));
+            ui.set_settings_custom_color_picker_g(f32::from(rgba.green));
+            ui.set_settings_custom_color_picker_b(f32::from(rgba.blue));
+            ui.set_show_custom_color_picker_dialog(true);
+        }
+    });
+
+    let ui_handle_clone = shared_state.ui_handles.ui_handle.clone();
+    ui.on_settings_apply_custom_color_picker(move |component_index, red, green, blue| {
+        let index = component_index.max(0) as usize;
+        let red = red.clamp(0, 255) as u8;
+        let green = green.clamp(0, 255) as u8;
+        let blue = blue.clamp(0, 255) as u8;
+        let next_value = format!("#{red:02X}{green:02X}{blue:02X}");
+        if let Some(ui) = ui_handle_clone.upgrade() {
+            set_custom_color_draft_value(&ui, index, next_value);
+            ui.set_show_custom_color_picker_dialog(false);
+        }
+    });
+
+    let ui_handle_clone = shared_state.ui_handles.ui_handle.clone();
+    ui.on_settings_reset_custom_colors(move || {
+        if let Some(ui) = ui_handle_clone.upgrade() {
+            let default_colors = crate::theme::default_custom_theme_colors();
+            let default_values = crate::theme::custom_color_values_for_ui(&default_colors);
+            set_custom_color_draft_values(&ui, &default_values);
+            ui.set_show_custom_color_picker_dialog(false);
+        }
+    });
+
     let bus_sender_clone = shared_state.bus_sender.clone();
     let config_state_clone = shared_state.config_state.clone();
     let output_options_clone = shared_state.runtime_handles.output_options.clone();
@@ -239,12 +361,13 @@ pub(crate) fn register_settings_ui_callbacks(ui: &AppWindow, shared_state: &AppS
               show_layout_edit_tutorial,
               show_tooltips_enabled,
               auto_scroll_to_playing_track,
-              dark_mode_enabled,
               sample_rate_mode_index,
               resampler_quality_index,
               dither_on_bitdepth_reduce,
               downmix_higher_channel_tracks,
-              cast_allow_transcode_fallback| {
+              cast_allow_transcode_fallback,
+              color_scheme_index,
+              custom_color_values| {
             let previous_config = {
                 let state = config_state_clone
                     .lock()
@@ -319,6 +442,15 @@ pub(crate) fn register_settings_ui_callbacks(ui: &AppWindow, shared_state: &AppS
                 1 => ResamplerQuality::Highest,
                 _ => ResamplerQuality::High,
             };
+            let selected_color_scheme = crate::theme::scheme_id_for_index(color_scheme_index);
+            let custom_color_values = shared_string_model_to_vec(custom_color_values);
+            let fallback_colors =
+                crate::theme::resolve_persisted_custom_colors(&previous_config.ui.layout);
+            let custom_colors =
+                crate::theme::custom_colors_from_ui_values(&custom_color_values, &fallback_colors);
+            let mut next_layout = previous_config.ui.layout.clone();
+            next_layout.color_scheme = selected_color_scheme;
+            next_layout.custom_colors = Some(custom_colors);
 
             let next_config = crate::sanitize_config(Config {
                 output: OutputConfig {
@@ -345,14 +477,14 @@ pub(crate) fn register_settings_ui_callbacks(ui: &AppWindow, shared_state: &AppS
                     show_layout_edit_intro: show_layout_edit_tutorial,
                     show_tooltips: show_tooltips_enabled,
                     auto_scroll_to_playing_track,
-                    dark_mode: dark_mode_enabled,
+                    legacy_dark_mode: previous_config.ui.legacy_dark_mode,
                     playlist_album_art_column_min_width_px: previous_config
                         .ui
                         .playlist_album_art_column_min_width_px,
                     playlist_album_art_column_max_width_px: previous_config
                         .ui
                         .playlist_album_art_column_max_width_px,
-                    layout: previous_config.ui.layout.clone(),
+                    layout: next_layout,
                     playlist_columns: previous_config.ui.playlist_columns.clone(),
                     window_width: previous_config.ui.window_width,
                     window_height: previous_config.ui.window_height,

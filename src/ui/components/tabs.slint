@@ -1,16 +1,15 @@
-import { Palette } from "std-widgets.slint";
+import { AppPalette } from "../theme_palette.slint";
 
 export component ModeTabs inherits Rectangle {
     in property <[string]> labels: [];
     in property <int> selected_index: 0;
     callback selected(int);
-    private property <bool> dark: Palette.color-scheme == ColorScheme.dark;
 
     height: 30px;
-    background: root.dark ? #202020 : #f2f5fa;
+    background: AppPalette.panel-bg;
     border-radius: 4px;
     border-width: 1px;
-    border-color: root.dark ? #3a3a3a : #c8d2de;
+    border-color: AppPalette.border;
 
     HorizontalLayout {
         spacing: 0px;
@@ -19,17 +18,17 @@ export component ModeTabs inherits Rectangle {
             horizontal-stretch: 1;
             height: parent.height;
             background: self.active
-                ? (root.dark ? #2f3f56 : #d8e6f7)
+                ? AppPalette.selection-bg
                 : tab-ta.has-hover
-                    ? (root.dark ? #2a2a2a : #e6edf6)
+                    ? AppPalette.control-hover-bg
                     : transparent;
             border-width: self.active ? 1px : 0px;
-            border-color: root.dark ? #4f6787 : #799ac1;
+            border-color: AppPalette.selection-border;
             Text {
                 text: label;
                 color: parent.active
-                    ? (root.dark ? #d7e6f8 : #23466d)
-                    : (root.dark ? #a8a8a8 : #566575);
+                    ? AppPalette.text-primary
+                    : AppPalette.text-secondary;
                 font-size: 12px;
                 horizontal-alignment: center;
                 vertical-alignment: center;
