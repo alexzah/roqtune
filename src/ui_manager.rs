@@ -457,6 +457,7 @@ const TEXT_PANEL_CHAR_WIDTH_NARROW_PERCENT: u32 = 36;
 const TEXT_PANEL_CHAR_WIDTH_WIDE_PERCENT: u32 = 92;
 const TEXT_PANEL_CHAR_WIDTH_CJK_PERCENT: u32 = 100;
 const TEXT_PANEL_WIDTH_ESTIMATE_GRACE_PX: i32 = 6;
+const TEXT_PANEL_WIDTH_OVERFLOW_THRESHOLD_PX: i32 = 10;
 const TEXT_PANEL_ELLIPSIS: &str = "…";
 const TEXT_PANEL_MIN_BASE_FONT_SIZE_PX: u32 = 1;
 const TEXT_PANEL_MIN_VISIBLE_LINES: usize = 2;
@@ -3793,9 +3794,13 @@ impl UiManager {
             .saturating_add(TEXT_PANEL_WIDTH_ESTIMATE_GRACE_PX)
     }
 
-    fn text_panel_line_exceeds_width(line: &text_template::RichTextLine, width_px: i32) -> bool {
+    fn text_panel_line_overflow_px(line: &text_template::RichTextLine, width_px: i32) -> i32 {
         Self::text_panel_estimated_line_width_px(line)
-            > Self::text_panel_effective_width_px(width_px)
+            .saturating_sub(Self::text_panel_effective_width_px(width_px))
+    }
+
+    fn text_panel_line_exceeds_width(line: &text_template::RichTextLine, width_px: i32) -> bool {
+        Self::text_panel_line_overflow_px(line, width_px) > TEXT_PANEL_WIDTH_OVERFLOW_THRESHOLD_PX
     }
 
     fn text_panel_any_line_exceeds_width(
@@ -11525,7 +11530,8 @@ mod tests {
         fit_column_widths_deterministic, ColumnWidthProfile, CoverArtLookupRequest,
         DeterministicColumnLayoutSpec, LibraryEntry, LibraryViewState, PathImageCache,
         PlaylistColumnClass, PlaylistSortDirection, TrackMetadata, UiManager,
-        ENRICHMENT_FAILED_ATTEMPT_CAP,
+        ENRICHMENT_FAILED_ATTEMPT_CAP, TEXT_PANEL_WIDTH_ESTIMATE_GRACE_PX,
+        TEXT_PANEL_WIDTH_OVERFLOW_THRESHOLD_PX,
     };
     use crate::{config::PlaylistColumnConfig, protocol, text_template};
     use std::collections::{HashMap, HashSet};
@@ -11773,6 +11779,30 @@ mod tests {
         assert!(fitted.was_elided);
         assert_eq!(fitted.rendered.lines.len(), 1);
         assert!(fitted.rendered.plain_text.contains('…'));
+    }
+
+    #[test]
+    fn test_text_panel_line_exceeds_width_ignores_small_estimation_overflow() {
+        let line = text_template::RichTextLine {
+            runs: vec![text_template::RichTextRun {
+                text: "Example Title".to_string(),
+                bold: false,
+                italic: false,
+                underline: false,
+                font_size_px: 13,
+                font_family: String::new(),
+                color: None,
+            }],
+        };
+        let effective_width = UiManager::text_panel_estimated_line_width_px(&line)
+            .saturating_sub(TEXT_PANEL_WIDTH_OVERFLOW_THRESHOLD_PX - 1);
+        let test_width = effective_width
+            .saturating_sub(TEXT_PANEL_WIDTH_ESTIMATE_GRACE_PX)
+            .max(1);
+        assert!(
+            !UiManager::text_panel_line_exceeds_width(&line, test_width),
+            "small overflow should not force ellipsis"
+        );
     }
 
     #[test]
