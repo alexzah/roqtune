@@ -26,7 +26,8 @@ export component AppWindow inherits Window {
     preferred-height: 650px;
     min-width: 600px;
     min-height: 400px;
-    title: "roqtune";
+    in-out property <string> app_window_title: "roqtune";
+    title: root.app_window_title;
     in-out property <bool> ui_dark_mode: true;
     property <brush> theme_window_bg: AppPalette.window-bg;
     property <brush> theme_surface_bg: AppPalette.panel-bg;

@@ -40,6 +40,13 @@ use governor::{Quota, RateLimiter};
 
 const OPENSUBSONIC_API_VERSION: &str = "1.16.1";
 const OPENSUBSONIC_CLIENT_ID: &str = "roqtune";
+const APP_WINDOW_TITLE_IDLE: &str = "roqtune";
+const APP_WINDOW_TITLE_BODY_TEMPLATE: &str =
+    "{artist;album_artist} - {title;file_name;path} (roqtune)";
+const APP_WINDOW_TITLE_PLAY_ICON: &str = "▶";
+const APP_WINDOW_TITLE_PAUSE_ICON: &str = "⏸";
+const APP_WINDOW_TITLE_UNKNOWN_ARTIST: &str = "Unknown Artist";
+const APP_WINDOW_TITLE_UNKNOWN_TITLE: &str = "Unknown Title";
 
 /// Shared UI models that are created in `main` and attached to the Slint window.
 pub struct UiState {
@@ -3255,6 +3262,166 @@ impl UiManager {
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
+    fn app_window_title_from_metadata(
+        playback_active: bool,
+        has_track_context: bool,
+        title: &str,
+        artist: &str,
+        album: &str,
+        album_artist: &str,
+        date: &str,
+        year: &str,
+        genre: &str,
+        track_number: &str,
+        path: Option<&Path>,
+    ) -> String {
+        if !has_track_context {
+            return APP_WINDOW_TITLE_IDLE.to_string();
+        }
+
+        let has_path_title_fallback = path
+            .and_then(|value| value.file_name())
+            .and_then(|value| value.to_str())
+            .map(str::trim)
+            .is_some_and(|value| !value.is_empty())
+            || path
+                .and_then(|value| value.to_str())
+                .map(str::trim)
+                .is_some_and(|value| !value.is_empty());
+
+        let normalized_artist = if artist.trim().is_empty() && album_artist.trim().is_empty() {
+            APP_WINDOW_TITLE_UNKNOWN_ARTIST
+        } else {
+            artist
+        };
+        let normalized_title = if title.trim().is_empty() && !has_path_title_fallback {
+            APP_WINDOW_TITLE_UNKNOWN_TITLE
+        } else {
+            title
+        };
+
+        let context = text_template::TemplateContext::from_path_metadata(
+            normalized_title,
+            normalized_artist,
+            album,
+            album_artist,
+            date,
+            year,
+            genre,
+            track_number,
+            path,
+        );
+
+        let mut rendered = text_template::render_template(APP_WINDOW_TITLE_BODY_TEMPLATE, &context)
+            .plain_text
+            .trim()
+            .to_string();
+        if rendered.is_empty() {
+            rendered = format!(
+                "{} - {} (roqtune)",
+                APP_WINDOW_TITLE_UNKNOWN_ARTIST, APP_WINDOW_TITLE_UNKNOWN_TITLE
+            );
+        }
+
+        let icon = if playback_active {
+            APP_WINDOW_TITLE_PLAY_ICON
+        } else {
+            APP_WINDOW_TITLE_PAUSE_ICON
+        };
+        format!("{icon} {rendered}")
+    }
+
+    fn current_app_window_title(&self) -> String {
+        let path = self.playing_track.path.as_deref();
+        let mut title = String::new();
+        let mut artist = String::new();
+        let mut album = String::new();
+        let mut album_artist = String::new();
+        let mut date = String::new();
+        let mut year = String::new();
+        let mut genre = String::new();
+        let mut track_number = String::new();
+
+        if let Some(path_ref) = path {
+            if let Some(index) = self
+                .track_paths
+                .iter()
+                .position(|candidate| candidate == path_ref)
+            {
+                if let Some(metadata) = self.track_metadata.get(index) {
+                    title = metadata.title.clone();
+                    artist = metadata.artist.clone();
+                    album = metadata.album.clone();
+                    album_artist = metadata.album_artist.clone();
+                    date = metadata.date.clone();
+                    year = metadata.year.clone();
+                    genre = metadata.genre.clone();
+                    track_number = metadata.track_number.clone();
+                }
+            } else if let Some(track) = self.library_entries.iter().find_map(|entry| match entry {
+                LibraryEntry::Track(track) if track.path.as_path() == path_ref => Some(track),
+                _ => None,
+            }) {
+                title = track.title.clone();
+                artist = track.artist.clone();
+                album = track.album.clone();
+                album_artist = track.album_artist.clone();
+                date = track.year.clone();
+                year = track.year.clone();
+                genre = track.genre.clone();
+                track_number = track.track_number.clone();
+            }
+        }
+
+        if let Some(metadata) = self.playing_track.metadata.as_ref() {
+            if title.trim().is_empty() {
+                title = metadata.title.clone();
+            }
+            if artist.trim().is_empty() {
+                artist = metadata.artist.clone();
+            }
+            if album.trim().is_empty() {
+                album = metadata.album.clone();
+            }
+            if date.trim().is_empty() {
+                date = metadata.date.clone();
+            }
+            if genre.trim().is_empty() {
+                genre = metadata.genre.clone();
+            }
+        }
+
+        let has_track_context = self.playing_track.path.is_some()
+            || self.playing_track.metadata.is_some()
+            || self
+                .playing_track
+                .id
+                .as_ref()
+                .is_some_and(|id| !id.trim().is_empty());
+
+        Self::app_window_title_from_metadata(
+            self.playback_active,
+            has_track_context,
+            title.as_str(),
+            artist.as_str(),
+            album.as_str(),
+            album_artist.as_str(),
+            date.as_str(),
+            year.as_str(),
+            genre.as_str(),
+            track_number.as_str(),
+            path,
+        )
+    }
+
+    fn sync_app_window_title_to_ui(&self) {
+        let window_title = self.current_app_window_title();
+        let _ = self.ui.upgrade_in_event_loop(move |ui| {
+            ui.set_app_window_title(window_title.into());
+        });
+    }
+
     fn resolve_metadata_for_track_path_from_sources(
         path: &Path,
         track_paths: &[PathBuf],
@@ -5357,6 +5524,7 @@ impl UiManager {
 
         self.refresh_playing_track_metadata();
         self.update_display_for_active_collection();
+        self.sync_app_window_title_to_ui();
 
         if let Some(warning) = db_sync_warning {
             self.library_status_text = warning.clone();
@@ -6376,6 +6544,7 @@ impl UiManager {
         self.apply_playlist_column_layout();
         self.refresh_playing_track_metadata();
         self.update_display_for_active_collection();
+        self.sync_app_window_title_to_ui();
         self.rebuild_track_model();
     }
 
@@ -10874,6 +11043,7 @@ impl UiManager {
                                 self.apply_playlist_column_layout();
                                 self.refresh_playing_track_metadata();
                                 self.update_display_for_active_collection();
+                                self.sync_app_window_title_to_ui();
                                 self.rebuild_track_model();
                             }
                         }
@@ -10905,6 +11075,7 @@ impl UiManager {
                             self.apply_playlist_column_layout();
                             self.refresh_playing_track_metadata();
                             self.update_display_for_active_collection();
+                            self.sync_app_window_title_to_ui();
                             self.rebuild_track_model();
                         }
                         protocol::Message::Playlist(
@@ -11138,6 +11309,7 @@ impl UiManager {
                                 ui.set_elapsed_ms(0);
                                 ui.set_total_ms(0);
                             });
+                            self.sync_app_window_title_to_ui();
                             self.sync_playlist_playback_state_to_ui();
                             if had_playing_track {
                                 self.sync_library_playing_state_to_ui();
@@ -11221,6 +11393,7 @@ impl UiManager {
                                 };
                                 ui.set_playback_order_index(order_int);
                             });
+                            self.sync_app_window_title_to_ui();
                             self.rebuild_track_model();
                             if playing_track_changed
                                 || previous_active_playing_index != self.active_playing_index
@@ -11566,6 +11739,55 @@ mod tests {
             year: "2025".to_string(),
             track_number: "1".to_string(),
         }
+    }
+
+    fn window_title_for_test(
+        playback_active: bool,
+        has_track_context: bool,
+        title: &str,
+        artist: &str,
+        album_artist: &str,
+        path: Option<&str>,
+    ) -> String {
+        let path_buf = path.map(PathBuf::from);
+        UiManager::app_window_title_from_metadata(
+            playback_active,
+            has_track_context,
+            title,
+            artist,
+            "",
+            album_artist,
+            "",
+            "",
+            "",
+            "",
+            path_buf.as_deref(),
+        )
+    }
+
+    #[test]
+    fn test_app_window_title_is_idle_without_track_context() {
+        let title = window_title_for_test(false, false, "", "", "", None);
+        assert_eq!(title, "roqtune");
+    }
+
+    #[test]
+    fn test_app_window_title_uses_play_icon_when_playing() {
+        let title = window_title_for_test(true, true, "Song", "Artist", "", None);
+        assert_eq!(title, "▶ Artist - Song (roqtune)");
+    }
+
+    #[test]
+    fn test_app_window_title_uses_pause_icon_when_paused_with_track_context() {
+        let title = window_title_for_test(false, true, "Song", "Artist", "", None);
+        assert_eq!(title, "⏸ Artist - Song (roqtune)");
+    }
+
+    #[test]
+    fn test_app_window_title_falls_back_to_file_name_for_missing_title() {
+        let title =
+            window_title_for_test(true, true, "", "Artist", "", Some("/music/demo-track.mp3"));
+        assert_eq!(title, "▶ Artist - demo-track.mp3 (roqtune)");
     }
 
     fn make_library_track_in_album(
