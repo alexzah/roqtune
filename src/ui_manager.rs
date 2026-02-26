@@ -9492,6 +9492,7 @@ impl UiManager {
         let mut playlist_columns_changed = false;
         let mut album_art_column_width_limits_changed = false;
         let mut layout_changed = false;
+        let mut window_size_patch_received = false;
         if let Some(ui_config) = ui_update {
             let has_playlist_columns_patch = ui_config.playlist_columns.is_some();
             let has_layout_patch = ui_config.layout.is_some();
@@ -9499,6 +9500,9 @@ impl UiManager {
                 ui_config.playlist_album_art_column_min_width_px.is_some();
             let has_album_art_max_patch =
                 ui_config.playlist_album_art_column_max_width_px.is_some();
+            let has_window_width_patch = ui_config.window_width.is_some();
+            let has_window_height_patch = ui_config.window_height.is_some();
+            window_size_patch_received = has_window_width_patch || has_window_height_patch;
             if let Some(auto_scroll_to_playing_track) = ui_config.auto_scroll_to_playing_track {
                 self.auto_scroll_to_playing_track = auto_scroll_to_playing_track;
             }
@@ -9588,7 +9592,8 @@ impl UiManager {
         let refresh_display_target = refresh_library_ui
             || playlist_columns_changed
             || album_art_column_width_limits_changed
-            || layout_changed;
+            || layout_changed
+            || window_size_patch_received;
         if refresh_library_ui {
             self.sync_library_ui();
         }
