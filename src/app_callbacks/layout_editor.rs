@@ -645,20 +645,13 @@ pub(crate) fn register_layout_editor_callbacks(ui: &AppWindow, shared_state: &Ap
             Some(selected_leaf_id.clone())
         };
         let mut next = crate::with_updated_layout(&previous, updated_layout);
-        if panel == LayoutPanelKind::ButtonCluster {
-            if let Some(actions) = preset_actions {
-                crate::upsert_button_cluster_actions_for_leaf(
-                    &mut next.ui.layout.button_cluster_instances,
-                    &selected_leaf_id,
-                    actions,
-                );
-            }
-        } else {
-            crate::remove_button_cluster_instance_for_leaf(
-                &mut next.ui.layout.button_cluster_instances,
-                &selected_leaf_id,
-            );
-        }
+        crate::apply_layout_panel_selection_preset_to_leaf(
+            &mut next.ui.layout,
+            &selected_leaf_id,
+            panel,
+            panel_code,
+            preset_actions,
+        );
         next = crate::sanitize_config(next);
         crate::push_layout_undo_snapshot(
             &shared_state_clone.layout_undo_stack,
@@ -716,14 +709,14 @@ pub(crate) fn register_layout_editor_callbacks(ui: &AppWindow, shared_state: &Ap
                 .or_else(|| first_leaf_id(&updated_layout.root))
         };
         let mut next = crate::with_updated_layout(&previous, updated_layout);
-        if panel == LayoutPanelKind::ButtonCluster {
-            if let (Some(new_leaf_id), Some(actions)) = (added_leaf_id, preset_actions) {
-                crate::upsert_button_cluster_actions_for_leaf(
-                    &mut next.ui.layout.button_cluster_instances,
-                    &new_leaf_id,
-                    actions,
-                );
-            }
+        if let Some(new_leaf_id) = added_leaf_id {
+            crate::apply_layout_panel_selection_preset_to_leaf(
+                &mut next.ui.layout,
+                &new_leaf_id,
+                panel,
+                panel_code,
+                preset_actions,
+            );
         }
         next = crate::sanitize_config(next);
         crate::push_layout_undo_snapshot(
@@ -804,14 +797,14 @@ pub(crate) fn register_layout_editor_callbacks(ui: &AppWindow, shared_state: &Ap
         let added_leaf_id = added_leaf_ids.first().cloned();
         updated_layout.selected_leaf_id = first_leaf_id(&updated_layout.root);
         let mut next = crate::with_updated_layout(&previous, updated_layout);
-        if panel == LayoutPanelKind::ButtonCluster {
-            if let (Some(new_leaf_id), Some(actions)) = (added_leaf_id, preset_actions) {
-                crate::upsert_button_cluster_actions_for_leaf(
-                    &mut next.ui.layout.button_cluster_instances,
-                    &new_leaf_id,
-                    actions,
-                );
-            }
+        if let Some(new_leaf_id) = added_leaf_id {
+            crate::apply_layout_panel_selection_preset_to_leaf(
+                &mut next.ui.layout,
+                &new_leaf_id,
+                panel,
+                panel_code,
+                preset_actions,
+            );
         }
         next = crate::sanitize_config(next);
         crate::push_layout_undo_snapshot(

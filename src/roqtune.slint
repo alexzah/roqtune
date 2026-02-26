@@ -482,6 +482,14 @@ export component AppWindow inherits Window {
     property <int> panel_kind_spacer: 10;
     property <int> panel_kind_status_bar: 11;
     property <int> panel_kind_import_button_cluster: 12;
+    property <int> panel_preset_text_track_details_now_playing: 101;
+    property <int> panel_preset_text_track_details_selection: 102;
+    property <int> panel_preset_text_album_description: 103;
+    property <int> panel_preset_text_artist_bio: 104;
+    property <int> panel_preset_image_album_art_now_playing: 111;
+    property <int> panel_preset_image_album_art_selection: 112;
+    property <int> panel_preset_image_artist_image_now_playing: 113;
+    property <int> panel_preset_image_artist_image_selection: 114;
     in-out property <[string]> layout_panel_options: [];
     in-out property <int> layout_editor_replace_panel_kind: root.panel_kind_none;
     in-out property <int> layout_editor_split_panel_kind: root.panel_kind_spacer;
@@ -516,14 +524,40 @@ export component AppWindow inherits Window {
         root.panel_kind_status_bar
     ];
     property <[string]> layout_replace_preset_labels: [
-        "Import Button Cluster",
-        "Transport Button Cluster",
-        "Utility Button Cluster"
+        "Button Cluster",
+        "Import Controls",
+        "Transport Controls",
+        "Utility Controls",
+        "",
+        "Text Panel",
+        "Track Details (Now Playing)",
+        "Track Details (Selection)",
+        "Album Description",
+        "Artist Bio",
+        "",
+        "Image Panel",
+        "Album Art (Now Playing)",
+        "Album Art (Selection)",
+        "Artist Image (Now Playing)",
+        "Artist Image (Selection)"
     ];
     property <[int]> layout_replace_preset_codes: [
+        -1,
         root.panel_kind_import_button_cluster,
         root.panel_kind_transport_button_cluster,
-        root.panel_kind_utility_button_cluster
+        root.panel_kind_utility_button_cluster,
+        -2,
+        -3,
+        root.panel_preset_text_track_details_now_playing,
+        root.panel_preset_text_track_details_selection,
+        root.panel_preset_text_album_description,
+        root.panel_preset_text_artist_bio,
+        -4,
+        -5,
+        root.panel_preset_image_album_art_now_playing,
+        root.panel_preset_image_album_art_selection,
+        root.panel_preset_image_artist_image_now_playing,
+        root.panel_preset_image_artist_image_selection
     ];
     in-out property <[LayoutSplitterModel]> layout_splitters: [];
     in-out property <int> layout_active_splitter_index: -1;
@@ -3127,7 +3161,7 @@ export component AppWindow inherits Window {
                 x: (root.layout_leaf_context_menu_x + parent.x + parent.width + 4px + self.width <= root.width - 8px) ? parent.width + 4px : -self.width - 4px;
                 y: 58px;
                 width: 252px;
-                height: min(140px, root.layout_replace_preset_labels.length * 24px + 12px);
+                height: min(300px, root.layout_replace_preset_labels.length * 24px + 12px);
                 border-radius: 6px;
                 background: AppPalette.panel-bg-elevated;
                 border-width: 1px;
@@ -3142,31 +3176,52 @@ export component AppWindow inherits Window {
                 VerticalLayout {
                     padding: 6px;
                     spacing: 0px;
-                    for preset-option[index] in root.layout_replace_preset_labels : Rectangle {
-                        height: 24px;
-                        border-radius: 3px;
-                        background: preset-option-ta.has-hover ? AppPalette.control-hover-bg : transparent;
-                        Text {
-                            text: preset-option;
-                            color: AppPalette.text-primary;
-                            font-size: 12px;
-                            x: 10px;
-                            width: max(0px, parent.width - 20px);
-                            overflow: elide;
-                            vertical-alignment: center;
-                        }
-                        preset-option-ta := TouchArea {
-                            clicked => {
-                                let panel-code = root.layout_replace_preset_codes[index];
-                                root.layout_editor_replace_panel_kind = panel-code;
-                                root.layout_replace_selected_leaf(panel-code);
-                                root.show_layout_leaf_presets_submenu = false;
-                                root.layout_leaf_presets_submenu_hover = false;
-                                root.show_layout_leaf_panels_submenu = false;
-                                root.layout_leaf_panels_submenu_hover = false;
-                                root.show_layout_leaf_replace_submenu = false;
-                                root.layout_leaf_replace_submenu_hover = false;
-                                root.show_layout_leaf_context_menu = false;
+                    ScrollView {
+                        vertical-stretch: 1;
+                        Rectangle {
+                            x: 4px;
+                            width: max(0px, parent.width - 8px);
+                            height: max(24px, root.layout_replace_preset_labels.length * 24px);
+                            background: transparent;
+                            for preset-option[index] in root.layout_replace_preset_labels : Rectangle {
+                                y: index * 24px;
+                                width: parent.width;
+                                height: 24px;
+                                border-radius: 3px;
+                                property <int> preset-code: index < root.layout_replace_preset_codes.length ? root.layout_replace_preset_codes[index] : -999;
+                                property <bool> is-header: self.preset-code < 0;
+                                background: self.is-header ? transparent : (preset-option-ta.has-hover ? AppPalette.control-hover-bg : transparent);
+                                Text {
+                                    text: preset-option;
+                                    color: parent.is-header ? AppPalette.text-muted : AppPalette.text-primary;
+                                    font-size: parent.is-header ? 11px : 12px;
+                                    x: parent.is-header ? 8px : 18px;
+                                    width: max(0px, parent.width - 20px);
+                                    overflow: elide;
+                                    vertical-alignment: center;
+                                }
+                                if self.is-header && preset-option != "" : Rectangle {
+                                    x: 8px;
+                                    y: parent.height - 1px;
+                                    width: max(0px, parent.width - 16px);
+                                    height: 1px;
+                                    background: AppPalette.separator;
+                                }
+                                preset-option-ta := TouchArea {
+                                    enabled: !parent.is-header;
+                                    clicked => {
+                                        let panel-code = parent.preset-code;
+                                        root.layout_editor_replace_panel_kind = panel-code;
+                                        root.layout_replace_selected_leaf(panel-code);
+                                        root.show_layout_leaf_presets_submenu = false;
+                                        root.layout_leaf_presets_submenu_hover = false;
+                                        root.show_layout_leaf_panels_submenu = false;
+                                        root.layout_leaf_panels_submenu_hover = false;
+                                        root.show_layout_leaf_replace_submenu = false;
+                                        root.layout_leaf_replace_submenu_hover = false;
+                                        root.show_layout_leaf_context_menu = false;
+                                    }
+                                }
                             }
                         }
                     }

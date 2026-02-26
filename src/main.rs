@@ -196,7 +196,7 @@ pub(crate) fn resolve_effective_runtime_config(
 
 const IMPORT_CLUSTER_PRESET: [i32; 1] = [1];
 const TRANSPORT_CLUSTER_PRESET: [i32; 5] = [2, 3, 4, 5, 6];
-const UTILITY_CLUSTER_PRESET: [i32; 4] = [7, 8, 11, 10];
+const UTILITY_CLUSTER_PRESET: [i32; 3] = [7, 8, 11];
 const PLAYLIST_COLUMN_KIND_TEXT: i32 = 0;
 const PLAYLIST_COLUMN_KIND_ALBUM_ART: i32 = 1;
 const PLAYLIST_COLUMN_KIND_FAVORITE: i32 = 2;
