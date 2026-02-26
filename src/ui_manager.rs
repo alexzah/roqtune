@@ -3672,6 +3672,20 @@ impl UiManager {
         }
     }
 
+    fn text_panel_base_font_size_px(width_px: i32, height_px: i32) -> u32 {
+        let width = width_px.max(0) as u32;
+        let height = height_px.max(0) as u32;
+        let min_edge_px = width.min(height);
+        match min_edge_px {
+            0..=119 => 11,
+            120..=179 => 12,
+            180..=259 => 13,
+            260..=359 => 14,
+            360..=519 => 15,
+            _ => 16,
+        }
+    }
+
     fn viewer_track_context_for_display_target(
         &self,
         display_path: Option<&PathBuf>,
@@ -3999,7 +4013,16 @@ impl UiManager {
                             &template_metadata.track_number,
                             display_path,
                         );
-                        text_template::render_template(&template_source, &context)
+                        text_template::render_template_with_options(
+                            &template_source,
+                            &context,
+                            text_template::RenderOptions {
+                                base_font_size_px: UiManager::text_panel_base_font_size_px(
+                                    row_data.width_px,
+                                    row_data.height_px,
+                                ),
+                            },
+                        )
                     } else {
                         UiManager::empty_rendered_text()
                     };

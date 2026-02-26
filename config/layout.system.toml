@@ -129,7 +129,7 @@ custom = false
 # leaf_id = "l1"
 # display_priority = "default"
 # text_source = "track"
-# text_format = "[b][color=text_primary]{title;file_name}[/color][/b]\\n[color=text_secondary]{artist;album_artist}[/color]\\n[color=text_muted]{album}[/color]\\n[color=text_muted]{date;year} {genre}[/color]"
+# text_format = "[size=title][b][color=text_primary]{title;file_name}[/color][/b][/size]\\n[size=body][color=text_secondary]{artist;album_artist}[/color][/size]\\n[size=caption][color=text_muted]{album}[/color][/size]\\n[size=micro][color=text_muted]{date;year} {genre}[/color][/size]"
 #
 # Optional per-leaf image panel behavior overrides.
 # image_source options:

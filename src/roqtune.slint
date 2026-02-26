@@ -3173,7 +3173,7 @@ export component AppWindow inherits Window {
                     height: parent.height;
                     enabled: true;
                     text: root.viewer_panel_settings_metadata_text_format;
-                    placeholder-text: "[b]{title}[/b]\\n{i}{artist}[/i]";
+                    placeholder-text: "[size=title][b]{title}[/b][/size]\\n[size=body][i]{artist}[/i][/size]";
                     edited => {
                         root.viewer_panel_settings_metadata_text_format = self.text;
                         root.set_viewer_panel_metadata_text_format(

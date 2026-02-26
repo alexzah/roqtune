@@ -5,7 +5,7 @@ use std::path::Path;
 const DEFAULT_FONT_SIZE_PX: u32 = 13;
 
 pub(crate) const DEFAULT_METADATA_PANEL_TEMPLATE: &str =
-    "[b][color=text_primary]{title;file_name}[/color][/b]\\n[color=text_secondary]{artist;album_artist}[/color]\\n[color=text_muted]{album}[/color]\\n[color=text_muted]{date;year} {genre}[/color]";
+    "[size=title][b][color=text_primary]{title;file_name}[/color][/b][/size]\\n[size=body][color=text_secondary]{artist;album_artist}[/color][/size]\\n[size=caption][color=text_muted]{album}[/color][/size]\\n[size=micro][color=text_muted]{date;year} {genre}[/color][/size]";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum PaletteColor {
@@ -105,6 +105,85 @@ pub(crate) struct RenderedText {
 pub(crate) struct TemplateMetrics {
     pub explicit_line_count: u32,
     pub max_font_size_px: u32,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct RenderOptions {
+    pub base_font_size_px: u32,
+}
+
+impl Default for RenderOptions {
+    fn default() -> Self {
+        Self {
+            base_font_size_px: DEFAULT_FONT_SIZE_PX,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum FontSizeRole {
+    Micro,
+    Caption,
+    Body,
+    BodyLarge,
+    Title,
+    H3,
+    H2,
+    H1,
+    Spotlight,
+}
+
+impl FontSizeRole {
+    fn from_name(name: &str) -> Option<Self> {
+        let normalized = normalize_name(name);
+        match normalized.as_str() {
+            "micro" => Some(Self::Micro),
+            "caption" => Some(Self::Caption),
+            "body" => Some(Self::Body),
+            "body_large" | "bodylarge" => Some(Self::BodyLarge),
+            "title" => Some(Self::Title),
+            "h3" => Some(Self::H3),
+            "h2" => Some(Self::H2),
+            "h1" => Some(Self::H1),
+            "spotlight" => Some(Self::Spotlight),
+            _ => None,
+        }
+    }
+
+    fn scale_percent(self) -> u32 {
+        match self {
+            Self::Micro => 70,
+            Self::Caption => 82,
+            Self::Body => 100,
+            Self::BodyLarge => 115,
+            Self::Title => 130,
+            Self::H3 => 150,
+            Self::H2 => 175,
+            Self::H1 => 205,
+            Self::Spotlight => 245,
+        }
+    }
+
+    fn resolve_px(self, base_font_size_px: u32) -> u32 {
+        let base = base_font_size_px.max(1);
+        let scaled = base.saturating_mul(self.scale_percent());
+        scaled.saturating_add(50) / 100
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum FontSizeSpec {
+    Px(u32),
+    Role(FontSizeRole),
+}
+
+impl FontSizeSpec {
+    fn resolve_px(self, options: RenderOptions) -> u32 {
+        match self {
+            Self::Px(size) => size.max(1),
+            Self::Role(role) => role.resolve_px(options.base_font_size_px),
+        }
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -211,7 +290,7 @@ enum StyleTag {
     Bold,
     Italic,
     Underline,
-    Size(u32),
+    Size(FontSizeSpec),
     Font(String),
     Color(RunColor),
 }
@@ -293,9 +372,11 @@ pub(crate) fn parse_template(source: &str) -> ParsedTemplate {
                             segments.push(TemplateSegment::NewLine);
                         }
                         Some(ParsedTag::Open(style)) => {
-                            if let StyleTag::Size(size) = style {
-                                max_font_size_px = max_font_size_px.max(size);
-                                segments.push(TemplateSegment::OpenStyle(StyleTag::Size(size)));
+                            if let StyleTag::Size(size_spec) = style {
+                                max_font_size_px = max_font_size_px
+                                    .max(size_spec.resolve_px(RenderOptions::default()));
+                                segments
+                                    .push(TemplateSegment::OpenStyle(StyleTag::Size(size_spec)));
                             } else {
                                 segments.push(TemplateSegment::OpenStyle(style));
                             }
@@ -329,7 +410,11 @@ pub(crate) fn parse_template(source: &str) -> ParsedTemplate {
     }
 }
 
-pub(crate) fn render(parsed: &ParsedTemplate, context: &TemplateContext<'_>) -> RenderedText {
+pub(crate) fn render(
+    parsed: &ParsedTemplate,
+    context: &TemplateContext<'_>,
+    render_options: RenderOptions,
+) -> RenderedText {
     let mut lines = vec![RichTextLine { runs: Vec::new() }];
     let mut plain_text = String::new();
     let mut style_stack: Vec<StyleTag> = Vec::new();
@@ -337,17 +422,30 @@ pub(crate) fn render(parsed: &ParsedTemplate, context: &TemplateContext<'_>) -> 
     for segment in &parsed.segments {
         match segment {
             TemplateSegment::Text(text) => {
-                append_text(&mut lines, &mut plain_text, text, &style_stack);
+                append_text(
+                    &mut lines,
+                    &mut plain_text,
+                    text,
+                    &style_stack,
+                    render_options,
+                );
             }
             TemplateSegment::Placeholder { raw, fallbacks } => {
                 if let Some(value) = resolve_placeholder(context, fallbacks) {
-                    append_text(&mut lines, &mut plain_text, &value, &style_stack);
+                    append_text(
+                        &mut lines,
+                        &mut plain_text,
+                        &value,
+                        &style_stack,
+                        render_options,
+                    );
                 } else {
                     append_text(
                         &mut lines,
                         &mut plain_text,
                         &format!("{{{raw}}}"),
                         &style_stack,
+                        render_options,
                     );
                 }
             }
@@ -362,7 +460,13 @@ pub(crate) fn render(parsed: &ParsedTemplate, context: &TemplateContext<'_>) -> 
                 if style_stack.last().map(style_kind) == Some(*kind) {
                     style_stack.pop();
                 } else {
-                    append_text(&mut lines, &mut plain_text, literal, &style_stack);
+                    append_text(
+                        &mut lines,
+                        &mut plain_text,
+                        literal,
+                        &style_stack,
+                        render_options,
+                    );
                 }
             }
         }
@@ -373,7 +477,16 @@ pub(crate) fn render(parsed: &ParsedTemplate, context: &TemplateContext<'_>) -> 
 
 pub(crate) fn render_template(source: &str, context: &TemplateContext<'_>) -> RenderedText {
     let parsed = parse_template(source);
-    render(&parsed, context)
+    render(&parsed, context, RenderOptions::default())
+}
+
+pub(crate) fn render_template_with_options(
+    source: &str,
+    context: &TemplateContext<'_>,
+    render_options: RenderOptions,
+) -> RenderedText {
+    let parsed = parse_template(source);
+    render(&parsed, context, render_options)
 }
 
 pub(crate) fn template_metrics(source: &str) -> TemplateMetrics {
@@ -402,8 +515,9 @@ fn append_text(
     plain_text: &mut String,
     text: &str,
     style_stack: &[StyleTag],
+    render_options: RenderOptions,
 ) {
-    let state = style_state(style_stack);
+    let state = style_state(style_stack, render_options);
     let mut first = true;
     for part in text.split('\n') {
         if !first {
@@ -442,9 +556,9 @@ fn append_text(
     }
 }
 
-fn style_state(style_stack: &[StyleTag]) -> StyleState {
+fn style_state(style_stack: &[StyleTag], render_options: RenderOptions) -> StyleState {
     let mut state = StyleState {
-        font_size_px: DEFAULT_FONT_SIZE_PX,
+        font_size_px: render_options.base_font_size_px.max(1),
         ..StyleState::default()
     };
     for style in style_stack {
@@ -452,7 +566,7 @@ fn style_state(style_stack: &[StyleTag]) -> StyleState {
             StyleTag::Bold => state.bold = true,
             StyleTag::Italic => state.italic = true,
             StyleTag::Underline => state.underline = true,
-            StyleTag::Size(size) => state.font_size_px = *size,
+            StyleTag::Size(size_spec) => state.font_size_px = size_spec.resolve_px(render_options),
             StyleTag::Font(font) => state.font_family = font.clone(),
             StyleTag::Color(color) => state.color = Some(color.clone()),
         }
@@ -554,11 +668,7 @@ fn parse_tag_segment(content: &str) -> Option<ParsedTag> {
             return None;
         }
         return match name.as_str() {
-            "size" => value
-                .parse::<u32>()
-                .ok()
-                .filter(|size| *size > 0)
-                .map(|size| ParsedTag::Open(StyleTag::Size(size))),
+            "size" => parse_size_spec(value).map(|size| ParsedTag::Open(StyleTag::Size(size))),
             "font" => Some(ParsedTag::Open(StyleTag::Font(value.to_string()))),
             "color" => parse_color(value).map(|color| ParsedTag::Open(StyleTag::Color(color))),
             _ => None,
@@ -572,6 +682,13 @@ fn parse_tag_segment(content: &str) -> Option<ParsedTag> {
         "u" => Some(ParsedTag::Open(StyleTag::Underline)),
         _ => None,
     }
+}
+
+fn parse_size_spec(value: &str) -> Option<FontSizeSpec> {
+    if let Ok(size) = value.parse::<u32>() {
+        return (size > 0).then_some(FontSizeSpec::Px(size));
+    }
+    FontSizeRole::from_name(value).map(FontSizeSpec::Role)
 }
 
 fn parse_color(value: &str) -> Option<RunColor> {
@@ -628,7 +745,10 @@ fn parse_hex_color(value: &str) -> Option<(u8, u8, u8, u8)> {
 
 #[cfg(test)]
 mod tests {
-    use super::{render_template, template_metrics, PaletteColor, RunColor, TemplateContext};
+    use super::{
+        render_template, render_template_with_options, template_metrics, PaletteColor,
+        RenderOptions, RunColor, TemplateContext,
+    };
 
     fn context<'a>(title: &'a str) -> TemplateContext<'a> {
         TemplateContext {
@@ -694,6 +814,37 @@ mod tests {
     }
 
     #[test]
+    fn test_size_roles_use_default_base() {
+        let rendered = render_template("[size=title]{title}[/size]", &context("Song"));
+        assert_eq!(rendered.lines[0].runs[0].font_size_px, 17);
+    }
+
+    #[test]
+    fn test_size_roles_are_responsive_with_base_font_option() {
+        let rendered = render_template_with_options(
+            "[size=title]{title}[/size] [size=caption]{artist}[/size]",
+            &context("Song"),
+            RenderOptions {
+                base_font_size_px: 16,
+            },
+        );
+        assert_eq!(rendered.lines[0].runs[0].font_size_px, 21);
+        assert_eq!(rendered.lines[0].runs[2].font_size_px, 13);
+    }
+
+    #[test]
+    fn test_numeric_size_stays_fixed_with_custom_base_font_option() {
+        let rendered = render_template_with_options(
+            "[size=18]{title}[/size]",
+            &context("Song"),
+            RenderOptions {
+                base_font_size_px: 24,
+            },
+        );
+        assert_eq!(rendered.lines[0].runs[0].font_size_px, 18);
+    }
+
+    #[test]
     fn test_fallback_chain() {
         let rendered = render_template("{missing;title;file_name}", &context("Song"));
         assert_eq!(rendered.plain_text, "Song");
@@ -716,5 +867,12 @@ mod tests {
         let metrics = template_metrics("[size=18]{title}[/size]\\n{artist}[br]{album}");
         assert_eq!(metrics.explicit_line_count, 3);
         assert_eq!(metrics.max_font_size_px, 18);
+    }
+
+    #[test]
+    fn test_template_metrics_supports_size_roles() {
+        let metrics = template_metrics("[size=h2]{title}[/size]");
+        assert_eq!(metrics.explicit_line_count, 1);
+        assert_eq!(metrics.max_font_size_px, 23);
     }
 }
