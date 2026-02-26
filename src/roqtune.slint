@@ -3104,6 +3104,8 @@ export component AppWindow inherits Window {
                     spacing: 0px;
                     ScrollView {
                         vertical-stretch: 1;
+                        viewport-width: max(24px, parent.width - 8px);
+                        viewport-height: max(24px, root.layout_panel_submenu_labels.length * 24px);
                         Rectangle {
                             x: 4px;
                             width: max(0px, parent.width - 8px);
@@ -3128,6 +3130,9 @@ export component AppWindow inherits Window {
                                     horizontal-alignment: left;
                                 }
                                 panel-option-ta := TouchArea {
+                                    scroll-event(event) => {
+                                        return EventResult.reject;
+                                    }
                                     clicked => {
                                         let panel-code = root.layout_panel_submenu_codes[index];
                                         root.layout_editor_replace_panel_kind = panel-code;
@@ -3155,7 +3160,7 @@ export component AppWindow inherits Window {
                 height: max(
                     24px,
                     min(
-                        min(300px, root.layout_replace_preset_labels.length * 24px + 12px),
+                        min(360px, root.layout_replace_preset_labels.length * 24px + 12px),
                         root.height - root.layout_leaf_context_menu_y - 72px
                     )
                 );
@@ -3169,6 +3174,8 @@ export component AppWindow inherits Window {
                     spacing: 0px;
                     ScrollView {
                         vertical-stretch: 1;
+                        viewport-width: max(24px, parent.width - 8px);
+                        viewport-height: max(24px, root.layout_replace_preset_labels.length * 24px);
                         Rectangle {
                             x: 4px;
                             width: max(0px, parent.width - 8px);
@@ -3201,6 +3208,9 @@ export component AppWindow inherits Window {
                                 }
                                 preset-option-ta := TouchArea {
                                     enabled: !parent.is-header;
+                                    scroll-event(event) => {
+                                        return EventResult.reject;
+                                    }
                                     clicked => {
                                         let panel-code = parent.preset-code;
                                         root.layout_editor_replace_panel_kind = panel-code;
