@@ -49,8 +49,8 @@ export component PlaylistRow inherits Rectangle {
         height: 14px;
         border-radius: 7px;
         border-width: 1px;
-        border-color: AppPalette.accent-soft-border;
-        background: AppPalette.accent-soft-bg;
+        border-color: AppPalette.opensubsonic-badge-border;
+        background: AppPalette.opensubsonic-badge-bg;
 
         Image {
             source: AppIcons.opensubsonic;
@@ -59,7 +59,7 @@ export component PlaylistRow inherits Rectangle {
             x: (parent.width - self.width) / 2;
             y: (parent.height - self.height) / 2;
             image-fit: contain;
-            colorize: AppPalette.accent;
+            colorize: AppPalette.opensubsonic-badge-icon;
         }
     }
 
@@ -277,8 +277,8 @@ export component TrackRow inherits Rectangle {
                 height: 18px;
                 border-radius: 9px;
                 border-width: 1px;
-                border-color: AppPalette.accent-soft-border;
-                background: AppPalette.accent-soft-bg;
+                border-color: AppPalette.opensubsonic-badge-border;
+                background: AppPalette.opensubsonic-badge-bg;
 
                 Image {
                     source: AppIcons.opensubsonic;
@@ -287,7 +287,7 @@ export component TrackRow inherits Rectangle {
                     x: (parent.width - self.width) / 2;
                     y: (parent.height - self.height) / 2;
                     image-fit: contain;
-                    colorize: AppPalette.accent;
+                    colorize: AppPalette.opensubsonic-badge-icon;
                 }
             }
         }

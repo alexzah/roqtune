@@ -48,13 +48,19 @@ This project contains third-party code with the following licenses.
 - **Copyright**: Copyright (c) 2020-2026 Paweł Kuna
 - **Location**: `src/ui/icons/tabler/`
 
+### OpenSubsonic Logo
+- **Source**: https://github.com/opensubsonic/open-subsonic-api/blob/main/assets/icons/logo.svg
+- **License**: Apache-2.0
+- **Copyright**: OpenSubsonic contributors
+- **Location**: `src/ui/icons/opensubsonic/logo.svg`
+
 ## Fonts
 
 No custom fonts are bundled with this project.
 
 ## Other Assets
 
-No other third-party assets are included in this repository.
+No additional third-party assets are included beyond those listed above.
 
 ---
 

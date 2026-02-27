@@ -2721,6 +2721,7 @@ export component AppWindow inherits Window {
         x: min(max(0px, root.layout_exit_editor_button_x), max(0px, root.width - self.width));
         y: min(max(0px, root.layout_exit_editor_button_y), max(0px, root.height - self.height));
         background: transparent;
+        opacity: 0.86;
 
         drag-handle-chip := Rectangle {
             x: 0px;
@@ -6511,7 +6512,7 @@ export component AppWindow inherits Window {
             && !root.show_playlist_track_context_menu
             && !root.show_properties_dialog
             && !root.show_control_cluster_menu : Rectangle {
-        z: 120;
+        z: 200;
         property <length> tooltip-max-width: min(360px, root.width - 16px);
         width: min(
             self.tooltip-max-width,
