@@ -1905,6 +1905,19 @@ impl LibraryManager {
                             self.publish_global_search_data();
                         }
                     }
+                    Message::Playlist(protocol::PlaylistMessage::TracksInsertedBatch {
+                        tracks,
+                        ..
+                    }) => {
+                        if self.include_playlist_tracks_in_library && !tracks.is_empty() {
+                            self.scan_library();
+                        }
+                    }
+                    Message::Playlist(protocol::PlaylistMessage::TrackAdded { .. }) => {
+                        if self.include_playlist_tracks_in_library {
+                            self.scan_library();
+                        }
+                    }
                     Message::Playlist(protocol::PlaylistMessage::PlaylistIndicesChanged {
                         is_playing,
                         ..
