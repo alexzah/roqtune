@@ -43,6 +43,7 @@ export component AppWindow inherits Window {
         width: 0px;
         height: 0px;
         key-pressed(event) => {
+            root.playlist-link-modifier-active = event.modifiers.control || event.modifiers.meta;
             if (event.text == Key.F6 || ((event.text == "l" || event.text == "L") && event.modifiers.control)) {
                 root.open_layout_editor();
                 return accept;
@@ -227,6 +228,10 @@ export component AppWindow inherits Window {
             }
             reject
         }
+        key-released(event) => {
+            root.playlist-link-modifier-active = event.modifiers.control || event.modifiers.meta;
+            accept
+        }
     }
 
     init => {
@@ -264,6 +269,8 @@ export component AppWindow inherits Window {
     in-out property <string> remote_detach_target_playlist_id: "";
     in-out property <bool> show_apply_filter_view_confirm: false;
     in-out property <bool> show_library_remove_confirm: false;
+    in-out property <string> library_remove_confirm_message:
+        "Remove from library? This will not delete any files\n\nNote: tracks may be re-added in a rescan if files remain in library folders";
     in-out property <string> apply_filter_view_confirm_message: "";
     in-out property <int> delete_custom_column_index: -1;
     in-out property <string> delete_custom_column_message: "";
@@ -462,6 +469,8 @@ export component AppWindow inherits Window {
     in-out property <[string]> settings_library_folders: [];
     in-out property <int> settings_library_selected_folder_index: -1;
     in-out property <bool> settings_library_online_metadata_enabled: false;
+    in-out property <bool> settings_library_include_playlist_tracks_in_library: true;
+    in-out property <bool> library_has_any_content: false;
     in-out property <bool> layout_edit_mode: false;
     in-out property <bool> show_layout_editor_dialog: false;
     in-out property <bool> show_layout_leaf_context_menu: false;
@@ -1171,8 +1180,21 @@ export component AppWindow inherits Window {
                     display-text: panel.display_text;
                     tooltip-text: panel.display_text_full;
                     tooltip-enabled: panel.display_text_elided;
+                    empty-state-text: panel.display_priority == 4
+                        ? "No track playing"
+                        : "No track selected";
                     tooltip_hover_changed(is-hovered, tooltip, anchor-x-px, anchor-y-px) => {
                         root.tooltip_hover_changed(is-hovered, tooltip, anchor-x-px, anchor-y-px);
+                    }
+                    metadata_link_activated(kind, value, album, album_artist, track_path) => {
+                        root.activate_metadata_link(
+                            kind,
+                            value,
+                            album,
+                            album_artist,
+                            track_path,
+                            true
+                        );
                     }
                 }
             }
@@ -1739,6 +1761,20 @@ export component AppWindow inherits Window {
                                 horizontal-padding: root.playlist-row-padding-x;
                                 column-spacing: root.playlist-column-spacing;
                                 status-lane-width: root.playlist-status-lane-width;
+                                hover-column-index: root.playlist-link-hover-row == i
+                                    ? root.playlist-link-hover-column
+                                    : -1;
+                                modifier-link-mode-active: root.playlist-link-modifier-active;
+                                metadata_link_activated(kind, value, album, album_artist, track_path) => {
+                                    root.activate_metadata_link(
+                                        kind,
+                                        value,
+                                        album,
+                                        album_artist,
+                                        track_path,
+                                        true
+                                    );
+                                }
                             }
                         }
 
@@ -1762,33 +1798,66 @@ export component AppWindow inherits Window {
                                 && self.mouse-x >= (track-list.visible-width - root.null-column-width);
                             property <int> hovered-row: is-in-rows ? raw-row : -1;
                             property <int> drop-gap: max(0, min(root.track_model.length, floor((content-y + row-height / 2) / row-height)));
+                            property <int> hovered-column: -1;
+                            property <bool> hovered-column-has-link: self.is-in-rows
+                                && !self.in-null-column
+                                && self.hovered-column >= 0
+                                && self.hovered-column < root.track_model[self.hovered-row].rich_values.length
+                                && root.track_model[self.hovered-row].rich_values[self.hovered-column].lines.length > 0
+                                && root.track_model[self.hovered-row].rich_values[self.hovered-column].lines[0].runs.length > 0
+                                && root.track_model[self.hovered-row].rich_values[self.hovered-column].lines[0].runs[0].link_kind != 0;
+                            property <bool> hovered-link-activatable: self.hovered-column-has-link
+                                && root.playlist-link-modifier-active;
+                            mouse-cursor: self.hovered-link-activatable ? pointer : default;
 
                             pointer-event(event) => {
+                                let content-mouse-x-px = floor(
+                                    (
+                                        self.mouse-x
+                                            - root.playlist-columns-band-offset-x
+                                            - track-list.viewport-x
+                                    ) / 1px
+                                );
+                                self.hovered-column = content-mouse-x-px >= 0
+                                    ? root.playlist_header_column_at(content-mouse-x-px)
+                                    : -1;
+                                root.playlist-link-modifier-active = event.modifiers.control || event.modifiers.meta;
+                                if (self.hovered-link-activatable) {
+                                    root.playlist-link-hover-row = self.hovered-row;
+                                    root.playlist-link-hover-column = self.hovered-column;
+                                } else {
+                                    root.playlist-link-hover-row = -1;
+                                    root.playlist-link-hover-column = -1;
+                                }
                                 if (event.button == PointerEventButton.left) {
                                     if (event.kind == PointerEventKind.down) {
                                         root.show_playlist_track_context_menu = false;
                                         root.show_library_context_menu = false;
+                                        if (self.hovered-link-activatable) {
+                                            let run = root.track_model[self.hovered-row].rich_values[self.hovered-column].lines[0].runs[0];
+                                            root.activate_metadata_link(
+                                                run.link_kind,
+                                                run.link_value,
+                                                run.link_album,
+                                                run.link_album_artist,
+                                                run.link_track_path,
+                                                true
+                                            );
+                                            return;
+                                        }
                                         if (!self.is-in-rows || self.in-null-column) {
                                             root.sidebar_has_focus = false;
                                             key-handler.focus();
                                             root.pressed-index = -1;
                                             root.hover-index = -1;
+                                            root.playlist-link-hover-row = -1;
+                                            root.playlist-link-hover-column = -1;
                                             root.deselect_all();
                                             return;
                                         }
-                                        let content-mouse-x-px = floor(
-                                            (
-                                                self.mouse-x
-                                                    - root.playlist-columns-band-offset-x
-                                                    - track-list.viewport-x
-                                            ) / 1px
-                                        );
-                                        let hovered-column = content-mouse-x-px >= 0
-                                            ? root.playlist_header_column_at(content-mouse-x-px)
-                                            : -1;
-                                        if (hovered-column >= 0
-                                                && hovered-column < root.playlist_visible_column_kinds.length
-                                                && root.playlist_visible_column_kinds[hovered-column] == 2) {
+                                        if (self.hovered-column >= 0
+                                                && self.hovered-column < root.playlist_visible_column_kinds.length
+                                                && root.playlist_visible_column_kinds[self.hovered-column] == 2) {
                                             root.toggle_favorite_for_playlist_row(self.hovered-row);
                                             root.pressed-index = -1;
                                             root.hover-index = -1;
@@ -1812,6 +1881,8 @@ export component AppWindow inherits Window {
                                             root.on_drag_end(self.drop-gap, root.filter-blocked-shown);
                                         }
                                         root.hover-index = -1;
+                                        root.playlist-link-hover-row = -1;
+                                        root.playlist-link-hover-column = -1;
                                     }
                                 }
                                 if (event.button == PointerEventButton.right
@@ -1842,6 +1913,23 @@ export component AppWindow inherits Window {
                             }
 
                             moved => {
+                                let content-mouse-x-px = floor(
+                                    (
+                                        self.mouse-x
+                                            - root.playlist-columns-band-offset-x
+                                            - track-list.viewport-x
+                                    ) / 1px
+                                );
+                                self.hovered-column = content-mouse-x-px >= 0
+                                    ? root.playlist_header_column_at(content-mouse-x-px)
+                                    : -1;
+                                if (self.hovered-link-activatable) {
+                                    root.playlist-link-hover-row = self.hovered-row;
+                                    root.playlist-link-hover-column = self.hovered-column;
+                                } else {
+                                    root.playlist-link-hover-row = -1;
+                                    root.playlist-link-hover-column = -1;
+                                }
                                 if (root.playlist_filter_active) {
                                     if (self.pressed && root.pressed-index != -1 && !root.filter-blocked-shown && abs(self.mouse-y - root.press-y) > 5px) {
                                         root.playlist_modification_blocked();
@@ -2083,6 +2171,7 @@ export component AppWindow inherits Window {
                         vertical-stretch: 1;
                         clip: true;
                         property <bool> has-configured-folders: root.settings_library_folders.length > 0;
+                        property <bool> has-any-content: root.library_has_any_content;
                         property <int> first-visible-row: max(
                             0,
                             floor(max(0px, -library-list-view.viewport-y) / (library-list-view.row-height-px * 1px))
@@ -2102,7 +2191,7 @@ export component AppWindow inherits Window {
                             && self.has-partial-bottom-row
                             && root.library_playing_track_index == root.library_model.length - 1
                             && root.library_playing_track_index == self.first-visible-row + self.visible-row-count;
-                        property <bool> has-playing-row: self.has-configured-folders
+                        property <bool> has-playing-row: self.has-any-content
                             && root.library_playing_track_index >= 0
                             && root.library_playing_track_index < root.library_model.length;
                         property <bool> playing-above-viewport: self.has-playing-row
@@ -2125,7 +2214,7 @@ export component AppWindow inherits Window {
                             y: 0px;
                             width: parent.width;
                             height: parent.height;
-                            visible: library-list-container.has-configured-folders;
+                            visible: library-list-container.has-any-content;
                             property <int> row-height-px: root.library_root_index == 2 ? 38
                                 : root.library_root_index == 0 ? 32
                                 : 34;
@@ -2178,12 +2267,6 @@ export component AppWindow inherits Window {
                                 height: item.item_kind == 2 ? 38px
                                     : item.item_kind == 0 ? 32px
                                     : 34px;
-                                LibraryRow {
-                                    width: parent.width;
-                                    height: parent.height;
-                                    data: item;
-                                    is-hover: library-list-row-ta.has-hover;
-                                }
                                 library-list-row-ta := TouchArea {
                                     pointer-event(event) => {
                                         if (event.kind == PointerEventKind.down && event.button == PointerEventButton.left) {
@@ -2227,10 +2310,26 @@ export component AppWindow inherits Window {
                                         root.library_item_activated(row);
                                     }
                                 }
+                                LibraryRow {
+                                    width: parent.width;
+                                    height: parent.height;
+                                    data: item;
+                                    is-hover: library-list-row-ta.has-hover;
+                                    metadata_link_activated(kind, value, album, album_artist, track_path) => {
+                                        root.activate_metadata_link(
+                                            kind,
+                                            value,
+                                            album,
+                                            album_artist,
+                                            track_path,
+                                            false
+                                        );
+                                    }
+                                }
                             }
                         }
 
-                        if !library-list-container.has-configured-folders : Rectangle {
+                        if !library-list-container.has-any-content : Rectangle {
                             x: 12px;
                             y: 12px;
                             width: max(0px, parent.width - 24px);
@@ -2258,7 +2357,7 @@ export component AppWindow inherits Window {
                                     }
 
                                     Text {
-                                        text: "Library mode stays empty until at least one music folder is configured.";
+                                        text: "Library mode is empty. Add folders, playlist tracks, or remote tracks to populate it.";
                                         color: AppPalette.text-secondary;
                                         font-size: 13px;
                                         horizontal-alignment: center;
@@ -2280,7 +2379,7 @@ export component AppWindow inherits Window {
                             }
                         }
 
-                        if library-list-container.has-configured-folders
+                        if library-list-container.has-any-content
                                 && library-list-container.show-scroll-to-playing-toast : Rectangle {
                             x: max(8px, parent.width - self.width - 8px);
                             y: library-list-container.scroll-toast-y;
@@ -4531,7 +4630,7 @@ export component AppWindow inherits Window {
 
     library_remove_overlay := ConfirmationDialog {
         is-visible: root.show_library_remove_confirm;
-        message: "Remove from library? This will not delete any files\n\nNote: tracks may be re-added in a rescan if files remain in library folders";
+        message: root.library_remove_confirm_message;
         confirm-button-text: "Remove";
         confirmed => {
             root.library_confirm_remove_selection();
@@ -5822,6 +5921,68 @@ export component AppWindow inherits Window {
                             }
                         }
 
+                        Rectangle {
+                            height: 32px;
+                            background: settings-library-include-playlist-toggle-ta.has-hover
+                                ? AppPalette.control-hover-bg
+                                : transparent;
+                            border-radius: 4px;
+                            HorizontalLayout {
+                                spacing: 10px;
+                                include-playlist-label-host := Rectangle {
+                                    width: max(
+                                        settings-dialog-panel.label_column_width,
+                                        parent.width - settings-dialog-panel.control_max_width - 10px
+                                    );
+                                    height: parent.height;
+                                    background: transparent;
+                                    Text {
+                                        text: "Include playlist tracks in Library";
+                                        width: parent.width;
+                                        color: root.theme_text_primary;
+                                        font-size: 12px;
+                                        vertical-alignment: center;
+                                        horizontal-alignment: left;
+                                    }
+                                    include-playlist-label-tooltip-ta := TooltipHoverArea {
+                                        tooltip-text: "When enabled, tracks from all playlists appear in Library categories even if folder scanning is empty.";
+                                        tooltip_hover_changed(is-hovered, tooltip, anchor-x-px, anchor-y-px) => {
+                                            root.tooltip_hover_changed(is-hovered, tooltip, anchor-x-px, anchor-y-px);
+                                        }
+                                    }
+                                }
+                                Rectangle {
+                                    width: settings-dialog-panel.control_max_width;
+                                    height: parent.height;
+                                    background: transparent;
+                                    settings-library-include-playlist-toggle := Switch {
+                                        x: parent.width - self.width - 8px;
+                                        y: (parent.height - self.height) / 2;
+                                        width: 36px;
+                                        text: "";
+                                        checked <=> root.settings_library_include_playlist_tracks_in_library;
+                                    }
+                                }
+                                Rectangle { horizontal-stretch: 1; }
+                            }
+                            settings-library-include-playlist-toggle-ta := TouchArea {
+                                changed has-hover => {
+                                    root.tooltip_hover_changed(
+                                        self.has-hover,
+                                        "When enabled, tracks from all playlists appear in Library categories even if folder scanning is empty.",
+                                        floor((include-playlist-label-host.absolute-position.x + include-playlist-label-host.width / 2) / 1px),
+                                        floor((include-playlist-label-host.absolute-position.y + include-playlist-label-host.height) / 1px)
+                                    );
+                                }
+                                clicked => {
+                                    settings-library-include-playlist-toggle.checked = !settings-library-include-playlist-toggle.checked;
+                                    root.settings_set_library_include_playlist_tracks_in_library(
+                                        settings-library-include-playlist-toggle.checked
+                                    );
+                                }
+                            }
+                        }
+
                         HorizontalLayout {
                             spacing: 8px;
                             Button {
@@ -6418,6 +6579,9 @@ export component AppWindow inherits Window {
     in-out property <bool> is-dragging: false;
     in-out property <int> drop-index: -1;
     property <int> hover-index: -1;
+    property <int> playlist-link-hover-row: -1;
+    property <int> playlist-link-hover-column: -1;
+    property <bool> playlist-link-modifier-active: false;
     property <bool> filter-blocked-shown: false;
 
     // Seek bar properties - raw integer values from Rust (no string allocations)
@@ -6588,6 +6752,8 @@ export component AppWindow inherits Window {
     callback library_online_metadata_prompt_accept();
     callback library_online_metadata_prompt_deny();
     callback settings_set_library_online_metadata_enabled(bool);
+    callback settings_set_library_include_playlist_tracks_in_library(bool);
+    callback activate_metadata_link(int, string, string, string, string, bool);
     callback settings_save_subsonic_profile(bool, string, string, string);
     callback settings_test_subsonic_connection();
     callback settings_sync_subsonic_now();

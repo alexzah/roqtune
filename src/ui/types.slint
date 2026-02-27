@@ -8,6 +8,11 @@ export struct RichTextRun {
     color_mode: int, // 0 default, 1 palette, 2 rgba
     palette_color: int,
     color_rgba: color,
+    link_kind: int, // 0 none, 1 artist, 2 album, 3 genre, 4 decade, 5 title
+    link_value: string,
+    link_album: string,
+    link_album_artist: string,
+    link_track_path: string,
 }
 
 export struct RichTextLine {
@@ -35,6 +40,8 @@ export struct LibraryRowData {
     leading: string,
     primary: string,
     secondary: string,
+    primary_rich: RichTextBlock,
+    secondary_rich: RichTextBlock,
     item_kind: int, // 0 track, 1 artist, 2 album, 3 genre, 4 decade
     album_art: image,
     has_album_art: bool,

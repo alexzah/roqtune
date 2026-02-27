@@ -1,5 +1,6 @@
 //! UI callback registration for direct event-bus forwarding.
 
+use std::path::PathBuf;
 use std::time::Duration;
 
 use log::{debug, warn};
@@ -48,6 +49,34 @@ pub fn register_bus_forwarding_callbacks(ui: &AppWindow, context: BusForwardingC
     ui.on_library_back(move || {
         let _ = bus_sender_clone.send(Message::Library(protocol::LibraryMessage::NavigateBack));
     });
+
+    let bus_sender_clone = bus_sender.clone();
+    ui.on_activate_metadata_link(
+        move |kind, value, album, album_artist, track_path, reset_stack_to_root| {
+            let kind = match kind {
+                1 => protocol::MetadataLinkKind::Artist,
+                2 => protocol::MetadataLinkKind::Album,
+                3 => protocol::MetadataLinkKind::Genre,
+                4 => protocol::MetadataLinkKind::Decade,
+                5 => protocol::MetadataLinkKind::Title,
+                _ => return,
+            };
+            let payload = protocol::MetadataLinkPayload {
+                kind,
+                value: value.to_string(),
+                album: album.to_string(),
+                album_artist: album_artist.to_string(),
+                track_path: (!track_path.trim().is_empty())
+                    .then(|| PathBuf::from(track_path.to_string())),
+            };
+            let _ = bus_sender_clone.send(Message::Library(
+                protocol::LibraryMessage::ActivateMetadataLink {
+                    link: payload,
+                    reset_stack_to_root,
+                },
+            ));
+        },
+    );
 
     let bus_sender_clone = bus_sender.clone();
     ui.on_library_select_list_item(move |index, ctrl, shift, context_click| {

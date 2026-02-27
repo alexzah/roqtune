@@ -472,6 +472,53 @@ impl PlaylistManager {
         }
     }
 
+    fn prune_active_playlist_paths(&mut self, paths: Vec<PathBuf>) {
+        if paths.is_empty() {
+            return;
+        }
+
+        let path_set: HashSet<PathBuf> = paths.into_iter().collect();
+        if path_set.is_empty() {
+            return;
+        }
+
+        let indices_to_remove: Vec<usize> = (0..self.editing_playlist.num_tracks())
+            .filter(|&index| {
+                let path = &self.editing_playlist.get_track(index).path;
+                path_set.contains(path)
+            })
+            .collect();
+        if indices_to_remove.is_empty() {
+            return;
+        }
+
+        let previous_track_list = self.capture_track_list_snapshot();
+        for index in indices_to_remove.into_iter().rev() {
+            let id = self.editing_playlist.get_track_id(index);
+            self.unavailable_track_ids.remove(&id);
+            self.cached_track_ids.remove(&id);
+            self.fully_cached_track_ids.remove(&id);
+            self.requested_track_offsets.remove(&id);
+            self.editing_playlist.delete_track(index);
+        }
+
+        let all_ids: Vec<String> = (0..self.editing_playlist.num_tracks())
+            .map(|i| self.editing_playlist.get_track_id(i))
+            .collect();
+        if let Err(err) = self.db_manager.update_positions(all_ids) {
+            error!(
+                "Failed to normalize active playlist positions after path prune: {}",
+                err
+            );
+        }
+
+        if !Self::track_list_changed(&previous_track_list, &self.capture_track_list_snapshot()) {
+            return;
+        }
+        self.broadcast_playlist_changed();
+        self.broadcast_selection_changed();
+    }
+
     fn remove_remote_metadata_for_profile(&mut self, profile_id: &str) {
         self.remote_track_metadata_by_path.retain(|path, _| {
             parse_opensubsonic_track_uri(path.as_path())
@@ -2008,6 +2055,11 @@ impl PlaylistManager {
 
                         // Notify UI manager about selection change (delete modifies selection)
                         self.broadcast_selection_changed();
+                    }
+                    protocol::Message::Playlist(
+                        protocol::PlaylistMessage::PruneActivePlaylistPaths { paths },
+                    ) => {
+                        self.prune_active_playlist_paths(paths);
                     }
                     protocol::Message::Playlist(protocol::PlaylistMessage::SelectTrackMulti {
                         index,

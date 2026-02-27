@@ -1,10 +1,12 @@
 import { LibraryRowData } from "../types.slint";
 import { AppIcons } from "../icons.slint";
 import { AppPalette } from "../theme_palette.slint";
+import { RichTextBlockView } from "media.slint";
 
 export component LibraryRow inherits Rectangle {
     in property <LibraryRowData> data;
     in property <bool> is-hover;
+    callback metadata_link_activated(int, string, string, string, string);
 
     height: 34px;
     property <brush> idle-background: root.data.selected
@@ -79,27 +81,29 @@ export component LibraryRow inherits Rectangle {
                     colorize: AppPalette.accent;
                 }
 
-                Text {
-                    text: root.data.primary;
-                    color: root.data.selected
-                        ? AppPalette.text-primary
-                        : AppPalette.text-primary;
-                    font-size: 12px;
-                    overflow: elide;
-                    horizontal-alignment: left;
-                    vertical-alignment: center;
+                RichTextBlockView {
+                    block: root.data.primary_rich;
+                    default-color: AppPalette.text-primary;
+                    compact: true;
+                    max-lines: 1;
+                    clip-lines: true;
                     horizontal-stretch: 1;
+                    metadata_link_activated(kind, value, album, album_artist, track_path) => {
+                        root.metadata_link_activated(kind, value, album, album_artist, track_path);
+                    }
                 }
             }
-            Text {
-                text: root.data.secondary;
-                color: root.data.selected
+            RichTextBlockView {
+                block: root.data.secondary_rich;
+                default-color: root.data.selected
                     ? AppPalette.text-secondary
                     : AppPalette.text-muted;
-                font-size: 11px;
-                overflow: elide;
-                horizontal-alignment: left;
-                vertical-alignment: center;
+                compact: true;
+                max-lines: 1;
+                clip-lines: true;
+                metadata_link_activated(kind, value, album, album_artist, track_path) => {
+                    root.metadata_link_activated(kind, value, album, album_artist, track_path);
+                }
             }
         }
 

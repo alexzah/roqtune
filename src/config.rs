@@ -134,6 +134,8 @@ pub struct LibraryConfig {
     pub online_metadata_enabled: bool,
     #[serde(default = "default_true")]
     pub online_metadata_prompt_pending: bool,
+    #[serde(default = "default_true")]
+    pub include_playlist_tracks_in_library: bool,
     #[serde(default = "default_list_image_max_edge_px")]
     pub list_image_max_edge_px: u32,
     #[serde(default = "default_cover_art_cache_max_size_mb")]
@@ -274,6 +276,7 @@ impl Default for LibraryConfig {
             folders: Vec::new(),
             online_metadata_enabled: false,
             online_metadata_prompt_pending: true,
+            include_playlist_tracks_in_library: true,
             list_image_max_edge_px: default_list_image_max_edge_px(),
             cover_art_cache_max_size_mb: default_cover_art_cache_max_size_mb(),
             cover_art_memory_cache_max_size_mb: default_cover_art_memory_cache_max_size_mb(),

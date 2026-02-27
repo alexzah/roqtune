@@ -198,6 +198,12 @@ pub fn config_delta_entries(previous: &Config, next: &Config) -> Vec<ConfigDelta
     {
         library.online_metadata_prompt_pending = Some(next.library.online_metadata_prompt_pending);
     }
+    if previous.library.include_playlist_tracks_in_library
+        != next.library.include_playlist_tracks_in_library
+    {
+        library.include_playlist_tracks_in_library =
+            Some(next.library.include_playlist_tracks_in_library);
+    }
     if previous.library.list_image_max_edge_px != next.library.list_image_max_edge_px {
         library.list_image_max_edge_px = Some(next.library.list_image_max_edge_px);
     }

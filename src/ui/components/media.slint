@@ -273,6 +273,10 @@ export component RichTextBlockView inherits Rectangle {
     in property <bool> compact: false;
     in property <int> max-lines: 0; // 0 means no limit
     in property <bool> clip-lines: true;
+    in property <bool> link-activation-requires-modifier: false;
+    in property <bool> link-modifier-active: false;
+    in property <bool> force-link-hover: false;
+    callback metadata_link_activated(int, string, string, string, string);
 
     pure function color-from-palette(code: int) -> color {
         if code == 1 {
@@ -320,6 +324,16 @@ export component RichTextBlockView inherits Rectangle {
         return root.default-color;
     }
 
+    pure function link-is-clickable(link-kind: int) -> bool {
+        if link-kind == 0 {
+            return false;
+        }
+        if root.link-activation-requires-modifier {
+            return root.link-modifier-active;
+        }
+        return true;
+    }
+
     background: transparent;
     clip: root.clip-lines;
     VerticalLayout {
@@ -330,11 +344,16 @@ export component RichTextBlockView inherits Rectangle {
             HorizontalLayout {
                 spacing: 0px;
                 for run in line.runs : Rectangle {
+                    property <bool> run-link-clickable: root.link-is-clickable(run.link_kind);
+                    property <bool> run-link-hovered: self.run-link-clickable
+                        && (root.force-link-hover || run-link-ta.has-hover);
                     width: run-text.preferred-width;
                     height: run-text.preferred-height;
                     run-text := Text {
                         text: run.text;
-                        color: root.run-color(run.color_mode, run.palette_color, run.color_rgba);
+                        color: parent.run-link-hovered
+                            ? AppPalette.accent
+                            : root.run-color(run.color_mode, run.palette_color, run.color_rgba);
                         font-size: max(1px, run.font_size_px * 1px);
                         font-family: run.font_family;
                         font-weight: run.bold ? 700 : 400;
@@ -347,7 +366,24 @@ export component RichTextBlockView inherits Rectangle {
                         y: run-text.y + run-text.height - 1px;
                         width: run-text.preferred-width;
                         height: 1px;
-                        background: root.run-color(run.color_mode, run.palette_color, run.color_rgba);
+                        background: parent.run-link-hovered
+                            ? AppPalette.accent
+                            : root.run-color(run.color_mode, run.palette_color, run.color_rgba);
+                    }
+                    run-link-ta := TouchArea {
+                        enabled: run.link_kind != 0;
+                        mouse-cursor: self.has-hover && parent.run-link-clickable ? pointer : default;
+                        clicked => {
+                            if (parent.run-link-clickable) {
+                                root.metadata_link_activated(
+                                    run.link_kind,
+                                    run.link_value,
+                                    run.link_album,
+                                    run.link_album_artist,
+                                    run.link_track_path
+                                );
+                            }
+                        }
                     }
                 }
                 Rectangle { horizontal-stretch: 1; }
@@ -360,7 +396,9 @@ export component TextPanel inherits Rectangle {
     in property <RichTextBlock> display-text;
     in property <string> tooltip-text: "";
     in property <bool> tooltip-enabled: false;
+    in property <string> empty-state-text: "No track selected";
     callback tooltip_hover_changed(bool, string, int, int);
+    callback metadata_link_activated(int, string, string, string, string);
     private property <bool> has-metadata: root.display-text.plain_text != "" || root.tooltip-text != "";
     private property <bool> compact: root.width < 220px || root.height < 120px;
     in property <color> text-primary: AppPalette.text-primary;
@@ -369,31 +407,6 @@ export component TextPanel inherits Rectangle {
     in property <color> text-disabled: AppPalette.text-disabled;
 
     background: transparent;
-    if root.has-metadata : RichTextBlockView {
-        width: parent.width;
-        height: min(parent.height, self.preferred-height);
-        y: (parent.height - self.height) / 2;
-        block: root.display-text;
-        compact: root.compact;
-        default-color: root.text-secondary;
-        clip-lines: true;
-    }
-
-    if !root.has-metadata : Rectangle {
-        width: parent.width;
-        height: parent.height;
-        background: transparent;
-
-        Text {
-            text: "No track selected";
-            color: root.text-disabled;
-            font-size: root.compact ? 11px : 14px;
-            font-weight: 600;
-            horizontal-alignment: center;
-            vertical-alignment: center;
-        }
-    }
-
     tooltip-hover-area := TooltipHoverArea {
         x: 0px;
         y: 0px;
@@ -403,6 +416,34 @@ export component TextPanel inherits Rectangle {
         tooltip-enabled: root.tooltip-enabled && root.tooltip-text != "";
         tooltip_hover_changed(is-hovered, tooltip, anchor-x-px, anchor-y-px) => {
             root.tooltip_hover_changed(is-hovered, tooltip, anchor-x-px, anchor-y-px);
+        }
+    }
+
+    if root.has-metadata : RichTextBlockView {
+        width: parent.width;
+        height: min(parent.height, self.preferred-height);
+        y: (parent.height - self.height) / 2;
+        block: root.display-text;
+        compact: root.compact;
+        default-color: root.text-secondary;
+        clip-lines: true;
+        metadata_link_activated(kind, value, album, album_artist, track_path) => {
+            root.metadata_link_activated(kind, value, album, album_artist, track_path);
+        }
+    }
+
+    if !root.has-metadata : Rectangle {
+        width: parent.width;
+        height: parent.height;
+        background: transparent;
+
+        Text {
+            text: root.empty-state-text;
+            color: root.text-disabled;
+            font-size: root.compact ? 11px : 14px;
+            font-weight: 600;
+            horizontal-alignment: center;
+            vertical-alignment: center;
         }
     }
 }

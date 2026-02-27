@@ -1,6 +1,8 @@
 //! Shared template language parser/evaluator for playlist and metadata text.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
+
+use crate::protocol;
 
 const DEFAULT_FONT_SIZE_PX: u32 = 13;
 
@@ -88,6 +90,7 @@ pub(crate) struct RichTextRun {
     pub font_size_px: u32,
     pub font_family: String,
     pub color: Option<RunColor>,
+    pub link: Option<protocol::MetadataLinkPayload>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -257,6 +260,38 @@ impl<'a> TemplateContext<'a> {
             "album_art" | "favorite" | "disc" | "disc_number" | "duration" => Some(String::new()),
             _ => None,
         }
+    }
+
+    fn link_payload_for_key_value(
+        &self,
+        key: &str,
+        value: &str,
+    ) -> Option<protocol::MetadataLinkPayload> {
+        let trimmed = value.trim();
+        if trimmed.is_empty() {
+            return None;
+        }
+        let normalized = normalize_name(key);
+        let kind = match normalized.as_str() {
+            "artist" | "album_artist" | "albumartist" => protocol::MetadataLinkKind::Artist,
+            "album" => protocol::MetadataLinkKind::Album,
+            "genre" => protocol::MetadataLinkKind::Genre,
+            "year" | "date" => protocol::MetadataLinkKind::Decade,
+            "title" => protocol::MetadataLinkKind::Title,
+            _ => return None,
+        };
+        let album_artist = if self.album_artist.trim().is_empty() {
+            self.artist.to_string()
+        } else {
+            self.album_artist.to_string()
+        };
+        Some(protocol::MetadataLinkPayload {
+            kind,
+            value: trimmed.to_string(),
+            album: self.album.to_string(),
+            album_artist,
+            track_path: self.path.map(PathBuf::from),
+        })
     }
 }
 
@@ -428,16 +463,20 @@ pub(crate) fn render(
                     text,
                     &style_stack,
                     render_options,
+                    None,
                 );
             }
             TemplateSegment::Placeholder { raw, fallbacks } => {
-                if let Some(value) = resolve_placeholder(context, fallbacks) {
+                if let Some(resolved) = resolve_placeholder(context, fallbacks) {
+                    let link_payload =
+                        context.link_payload_for_key_value(&resolved.selected_key, &resolved.value);
                     append_text(
                         &mut lines,
                         &mut plain_text,
-                        &value,
+                        &resolved.value,
                         &style_stack,
                         render_options,
+                        link_payload.as_ref(),
                     );
                 } else {
                     append_text(
@@ -446,6 +485,7 @@ pub(crate) fn render(
                         &format!("{{{raw}}}"),
                         &style_stack,
                         render_options,
+                        None,
                     );
                 }
             }
@@ -466,6 +506,7 @@ pub(crate) fn render(
                         literal,
                         &style_stack,
                         render_options,
+                        None,
                     );
                 }
             }
@@ -493,18 +534,36 @@ pub(crate) fn template_metrics(source: &str) -> TemplateMetrics {
     parse_template(source).metrics
 }
 
-fn resolve_placeholder(context: &TemplateContext<'_>, fallbacks: &[String]) -> Option<String> {
+struct ResolvedPlaceholder {
+    selected_key: String,
+    value: String,
+}
+
+fn resolve_placeholder(
+    context: &TemplateContext<'_>,
+    fallbacks: &[String],
+) -> Option<ResolvedPlaceholder> {
     let mut recognized_any = false;
+    let mut first_recognized_key: Option<String> = None;
     for key in fallbacks {
         if let Some(value) = context.value_for_key(key) {
             recognized_any = true;
+            if first_recognized_key.is_none() {
+                first_recognized_key = Some(key.clone());
+            }
             if !value.is_empty() {
-                return Some(value);
+                return Some(ResolvedPlaceholder {
+                    selected_key: key.clone(),
+                    value,
+                });
             }
         }
     }
     if recognized_any {
-        Some(String::new())
+        Some(ResolvedPlaceholder {
+            selected_key: first_recognized_key.unwrap_or_default(),
+            value: String::new(),
+        })
     } else {
         None
     }
@@ -516,6 +575,7 @@ fn append_text(
     text: &str,
     style_stack: &[StyleTag],
     render_options: RenderOptions,
+    link_payload: Option<&protocol::MetadataLinkPayload>,
 ) {
     let state = style_state(style_stack, render_options);
     let mut first = true;
@@ -537,6 +597,7 @@ fn append_text(
             font_size_px: state.font_size_px,
             font_family: state.font_family.clone(),
             color: state.color.clone(),
+            link: link_payload.cloned(),
         };
         if let Some(line) = lines.last_mut() {
             if let Some(previous) = line.runs.last_mut() {
@@ -546,6 +607,7 @@ fn append_text(
                     && previous.font_size_px == run.font_size_px
                     && previous.font_family == run.font_family
                     && previous.color == run.color
+                    && previous.link == run.link
                 {
                     previous.text.push_str(&run.text);
                     continue;

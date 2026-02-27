@@ -262,6 +262,13 @@ fn write_config_to_document(document: &mut DocumentMut, previous: &Config, confi
         );
         set_table_scalar_if_changed(
             library,
+            "include_playlist_tracks_in_library",
+            previous.library.include_playlist_tracks_in_library,
+            config.library.include_playlist_tracks_in_library,
+            value,
+        );
+        set_table_scalar_if_changed(
+            library,
             "list_image_max_edge_px",
             i64::from(previous.library.list_image_max_edge_px),
             i64::from(config.library.list_image_max_edge_px),
