@@ -1,0 +1,56 @@
+name: macOS Build
+
+on:
+  workflow_dispatch:
+  push:
+    tags:
+      - "v*"
+
+jobs:
+  build-intel:
+    runs-on: macos-13
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-apple-darwin
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo build --release --target x86_64-apple-darwin
+      - uses: actions/upload-artifact@v4
+        with:
+          name: roqtune-x86_64-apple-darwin
+          path: target/x86_64-apple-darwin/release/roqtune
+
+  build-arm:
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-darwin
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo build --release --target aarch64-apple-darwin
+      - uses: actions/upload-artifact@v4
+        with:
+          name: roqtune-aarch64-apple-darwin
+          path: target/aarch64-apple-darwin/release/roqtune
+
+  universal:
+    needs: [build-intel, build-arm]
+    runs-on: macos-14
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: roqtune-x86_64-apple-darwin
+          path: dist/x86_64
+      - uses: actions/download-artifact@v4
+        with:
+          name: roqtune-aarch64-apple-darwin
+          path: dist/aarch64
+      - run: |
+          chmod +x dist/x86_64/roqtune dist/aarch64/roqtune
+          lipo -create dist/x86_64/roqtune dist/aarch64/roqtune -output roqtune-macos-universal
+      - uses: actions/upload-artifact@v4
+        with:
+          name: roqtune-macos-universal
+          path: roqtune-macos-universal
