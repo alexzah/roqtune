@@ -8,6 +8,10 @@ const DEFAULT_FONT_SIZE_PX: u32 = 13;
 
 pub(crate) const DEFAULT_METADATA_PANEL_TEMPLATE: &str =
     "[size=title][b][color=text_primary]{title;file_name}[/color][/b][/size]\\n[size=body][color=text_secondary]{artist;album_artist}[/color][/size]\\n[size=body][color=text_muted]{album}[/color][/size]\\n[size=caption][color=text_muted]{date;year} • {genre}[/color][/size]";
+pub(crate) const PLAYING_SYMBOL_PLAYING: &str = "▶️";
+pub(crate) const PLAYING_SYMBOL_PAUSED: &str = "⏸️";
+pub(crate) const FAVORITE_SYMBOL_ON: &str = "♥";
+pub(crate) const FAVORITE_SYMBOL_OFF: &str = "♡";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum PaletteColor {
@@ -201,6 +205,8 @@ pub(crate) struct TemplateContext<'a> {
     pub track_number: &'a str,
     pub file_name: Option<&'a str>,
     pub path: Option<&'a str>,
+    pub playing: Option<&'a str>,
+    pub favorite: Option<&'a str>,
 }
 
 impl<'a> TemplateContext<'a> {
@@ -231,7 +237,19 @@ impl<'a> TemplateContext<'a> {
             track_number,
             file_name,
             path: path_text,
+            playing: None,
+            favorite: None,
         }
+    }
+
+    pub(crate) fn with_indicator_symbols(
+        mut self,
+        playing: Option<&'a str>,
+        favorite: Option<&'a str>,
+    ) -> Self {
+        self.playing = playing;
+        self.favorite = favorite;
+        self
     }
 
     fn value_for_key(&self, key: &str) -> Option<String> {
@@ -253,11 +271,13 @@ impl<'a> TemplateContext<'a> {
             }
             "genre" => Some(self.genre.to_string()),
             "track" | "track_number" | "tracknumber" => Some(self.track_number.to_string()),
+            "playing" => Some(self.playing.unwrap_or_default().to_string()),
+            "favorite" => Some(self.favorite.unwrap_or_default().to_string()),
             "file_name" | "filename" | "file" => {
                 Some(self.file_name.unwrap_or_default().to_string())
             }
             "path" => Some(self.path.unwrap_or_default().to_string()),
-            "album_art" | "favorite" | "disc" | "disc_number" | "duration" => Some(String::new()),
+            "album_art" | "disc" | "disc_number" | "duration" => Some(String::new()),
             _ => None,
         }
     }
@@ -824,6 +844,8 @@ mod tests {
             track_number: "7",
             file_name: Some("track.flac"),
             path: Some("/music/track.flac"),
+            playing: None,
+            favorite: None,
         }
     }
 
@@ -921,6 +943,25 @@ mod tests {
         assert_eq!(
             rendered.plain_text,
             "[unknown]x[/unknown] x[/i] {bad field name}"
+        );
+    }
+
+    #[test]
+    fn test_playing_and_favorite_placeholders_render_indicator_symbols() {
+        let rendered = render_template(
+            "{playing} {favorite}",
+            &context("Song").with_indicator_symbols(
+                Some(super::PLAYING_SYMBOL_PAUSED),
+                Some(super::FAVORITE_SYMBOL_ON),
+            ),
+        );
+        assert_eq!(
+            rendered.plain_text,
+            format!(
+                "{} {}",
+                super::PLAYING_SYMBOL_PAUSED,
+                super::FAVORITE_SYMBOL_ON
+            )
         );
     }
 

@@ -411,6 +411,12 @@ pub fn default_playlist_columns() -> Vec<PlaylistColumnConfig> {
             custom: false,
         },
         PlaylistColumnConfig {
+            name: "Playing".to_string(),
+            format: "{playing}".to_string(),
+            enabled: true,
+            custom: false,
+        },
+        PlaylistColumnConfig {
             name: "Favorite".to_string(),
             format: "{favorite}".to_string(),
             enabled: false,
@@ -562,6 +568,19 @@ decoder_request_chunk_ms = 1500
         );
         assert!(!track_details_column.enabled);
         assert!(!track_details_column.custom);
+    }
+
+    #[test]
+    fn test_default_playlist_columns_include_playing_builtin_enabled() {
+        let columns = default_playlist_columns();
+        let playing_column = columns
+            .iter()
+            .find(|column| column.format == "{playing}")
+            .expect("playing built-in column should exist");
+
+        assert_eq!(playing_column.name, "Playing");
+        assert!(playing_column.enabled);
+        assert!(!playing_column.custom);
     }
 
     #[test]

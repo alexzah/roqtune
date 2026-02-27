@@ -286,6 +286,7 @@ struct ColumnWidthProfile {
 enum PlaylistColumnClass {
     AlbumArt,
     Favorite,
+    Playing,
     TrackNumber,
     DiscNumber,
     YearDate,
@@ -447,6 +448,7 @@ enum DisplayTargetResolutionMode {
 const PLAYLIST_COLUMN_KIND_TEXT: i32 = 0;
 const PLAYLIST_COLUMN_KIND_ALBUM_ART: i32 = 1;
 const PLAYLIST_COLUMN_KIND_FAVORITE: i32 = 2;
+const PLAYLIST_COLUMN_KIND_PLAYING: i32 = 3;
 const BASE_ROW_HEIGHT_PX: u32 = 30;
 const ALBUM_ART_ROW_PADDING_PX: u32 = 8;
 const TEXT_ROW_VERTICAL_PADDING_PX: u32 = 8;
@@ -2530,9 +2532,11 @@ impl UiManager {
         }
     }
 
-    fn template_context_for_track<'a>(
+    fn template_context_for_track_with_indicators<'a>(
         track_metadata: &'a TrackMetadata,
         track_path: Option<&'a Path>,
+        playing_indicator: Option<&'a str>,
+        favorite_indicator: Option<&'a str>,
     ) -> text_template::TemplateContext<'a> {
         text_template::TemplateContext::from_path_metadata(
             &track_metadata.title,
@@ -2545,6 +2549,33 @@ impl UiManager {
             &track_metadata.track_number,
             track_path,
         )
+        .with_indicator_symbols(playing_indicator, favorite_indicator)
+    }
+
+    fn playing_indicator_symbol(
+        is_current_track: bool,
+        playback_active: bool,
+        track_unavailable: bool,
+    ) -> &'static str {
+        if !is_current_track || track_unavailable {
+            return "";
+        }
+        if playback_active {
+            text_template::PLAYING_SYMBOL_PLAYING
+        } else {
+            text_template::PLAYING_SYMBOL_PAUSED
+        }
+    }
+
+    fn favorite_indicator_symbol(has_track_context: bool, favorited: bool) -> &'static str {
+        if !has_track_context {
+            return "";
+        }
+        if favorited {
+            text_template::FAVORITE_SYMBOL_ON
+        } else {
+            text_template::FAVORITE_SYMBOL_OFF
+        }
     }
 
     fn empty_rendered_text() -> text_template::RenderedText {
@@ -2657,7 +2688,28 @@ impl UiManager {
         track_path: Option<&Path>,
         format_string: &str,
     ) -> text_template::RenderedText {
-        let context = Self::template_context_for_track(track_metadata, track_path);
+        Self::render_column_rich_value_with_indicators(
+            track_metadata,
+            track_path,
+            format_string,
+            None,
+            None,
+        )
+    }
+
+    fn render_column_rich_value_with_indicators(
+        track_metadata: &TrackMetadata,
+        track_path: Option<&Path>,
+        format_string: &str,
+        playing_indicator: Option<&str>,
+        favorite_indicator: Option<&str>,
+    ) -> text_template::RenderedText {
+        let context = Self::template_context_for_track_with_indicators(
+            track_metadata,
+            track_path,
+            playing_indicator,
+            favorite_indicator,
+        );
         text_template::render_template(format_string, &context)
     }
 
@@ -2669,10 +2721,27 @@ impl UiManager {
         Self::render_column_rich_value(track_metadata, track_path, format_string).plain_text
     }
 
+    #[cfg(test)]
     fn build_playlist_row_values(
         track_metadata: &TrackMetadata,
         track_path: Option<&Path>,
         playlist_columns: &[PlaylistColumnConfig],
+    ) -> Vec<RenderedColumnValue> {
+        Self::build_playlist_row_values_with_indicators(
+            track_metadata,
+            track_path,
+            playlist_columns,
+            None,
+            None,
+        )
+    }
+
+    fn build_playlist_row_values_with_indicators(
+        track_metadata: &TrackMetadata,
+        track_path: Option<&Path>,
+        playlist_columns: &[PlaylistColumnConfig],
+        playing_indicator: Option<&str>,
+        favorite_indicator: Option<&str>,
     ) -> Vec<RenderedColumnValue> {
         playlist_columns
             .iter()
@@ -2680,14 +2749,20 @@ impl UiManager {
             .map(|column| {
                 if Self::is_album_art_builtin_column(column)
                     || Self::is_favorite_builtin_column(column)
+                    || Self::is_playing_builtin_column(column)
                 {
                     RenderedColumnValue {
                         plain_text: String::new(),
                         rich_text: Self::empty_rendered_text(),
                     }
                 } else {
-                    let rich_text =
-                        Self::render_column_rich_value(track_metadata, track_path, &column.format);
+                    let rich_text = Self::render_column_rich_value_with_indicators(
+                        track_metadata,
+                        track_path,
+                        &column.format,
+                        playing_indicator,
+                        favorite_indicator,
+                    );
                     RenderedColumnValue {
                         plain_text: rich_text.plain_text.clone(),
                         rich_text,
@@ -2827,11 +2902,17 @@ impl UiManager {
         !column.custom && Self::normalize_column_format(&column.format) == "{favorite}"
     }
 
+    fn is_playing_builtin_column(column: &PlaylistColumnConfig) -> bool {
+        !column.custom && Self::normalize_column_format(&column.format) == "{playing}"
+    }
+
     fn playlist_column_kind(column: &PlaylistColumnConfig) -> i32 {
         if Self::is_album_art_builtin_column(column) {
             PLAYLIST_COLUMN_KIND_ALBUM_ART
         } else if Self::is_favorite_builtin_column(column) {
             PLAYLIST_COLUMN_KIND_FAVORITE
+        } else if Self::is_playing_builtin_column(column) {
+            PLAYLIST_COLUMN_KIND_PLAYING
         } else {
             PLAYLIST_COLUMN_KIND_TEXT
         }
@@ -2890,7 +2971,9 @@ impl UiManager {
     }
 
     fn is_sortable_playlist_column(column: &PlaylistColumnConfig) -> bool {
-        !Self::is_album_art_builtin_column(column) && !Self::is_favorite_builtin_column(column)
+        !Self::is_album_art_builtin_column(column)
+            && !Self::is_favorite_builtin_column(column)
+            && !Self::is_playing_builtin_column(column)
     }
 
     fn playlist_column_class(column: &PlaylistColumnConfig) -> PlaylistColumnClass {
@@ -2899,6 +2982,9 @@ impl UiManager {
         }
         if Self::is_favorite_builtin_column(column) {
             return PlaylistColumnClass::Favorite;
+        }
+        if Self::is_playing_builtin_column(column) {
+            return PlaylistColumnClass::Playing;
         }
 
         let normalized_format = column.format.trim().to_ascii_lowercase();
@@ -2983,6 +3069,11 @@ impl UiManager {
                 preferred_px: 24,
                 max_px: 24,
             },
+            PlaylistColumnClass::Playing => ColumnWidthProfile {
+                min_px: 24,
+                preferred_px: 24,
+                max_px: 24,
+            },
             PlaylistColumnClass::TrackNumber => ColumnWidthProfile {
                 min_px: 52,
                 preferred_px: 68,
@@ -3038,7 +3129,9 @@ impl UiManager {
 
     fn column_shrink_priority(class: PlaylistColumnClass) -> u8 {
         match class {
-            PlaylistColumnClass::AlbumArt | PlaylistColumnClass::Favorite => 255,
+            PlaylistColumnClass::AlbumArt
+            | PlaylistColumnClass::Favorite
+            | PlaylistColumnClass::Playing => 255,
             PlaylistColumnClass::TrackNumber
             | PlaylistColumnClass::DiscNumber
             | PlaylistColumnClass::YearDate
@@ -3053,7 +3146,9 @@ impl UiManager {
 
     fn auto_growth_headroom_px(class: PlaylistColumnClass) -> u32 {
         match class {
-            PlaylistColumnClass::AlbumArt | PlaylistColumnClass::Favorite => 0,
+            PlaylistColumnClass::AlbumArt
+            | PlaylistColumnClass::Favorite
+            | PlaylistColumnClass::Playing => 0,
             PlaylistColumnClass::TrackNumber
             | PlaylistColumnClass::DiscNumber
             | PlaylistColumnClass::YearDate
@@ -3073,7 +3168,9 @@ impl UiManager {
     ) -> u32 {
         if matches!(
             class,
-            PlaylistColumnClass::AlbumArt | PlaylistColumnClass::Favorite
+            PlaylistColumnClass::AlbumArt
+                | PlaylistColumnClass::Favorite
+                | PlaylistColumnClass::Playing
         ) {
             return profile.max_px;
         }
@@ -3087,6 +3184,7 @@ impl UiManager {
         match class {
             PlaylistColumnClass::AlbumArt => profile.preferred_px,
             PlaylistColumnClass::Favorite => profile.preferred_px,
+            PlaylistColumnClass::Playing => profile.preferred_px,
             PlaylistColumnClass::TrackNumber => profile.min_px.max(52),
             PlaylistColumnClass::DiscNumber => profile.min_px.max(50),
             PlaylistColumnClass::YearDate => profile.min_px.max(64),
@@ -3106,6 +3204,7 @@ impl UiManager {
         match class {
             PlaylistColumnClass::AlbumArt => profile.preferred_px,
             PlaylistColumnClass::Favorite => profile.preferred_px,
+            PlaylistColumnClass::Playing => profile.preferred_px,
             PlaylistColumnClass::TrackNumber => 24,
             PlaylistColumnClass::DiscNumber => 24,
             PlaylistColumnClass::YearDate => 36,
@@ -3137,7 +3236,9 @@ impl UiManager {
         let mut targets = Vec::with_capacity(visible_columns.len());
         for column in visible_columns {
             let profile = self.column_width_profile_for_column(column);
-            if Self::is_album_art_builtin_column(column) || Self::is_favorite_builtin_column(column)
+            if Self::is_album_art_builtin_column(column)
+                || Self::is_favorite_builtin_column(column)
+                || Self::is_playing_builtin_column(column)
             {
                 targets.push(profile.preferred_px.clamp(profile.min_px, profile.max_px));
                 continue;
@@ -3208,7 +3309,10 @@ impl UiManager {
         profile: ColumnWidthProfile,
         target_width_px: u32,
     ) -> u32 {
-        if Self::is_album_art_builtin_column(column) || Self::is_favorite_builtin_column(column) {
+        if Self::is_album_art_builtin_column(column)
+            || Self::is_favorite_builtin_column(column)
+            || Self::is_playing_builtin_column(column)
+        {
             return target_width_px;
         }
         profile.min_px
@@ -3275,7 +3379,8 @@ impl UiManager {
                 emergency_floor_px,
                 shrink_priority: Self::column_shrink_priority(class),
                 fixed_width: Self::is_album_art_builtin_column(column)
-                    || Self::is_favorite_builtin_column(column),
+                    || Self::is_favorite_builtin_column(column)
+                    || Self::is_playing_builtin_column(column),
             });
         }
 
@@ -3300,7 +3405,9 @@ impl UiManager {
     ) -> u32 {
         let mut text_row_height_px = BASE_ROW_HEIGHT_PX;
         for column in visible_columns {
-            if Self::is_album_art_builtin_column(column) || Self::is_favorite_builtin_column(column)
+            if Self::is_album_art_builtin_column(column)
+                || Self::is_favorite_builtin_column(column)
+                || Self::is_playing_builtin_column(column)
             {
                 continue;
             }
@@ -5030,6 +5137,9 @@ impl UiManager {
         artist_bio_by_priority: Vec<Option<protocol::DetailedMetadata>>,
         album_art_paths_by_priority: Vec<Option<PathBuf>>,
         artist_image_paths_by_priority: Vec<Option<PathBuf>>,
+        playback_active: bool,
+        display_is_playing_by_priority: Vec<bool>,
+        display_is_favorited_by_priority: Vec<bool>,
     ) {
         let _ = self.ui.upgrade_in_event_loop(move |ui| {
             let metadata_model = ui.get_layout_metadata_viewer_panels();
@@ -5106,6 +5216,25 @@ impl UiManager {
                             .get(priority_index)
                             .and_then(|value| value.as_ref())
                             .map(PathBuf::as_path);
+                        let has_track_context = display_paths_by_priority
+                            .get(priority_index)
+                            .and_then(|value| value.as_ref())
+                            .is_some();
+                        let playing_indicator = UiManager::playing_indicator_symbol(
+                            display_is_playing_by_priority
+                                .get(priority_index)
+                                .copied()
+                                .unwrap_or(false),
+                            playback_active,
+                            false,
+                        );
+                        let favorite_indicator = UiManager::favorite_indicator_symbol(
+                            has_track_context,
+                            display_is_favorited_by_priority
+                                .get(priority_index)
+                                .copied()
+                                .unwrap_or(false),
+                        );
                         let context = text_template::TemplateContext::from_path_metadata(
                             &template_metadata.title,
                             &template_metadata.artist,
@@ -5116,7 +5245,8 @@ impl UiManager {
                             &template_metadata.genre,
                             &template_metadata.track_number,
                             display_path,
-                        );
+                        )
+                        .with_indicator_symbols(Some(playing_indicator), Some(favorite_indicator));
                         let content_inset_px = Self::text_panel_content_inset_px(
                             row_data.width_px,
                             row_data.height_px,
@@ -5247,6 +5377,24 @@ impl UiManager {
             artist_entities_by_priority.push(artist_entity);
         }
 
+        let mut display_is_playing_by_priority =
+            Vec::with_capacity(display_paths_by_priority.len());
+        let mut display_is_favorited_by_priority =
+            Vec::with_capacity(display_paths_by_priority.len());
+        for display_path in &display_paths_by_priority {
+            let is_playing_track = match (display_path.as_ref(), playing_track_path) {
+                (Some(display_path), Some(playing_path)) => display_path == playing_path,
+                _ => false,
+            };
+            let is_favorited = display_path
+                .as_ref()
+                .map(|path| Self::favorite_key_for_track_path(path.as_path()))
+                .map(|key| self.favorites_by_key.contains_key(&key))
+                .unwrap_or(false);
+            display_is_playing_by_priority.push(is_playing_track);
+            display_is_favorited_by_priority.push(is_favorited);
+        }
+
         let mut cover_art_cache: HashMap<Option<PathBuf>, Option<PathBuf>> = HashMap::new();
         let mut album_art_paths_by_priority = Vec::with_capacity(display_paths_by_priority.len());
         for display_path in &display_paths_by_priority {
@@ -5318,6 +5466,9 @@ impl UiManager {
             artist_bio_by_priority,
             album_art_paths_by_priority,
             artist_image_paths_by_priority,
+            self.playback_active,
+            display_is_playing_by_priority,
+            display_is_favorited_by_priority,
         );
     }
 
@@ -6315,6 +6466,8 @@ impl UiManager {
 
         let active_sort_index = active_sort.map(|(index, _)| index);
         let descending = self.filter_sort_direction == Some(PlaylistSortDirection::Descending);
+        let active_playing_index = self.active_playing_index;
+        let playback_active = self.playback_active;
         let album_art_column_visible = self.is_album_art_column_visible();
         if album_art_column_visible {
             self.ensure_track_cover_art_slots();
@@ -6329,13 +6482,29 @@ impl UiManager {
         let mut rows: Vec<ViewRow> = Vec::with_capacity(self.track_metadata.len());
         for (source_index, metadata) in self.track_metadata.iter().enumerate() {
             let track_path = self.track_paths.get(source_index).map(PathBuf::as_path);
-            let mut rendered_values =
-                Self::build_playlist_row_values(metadata, track_path, &self.playlist_columns);
             let track_unavailable = self
                 .track_ids
                 .get(source_index)
                 .map(|track_id| self.unavailable_track_ids.contains(track_id))
                 .unwrap_or(false);
+            let favorited = track_path
+                .map(Self::favorite_key_for_track_path)
+                .map(|key| self.favorites_by_key.contains_key(&key))
+                .unwrap_or(false);
+            let playing_indicator = Self::playing_indicator_symbol(
+                Some(source_index) == active_playing_index,
+                playback_active,
+                track_unavailable,
+            );
+            let favorite_indicator =
+                Self::favorite_indicator_symbol(track_path.is_some(), favorited);
+            let mut rendered_values = Self::build_playlist_row_values_with_indicators(
+                metadata,
+                track_path,
+                &self.playlist_columns,
+                Some(playing_indicator),
+                Some(favorite_indicator),
+            );
             if track_unavailable {
                 Self::apply_unavailable_title_override(
                     &mut rendered_values,
@@ -6383,8 +6552,6 @@ impl UiManager {
         let selected_set: HashSet<usize> = self.selected_indices.iter().copied().collect();
         let selected_track_count = selected_set.len();
         let selection_summary_text = Self::status_selection_summary_text(selected_track_count);
-        let active_playing_index = self.active_playing_index;
-        let playback_active = self.playback_active;
         let selected_view_index = self
             .selected_indices
             .iter()
@@ -6415,17 +6582,11 @@ impl UiManager {
                     .get(row.source_index)
                     .map(|track_id| self.unavailable_track_ids.contains(track_id))
                     .unwrap_or(false);
-                let status = if track_unavailable {
-                    ""
-                } else if Some(row.source_index) == active_playing_index {
-                    if playback_active {
-                        "▶️"
-                    } else {
-                        "⏸️"
-                    }
-                } else {
-                    ""
-                };
+                let status = Self::playing_indicator_symbol(
+                    Some(row.source_index) == active_playing_index,
+                    playback_active,
+                    track_unavailable,
+                );
                 let resolve_album_art = album_art_column_visible
                     && row_index >= cover_decode_start
                     && row_index < cover_decode_end;
@@ -6554,17 +6715,11 @@ impl UiManager {
                     .get(source_index)
                     .map(|track_id| unavailable_track_ids.contains(track_id))
                     .unwrap_or(false);
-                let status = if track_unavailable {
-                    ""
-                } else if Some(source_index) == active_playing_index {
-                    if playback_active {
-                        "▶️"
-                    } else {
-                        "⏸️"
-                    }
-                } else {
-                    ""
-                };
+                let status = Self::playing_indicator_symbol(
+                    Some(source_index) == active_playing_index,
+                    playback_active,
+                    track_unavailable,
+                );
                 if row_data.status.as_str() == status {
                     continue;
                 }
@@ -12729,6 +12884,8 @@ mod tests {
             track_number: "1",
             file_name: Some("example.mp3"),
             path: Some("/music/example.mp3"),
+            playing: None,
+            favorite: None,
         }
     }
 
@@ -14081,12 +14238,48 @@ mod tests {
                 enabled: true,
                 custom: true,
             },
+            PlaylistColumnConfig {
+                name: "Playing".to_string(),
+                format: "{playing}".to_string(),
+                enabled: true,
+                custom: false,
+            },
         ];
 
         let values = UiManager::build_playlist_row_values(&metadata, None, &columns);
         assert_eq!(values[0].plain_text, "Track");
         assert_eq!(values[1].plain_text, "");
         assert_eq!(values[2].plain_text, "");
+        assert_eq!(values[3].plain_text, "");
+    }
+
+    #[test]
+    fn test_build_playlist_row_values_renders_indicator_placeholders_for_custom_columns() {
+        let metadata = make_meta("Track");
+        let columns = vec![
+            PlaylistColumnConfig {
+                name: "Now".to_string(),
+                format: "{playing}".to_string(),
+                enabled: true,
+                custom: true,
+            },
+            PlaylistColumnConfig {
+                name: "Fav".to_string(),
+                format: "{favorite}".to_string(),
+                enabled: true,
+                custom: true,
+            },
+        ];
+
+        let values = UiManager::build_playlist_row_values_with_indicators(
+            &metadata,
+            None,
+            &columns,
+            Some(text_template::PLAYING_SYMBOL_PAUSED),
+            Some(text_template::FAVORITE_SYMBOL_ON),
+        );
+        assert_eq!(values[0].plain_text, text_template::PLAYING_SYMBOL_PAUSED);
+        assert_eq!(values[1].plain_text, text_template::FAVORITE_SYMBOL_ON);
     }
 
     #[test]
@@ -14103,6 +14296,12 @@ mod tests {
             enabled: true,
             custom: false,
         };
+        let playing = PlaylistColumnConfig {
+            name: "Playing".to_string(),
+            format: "{playing}".to_string(),
+            enabled: true,
+            custom: false,
+        };
         let title = PlaylistColumnConfig {
             name: "Title".to_string(),
             format: "{title}".to_string(),
@@ -14112,6 +14311,7 @@ mod tests {
 
         assert!(!UiManager::is_sortable_playlist_column(&album_art));
         assert!(!UiManager::is_sortable_playlist_column(&favorite));
+        assert!(!UiManager::is_sortable_playlist_column(&playing));
         assert!(UiManager::is_sortable_playlist_column(&title));
     }
 
@@ -14160,6 +14360,18 @@ mod tests {
             enabled: true,
             custom: true,
         };
+        let playing = PlaylistColumnConfig {
+            name: "Playing".to_string(),
+            format: "{playing}".to_string(),
+            enabled: true,
+            custom: false,
+        };
+        let custom_playing = PlaylistColumnConfig {
+            name: "Playing".to_string(),
+            format: "{playing}".to_string(),
+            enabled: true,
+            custom: true,
+        };
 
         assert_eq!(
             UiManager::playlist_column_class(&favorite),
@@ -14167,6 +14379,14 @@ mod tests {
         );
         assert_eq!(
             UiManager::playlist_column_class(&custom_favorite),
+            PlaylistColumnClass::Custom
+        );
+        assert_eq!(
+            UiManager::playlist_column_class(&playing),
+            PlaylistColumnClass::Playing
+        );
+        assert_eq!(
+            UiManager::playlist_column_class(&custom_playing),
             PlaylistColumnClass::Custom
         );
     }

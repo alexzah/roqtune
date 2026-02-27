@@ -128,7 +128,6 @@ export component TrackRow inherits Rectangle {
     in property <length> null-column-width: 120px;
     in property <length> horizontal-padding: 8px;
     in property <length> column-spacing: 10px;
-    in property <length> status-lane-width: 40px;
     in property <int> hover-column-index: -1;
     in property <bool> modifier-link-mode-active: false;
     callback metadata_link_activated(int, string, string, string, string);
@@ -160,17 +159,6 @@ export component TrackRow inherits Rectangle {
         padding-left: root.horizontal-padding;
         padding-right: root.horizontal-padding;
         spacing: root.column-spacing;
-
-        Rectangle {
-            width: root.status-lane-width;
-            Text {
-                text: root.data.status;
-                color: root.data.unavailable ? AppPalette.text-disabled : AppPalette.accent;
-                font-size: 14px;
-                horizontal-alignment: center;
-                vertical-alignment: center;
-            }
-        }
 
         for column-value[index] in root.data.values : Rectangle {
             width: root.column-width-for-index(index);
@@ -220,7 +208,23 @@ export component TrackRow inherits Rectangle {
                 }
             }
 
-            if self.column-kind != 1 && self.column-kind != 2 : Rectangle {
+            if self.column-kind == 3 : Rectangle {
+                x: (parent.width - self.width) / 2;
+                y: (parent.height - self.height) / 2;
+                width: 18px;
+                height: 18px;
+                if root.is-playing && !root.data.unavailable : Image {
+                    source: root.data.status == "⏸️" ? AppIcons.player-pause : AppIcons.player-play;
+                    width: 14px;
+                    height: 14px;
+                    x: (parent.width - self.width) / 2;
+                    y: (parent.height - self.height) / 2;
+                    image-fit: contain;
+                    colorize: AppPalette.accent;
+                }
+            }
+
+            if self.column-kind != 1 && self.column-kind != 2 && self.column-kind != 3 : Rectangle {
                 width: parent.width;
                 height: parent.height;
                 clip: true;

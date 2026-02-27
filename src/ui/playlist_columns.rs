@@ -14,6 +14,7 @@ use crate::{
 };
 
 const FAVORITE_COLUMN_WIDTH_PX: i32 = 24;
+const PLAYING_COLUMN_WIDTH_PX: i32 = 24;
 
 /// Normalizes a column format token for stable comparisons and keys.
 pub(crate) fn normalize_column_format(format: &str) -> String {
@@ -30,12 +31,19 @@ pub(crate) fn is_favorite_builtin_column(column: &PlaylistColumnConfig) -> bool 
     !column.custom && normalize_column_format(&column.format) == "{favorite}"
 }
 
+/// Returns `true` when a column is the built-in playing-indicator placeholder column.
+pub(crate) fn is_playing_builtin_column(column: &PlaylistColumnConfig) -> bool {
+    !column.custom && normalize_column_format(&column.format) == "{playing}"
+}
+
 /// Maps a column to its UI kind code used by Slint models.
 pub(crate) fn playlist_column_kind(column: &PlaylistColumnConfig) -> i32 {
     if is_album_art_builtin_column(column) {
         crate::PLAYLIST_COLUMN_KIND_ALBUM_ART
     } else if is_favorite_builtin_column(column) {
         crate::PLAYLIST_COLUMN_KIND_FAVORITE
+    } else if is_playing_builtin_column(column) {
+        crate::PLAYLIST_COLUMN_KIND_PLAYING
     } else {
         crate::PLAYLIST_COLUMN_KIND_TEXT
     }
@@ -166,6 +174,12 @@ pub(crate) fn playlist_column_width_bounds_with_album_art(
         return ColumnWidthBounds {
             min_px: FAVORITE_COLUMN_WIDTH_PX,
             max_px: FAVORITE_COLUMN_WIDTH_PX,
+        };
+    }
+    if is_playing_builtin_column(column) {
+        return ColumnWidthBounds {
+            min_px: PLAYING_COLUMN_WIDTH_PX,
+            max_px: PLAYING_COLUMN_WIDTH_PX,
         };
     }
 
@@ -536,7 +550,7 @@ mod tests {
 
     use super::{
         clamp_width_for_visible_column, default_album_art_column_width_bounds,
-        is_album_art_builtin_column, is_favorite_builtin_column,
+        is_album_art_builtin_column, is_favorite_builtin_column, is_playing_builtin_column,
         playlist_column_key_at_visible_index, playlist_column_width_bounds,
         playlist_column_width_bounds_with_album_art, playlist_column_widths_from_model,
         reorder_visible_playlist_columns, resolve_playlist_header_column_from_x,
@@ -685,6 +699,19 @@ mod tests {
     }
 
     #[test]
+    fn test_playlist_column_width_bounds_for_playing_column_are_fixed() {
+        let playing_column = PlaylistColumnConfig {
+            name: "Playing".to_string(),
+            format: "{playing}".to_string(),
+            enabled: true,
+            custom: false,
+        };
+
+        let bounds = playlist_column_width_bounds(&playing_column);
+        assert_eq!((bounds.min_px, bounds.max_px), (24, 24));
+    }
+
+    #[test]
     fn test_playlist_column_width_bounds_use_custom_album_art_limits() {
         let album_art_column = PlaylistColumnConfig {
             name: "Album Art".to_string(),
@@ -752,6 +779,32 @@ mod tests {
         assert!(is_favorite_builtin_column(&builtin_favorite));
         assert!(!is_favorite_builtin_column(&custom_favorite));
         assert!(!is_favorite_builtin_column(&title_column));
+    }
+
+    #[test]
+    fn test_is_playing_builtin_column_requires_builtin_marker() {
+        let builtin_playing = PlaylistColumnConfig {
+            name: "Playing".to_string(),
+            format: "{playing}".to_string(),
+            enabled: true,
+            custom: false,
+        };
+        let custom_playing = PlaylistColumnConfig {
+            name: "Playing".to_string(),
+            format: "{playing}".to_string(),
+            enabled: true,
+            custom: true,
+        };
+        let title_column = PlaylistColumnConfig {
+            name: "Title".to_string(),
+            format: "{title}".to_string(),
+            enabled: true,
+            custom: false,
+        };
+
+        assert!(is_playing_builtin_column(&builtin_playing));
+        assert!(!is_playing_builtin_column(&custom_playing));
+        assert!(!is_playing_builtin_column(&title_column));
     }
 
     #[test]
@@ -847,7 +900,7 @@ mod tests {
     }
 
     #[test]
-    fn test_visible_playlist_column_kinds_marks_builtin_album_art_only() {
+    fn test_visible_playlist_column_kinds_marks_builtin_icon_columns() {
         let columns = vec![
             PlaylistColumnConfig {
                 name: "Title".to_string(),
@@ -856,8 +909,20 @@ mod tests {
                 custom: false,
             },
             PlaylistColumnConfig {
+                name: "Playing".to_string(),
+                format: "{playing}".to_string(),
+                enabled: true,
+                custom: false,
+            },
+            PlaylistColumnConfig {
                 name: "Album Art".to_string(),
                 format: "{album_art}".to_string(),
+                enabled: true,
+                custom: false,
+            },
+            PlaylistColumnConfig {
+                name: "Favorite".to_string(),
+                format: "{favorite}".to_string(),
                 enabled: true,
                 custom: false,
             },
@@ -869,7 +934,7 @@ mod tests {
             },
         ];
 
-        assert_eq!(visible_playlist_column_kinds(&columns), vec![0, 1, 0]);
+        assert_eq!(visible_playlist_column_kinds(&columns), vec![0, 3, 1, 2, 0]);
     }
 
     #[test]
@@ -907,15 +972,13 @@ mod tests {
             .filter(|column| column.enabled)
             .map(|column| column.format.clone())
             .collect();
-        assert_eq!(
-            visible_order,
-            vec![
-                "{track_number}".to_string(),
-                "{title}".to_string(),
-                "{artist}".to_string(),
-                "{album}".to_string(),
-            ]
-        );
+        assert!(visible_order.starts_with(&[
+            "{track_number}".to_string(),
+            "{title}".to_string(),
+            "{artist}".to_string(),
+            "{album}".to_string(),
+        ]));
+        assert!(visible_order.iter().any(|value| value == "{playing}"));
     }
 
     #[test]

@@ -279,14 +279,10 @@ export component AppWindow inherits Window {
     property <length> null-column-width: 120px;
     property <length> playlist-row-padding-x: 8px;
     property <length> playlist-column-spacing: 10px;
-    property <length> playlist-status-lane-width: 40px;
-    property <length> playlist-columns-band-offset-x: root.playlist-row-padding-x
-        + root.playlist-status-lane-width
-        + root.playlist-column-spacing;
+    property <length> playlist-columns-band-offset-x: root.playlist-row-padding-x;
     property <length> playlist-fixed-chrome-width: root.playlist-row-padding-x * 2
-        + root.playlist-status-lane-width
         + root.null-column-width
-        + root.playlist-column-spacing * 3;
+        + root.playlist-column-spacing * 2;
     property <length> column-menu-x: 0px;
     property <length> column-menu-y: 0px;
     in-out property <int> column_drag_from: -1;
@@ -388,7 +384,7 @@ export component AppWindow inherits Window {
         + "Syntax: {field} or {field1;field2;field3}\n"
         + "Fallback chains return the first non-empty field.\n"
         + "Supported fields: title, artist, album, album_artist, date, year, genre,\n"
-        + "track_number, file_name, path.\n"
+        + "track_number, file_name, path, favorite, playing.\n"
         + "Unknown/invalid placeholders are rendered literally.\n\n"
         + "Style tags\n"
         + "[b] [/b] bold\n"
@@ -1262,24 +1258,14 @@ export component AppWindow inherits Window {
                             padding-left: root.playlist-row-padding-x;
                             padding-right: root.playlist-row-padding-x;
                             spacing: root.playlist-column-spacing;
-                            Rectangle {
-                                width: root.playlist-status-lane-width;
-                                Image {
-                                    source: AppIcons.player-play;
-                                    width: 11px;
-                                    height: 11px;
-                                    x: (parent.width - self.width) / 2;
-                                    y: (parent.height - self.height) / 2;
-                                    image-fit: contain;
-                                    colorize: root.theme_text_muted;
-                                }
-                            }
                             for column-header[i] in root.playlist_visible_column_headers : Rectangle {
                                 property <bool> is-drag-source: root.column_drag_from == i;
                                 property <bool> is-resize-target: root.column_resize_active && root.column_resize_index == i;
                                 property <int> sort-state: i < root.playlist_column_sort_states.length ? root.playlist_column_sort_states[i] : 0;
-                                property <bool> is-favorite-column: i < root.playlist_visible_column_kinds.length
-                                    && root.playlist_visible_column_kinds[i] == 2;
+                                property <int> column-kind: i < root.playlist_visible_column_kinds.length
+                                    ? root.playlist_visible_column_kinds[i]
+                                    : 0;
+                                property <bool> is-icon-column: self.column-kind == 2 || self.column-kind == 3;
                                 property <color> header-color: (self.is-drag-source || self.is-resize-target || self.sort-state != 0)
                                     ? AppPalette.accent
                                     : root.theme_text_muted;
@@ -1290,8 +1276,7 @@ export component AppWindow inherits Window {
                                     : transparent;
                                 border-width: (self.is-drag-source || self.is-resize-target) ? 1px : 0px;
                                 border-color: AppPalette.selection-border;
-                                if !(i < root.playlist_visible_column_kinds.length
-                                        && root.playlist_visible_column_kinds[i] == 2) : Text {
+                                if !self.is-icon-column : Text {
                                     text: parent.sort-state == 1 ? column-header + " ▲"
                                         : parent.sort-state == 2 ? column-header + " ▼"
                                         : column-header;
@@ -1303,9 +1288,17 @@ export component AppWindow inherits Window {
                                     horizontal-alignment: left;
                                     overflow: elide;
                                 }
-                                if i < root.playlist_visible_column_kinds.length
-                                        && root.playlist_visible_column_kinds[i] == 2 : Image {
+                                if self.column-kind == 2 : Image {
                                     source: AppIcons.heart-filled;
+                                    width: 12px;
+                                    height: 12px;
+                                    x: (parent.width - self.width) / 2;
+                                    y: (parent.height - self.height) / 2;
+                                    image-fit: contain;
+                                    colorize: parent.header-color;
+                                }
+                                if self.column-kind == 3 : Image {
+                                    source: AppIcons.player-play;
                                     width: 12px;
                                     height: 12px;
                                     x: (parent.width - self.width) / 2;
@@ -1760,7 +1753,6 @@ export component AppWindow inherits Window {
                                 null-column-width: root.null-column-width;
                                 horizontal-padding: root.playlist-row-padding-x;
                                 column-spacing: root.playlist-column-spacing;
-                                status-lane-width: root.playlist-status-lane-width;
                                 hover-column-index: root.playlist-link-hover-row == i
                                     ? root.playlist-link-hover-column
                                     : -1;

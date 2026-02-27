@@ -63,6 +63,13 @@ enabled = false
 custom = false
 
 [[playlist_columns]]
+name = "Playing"
+format = "{playing}"
+enabled = true
+custom = false
+width_px = 24
+
+[[playlist_columns]]
 name = "Favorite"
 format = "{favorite}"
 enabled = true
