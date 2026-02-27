@@ -450,7 +450,11 @@ Check Settings -> OpenSubsonic status and re-save credentials if needed.",
                 }
             }
             DecodeWorkItem::RuntimeOutputSampleRateChanged { sample_rate_hz } => {
-                self.target_sample_rate = sample_rate_hz.max(8_000);
+                let next_sample_rate = sample_rate_hz.max(8_000);
+                if self.target_sample_rate == next_sample_rate {
+                    return;
+                }
+                self.target_sample_rate = next_sample_rate;
                 self.resampler = None;
                 self.resampler_flushed = false;
                 self.resample_buffer.clear();
@@ -1454,6 +1458,10 @@ pub struct AudioDecoder {
     playback_session_active: bool,
     /// Output deltas staged during active sessions to avoid mid-stream resample/output churn.
     staged_output_delta: protocol::OutputConfigDelta,
+    /// Runtime sample-rate switches staged while a started track is actively rendering.
+    staged_runtime_sample_rate_hz: Option<u32>,
+    /// Set once `TrackStarted` arrives for the current local playback segment.
+    playback_track_started: bool,
 }
 
 impl AudioDecoder {
@@ -1473,6 +1481,8 @@ impl AudioDecoder {
             decode_generation: 0,
             playback_session_active: false,
             staged_output_delta: protocol::OutputConfigDelta::default(),
+            staged_runtime_sample_rate_hz: None,
+            playback_track_started: false,
         };
         audio_decoder.spawn_decode_worker(
             worker_receiver,
@@ -1485,7 +1495,9 @@ impl AudioDecoder {
     fn set_playback_session_active(&mut self, active: bool) {
         self.playback_session_active = active;
         if !active {
+            self.playback_track_started = false;
             self.flush_staged_output_config();
+            self.flush_staged_runtime_output_sample_rate();
         }
     }
 
@@ -1531,6 +1543,42 @@ impl AudioDecoder {
         }
     }
 
+    fn flush_staged_runtime_output_sample_rate(&mut self) {
+        if self.playback_track_started {
+            return;
+        }
+        let Some(sample_rate_hz) = self.staged_runtime_sample_rate_hz.take() else {
+            return;
+        };
+        debug!(
+            "AudioDecoder: Applying deferred runtime sample-rate change to {} Hz",
+            sample_rate_hz
+        );
+        self.worker_sender
+            .blocking_send(DecodeWorkItem::RuntimeOutputSampleRateChanged { sample_rate_hz })
+            .unwrap();
+    }
+
+    fn handle_runtime_output_sample_rate_changed(&mut self, sample_rate_hz: u32) {
+        debug!(
+            "AudioDecoder: Received runtime output sample-rate change: {} Hz",
+            sample_rate_hz
+        );
+        if self.playback_track_started {
+            // Defensive receiver-side guard: adaptive rate switches should be track-boundary
+            // operations. If one arrives after track start, defer until current render ends.
+            debug!(
+                "AudioDecoder: Deferring runtime sample-rate change to {} Hz until track boundary",
+                sample_rate_hz
+            );
+            self.staged_runtime_sample_rate_hz = Some(sample_rate_hz.max(8_000));
+            return;
+        }
+        self.worker_sender
+            .blocking_send(DecodeWorkItem::RuntimeOutputSampleRateChanged { sample_rate_hz })
+            .unwrap();
+    }
+
     /// Starts the blocking event loop that translates bus commands into decode work.
     pub fn run(&mut self) {
         loop {
@@ -1540,6 +1588,8 @@ impl AudioDecoder {
                         debug!("AudioDecoder: Queueing tracks for decode {:?}", paths);
                         if paths.iter().any(|track| track.play_immediately) {
                             self.decode_generation = self.decode_generation.saturating_add(1);
+                            self.playback_track_started = false;
+                            self.flush_staged_runtime_output_sample_rate();
                             self.set_playback_session_active(true);
                         }
                         let generation = self.decode_generation;
@@ -1558,6 +1608,8 @@ impl AudioDecoder {
                     }
                     Message::Audio(AudioMessage::StopDecoding) => {
                         debug!("AudioDecoder: Clearing decode state");
+                        self.playback_track_started = false;
+                        self.flush_staged_runtime_output_sample_rate();
                         let generation = self.decode_generation;
                         let _ = self
                             .worker_sender
@@ -1569,15 +1621,7 @@ impl AudioDecoder {
                     Message::Config(ConfigMessage::RuntimeOutputSampleRateChanged {
                         sample_rate_hz,
                     }) => {
-                        debug!(
-                            "AudioDecoder: Received runtime output sample-rate change: {} Hz",
-                            sample_rate_hz
-                        );
-                        self.worker_sender
-                            .blocking_send(DecodeWorkItem::RuntimeOutputSampleRateChanged {
-                                sample_rate_hz,
-                            })
-                            .unwrap();
+                        self.handle_runtime_output_sample_rate_changed(sample_rate_hz);
                     }
                     Message::Config(ConfigMessage::AudioDeviceOpened { stream_info }) => {
                         debug!(
@@ -1600,14 +1644,23 @@ impl AudioDecoder {
                     Message::Playback(
                         PlaybackMessage::Play
                         | PlaybackMessage::PlayActiveCollection
-                        | PlaybackMessage::PlayTrackById(_)
-                        | PlaybackMessage::TrackStarted(_),
+                        | PlaybackMessage::PlayTrackById(_),
                     ) => {
                         self.set_playback_session_active(true);
+                    }
+                    Message::Playback(PlaybackMessage::TrackStarted(_)) => {
+                        self.playback_track_started = true;
+                        self.set_playback_session_active(true);
+                    }
+                    Message::Playback(PlaybackMessage::TrackFinished(_)) => {
+                        self.playback_track_started = false;
+                        self.flush_staged_runtime_output_sample_rate();
                     }
                     Message::Playback(
                         PlaybackMessage::Stop | PlaybackMessage::ClearPlayerCache,
                     ) => {
+                        self.playback_track_started = false;
+                        self.flush_staged_runtime_output_sample_rate();
                         self.set_playback_session_active(false);
                     }
                     Message::Integration(IntegrationMessage::UpsertBackendProfile {
@@ -1725,6 +1778,8 @@ mod tests {
             decode_generation: 0,
             playback_session_active: false,
             staged_output_delta: OutputConfigDelta::default(),
+            staged_runtime_sample_rate_hz: None,
+            playback_track_started: false,
         };
 
         decoder
@@ -1912,6 +1967,8 @@ mod tests {
             decode_generation: 0,
             playback_session_active: false,
             staged_output_delta: OutputConfigDelta::default(),
+            staged_runtime_sample_rate_hz: None,
+            playback_track_started: false,
         };
 
         decoder.enqueue_decode_chunk_request(0, 10_000);
@@ -1946,6 +2003,8 @@ mod tests {
             decode_generation: 0,
             playback_session_active: true,
             staged_output_delta: OutputConfigDelta::default(),
+            staged_runtime_sample_rate_hz: None,
+            playback_track_started: false,
         };
 
         decoder.handle_config_changed(vec![
@@ -1992,6 +2051,39 @@ mod tests {
             }
             other => panic!("unexpected work item: {:?}", other),
         }
+    }
+
+    #[test]
+    fn test_runtime_sample_rate_changes_are_staged_after_track_start() {
+        let (bus_sender, _) = broadcast::channel(8);
+        let (worker_tx, mut worker_rx) = mpsc::channel(8);
+        let mut decoder = AudioDecoder {
+            bus_receiver: bus_sender.subscribe(),
+            bus_sender: bus_sender.clone(),
+            worker_sender: worker_tx,
+            decode_request_inflight: Arc::new(AtomicBool::new(false)),
+            decode_generation: 0,
+            playback_session_active: true,
+            staged_output_delta: OutputConfigDelta::default(),
+            staged_runtime_sample_rate_hz: None,
+            playback_track_started: true,
+        };
+
+        decoder.handle_runtime_output_sample_rate_changed(44_100);
+        assert_eq!(decoder.staged_runtime_sample_rate_hz, Some(44_100));
+        assert!(worker_rx.try_recv().is_err());
+
+        decoder.playback_track_started = false;
+        decoder.flush_staged_runtime_output_sample_rate();
+        let flushed = worker_rx
+            .try_recv()
+            .expect("expected staged runtime sample-rate flush");
+        assert!(matches!(
+            flushed,
+            DecodeWorkItem::RuntimeOutputSampleRateChanged {
+                sample_rate_hz: 44_100
+            }
+        ));
     }
 
     #[test]

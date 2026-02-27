@@ -8,9 +8,6 @@ use std::path::PathBuf;
 use std::sync::mpsc::Receiver as StdReceiver;
 
 use log::{debug, error, info, trace, warn};
-use symphonia::core::{
-    formats::FormatOptions, io::MediaSourceStream, meta::MetadataOptions, probe::Hint,
-};
 use tokio::sync::broadcast::{Receiver, Sender};
 use uuid::Uuid;
 
@@ -886,48 +883,18 @@ impl PlaylistManager {
         self.verified_output_rates = rates;
     }
 
-    fn probe_track_sample_rate(path: &PathBuf) -> Option<u32> {
-        let file = std::fs::File::open(path).ok()?;
-        let mss = MediaSourceStream::new(Box::new(file), Default::default());
-        let hint = Hint::new();
-        let probed = symphonia::default::get_probe()
-            .format(
-                &hint,
-                mss,
-                &FormatOptions::default(),
-                &MetadataOptions::default(),
-            )
-            .ok()?;
-        let format = probed.format;
-        let track = format.default_track()?;
-        track.codec_params.sample_rate
-    }
-
-    fn track_sample_rate_hz(&mut self, track: &Track) -> Option<u32> {
+    fn track_sample_rate_hz_cached(&mut self, track: &Track) -> Option<u32> {
         if let Some(cached) = self.track_sample_rate_cache.get(&track.path) {
             return *cached;
         }
-        if is_remote_track_path(track.path.as_path()) {
-            self.track_sample_rate_cache
-                .insert(track.path.clone(), None);
+        // Startup playback must remain non-blocking. Do not synchronously probe files in the
+        // hot path; rely on technical metadata updates to backfill this cache.
+        if !is_remote_track_path(track.path.as_path()) {
             return None;
         }
-        let probed = Self::probe_track_sample_rate(&track.path);
-        if let Some(rate) = probed {
-            debug!(
-                "PlaylistManager: Probed source sample-rate {} Hz for {}",
-                rate,
-                track.path.display()
-            );
-        } else {
-            debug!(
-                "PlaylistManager: Failed to probe source sample-rate for {}",
-                track.path.display()
-            );
-        }
         self.track_sample_rate_cache
-            .insert(track.path.clone(), probed);
-        probed
+            .insert(track.path.clone(), None);
+        None
     }
 
     fn desired_output_rate_for_track(&mut self, track: &Track) -> Option<u32> {
@@ -935,10 +902,14 @@ impl PlaylistManager {
             return self.current_output_rate_hz;
         }
         if self.verified_output_rates.is_empty() {
-            return self.current_output_rate_hz;
+            // Startup can race with asynchronous output capability probing. When rates are still
+            // unknown, prefer the track's native rate so first-playback stays content-matched.
+            return self
+                .track_sample_rate_hz_cached(track)
+                .or(self.current_output_rate_hz);
         }
 
-        let source_rate = match self.track_sample_rate_hz(track) {
+        let source_rate = match self.track_sample_rate_hz_cached(track) {
             Some(source_rate) => source_rate,
             None => {
                 if is_remote_track_path(track.path.as_path()) {
@@ -1035,7 +1006,19 @@ impl PlaylistManager {
             meta
         );
         self.current_track_duration_ms = meta.duration_ms;
-        let source_rate_supported = self.verified_output_rates.contains(&meta.sample_rate_hz);
+        if let Some(playing_index) = self.playback_playlist.get_playing_track_index() {
+            if playing_index < self.playback_playlist.num_tracks() {
+                let playing_track = self.playback_playlist.get_track(playing_index);
+                if !is_remote_track_path(playing_track.path.as_path()) {
+                    self.track_sample_rate_cache
+                        .insert(playing_track.path.clone(), Some(meta.sample_rate_hz));
+                }
+            }
+        }
+        // Verified-rate probing can still be in flight at startup. Allow a pre-probe switch
+        // attempt from decoder technical metadata so first playback can still be content-matched.
+        let source_rate_supported = self.verified_output_rates.is_empty()
+            || self.verified_output_rates.contains(&meta.sample_rate_hz);
         let should_switch = self.playback_route == protocol::PlaybackRoute::Local
             && self.sample_rate_auto_enabled
             && self.pending_rate_switch.is_none()
@@ -4959,6 +4942,40 @@ mod tests {
     }
 
     #[test]
+    fn test_desired_output_rate_prefers_track_rate_when_verified_rates_are_pending() {
+        let (mut manager, _receiver) = make_direct_manager();
+        manager.sample_rate_auto_enabled = true;
+        manager.current_output_rate_hz = Some(192_000);
+        manager.verified_output_rates.clear();
+
+        let track = Track {
+            id: "pending_probe_rate_track".to_string(),
+            path: PathBuf::from("/tmp/pending_probe_rate_track.flac"),
+        };
+        manager
+            .track_sample_rate_cache
+            .insert(track.path.clone(), Some(44_100));
+
+        assert_eq!(manager.desired_output_rate_for_track(&track), Some(44_100));
+    }
+
+    #[test]
+    fn test_desired_output_rate_uses_current_output_for_uncached_local_track() {
+        let (mut manager, _receiver) = make_direct_manager();
+        manager.sample_rate_auto_enabled = true;
+        manager.current_output_rate_hz = Some(192_000);
+        manager.verified_output_rates.clear();
+
+        let track = Track {
+            id: "uncached_local_rate_track".to_string(),
+            path: PathBuf::from("/tmp/uncached_local_rate_track.flac"),
+        };
+
+        assert_eq!(manager.desired_output_rate_for_track(&track), Some(192_000));
+        assert!(!manager.track_sample_rate_cache.contains_key(&track.path));
+    }
+
+    #[test]
     fn test_cache_tracks_splits_decode_batches_at_rate_boundaries() {
         let (mut manager, mut receiver) = make_direct_manager();
         manager.sample_rate_auto_enabled = true;
@@ -5170,6 +5187,51 @@ mod tests {
         });
         assert_eq!(manager.pending_rate_switch, None);
         assert!(!manager.pending_rate_switch_play_immediately);
+    }
+
+    #[test]
+    fn test_technical_metadata_can_request_preprobe_runtime_switch_before_track_started() {
+        let (mut manager, mut receiver) = make_direct_manager();
+        manager.sample_rate_auto_enabled = true;
+        manager.verified_output_rates.clear();
+        manager.current_output_rate_hz = Some(192_000);
+        manager.playback_playlist = Playlist::new();
+        let track_path = PathBuf::from("/tmp/preprobe_local_t0.flac");
+        manager.playback_playlist.add_track(Track {
+            id: "preprobe_local_t0".to_string(),
+            path: track_path.clone(),
+        });
+        manager.playback_playlist.set_playing_track_index(Some(0));
+        manager.playback_playlist.set_playing(true);
+
+        manager.handle_technical_metadata_changed(protocol::TechnicalMetadata {
+            format: "FLAC".to_string(),
+            bitrate_kbps: 850,
+            sample_rate_hz: 44_100,
+            channel_count: 2,
+            duration_ms: 123_000,
+            bits_per_sample: 16,
+        });
+
+        let message = wait_for_message(&mut receiver, Duration::from_secs(1), |message| {
+            matches!(
+                message,
+                protocol::Message::Config(protocol::ConfigMessage::SetRuntimeOutputRate { .. })
+            )
+        });
+        let protocol::Message::Config(protocol::ConfigMessage::SetRuntimeOutputRate {
+            sample_rate_hz,
+            ..
+        }) = message
+        else {
+            panic!("expected runtime output-rate switch request");
+        };
+        assert_eq!(sample_rate_hz, 44_100);
+        assert_eq!(manager.pending_rate_switch, Some(44_100));
+        assert_eq!(
+            manager.track_sample_rate_cache.get(&track_path),
+            Some(&Some(44_100))
+        );
     }
 
     #[test]

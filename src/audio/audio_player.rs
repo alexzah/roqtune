@@ -89,6 +89,8 @@ pub struct AudioPlayer {
     playback_session_active: bool,
     /// Output deltas staged during active sessions to avoid mid-stream device reopens/pops.
     staged_output_delta: crate::protocol::OutputConfigDelta,
+    /// Runtime sample-rate switches staged while a track is actively rendering.
+    staged_runtime_sample_rate_hz: Option<u32>,
 
     // Audio stream
     config: Option<cpal::StreamConfig>,
@@ -420,6 +422,7 @@ impl AudioPlayer {
             last_output_signature: None,
             playback_session_active: false,
             staged_output_delta: crate::protocol::OutputConfigDelta::default(),
+            staged_runtime_sample_rate_hz: None,
         };
 
         if player.setup_audio_device() {
@@ -822,6 +825,9 @@ impl AudioPlayer {
 
     fn apply_runtime_output_sample_rate_change(&mut self, sample_rate_hz: u32) {
         let requested_sample_rate_hz = sample_rate_hz.max(8_000);
+        if self.target_sample_rate.load(Ordering::Relaxed) as u32 == requested_sample_rate_hz {
+            return;
+        }
         debug!(
             "AudioPlayer: Applying runtime output sample-rate change to {} Hz",
             requested_sample_rate_hz
@@ -852,6 +858,35 @@ impl AudioPlayer {
             self.dither_on_bitdepth_reduce = previous_dither;
             *self.target_output_device_name.lock().unwrap() = previous_device_name;
         }
+    }
+
+    fn flush_staged_runtime_output_sample_rate_if_idle(&mut self) {
+        if self.is_playing.load(Ordering::Relaxed) {
+            return;
+        }
+        let Some(sample_rate_hz) = self.staged_runtime_sample_rate_hz.take() else {
+            return;
+        };
+        debug!(
+            "AudioPlayer: Applying deferred runtime sample-rate change to {} Hz",
+            sample_rate_hz
+        );
+        self.apply_runtime_output_sample_rate_change(sample_rate_hz);
+    }
+
+    fn stage_or_apply_runtime_output_sample_rate_change(&mut self, sample_rate_hz: u32) {
+        if self.is_playing.load(Ordering::Relaxed) {
+            // Defensive receiver-side guard: runtime output-rate changes are adaptive
+            // track-boundary controls. If they arrive while samples are actively rendering,
+            // defer until the renderer is idle to prevent audible artifacts.
+            debug!(
+                "AudioPlayer: Deferring runtime sample-rate change to {} Hz until renderer is idle",
+                sample_rate_hz
+            );
+            self.staged_runtime_sample_rate_hz = Some(sample_rate_hz.max(8_000));
+            return;
+        }
+        self.apply_runtime_output_sample_rate_change(sample_rate_hz);
     }
 
     fn should_stage_output_config_change(&self) -> bool {
@@ -1243,6 +1278,7 @@ impl AudioPlayer {
                     }
                     Message::Playback(PlaybackMessage::Pause) => {
                         self.is_playing.store(false, Ordering::Relaxed);
+                        self.flush_staged_runtime_output_sample_rate_if_idle();
                         debug!("AudioPlayer: Playback paused");
                     }
                     Message::Playback(PlaybackMessage::Stop) => {
@@ -1251,6 +1287,7 @@ impl AudioPlayer {
                         self.decode_bootstrap_pending
                             .store(false, Ordering::Relaxed);
                         self.set_playback_session_active(false);
+                        self.flush_staged_runtime_output_sample_rate_if_idle();
                         debug!("AudioPlayer: Playback stopped");
                     }
                     Message::Playback(PlaybackMessage::PlayActiveCollection) => {
@@ -1329,7 +1366,11 @@ impl AudioPlayer {
                         self.current_track_position.store(0, Ordering::Relaxed);
                         *self.current_metadata.lock().unwrap() = None;
                         self.set_playback_session_active(false);
+                        self.flush_staged_runtime_output_sample_rate_if_idle();
                         debug!("AudioPlayer: Cache cleared");
+                    }
+                    Message::Playback(PlaybackMessage::TrackFinished(_)) => {
+                        self.flush_staged_runtime_output_sample_rate_if_idle();
                     }
                     Message::Audio(AudioMessage::StopDecoding) => {
                         self.decode_bootstrap_pending
@@ -1419,7 +1460,7 @@ impl AudioPlayer {
                     Message::Config(ConfigMessage::RuntimeOutputSampleRateChanged {
                         sample_rate_hz,
                     }) => {
-                        self.apply_runtime_output_sample_rate_change(sample_rate_hz);
+                        self.stage_or_apply_runtime_output_sample_rate_change(sample_rate_hz);
                     }
                     Message::Playback(PlaybackMessage::SetVolume(volume)) => {
                         let clamped = volume.clamp(0.0, 1.0);
@@ -1558,6 +1599,30 @@ mod tests {
 
         assert!(!player.downmix_higher_channel_tracks);
         assert!(player.staged_output_delta.is_empty());
+    }
+
+    #[test]
+    fn test_runtime_sample_rate_changes_are_staged_while_playing() {
+        let (bus_sender, bus_receiver) = broadcast::channel(32);
+        let mut player = AudioPlayer::new(
+            bus_receiver,
+            bus_sender,
+            OutputConfig::default(),
+            BufferingConfig::default(),
+        );
+
+        let initial_rate = player.target_sample_rate.load(Ordering::Relaxed) as u32;
+        player.is_playing.store(true, Ordering::Relaxed);
+        player.stage_or_apply_runtime_output_sample_rate_change(initial_rate + 1_000);
+
+        assert_eq!(
+            player.staged_runtime_sample_rate_hz,
+            Some((initial_rate + 1_000).max(8_000))
+        );
+        assert_eq!(
+            player.target_sample_rate.load(Ordering::Relaxed) as u32,
+            initial_rate
+        );
     }
 
     #[test]

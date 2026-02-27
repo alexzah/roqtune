@@ -203,113 +203,74 @@ pub fn spawn_runtime_event_reactor(context: RuntimeEventReactorContext) {
                     debug!("Skipping output options re-detection after runtime sample-rate switch");
                     continue;
                 }
-                let current_inventory = crate::snapshot_output_device_names(&cpal::default_host());
-                let inventory_changed = {
-                    let mut inventory = output_device_inventory
-                        .lock()
-                        .expect("output device inventory lock poisoned");
-                    if *inventory == current_inventory {
-                        false
-                    } else {
-                        *inventory = current_inventory;
-                        true
-                    }
-                };
-                if !inventory_changed {
-                    debug!(
-                        "Skipping output options re-detection after audio-device open: inventory unchanged"
-                    );
-                    continue;
-                }
-                let persisted_config = {
-                    let state = config_state.lock().expect("config state lock poisoned");
-                    state.clone()
-                };
-                let detected_options = crate::detect_output_settings_options(&persisted_config);
-                {
-                    let mut options = output_options.lock().expect("output options lock poisoned");
-                    *options = detected_options.clone();
-                }
-
-                let _ = bus_sender_clone.send(Message::Config(
-                    ConfigMessage::OutputDeviceCapabilitiesChanged {
-                        verified_sample_rates: detected_options.verified_sample_rate_values.clone(),
-                    },
-                ));
-
-                let runtime_override = runtime_output_override_snapshot(&runtime_output_override);
-                let runtime = crate::resolve_effective_runtime_config(
-                    &persisted_config,
-                    &detected_options,
-                    Some(&runtime_override),
-                    &runtime_audio_state,
-                );
-                let runtime_signature = OutputRuntimeSignature::from_output(&runtime.output);
-                let playback_active = playback_session_active.load(Ordering::Relaxed);
-                if playback_active {
-                    // Keep probe refreshes non-disruptive during active sessions: update
-                    // capabilities/UI now, but defer effective runtime output reconfiguration
-                    // until playback is fully stopped (same staging policy as manual changes).
-                    let signature_changed = {
-                        let last_signature = last_runtime_signature
+                // Probe in a detached worker so control-thread handling for adaptive sample-rate
+                // commands (`SetRuntimeOutputRate`) is never blocked by device probing.
+                let config_state_for_probe = Arc::clone(&config_state);
+                let output_options_for_probe = Arc::clone(&output_options);
+                let output_device_inventory_for_probe = Arc::clone(&output_device_inventory);
+                let bus_sender_for_probe = bus_sender_clone.clone();
+                let ui_weak = ui_handle.clone();
+                let layout_workspace_size_for_probe = Arc::clone(&layout_workspace_size);
+                thread::spawn(move || {
+                    let current_inventory =
+                        crate::snapshot_output_device_names(&cpal::default_host());
+                    let inventory_changed = {
+                        let mut inventory = output_device_inventory_for_probe
                             .lock()
-                            .expect("runtime signature lock poisoned");
-                        *last_signature != runtime_signature
-                    };
-                    if signature_changed {
-                        let mut staged = staged_audio_settings
-                            .lock()
-                            .expect("staged audio settings lock poisoned");
-                        *staged = Some(StagedAudioSettings {
-                            output: persisted_config.output.clone(),
-                            cast: persisted_config.cast.clone(),
-                        });
-                        debug!(
-                            "Deferring async probe output apply until playback stops (signature changed)"
-                        );
-                    } else {
-                        debug!(
-                            "Skipping async probe output apply during playback: signature unchanged"
-                        );
-                    }
-                } else {
-                    let should_broadcast_runtime = {
-                        let mut last_signature = last_runtime_signature
-                            .lock()
-                            .expect("runtime signature lock poisoned");
-                        if *last_signature == runtime_signature {
+                            .expect("output device inventory lock poisoned");
+                        if *inventory == current_inventory {
                             false
                         } else {
-                            *last_signature = runtime_signature;
+                            *inventory = current_inventory;
                             true
                         }
                     };
-                    if should_broadcast_runtime {
-                        let _ = publish_runtime_config_delta(
-                            &bus_sender_clone,
-                            &last_runtime_config,
-                            runtime,
+                    if !inventory_changed {
+                        debug!(
+                            "Skipping output options re-detection after audio-device open: inventory unchanged"
                         );
-                    } else {
-                        update_last_runtime_config_snapshot(&last_runtime_config, runtime);
+                        return;
                     }
-                }
+                    let persisted_config = {
+                        let state = config_state_for_probe
+                            .lock()
+                            .expect("config state lock poisoned");
+                        state.clone()
+                    };
+                    let detected_options = crate::detect_output_settings_options(&persisted_config);
+                    {
+                        let mut options = output_options_for_probe
+                            .lock()
+                            .expect("output options lock poisoned");
+                        *options = detected_options.clone();
+                    }
 
-                let ui_weak = ui_handle.clone();
-                let config_for_ui = persisted_config.clone();
-                let options_for_ui = detected_options.clone();
-                let (workspace_width_px, workspace_height_px) =
-                    crate::workspace_size_snapshot(&layout_workspace_size);
-                let _ = slint::invoke_from_event_loop(move || {
-                    if let Some(ui) = ui_weak.upgrade() {
-                        crate::apply_config_to_ui(
-                            &ui,
-                            &config_for_ui,
-                            &options_for_ui,
-                            workspace_width_px,
-                            workspace_height_px,
-                        );
-                    }
+                    let _ = bus_sender_for_probe.send(Message::Config(
+                        ConfigMessage::OutputDeviceCapabilitiesChanged {
+                            verified_sample_rates: detected_options
+                                .verified_sample_rate_values
+                                .clone(),
+                        },
+                    ));
+
+                    // Intentional policy: async probe refresh updates capability/UI state only.
+                    // It must not mutate active audio runtime settings; adaptive sample-rate
+                    // switching remains the sole runtime output mutation path.
+                    let config_for_ui = persisted_config;
+                    let options_for_ui = detected_options;
+                    let (workspace_width_px, workspace_height_px) =
+                        crate::workspace_size_snapshot(&layout_workspace_size_for_probe);
+                    let _ = slint::invoke_from_event_loop(move || {
+                        if let Some(ui) = ui_weak.upgrade() {
+                            crate::apply_config_to_ui(
+                                &ui,
+                                &config_for_ui,
+                                &options_for_ui,
+                                workspace_width_px,
+                                workspace_height_px,
+                            );
+                        }
+                    });
                 });
             }
             Ok(Message::Playlist(PlaylistMessage::RemoteDetachConfirmationRequested {
