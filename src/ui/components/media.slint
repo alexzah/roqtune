@@ -59,8 +59,13 @@ export component VolumeSliderControl inherits Rectangle {
                 height: root.handle-base-size;
                 x: volume-track.width > 0px ? volume-track.x + (volume-track.width * root.value) - self.width / 2 : volume-track.x;
                 y: volume-track.y + (volume-track.height - self.height) / 2;
-                background: AppPalette.accent-on;
-                border-radius: 5px;
+                background: AppPalette.text-primary;
+                border-radius: 6px;
+                border-width: 1px;
+                border-color: AppPalette.border;
+                drop-shadow-offset-y: 1px;
+                drop-shadow-blur: 2px;
+                drop-shadow-color: AppPalette.overlay-scrim;
                 animate x { duration: 100ms; easing: ease-out; }
             }
 
