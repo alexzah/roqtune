@@ -109,7 +109,7 @@ custom = false
 
 [[playlist_columns]]
 name = "Track Details"
-format = "[size=body][color=text_primary]{title;file_name}[/color][/size]\\n[size=caption][color=text_secondary]{artist;album_artist} • {album}[/color][/size]"
+format = '[size=body][color=text_primary]{title;file_name}[/color][/size]\n[size=caption][color=text_secondary]{artist;album_artist} • {album}[/color][/size]'
 enabled = false
 custom = false
 
@@ -175,7 +175,7 @@ actions = [10]
 node_type = "split"
 id = "n16"
 axis = "horizontal"
-ratio = 0.54
+ratio = 0.67
 min_first_px = 32
 min_second_px = 28
 
@@ -187,6 +187,10 @@ actions = [12]
 leaf_id = "n9"
 actions = [2, 3, 4, 5, 6]
 
+[[collection_panel_instances]]
+leaf_id = "n5"
+mode = "both"
+
 [root.first.first]
 node_type = "split"
 id = "n15"
@@ -194,6 +198,10 @@ axis = "vertical"
 ratio = 0.39
 min_first_px = 32
 min_second_px = 240
+
+[[collection_panel_instances]]
+leaf_id = "n7"
+mode = "both"
 
 [[button_cluster_instances]]
 leaf_id = "n10"
@@ -208,6 +216,7 @@ image_source = "album_art"
 leaf_id = "l5"
 display_priority = "now_playing_only"
 text_source = "track"
+text_format = '[size=title][b][color=text_primary]{title;file_name}[/color][/b][/size]\n[size=body][color=text_secondary]{artist;album_artist}[/color][/size]\n[size=body][color=text_muted]{album}[/color][/size]\n[size=caption][color=text_muted]{date;year} • {genre}[/color][/size]'
 
 [root.first.first.first]
 node_type = "split"
@@ -242,7 +251,7 @@ node_type = "split"
 id = "s6"
 panel = "spacer"
 axis = "vertical"
-ratio = 0.14
+ratio = 0.1
 min_first_px = 0
 min_second_px = 0
 
@@ -256,7 +265,7 @@ node_type = "leaf"
 id = "l5"
 panel = "text_panel"
 axis = "vertical"
-ratio = 0.9
+ratio = 0.94
 min_first_px = 0
 min_second_px = 0
 
@@ -274,6 +283,7 @@ panel = "spacer"
 leaf_id = "l1"
 display_priority = "default"
 text_source = "track"
+text_format = '[size=title][b][color=text_primary]{title;file_name}[/color][/b][/size]\n[size=body][color=text_secondary]{artist;album_artist}[/color][/size]\n[size=body][color=text_muted]{album}[/color][/size]\n[size=caption][color=text_muted]{date;year} • {genre}[/color][/size]'
 
 [root.first.first.second]
 node_type = "split"
