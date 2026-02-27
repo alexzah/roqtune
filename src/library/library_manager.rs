@@ -1830,7 +1830,11 @@ impl LibraryManager {
             )));
     }
 
-    fn remove_selection_from_library(&self, selections: Vec<protocol::LibrarySelectionSpec>) {
+    fn evaluate_remove_selection(
+        &self,
+        request_id: u64,
+        selections: Vec<protocol::LibrarySelectionSpec>,
+    ) {
         if selections.is_empty() {
             let _ =
                 self.bus_producer
@@ -1859,8 +1863,81 @@ impl LibraryManager {
             return;
         }
 
-        match self.db_manager.delete_library_paths(&paths) {
+        let requires_playlist_removal = if self.include_playlist_tracks_in_library {
+            match self.db_manager.has_playlist_tracks_for_paths(&paths) {
+                Ok(found) => found,
+                Err(err) => {
+                    let _ = self.bus_producer.send(Message::Library(
+                        LibraryMessage::RemoveSelectionFailed(format!(
+                            "Failed to evaluate library removal: {}",
+                            err
+                        )),
+                    ));
+                    return;
+                }
+            }
+        } else {
+            false
+        };
+
+        let _ = self.bus_producer.send(Message::Library(
+            LibraryMessage::RemoveSelectionEvaluationResult {
+                request_id,
+                requires_playlist_removal,
+            },
+        ));
+    }
+
+    fn remove_selection_from_library(
+        &self,
+        selections: Vec<protocol::LibrarySelectionSpec>,
+        remove_from_playlists: bool,
+    ) {
+        if selections.is_empty() {
+            let _ =
+                self.bus_producer
+                    .send(Message::Library(LibraryMessage::RemoveSelectionFailed(
+                        "No library items selected".to_string(),
+                    )));
+            return;
+        }
+
+        let paths = match self.resolve_selection_paths(selections) {
+            Ok(paths) => paths,
+            Err(err) => {
+                let _ = self
+                    .bus_producer
+                    .send(Message::Library(LibraryMessage::RemoveSelectionFailed(err)));
+                return;
+            }
+        };
+
+        if paths.is_empty() {
+            let _ =
+                self.bus_producer
+                    .send(Message::Library(LibraryMessage::RemoveSelectionFailed(
+                        "No tracks matched the selected library items".to_string(),
+                    )));
+            return;
+        }
+
+        let remove_from_playlists =
+            remove_from_playlists && self.include_playlist_tracks_in_library;
+        let removal_result = if remove_from_playlists {
+            self.db_manager.delete_library_and_playlist_paths(&paths)
+        } else {
+            self.db_manager.delete_library_paths(&paths)
+        };
+
+        match removal_result {
             Ok(removed_tracks) => {
+                if remove_from_playlists {
+                    let _ = self.bus_producer.send(Message::Playlist(
+                        protocol::PlaylistMessage::PruneActivePlaylistPaths {
+                            paths: paths.clone(),
+                        },
+                    ));
+                }
                 let _ = self.bus_producer.send(Message::Library(
                     LibraryMessage::RemoveSelectionCompleted { removed_tracks },
                 ));
@@ -2056,8 +2133,17 @@ impl LibraryManager {
                     }) => {
                         self.paste_selection_to_active_playlist(selections);
                     }
-                    Message::Library(LibraryMessage::RemoveSelectionFromLibrary { selections }) => {
-                        self.remove_selection_from_library(selections);
+                    Message::Library(LibraryMessage::EvaluateRemoveSelection {
+                        request_id,
+                        selections,
+                    }) => {
+                        self.evaluate_remove_selection(request_id, selections);
+                    }
+                    Message::Library(LibraryMessage::RemoveSelectionFromLibrary {
+                        selections,
+                        remove_from_playlists,
+                    }) => {
+                        self.remove_selection_from_library(selections, remove_from_playlists);
                     }
                     Message::Library(LibraryMessage::ToggleFavorite { entity, desired }) => {
                         if let Err(error) = self.apply_toggle_favorite(entity, desired) {

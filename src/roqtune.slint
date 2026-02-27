@@ -269,6 +269,8 @@ export component AppWindow inherits Window {
     in-out property <string> remote_detach_target_playlist_id: "";
     in-out property <bool> show_apply_filter_view_confirm: false;
     in-out property <bool> show_library_remove_confirm: false;
+    in-out property <string> library_remove_confirm_message:
+        "Remove from library? This will not delete any files\n\nNote: tracks may be re-added in a rescan if files remain in library folders";
     in-out property <string> apply_filter_view_confirm_message: "";
     in-out property <int> delete_custom_column_index: -1;
     in-out property <string> delete_custom_column_message: "";
@@ -1178,6 +1180,9 @@ export component AppWindow inherits Window {
                     display-text: panel.display_text;
                     tooltip-text: panel.display_text_full;
                     tooltip-enabled: panel.display_text_elided;
+                    empty-state-text: panel.display_priority == 4
+                        ? "No track playing"
+                        : "No track selected";
                     tooltip_hover_changed(is-hovered, tooltip, anchor-x-px, anchor-y-px) => {
                         root.tooltip_hover_changed(is-hovered, tooltip, anchor-x-px, anchor-y-px);
                     }
@@ -4625,7 +4630,7 @@ export component AppWindow inherits Window {
 
     library_remove_overlay := ConfirmationDialog {
         is-visible: root.show_library_remove_confirm;
-        message: "Remove from library? This will not delete any files\n\nNote: tracks may be re-added in a rescan if files remain in library folders";
+        message: root.library_remove_confirm_message;
         confirm-button-text: "Remove";
         confirmed => {
             root.library_confirm_remove_selection();

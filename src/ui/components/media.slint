@@ -396,6 +396,7 @@ export component TextPanel inherits Rectangle {
     in property <RichTextBlock> display-text;
     in property <string> tooltip-text: "";
     in property <bool> tooltip-enabled: false;
+    in property <string> empty-state-text: "No track selected";
     callback tooltip_hover_changed(bool, string, int, int);
     callback metadata_link_activated(int, string, string, string, string);
     private property <bool> has-metadata: root.display-text.plain_text != "" || root.tooltip-text != "";
@@ -437,7 +438,7 @@ export component TextPanel inherits Rectangle {
         background: transparent;
 
         Text {
-            text: "No track selected";
+            text: root.empty-state-text;
             color: root.text-disabled;
             font-size: root.compact ? 11px : 14px;
             font-weight: 600;

@@ -230,6 +230,9 @@ pub struct UiManager {
     pending_paste_feedback: bool,
     copied_library_selections: Vec<protocol::LibrarySelectionSpec>,
     pending_library_remove_selections: Vec<protocol::LibrarySelectionSpec>,
+    pending_library_remove_from_playlists: bool,
+    library_remove_eval_nonce: u64,
+    pending_library_remove_eval_request_id: Option<u64>,
     properties_request_nonce: u64,
     properties_pending_request_id: Option<u64>,
     properties_pending_request_kind: Option<PropertiesRequestKind>,
@@ -509,6 +512,10 @@ const IMAGE_MEMORY_CACHE_SWEEP_INTERVAL: Duration = Duration::from_secs(1);
 const DETAIL_VIEWER_RENDER_MAX_EDGE_PX: u32 = 512;
 const DETAIL_VIEWER_CONVERT_THRESHOLD_PX: u32 = 1024;
 const DETAIL_COMPACT_RENDER_MAX_EDGE_PX: u32 = 384;
+const LIBRARY_REMOVE_CONFIRM_DEFAULT_MESSAGE: &str =
+    "Remove from library? This will not delete any files\n\nNote: tracks may be re-added in a rescan if files remain in library folders";
+const LIBRARY_REMOVE_CONFIRM_PLAYLIST_SYNC_MESSAGE: &str =
+    "Playlist to library sync is enabled. Removing these tracks will must delete them from playlists. Do you want to proceed?";
 
 static COVER_ART_MEMORY_CACHE_BUDGET_BYTES: AtomicU64 =
     AtomicU64::new(DEFAULT_IMAGE_MEMORY_CACHE_MAX_BYTES);
@@ -1921,6 +1928,9 @@ impl UiManager {
             pending_paste_feedback: false,
             copied_library_selections: Vec::new(),
             pending_library_remove_selections: Vec::new(),
+            pending_library_remove_from_playlists: false,
+            library_remove_eval_nonce: 0,
+            pending_library_remove_eval_request_id: None,
             properties_request_nonce: 0,
             properties_pending_request_id: None,
             properties_pending_request_kind: None,
@@ -6812,35 +6822,66 @@ impl UiManager {
         );
     }
 
+    fn show_library_remove_confirmation_dialog(&self, message: &'static str) {
+        let _ = self.ui.upgrade_in_event_loop(move |ui| {
+            ui.set_library_remove_confirm_message(message.into());
+            ui.set_show_library_remove_confirm(true);
+        });
+    }
+
+    fn reset_library_remove_confirmation_state(&mut self) {
+        self.pending_library_remove_from_playlists = false;
+        self.pending_library_remove_eval_request_id = None;
+        let _ = self.ui.upgrade_in_event_loop(move |ui| {
+            ui.set_library_remove_confirm_message(LIBRARY_REMOVE_CONFIRM_DEFAULT_MESSAGE.into());
+            ui.set_show_library_remove_confirm(false);
+        });
+    }
+
     fn request_library_remove_selection_confirmation(&mut self) {
         let selections = self.build_library_selection_specs();
         if selections.is_empty() {
             return;
         }
         self.pending_library_remove_selections = selections;
-        let _ = self.ui.upgrade_in_event_loop(move |ui| {
-            ui.set_show_library_remove_confirm(true);
-        });
+        self.pending_library_remove_from_playlists = false;
+        self.pending_library_remove_eval_request_id = None;
+
+        if self.library_include_playlist_tracks_in_library {
+            self.library_remove_eval_nonce = self.library_remove_eval_nonce.wrapping_add(1);
+            let request_id = self.library_remove_eval_nonce;
+            self.pending_library_remove_eval_request_id = Some(request_id);
+            let selections = self.pending_library_remove_selections.clone();
+            let _ = self.bus_sender.send(protocol::Message::Library(
+                protocol::LibraryMessage::EvaluateRemoveSelection {
+                    request_id,
+                    selections,
+                },
+            ));
+            return;
+        }
+
+        self.show_library_remove_confirmation_dialog(LIBRARY_REMOVE_CONFIRM_DEFAULT_MESSAGE);
     }
 
     fn confirm_library_remove_selection(&mut self) {
         let selections = std::mem::take(&mut self.pending_library_remove_selections);
-        let _ = self.ui.upgrade_in_event_loop(move |ui| {
-            ui.set_show_library_remove_confirm(false);
-        });
+        let remove_from_playlists = self.pending_library_remove_from_playlists;
+        self.reset_library_remove_confirmation_state();
         if selections.is_empty() {
             return;
         }
         let _ = self.bus_sender.send(protocol::Message::Library(
-            protocol::LibraryMessage::RemoveSelectionFromLibrary { selections },
+            protocol::LibraryMessage::RemoveSelectionFromLibrary {
+                selections,
+                remove_from_playlists,
+            },
         ));
     }
 
     fn cancel_library_remove_selection(&mut self) {
         self.pending_library_remove_selections.clear();
-        let _ = self.ui.upgrade_in_event_loop(move |ui| {
-            ui.set_show_library_remove_confirm(false);
-        });
+        self.reset_library_remove_confirmation_state();
     }
 
     fn paste_copied_tracks(&mut self) {
@@ -10887,6 +10928,7 @@ impl UiManager {
                             protocol::LibraryMessage::OpenFileLocation => {
                                 self.open_file_location();
                             }
+                            protocol::LibraryMessage::EvaluateRemoveSelection { .. } => {}
                             protocol::LibraryMessage::ConfirmRemoveSelection => {
                                 self.confirm_library_remove_selection();
                             }
@@ -11204,9 +11246,7 @@ impl UiManager {
                                 removed_tracks,
                             } => {
                                 self.pending_library_remove_selections.clear();
-                                let _ = self.ui.upgrade_in_event_loop(move |ui| {
-                                    ui.set_show_library_remove_confirm(false);
-                                });
+                                self.reset_library_remove_confirmation_state();
                                 let toast_text =
                                     format!("Removed {} track(s) from library", removed_tracks);
                                 self.library_status_text = toast_text.clone();
@@ -11216,11 +11256,29 @@ impl UiManager {
                                 self.request_library_view_data();
                                 self.request_library_root_counts();
                             }
+                            protocol::LibraryMessage::RemoveSelectionEvaluationResult {
+                                request_id,
+                                requires_playlist_removal,
+                            } => {
+                                if self.pending_library_remove_eval_request_id != Some(request_id) {
+                                    continue;
+                                }
+                                self.pending_library_remove_eval_request_id = None;
+                                if self.pending_library_remove_selections.is_empty() {
+                                    continue;
+                                }
+                                self.pending_library_remove_from_playlists =
+                                    requires_playlist_removal;
+                                let message = if requires_playlist_removal {
+                                    LIBRARY_REMOVE_CONFIRM_PLAYLIST_SYNC_MESSAGE
+                                } else {
+                                    LIBRARY_REMOVE_CONFIRM_DEFAULT_MESSAGE
+                                };
+                                self.show_library_remove_confirmation_dialog(message);
+                            }
                             protocol::LibraryMessage::RemoveSelectionFailed(error_text) => {
                                 self.pending_library_remove_selections.clear();
-                                let _ = self.ui.upgrade_in_event_loop(move |ui| {
-                                    ui.set_show_library_remove_confirm(false);
-                                });
+                                self.reset_library_remove_confirmation_state();
                                 let toast_text =
                                     format!("Failed to remove from library: {}", error_text);
                                 self.library_status_text = toast_text.clone();

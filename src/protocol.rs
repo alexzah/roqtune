@@ -108,6 +108,9 @@ pub enum PlaylistMessage {
     },
     DeleteTracks(Vec<usize>),
     DeleteSelected,
+    PruneActivePlaylistPaths {
+        paths: Vec<PathBuf>,
+    },
     /// UI requested playback for a currently rendered track row.
     /// The index is in filtered/sorted view coordinates and must be mapped
     /// to playlist source coordinates by the UI manager.
@@ -310,8 +313,13 @@ pub enum LibraryMessage {
     OpenFileLocation,
     ConfirmRemoveSelection,
     CancelRemoveSelection,
+    EvaluateRemoveSelection {
+        request_id: u64,
+        selections: Vec<LibrarySelectionSpec>,
+    },
     RemoveSelectionFromLibrary {
         selections: Vec<LibrarySelectionSpec>,
+        remove_from_playlists: bool,
     },
     RequestScan,
     RequestRootCounts,
@@ -454,6 +462,10 @@ pub enum LibraryMessage {
     AddToPlaylistsFailed(String),
     RemoveSelectionCompleted {
         removed_tracks: usize,
+    },
+    RemoveSelectionEvaluationResult {
+        request_id: u64,
+        requires_playlist_removal: bool,
     },
     RemoveSelectionFailed(String),
     ToastTimeout {

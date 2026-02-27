@@ -801,6 +801,32 @@ impl DbManager {
         Ok(paths)
     }
 
+    /// Returns true when any provided path exists in one or more playlists.
+    pub fn has_playlist_tracks_for_paths(
+        &self,
+        paths: &[PathBuf],
+    ) -> Result<bool, rusqlite::Error> {
+        if paths.is_empty() {
+            return Ok(false);
+        }
+
+        let mut stmt = self
+            .conn
+            .prepare("SELECT 1 FROM tracks WHERE path = ?1 LIMIT 1")?;
+        let mut seen_paths = HashSet::new();
+        for path in paths {
+            let key = path.to_string_lossy().to_string();
+            if !seen_paths.insert(key.clone()) {
+                continue;
+            }
+            let exists: Option<i64> = stmt.query_row(params![key], |row| row.get(0)).optional()?;
+            if exists.is_some() {
+                return Ok(true);
+            }
+        }
+        Ok(false)
+    }
+
     /// Rewrites positional ordering for the supplied track ids.
     pub fn update_positions(&self, ids: Vec<String>) -> Result<(), rusqlite::Error> {
         if ids.is_empty() {
@@ -1122,6 +1148,75 @@ impl DbManager {
         drop(stmt);
         self.conn.execute("COMMIT", [])?;
         Ok(deleted)
+    }
+
+    /// Deletes playlist rows and indexed library rows for the provided paths in
+    /// one transaction. Returns the number of unique paths removed from either
+    /// source table.
+    pub fn delete_library_and_playlist_paths(
+        &self,
+        paths: &[PathBuf],
+    ) -> Result<usize, rusqlite::Error> {
+        if paths.is_empty() {
+            return Ok(0);
+        }
+
+        self.conn.execute("BEGIN IMMEDIATE TRANSACTION", [])?;
+        let mut playlist_stmt = match self.conn.prepare("DELETE FROM tracks WHERE path = ?1") {
+            Ok(stmt) => stmt,
+            Err(err) => {
+                let _ = self.conn.execute("ROLLBACK", []);
+                return Err(err);
+            }
+        };
+        let mut library_stmt = match self
+            .conn
+            .prepare("DELETE FROM library_tracks WHERE path = ?1")
+        {
+            Ok(stmt) => stmt,
+            Err(err) => {
+                drop(playlist_stmt);
+                let _ = self.conn.execute("ROLLBACK", []);
+                return Err(err);
+            }
+        };
+
+        let mut removed_unique_paths = 0usize;
+        let mut seen_paths = HashSet::new();
+        for path in paths {
+            let key = path.to_string_lossy().to_string();
+            if !seen_paths.insert(key.clone()) {
+                continue;
+            }
+
+            let removed_from_playlists = match playlist_stmt.execute(params![key.clone()]) {
+                Ok(changed) => changed,
+                Err(err) => {
+                    drop(library_stmt);
+                    drop(playlist_stmt);
+                    let _ = self.conn.execute("ROLLBACK", []);
+                    return Err(err);
+                }
+            };
+            let removed_from_library = match library_stmt.execute(params![key]) {
+                Ok(changed) => changed,
+                Err(err) => {
+                    drop(library_stmt);
+                    drop(playlist_stmt);
+                    let _ = self.conn.execute("ROLLBACK", []);
+                    return Err(err);
+                }
+            };
+
+            if removed_from_playlists > 0 || removed_from_library > 0 {
+                removed_unique_paths = removed_unique_paths.saturating_add(1);
+            }
+        }
+
+        drop(library_stmt);
+        drop(playlist_stmt);
+        self.conn.execute("COMMIT", [])?;
+        Ok(removed_unique_paths)
     }
 
     /// Loads all tracks in library sorted alphabetically by title.
