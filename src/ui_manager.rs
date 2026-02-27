@@ -272,6 +272,7 @@ struct PlayingTrackState {
     id: Option<String>,
     path: Option<PathBuf>,
     metadata: Option<protocol::DetailedMetadata>,
+    album_artist: String,
 }
 
 /// Width policy used by adaptive playlist column sizing.
@@ -2567,6 +2568,45 @@ impl UiManager {
         }
     }
 
+    fn normalize_album_artist_for_template(metadata: &TrackMetadata) -> String {
+        let album_artist = metadata.album_artist.trim().to_string();
+        if !album_artist.is_empty() {
+            return album_artist;
+        }
+        metadata.artist.trim().to_string()
+    }
+
+    fn enrich_metadata_links_for_rendered_text(
+        rendered: &mut text_template::RenderedText,
+        template_metadata: &TrackMetadata,
+        display_path: Option<&Path>,
+    ) {
+        let normalized_album = template_metadata.album.trim().to_string();
+        let normalized_album_artist = Self::normalize_album_artist_for_template(template_metadata);
+        for line in &mut rendered.lines {
+            for run in &mut line.runs {
+                let Some(link) = run.link.as_mut() else {
+                    continue;
+                };
+                if matches!(
+                    link.kind,
+                    protocol::MetadataLinkKind::Album | protocol::MetadataLinkKind::Title
+                ) && !normalized_album.is_empty()
+                {
+                    link.album = normalized_album.clone();
+                }
+                if !normalized_album_artist.is_empty() {
+                    link.album_artist = normalized_album_artist.clone();
+                }
+                if link.track_path.is_none() {
+                    if let Some(path) = display_path {
+                        link.track_path = Some(path.to_path_buf());
+                    }
+                }
+            }
+        }
+    }
+
     fn rendered_single_run(
         text: impl Into<String>,
         font_size_px: u32,
@@ -3488,11 +3528,7 @@ impl UiManager {
         let mut track_number = String::new();
 
         if let Some(path_ref) = path {
-            if let Some(index) = self
-                .track_paths
-                .iter()
-                .position(|candidate| candidate == path_ref)
-            {
+            if let Some(index) = Self::track_metadata_index_for_path(&self.track_paths, path_ref) {
                 if let Some(metadata) = self.track_metadata.get(index) {
                     title = metadata.title.clone();
                     artist = metadata.artist.clone();
@@ -3503,10 +3539,8 @@ impl UiManager {
                     genre = metadata.genre.clone();
                     track_number = metadata.track_number.clone();
                 }
-            } else if let Some(track) = self.library_entries.iter().find_map(|entry| match entry {
-                LibraryEntry::Track(track) if track.path.as_path() == path_ref => Some(track),
-                _ => None,
-            }) {
+            } else if let Some(track) = Self::library_track_by_path(&self.library_entries, path_ref)
+            {
                 title = track.title.clone();
                 artist = track.artist.clone();
                 album = track.album.clone();
@@ -3566,22 +3600,59 @@ impl UiManager {
         });
     }
 
+    fn is_equivalent_track_path(candidate: &Path, target: &Path) -> bool {
+        if candidate == target {
+            return true;
+        }
+        // Handle mixed absolute/relative path forms (for example, playlist-relative vs
+        // runtime-absolute paths) without broad fuzzy matching for two absolute paths.
+        if candidate.is_absolute() != target.is_absolute() {
+            if candidate.is_absolute() {
+                return candidate.ends_with(target);
+            }
+            return target.ends_with(candidate);
+        }
+        false
+    }
+
+    fn track_metadata_index_for_path(track_paths: &[PathBuf], path: &Path) -> Option<usize> {
+        track_paths
+            .iter()
+            .position(|candidate| candidate.as_path() == path)
+            .or_else(|| {
+                track_paths
+                    .iter()
+                    .position(|candidate| Self::is_equivalent_track_path(candidate.as_path(), path))
+            })
+    }
+
+    fn library_track_by_path<'a>(
+        library_entries: &'a [LibraryEntry],
+        path: &Path,
+    ) -> Option<&'a protocol::LibraryTrack> {
+        library_entries.iter().find_map(|entry| match entry {
+            LibraryEntry::Track(track)
+                if Self::is_equivalent_track_path(track.path.as_path(), path) =>
+            {
+                Some(track)
+            }
+            _ => None,
+        })
+    }
+
     fn resolve_metadata_for_track_path_from_sources(
         path: &Path,
         track_paths: &[PathBuf],
         track_metadata: &[TrackMetadata],
         library_entries: &[LibraryEntry],
     ) -> Option<protocol::DetailedMetadata> {
-        if let Some(index) = track_paths.iter().position(|candidate| candidate == path) {
+        if let Some(index) = Self::track_metadata_index_for_path(track_paths, path) {
             if let Some(metadata) = track_metadata.get(index) {
                 return Some(Self::to_detailed_metadata(metadata));
             }
         }
 
-        if let Some(track) = library_entries.iter().find_map(|entry| match entry {
-            LibraryEntry::Track(track) if track.path.as_path() == path => Some(track),
-            _ => None,
-        }) {
+        if let Some(track) = Self::library_track_by_path(library_entries, path) {
             return Some(Self::to_detailed_metadata_from_library_track(track));
         }
 
@@ -3596,6 +3667,45 @@ impl UiManager {
             &self.library_entries,
         )
         .or_else(|| Some(Self::fallback_detailed_metadata_from_path(path)))
+    }
+
+    fn resolve_album_artist_for_track_path(&self, path: &Path) -> String {
+        if let Some(index) = Self::track_metadata_index_for_path(&self.track_paths, path) {
+            if let Some(metadata) = self.track_metadata.get(index) {
+                let album_artist = metadata.album_artist.trim().to_string();
+                if !album_artist.is_empty() {
+                    return album_artist;
+                }
+                let artist = metadata.artist.trim().to_string();
+                if !artist.is_empty() {
+                    return artist;
+                }
+            }
+        }
+
+        if let Some(track) = Self::library_track_by_path(&self.library_entries, path) {
+            let album_artist = track.album_artist.trim().to_string();
+            if !album_artist.is_empty() {
+                return album_artist;
+            }
+            let artist = track.artist.trim().to_string();
+            if !artist.is_empty() {
+                return artist;
+            }
+        }
+
+        if let Some(parsed) = metadata_tags::read_common_track_metadata(path) {
+            let album_artist = parsed.album_artist.trim().to_string();
+            if !album_artist.is_empty() {
+                return album_artist;
+            }
+            let artist = parsed.artist.trim().to_string();
+            if !artist.is_empty() {
+                return artist;
+            }
+        }
+
+        String::new()
     }
 
     fn set_playing_track(
@@ -3614,22 +3724,46 @@ impl UiManager {
             (Some(path), None) if !path_changed => self.playing_track.metadata.clone(),
             (Some(path), None) => self.resolve_metadata_for_track_path(path.as_path()),
         };
+        self.playing_track.album_artist = path
+            .as_ref()
+            .map(|path| self.resolve_album_artist_for_track_path(path.as_path()))
+            .unwrap_or_default();
+        if self.playing_track.album_artist.is_empty() {
+            self.playing_track.album_artist = self
+                .playing_track
+                .metadata
+                .as_ref()
+                .map(|metadata| metadata.artist.trim().to_string())
+                .unwrap_or_default();
+        }
         path_changed
     }
 
     fn refresh_playing_track_metadata(&mut self) -> bool {
         let Some(path) = self.playing_track.path.as_ref() else {
-            if self.playing_track.metadata.is_some() {
+            if self.playing_track.metadata.is_some() || !self.playing_track.album_artist.is_empty()
+            {
                 self.playing_track.metadata = None;
+                self.playing_track.album_artist.clear();
                 return true;
             }
             return false;
         };
         let resolved = self.resolve_metadata_for_track_path(path.as_path());
-        if Self::detailed_metadata_equal(&self.playing_track.metadata, &resolved) {
+        let mut resolved_album_artist = self.resolve_album_artist_for_track_path(path.as_path());
+        if resolved_album_artist.is_empty() {
+            resolved_album_artist = resolved
+                .as_ref()
+                .map(|metadata| metadata.artist.trim().to_string())
+                .unwrap_or_default();
+        }
+        if Self::detailed_metadata_equal(&self.playing_track.metadata, &resolved)
+            && self.playing_track.album_artist == resolved_album_artist
+        {
             return false;
         }
         self.playing_track.metadata = resolved;
+        self.playing_track.album_artist = resolved_album_artist;
         true
     }
 
@@ -3679,7 +3813,7 @@ impl UiManager {
 
         let playing_path = playing_track_path.cloned();
         let (playing_path, playing_metadata) = if let Some(path) = playing_track_path {
-            if let Some(index) = track_paths.iter().position(|candidate| candidate == path) {
+            if let Some(index) = Self::track_metadata_index_for_path(track_paths, path) {
                 if let Some(metadata) = track_metadata.get(index) {
                     (playing_path, Some(Self::to_detailed_metadata(metadata)))
                 } else {
@@ -3819,18 +3953,14 @@ impl UiManager {
 
         let playing_path = playing_track_path.cloned();
         let (playing_path, playing_metadata) = if let Some(path) = playing_track_path {
-            let playing_track = library_entries.iter().find_map(|entry| match entry {
-                LibraryEntry::Track(track) if &track.path == path => Some(track),
-                _ => None,
-            });
+            let playing_track = Self::library_track_by_path(library_entries, path.as_path());
             if let Some(track) = playing_track {
                 (
                     playing_path,
                     Some(Self::to_detailed_metadata_from_library_track(track)),
                 )
-            } else if let Some(index) = playlist_track_paths
-                .iter()
-                .position(|candidate| candidate == path)
+            } else if let Some(index) =
+                Self::track_metadata_index_for_path(playlist_track_paths, path.as_path())
             {
                 if let Some(metadata) = playlist_track_metadata.get(index) {
                     (playing_path, Some(Self::to_detailed_metadata(metadata)))
@@ -4631,11 +4761,7 @@ impl UiManager {
         display_metadata: Option<&protocol::DetailedMetadata>,
     ) -> ViewerTrackContext {
         if let Some(path) = display_path {
-            if let Some(index) = self
-                .track_paths
-                .iter()
-                .position(|candidate| candidate == path)
-            {
+            if let Some(index) = Self::track_metadata_index_for_path(&self.track_paths, path) {
                 if let Some(metadata) = self.track_metadata.get(index) {
                     let artist = metadata.artist.trim().to_string();
                     let album = metadata.album.trim().to_string();
@@ -4652,10 +4778,9 @@ impl UiManager {
                 }
             }
 
-            if let Some(library_track) = self.library_entries.iter().find_map(|entry| match entry {
-                LibraryEntry::Track(track) if &track.path == path => Some(track),
-                _ => None,
-            }) {
+            if let Some(library_track) =
+                Self::library_track_by_path(&self.library_entries, path.as_path())
+            {
                 let artist = library_track.artist.trim().to_string();
                 let album = library_track.album.trim().to_string();
                 let album_artist = if library_track.album_artist.trim().is_empty() {
@@ -4691,19 +4816,14 @@ impl UiManager {
         display_metadata: Option<&protocol::DetailedMetadata>,
     ) -> Option<TrackMetadata> {
         if let Some(path) = display_path {
-            if let Some(index) = self
-                .track_paths
-                .iter()
-                .position(|candidate| candidate == path)
-            {
+            if let Some(index) = Self::track_metadata_index_for_path(&self.track_paths, path) {
                 if let Some(metadata) = self.track_metadata.get(index) {
                     return Some(metadata.clone());
                 }
             }
-            if let Some(library_track) = self.library_entries.iter().find_map(|entry| match entry {
-                LibraryEntry::Track(track) if &track.path == path => Some(track),
-                _ => None,
-            }) {
+            if let Some(library_track) =
+                Self::library_track_by_path(&self.library_entries, path.as_path())
+            {
                 return Some(TrackMetadata {
                     title: library_track.title.clone(),
                     artist: library_track.artist.clone(),
@@ -4717,19 +4837,34 @@ impl UiManager {
             }
         }
 
-        display_metadata.map(|metadata| TrackMetadata {
-            title: metadata.title.clone(),
-            artist: metadata.artist.clone(),
-            album: metadata.album.clone(),
-            album_artist: metadata.artist.clone(),
-            date: metadata.date.clone(),
-            year: if metadata.date.len() >= 4 {
-                metadata.date[0..4].to_string()
+        display_metadata.map(|metadata| {
+            let fallback_album_artist = if !self.playing_track.album_artist.trim().is_empty()
+                && display_path.is_some_and(|path| {
+                    self.playing_track
+                        .path
+                        .as_ref()
+                        .is_some_and(|playing_path| {
+                            Self::is_equivalent_track_path(path.as_path(), playing_path.as_path())
+                        })
+                }) {
+                self.playing_track.album_artist.clone()
             } else {
-                String::new()
-            },
-            genre: metadata.genre.clone(),
-            track_number: String::new(),
+                metadata.artist.clone()
+            };
+            TrackMetadata {
+                title: metadata.title.clone(),
+                artist: metadata.artist.clone(),
+                album: metadata.album.clone(),
+                album_artist: fallback_album_artist,
+                date: metadata.date.clone(),
+                year: if metadata.date.len() >= 4 {
+                    metadata.date[0..4].to_string()
+                } else {
+                    String::new()
+                },
+                genre: metadata.genre.clone(),
+                track_number: String::new(),
+            }
         })
     }
 
@@ -4962,12 +5097,18 @@ impl UiManager {
                         let content_height_px = row_data
                             .height_px
                             .saturating_sub(content_inset_px.saturating_mul(2));
-                        Self::fit_text_panel_rendered_text(
+                        let mut fitted_text = Self::fit_text_panel_rendered_text(
                             &template_source,
                             &context,
                             content_width_px,
                             content_height_px,
-                        )
+                        );
+                        Self::enrich_metadata_links_for_rendered_text(
+                            &mut fitted_text.rendered,
+                            &template_metadata,
+                            display_path,
+                        );
+                        fitted_text
                     } else {
                         FittedTextPanelRender {
                             rendered: UiManager::empty_rendered_text(),
@@ -5473,10 +5614,14 @@ impl UiManager {
         request_id: u64,
         path: &Path,
     ) -> bool {
+        let matches_target_path = self
+            .properties_target_path
+            .as_deref()
+            .is_some_and(|target_path| Self::is_equivalent_track_path(target_path, path));
         self.properties_dialog_visible
             && self.properties_pending_request_kind == Some(kind)
             && self.properties_pending_request_id == Some(request_id)
-            && self.properties_target_path.as_deref() == Some(path)
+            && matches_target_path
     }
 
     fn handle_properties_loaded(
@@ -5525,7 +5670,7 @@ impl UiManager {
         };
 
         for (index, track_path) in self.track_paths.iter().enumerate() {
-            if track_path.as_path() != path {
+            if !Self::is_equivalent_track_path(track_path.as_path(), path) {
                 continue;
             }
             let Some(metadata) = self.track_metadata.get_mut(index) else {
@@ -5566,7 +5711,12 @@ impl UiManager {
             }
         }
 
-        if self.playing_track.path.as_deref() == Some(path) {
+        if self
+            .playing_track
+            .path
+            .as_deref()
+            .is_some_and(|playing_path| Self::is_equivalent_track_path(playing_path, path))
+        {
             let detailed = protocol::DetailedMetadata {
                 title: summary.title.clone(),
                 artist: summary.artist.clone(),
@@ -5585,6 +5735,10 @@ impl UiManager {
                 self.playing_track.metadata = Some(detailed);
                 changed = true;
             }
+            if self.playing_track.album_artist != summary.album_artist {
+                self.playing_track.album_artist = summary.album_artist.clone();
+                changed = true;
+            }
         }
 
         changed
@@ -5600,7 +5754,7 @@ impl UiManager {
             let LibraryEntry::Track(track) = entry else {
                 continue;
             };
-            if track.path.as_path() != path {
+            if !Self::is_equivalent_track_path(track.path.as_path(), path) {
                 continue;
             }
 
@@ -9135,6 +9289,68 @@ impl UiManager {
         value.trim().to_string()
     }
 
+    fn resolve_album_detail_target_from_sources(
+        link: &protocol::MetadataLinkPayload,
+        default_album: &str,
+        track_paths: &[PathBuf],
+        track_metadata: &[TrackMetadata],
+        library_entries: &[LibraryEntry],
+    ) -> (String, String) {
+        let mut album = Self::normalize_metadata_link_value(default_album);
+        if album.is_empty() {
+            album = Self::normalize_metadata_link_value(&link.album);
+        }
+        let mut album_artist = Self::normalize_metadata_link_value(&link.album_artist);
+        let mut fallback_artist = String::new();
+
+        if let Some(path) = link.track_path.as_ref() {
+            if let Some(track) = Self::library_track_by_path(library_entries, path.as_path()) {
+                let resolved_album = Self::normalize_metadata_link_value(&track.album);
+                if !resolved_album.is_empty() {
+                    album = resolved_album;
+                }
+                album_artist = Self::normalize_metadata_link_value(&track.album_artist);
+                fallback_artist = Self::normalize_metadata_link_value(&track.artist);
+            } else if let Some(index) = Self::track_metadata_index_for_path(track_paths, path) {
+                if let Some(metadata) = track_metadata.get(index) {
+                    let resolved_album = Self::normalize_metadata_link_value(&metadata.album);
+                    if !resolved_album.is_empty() {
+                        album = resolved_album;
+                    }
+                    album_artist = Self::normalize_metadata_link_value(&metadata.album_artist);
+                    fallback_artist = Self::normalize_metadata_link_value(&metadata.artist);
+                }
+            } else if let Some(parsed) = metadata_tags::read_common_track_metadata(path.as_path()) {
+                let resolved_album = Self::normalize_metadata_link_value(&parsed.album);
+                if !resolved_album.is_empty() {
+                    album = resolved_album;
+                }
+                album_artist = Self::normalize_metadata_link_value(&parsed.album_artist);
+                fallback_artist = Self::normalize_metadata_link_value(&parsed.artist);
+            }
+        }
+
+        if album_artist.is_empty() {
+            album_artist = fallback_artist;
+        }
+
+        (album, album_artist)
+    }
+
+    fn resolve_album_detail_target(
+        &self,
+        link: &protocol::MetadataLinkPayload,
+        default_album: &str,
+    ) -> (String, String) {
+        Self::resolve_album_detail_target_from_sources(
+            link,
+            default_album,
+            &self.track_paths,
+            &self.track_metadata,
+            &self.library_entries,
+        )
+    }
+
     fn normalize_metadata_decade_label(raw_value: &str) -> String {
         let trimmed = raw_value.trim();
         if trimmed.is_empty() {
@@ -9238,10 +9454,9 @@ impl UiManager {
                 let LibraryEntry::Track(track) = entry else {
                     return None;
                 };
-                if pending_path
-                    .as_ref()
-                    .is_some_and(|path| track.path == *path)
-                {
+                if pending_path.as_ref().is_some_and(|path| {
+                    Self::is_equivalent_track_path(track.path.as_path(), path.as_path())
+                }) {
                     return Some(index);
                 }
                 pending_title
@@ -9290,13 +9505,16 @@ impl UiManager {
                 },
                 LibraryViewState::ArtistsRoot,
             ),
-            protocol::MetadataLinkKind::Album => (
-                LibraryViewState::AlbumDetail {
-                    album: value.clone(),
-                    album_artist: Self::normalize_metadata_link_value(&link.album_artist),
-                },
-                LibraryViewState::AlbumsRoot,
-            ),
+            protocol::MetadataLinkKind::Album => {
+                let (album, album_artist) = self.resolve_album_detail_target(&link, &value);
+                (
+                    LibraryViewState::AlbumDetail {
+                        album,
+                        album_artist,
+                    },
+                    LibraryViewState::AlbumsRoot,
+                )
+            }
             protocol::MetadataLinkKind::Genre => (
                 LibraryViewState::GenreDetail {
                     genre: value.clone(),
@@ -9316,7 +9534,7 @@ impl UiManager {
                 )
             }
             protocol::MetadataLinkKind::Title => {
-                let album = Self::normalize_metadata_link_value(&link.album);
+                let (album, album_artist) = self.resolve_album_detail_target(&link, &link.album);
                 if album.is_empty() {
                     self.navigate_to_library_root_with_search(
                         LibraryViewState::TracksRoot,
@@ -9329,7 +9547,7 @@ impl UiManager {
                 (
                     LibraryViewState::AlbumDetail {
                         album,
-                        album_artist: Self::normalize_metadata_link_value(&link.album_artist),
+                        album_artist,
                     },
                     LibraryViewState::AlbumsRoot,
                 )
@@ -12310,7 +12528,7 @@ mod tests {
     };
     use crate::{config::PlaylistColumnConfig, protocol, text_template};
     use std::collections::{HashMap, HashSet};
-    use std::path::PathBuf;
+    use std::path::{Path, PathBuf};
     use std::sync::mpsc;
     use std::time::{Duration, Instant};
 
@@ -13320,6 +13538,143 @@ mod tests {
         .expect("playlist metadata should resolve");
         assert_eq!(metadata.title, "Playlist Track");
         assert_eq!(metadata.artist, "Playlist Track-artist");
+    }
+
+    #[test]
+    fn test_resolve_metadata_for_track_path_from_sources_matches_relative_suffix_paths() {
+        let path = PathBuf::from("/tmp/music/shared.mp3");
+        let metadata = UiManager::resolve_metadata_for_track_path_from_sources(
+            &path,
+            &[PathBuf::from("music/shared.mp3")],
+            &[make_meta("Playlist Track")],
+            &[],
+        )
+        .expect("metadata should resolve from equivalent relative path");
+        assert_eq!(metadata.title, "Playlist Track");
+    }
+
+    #[test]
+    fn test_resolve_album_detail_target_from_sources_prefers_library_track_by_path() {
+        let link = protocol::MetadataLinkPayload {
+            kind: protocol::MetadataLinkKind::Title,
+            value: "Song".to_string(),
+            album: "Wrong Album".to_string(),
+            album_artist: "Wrong Artist".to_string(),
+            track_path: Some(PathBuf::from("song.mp3")),
+        };
+        let mut track = make_library_track_in_album(
+            "track-1",
+            "Song",
+            "song.mp3",
+            "Library Album",
+            "",
+            "2025",
+            "1",
+        );
+        track.artist = "Library Artist".to_string();
+        let (album, album_artist) = UiManager::resolve_album_detail_target_from_sources(
+            &link,
+            "Fallback Album",
+            &[],
+            &[],
+            &[LibraryEntry::Track(track)],
+        );
+        assert_eq!(album, "Library Album");
+        assert_eq!(album_artist, "Library Artist");
+    }
+
+    #[test]
+    fn test_resolve_album_detail_target_from_sources_falls_back_to_artist_when_album_artist_empty()
+    {
+        let mut metadata = make_meta("Song");
+        metadata.album = "Resolved Album".to_string();
+        metadata.album_artist = "".to_string();
+        metadata.artist = "Resolved Artist".to_string();
+        let link = protocol::MetadataLinkPayload {
+            kind: protocol::MetadataLinkKind::Album,
+            value: "Resolved Album".to_string(),
+            album: "Resolved Album".to_string(),
+            album_artist: "Wrong Artist".to_string(),
+            track_path: Some(PathBuf::from("song.mp3")),
+        };
+        let (album, album_artist) = UiManager::resolve_album_detail_target_from_sources(
+            &link,
+            "Resolved Album",
+            &[PathBuf::from("song.mp3")],
+            &[metadata],
+            &[],
+        );
+        assert_eq!(album, "Resolved Album");
+        assert_eq!(album_artist, "Resolved Artist");
+    }
+
+    #[test]
+    fn test_resolve_album_detail_target_from_sources_matches_relative_suffix_paths() {
+        let mut metadata = make_meta("Test Song");
+        metadata.album = "Compilation Album".to_string();
+        metadata.artist = "Track Artist".to_string();
+        metadata.album_artist = "Album Artist".to_string();
+        let link = protocol::MetadataLinkPayload {
+            kind: protocol::MetadataLinkKind::Album,
+            value: "Compilation Album".to_string(),
+            album: "Compilation Album".to_string(),
+            album_artist: "Track Artist".to_string(),
+            track_path: Some(PathBuf::from("/tmp/music/compilation/test-song.flac")),
+        };
+        let (album, album_artist) = UiManager::resolve_album_detail_target_from_sources(
+            &link,
+            "Compilation Album",
+            &[PathBuf::from("music/compilation/test-song.flac")],
+            &[metadata],
+            &[],
+        );
+        assert_eq!(album, "Compilation Album");
+        assert_eq!(album_artist, "Album Artist");
+    }
+
+    #[test]
+    fn test_enrich_metadata_links_for_rendered_text_sets_album_artist_and_path() {
+        let mut template_metadata = make_meta("Song");
+        template_metadata.album = "Resolved Album".to_string();
+        template_metadata.album_artist = "Resolved Album Artist".to_string();
+        let mut rendered = text_template::RenderedText {
+            plain_text: "Song".to_string(),
+            lines: vec![text_template::RichTextLine {
+                runs: vec![text_template::RichTextRun {
+                    text: "Song".to_string(),
+                    bold: false,
+                    italic: false,
+                    underline: false,
+                    font_size_px: 12,
+                    font_family: String::new(),
+                    color: None,
+                    link: Some(protocol::MetadataLinkPayload {
+                        kind: protocol::MetadataLinkKind::Title,
+                        value: "Song".to_string(),
+                        album: "Wrong Album".to_string(),
+                        album_artist: "Wrong Artist".to_string(),
+                        track_path: None,
+                    }),
+                }],
+            }],
+        };
+
+        UiManager::enrich_metadata_links_for_rendered_text(
+            &mut rendered,
+            &template_metadata,
+            Some(Path::new("/tmp/song.flac")),
+        );
+
+        let link = rendered.lines[0].runs[0]
+            .link
+            .as_ref()
+            .expect("run link should remain present");
+        assert_eq!(link.album, "Resolved Album");
+        assert_eq!(link.album_artist, "Resolved Album Artist");
+        assert_eq!(
+            link.track_path.as_deref(),
+            Some(Path::new("/tmp/song.flac"))
+        );
     }
 
     #[test]
