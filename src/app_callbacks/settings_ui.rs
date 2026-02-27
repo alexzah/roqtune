@@ -17,8 +17,9 @@ use crate::{
     config_persistence::persist_state_files_with_config_path,
     protocol::{self, Message, PlaybackMessage, PlaylistMessage},
     runtime_config::{
-        audio_settings_changed, output_preferences_changed, publish_runtime_config_delta,
-        runtime_output_override_snapshot, OutputRuntimeSignature, StagedAudioSettings,
+        audio_settings_changed, config_delta_entries, output_preferences_changed,
+        runtime_output_override_snapshot, update_last_runtime_config_snapshot,
+        OutputRuntimeSignature, StagedAudioSettings,
     },
     AppWindow,
 };
@@ -76,6 +77,18 @@ fn set_custom_color_draft_values(ui: &AppWindow, values: &[String]) {
         values_shared,
     ))));
     set_custom_color_draft_preview_colors(ui);
+}
+
+/// Build `ConfigChanged` deltas for settings-save events using user-intent config diffs.
+///
+/// Important invariant: settings saves must not publish unrelated runtime-derived changes
+/// (for example auto-resolved output values) because those can cause unintended audio
+/// reconfiguration while the user only changed a non-audio field like theme.
+fn settings_save_delta_entries(
+    previous: &Config,
+    next: &Config,
+) -> Vec<protocol::ConfigDeltaEntry> {
+    config_delta_entries(previous, next)
 }
 
 /// Registers callbacks that mutate persisted settings and runtime audio/UI state.
@@ -579,11 +592,13 @@ pub(crate) fn register_settings_ui_callbacks(ui: &AppWindow, shared_state: &AppS
                     .expect("runtime signature lock poisoned");
                 *last_runtime = OutputRuntimeSignature::from_output(&runtime_config.output);
             }
-            let _ = publish_runtime_config_delta(
-                &bus_sender_clone,
-                &last_runtime_config_clone,
-                runtime_config,
-            );
+            let deltas = settings_save_delta_entries(&previous_config, &next_config);
+            if !deltas.is_empty() {
+                let _ = bus_sender_clone.send(Message::Config(protocol::ConfigMessage::ConfigChanged(
+                    deltas,
+                )));
+            }
+            update_last_runtime_config_snapshot(&last_runtime_config_clone, runtime_config);
         },
     );
 
@@ -669,4 +684,51 @@ pub(crate) fn register_settings_ui_callbacks(ui: &AppWindow, shared_state: &AppS
             })],
         )));
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::{
+        config::Config,
+        protocol::{ConfigDeltaEntry, UiConfigDelta},
+    };
+
+    use super::settings_save_delta_entries;
+
+    #[test]
+    fn settings_save_delta_entries_theme_only_emits_ui_delta() {
+        let previous = Config::default();
+        let mut next = previous.clone();
+        next.ui.layout.color_scheme = "roqtune-light".to_string();
+
+        let deltas = settings_save_delta_entries(&previous, &next);
+        assert_eq!(deltas.len(), 1);
+        match deltas.first() {
+            Some(ConfigDeltaEntry::Ui(UiConfigDelta { layout, .. })) => {
+                assert!(layout.is_some());
+            }
+            other => panic!("expected one UI layout delta, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn settings_save_delta_entries_audio_changes_include_output_and_cast() {
+        let previous = Config::default();
+        let mut next = previous.clone();
+        next.output.downmix_higher_channel_tracks = !previous.output.downmix_higher_channel_tracks;
+        next.cast.allow_transcode_fallback = !previous.cast.allow_transcode_fallback;
+        next.ui.layout.color_scheme = "roqtune-light".to_string();
+
+        let deltas = settings_save_delta_entries(&previous, &next);
+        assert_eq!(deltas.len(), 3);
+        assert!(deltas
+            .iter()
+            .any(|delta| matches!(delta, ConfigDeltaEntry::Output(_))));
+        assert!(deltas
+            .iter()
+            .any(|delta| matches!(delta, ConfigDeltaEntry::Cast(_))));
+        assert!(deltas
+            .iter()
+            .any(|delta| matches!(delta, ConfigDeltaEntry::Ui(_))));
+    }
 }
