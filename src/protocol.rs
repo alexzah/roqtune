@@ -96,6 +96,7 @@ pub struct TrackStarted {
 }
 
 /// Playlist-domain commands and notifications.
+#[allow(clippy::large_enum_variant)]
 #[derive(Debug, Clone)]
 pub enum PlaylistMessage {
     #[allow(dead_code)]
@@ -958,6 +959,9 @@ pub struct DetailedMetadata {
     pub artist: String,
     /// Album title.
     pub album: String,
+    /// Album artist.
+    #[serde(default)]
+    pub album_artist: String,
     /// Date string as discovered from tags.
     pub date: String,
     /// Genre label.

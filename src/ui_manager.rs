@@ -272,7 +272,6 @@ struct PlayingTrackState {
     id: Option<String>,
     path: Option<PathBuf>,
     metadata: Option<protocol::DetailedMetadata>,
-    album_artist: String,
 }
 
 /// Width policy used by adaptive playlist column sizing.
@@ -2525,6 +2524,7 @@ impl UiManager {
             title: track_metadata.title.clone(),
             artist: track_metadata.artist.clone(),
             album: track_metadata.album.clone(),
+            album_artist: track_metadata.album_artist.clone(),
             date: track_metadata.date.clone(),
             genre: track_metadata.genre.clone(),
         }
@@ -3615,6 +3615,31 @@ impl UiManager {
         false
     }
 
+    fn canonical_local_track_path(path: &Path) -> Option<PathBuf> {
+        if is_remote_track_path(path) {
+            return None;
+        }
+        std::fs::canonicalize(path).ok()
+    }
+
+    fn metadata_link_path_matches_track_path(
+        track_path: &Path,
+        pending_path: &Path,
+        pending_canonical: Option<&PathBuf>,
+    ) -> bool {
+        if Self::is_equivalent_track_path(track_path, pending_path) {
+            return true;
+        }
+        let Some(pending_canonical) = pending_canonical else {
+            return false;
+        };
+        Self::canonical_local_track_path(track_path).as_ref() == Some(pending_canonical)
+    }
+
+    fn metadata_link_title_matches_track_title(track_title: &str, pending_title: &str) -> bool {
+        track_title.trim().to_lowercase() == pending_title.trim().to_lowercase()
+    }
+
     fn track_metadata_index_for_path(track_paths: &[PathBuf], path: &Path) -> Option<usize> {
         track_paths
             .iter()
@@ -3724,46 +3749,48 @@ impl UiManager {
             (Some(path), None) if !path_changed => self.playing_track.metadata.clone(),
             (Some(path), None) => self.resolve_metadata_for_track_path(path.as_path()),
         };
-        self.playing_track.album_artist = path
-            .as_ref()
-            .map(|path| self.resolve_album_artist_for_track_path(path.as_path()))
-            .unwrap_or_default();
-        if self.playing_track.album_artist.is_empty() {
-            self.playing_track.album_artist = self
+        if let Some(path) = path.as_ref() {
+            let resolved_album_artist = self
                 .playing_track
                 .metadata
                 .as_ref()
-                .map(|metadata| metadata.artist.trim().to_string())
-                .unwrap_or_default();
+                .is_some_and(|metadata| metadata.album_artist.trim().is_empty())
+                .then(|| self.resolve_album_artist_for_track_path(path.as_path()));
+            if let Some(metadata) = self.playing_track.metadata.as_mut() {
+                if metadata.album_artist.trim().is_empty() {
+                    if let Some(album_artist) = resolved_album_artist {
+                        metadata.album_artist = album_artist;
+                    }
+                }
+                if metadata.album_artist.trim().is_empty() {
+                    metadata.album_artist = metadata.artist.trim().to_string();
+                }
+            }
         }
         path_changed
     }
 
     fn refresh_playing_track_metadata(&mut self) -> bool {
         let Some(path) = self.playing_track.path.as_ref() else {
-            if self.playing_track.metadata.is_some() || !self.playing_track.album_artist.is_empty()
-            {
+            if self.playing_track.metadata.is_some() {
                 self.playing_track.metadata = None;
-                self.playing_track.album_artist.clear();
                 return true;
             }
             return false;
         };
-        let resolved = self.resolve_metadata_for_track_path(path.as_path());
-        let mut resolved_album_artist = self.resolve_album_artist_for_track_path(path.as_path());
-        if resolved_album_artist.is_empty() {
-            resolved_album_artist = resolved
-                .as_ref()
-                .map(|metadata| metadata.artist.trim().to_string())
-                .unwrap_or_default();
+        let mut resolved = self.resolve_metadata_for_track_path(path.as_path());
+        if let Some(metadata) = resolved.as_mut() {
+            if metadata.album_artist.trim().is_empty() {
+                metadata.album_artist = self.resolve_album_artist_for_track_path(path.as_path());
+            }
+            if metadata.album_artist.trim().is_empty() {
+                metadata.album_artist = metadata.artist.trim().to_string();
+            }
         }
-        if Self::detailed_metadata_equal(&self.playing_track.metadata, &resolved)
-            && self.playing_track.album_artist == resolved_album_artist
-        {
+        if Self::detailed_metadata_equal(&self.playing_track.metadata, &resolved) {
             return false;
         }
         self.playing_track.metadata = resolved;
-        self.playing_track.album_artist = resolved_album_artist;
         true
     }
 
@@ -3784,6 +3811,7 @@ impl UiManager {
                 left.title == right.title
                     && left.artist == right.artist
                     && left.album == right.album
+                    && left.album_artist == right.album_artist
                     && left.date == right.date
                     && left.genre == right.genre
             }
@@ -3873,6 +3901,7 @@ impl UiManager {
             title: library_track.title.clone(),
             artist: library_track.artist.clone(),
             album: library_track.album.clone(),
+            album_artist: library_track.album_artist.clone(),
             date: library_track.year.clone(),
             genre: library_track.genre.clone(),
         }
@@ -3905,6 +3934,7 @@ impl UiManager {
                     title,
                     artist: parsed.artist,
                     album: parsed.album,
+                    album_artist: parsed.album_artist,
                     date,
                     genre: parsed.genre,
                 };
@@ -3921,6 +3951,7 @@ impl UiManager {
             title,
             artist: String::new(),
             album: String::new(),
+            album_artist: String::new(),
             date: String::new(),
             genre: String::new(),
         }
@@ -4799,7 +4830,11 @@ impl UiManager {
         if let Some(metadata) = display_metadata {
             let artist = metadata.artist.trim().to_string();
             let album = metadata.album.trim().to_string();
-            let album_artist = artist.clone();
+            let album_artist = if metadata.album_artist.trim().is_empty() {
+                artist.clone()
+            } else {
+                metadata.album_artist.trim().to_string()
+            };
             return ViewerTrackContext {
                 artist,
                 album,
@@ -4838,18 +4873,10 @@ impl UiManager {
         }
 
         display_metadata.map(|metadata| {
-            let fallback_album_artist = if !self.playing_track.album_artist.trim().is_empty()
-                && display_path.is_some_and(|path| {
-                    self.playing_track
-                        .path
-                        .as_ref()
-                        .is_some_and(|playing_path| {
-                            Self::is_equivalent_track_path(path.as_path(), playing_path.as_path())
-                        })
-                }) {
-                self.playing_track.album_artist.clone()
-            } else {
+            let fallback_album_artist = if metadata.album_artist.trim().is_empty() {
                 metadata.artist.clone()
+            } else {
+                metadata.album_artist.clone()
             };
             TrackMetadata {
                 title: metadata.title.clone(),
@@ -4906,6 +4933,7 @@ impl UiManager {
             title,
             artist: payload.blurb.clone(),
             album: String::new(),
+            album_artist: String::new(),
             date: String::new(),
             genre: payload.source_name.clone(),
         })
@@ -4929,6 +4957,7 @@ impl UiManager {
             title,
             artist: payload.blurb.clone(),
             album: String::new(),
+            album_artist: String::new(),
             date: String::new(),
             genre: payload.source_name.clone(),
         })
@@ -5050,6 +5079,7 @@ impl UiManager {
                         template_metadata.title = metadata.title.clone();
                         template_metadata.artist = metadata.artist.clone();
                         template_metadata.album = metadata.album.clone();
+                        template_metadata.album_artist = metadata.album_artist.clone();
                         template_metadata.date = metadata.date.clone();
                         template_metadata.year = if metadata.date.len() >= 4 {
                             metadata.date[0..4].to_string()
@@ -5721,6 +5751,7 @@ impl UiManager {
                 title: summary.title.clone(),
                 artist: summary.artist.clone(),
                 album: summary.album.clone(),
+                album_artist: summary.album_artist.clone(),
                 date,
                 genre: summary.genre.clone(),
             };
@@ -5728,15 +5759,12 @@ impl UiManager {
                 meta.title == detailed.title
                     && meta.artist == detailed.artist
                     && meta.album == detailed.album
+                    && meta.album_artist == detailed.album_artist
                     && meta.date == detailed.date
                     && meta.genre == detailed.genre
             }) != Some(true)
             {
                 self.playing_track.metadata = Some(detailed);
-                changed = true;
-            }
-            if self.playing_track.album_artist != summary.album_artist {
-                self.playing_track.album_artist = summary.album_artist.clone();
                 changed = true;
             }
         }
@@ -9443,6 +9471,9 @@ impl UiManager {
             .as_ref()
             .map(|title| title.trim().to_string())
             .filter(|title| !title.is_empty());
+        let pending_canonical_path = pending_path
+            .as_deref()
+            .and_then(Self::canonical_local_track_path);
         if pending_path.is_none() && pending_title.is_none() {
             return;
         }
@@ -9455,13 +9486,19 @@ impl UiManager {
                     return None;
                 };
                 if pending_path.as_ref().is_some_and(|path| {
-                    Self::is_equivalent_track_path(track.path.as_path(), path.as_path())
+                    Self::metadata_link_path_matches_track_path(
+                        track.path.as_path(),
+                        path.as_path(),
+                        pending_canonical_path.as_ref(),
+                    )
                 }) {
                     return Some(index);
                 }
                 pending_title
                     .as_ref()
-                    .is_some_and(|title| track.title.eq_ignore_ascii_case(title))
+                    .is_some_and(|title| {
+                        Self::metadata_link_title_matches_track_title(&track.title, title)
+                    })
                     .then_some(index)
             });
         self.pending_metadata_link_track_path = None;
@@ -9496,8 +9533,11 @@ impl UiManager {
         }
         self.pending_metadata_link_track_path = None;
         self.pending_metadata_link_track_title = None;
+        self.pending_metadata_link_fallback = None;
 
         let mut search_query = value.clone();
+        let mut pending_track_path: Option<PathBuf> = None;
+        let mut pending_track_title: Option<String> = None;
         let (target_view, fallback_root) = match link.kind {
             protocol::MetadataLinkKind::Artist => (
                 LibraryViewState::ArtistDetail {
@@ -9542,8 +9582,8 @@ impl UiManager {
                     );
                     return;
                 }
-                self.pending_metadata_link_track_path = link.track_path.clone();
-                self.pending_metadata_link_track_title = Some(value.clone());
+                pending_track_path = link.track_path.clone();
+                pending_track_title = Some(value.clone());
                 (
                     LibraryViewState::AlbumDetail {
                         album,
@@ -9554,16 +9594,18 @@ impl UiManager {
             }
         };
 
+        if reset_stack_to_root {
+            self.navigate_to_library_view_from_root(fallback_root.clone(), target_view.clone());
+        } else {
+            self.navigate_to_library_view(target_view.clone());
+        }
+        self.pending_metadata_link_track_path = pending_track_path;
+        self.pending_metadata_link_track_title = pending_track_title;
         self.pending_metadata_link_fallback = Some(PendingMetadataLinkFallback {
-            expected_view: target_view.clone(),
-            fallback_root: fallback_root.clone(),
+            expected_view: target_view,
+            fallback_root,
             search_query,
         });
-        if reset_stack_to_root {
-            self.navigate_to_library_view_from_root(fallback_root, target_view);
-        } else {
-            self.navigate_to_library_view(target_view);
-        }
     }
 
     fn library_page_query_for_view(view: &LibraryViewState) -> protocol::LibraryViewQuery {
@@ -13251,6 +13293,7 @@ mod tests {
             title: "Playing".to_string(),
             artist: "P".to_string(),
             album: "P".to_string(),
+            album_artist: "P".to_string(),
             date: "".to_string(),
             genre: "".to_string(),
         };
@@ -13300,6 +13343,7 @@ mod tests {
             title: "Playing".to_string(),
             artist: "P".to_string(),
             album: "P".to_string(),
+            album_artist: "P".to_string(),
             date: "".to_string(),
             genre: "".to_string(),
         };
@@ -13328,6 +13372,7 @@ mod tests {
             title: "stale".to_string(),
             artist: "stale".to_string(),
             album: "stale".to_string(),
+            album_artist: "stale".to_string(),
             date: String::new(),
             genre: String::new(),
         };
@@ -13372,6 +13417,7 @@ mod tests {
             title: "Playing".to_string(),
             artist: "P".to_string(),
             album: "P".to_string(),
+            album_artist: "P".to_string(),
             date: String::new(),
             genre: String::new(),
         };
@@ -13430,6 +13476,7 @@ mod tests {
             title: "Playing".to_string(),
             artist: "P".to_string(),
             album: "P".to_string(),
+            album_artist: "P".to_string(),
             date: String::new(),
             genre: String::new(),
         };
