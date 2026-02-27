@@ -10,8 +10,8 @@ pub(crate) const DEFAULT_METADATA_PANEL_TEMPLATE: &str =
     "[size=title][b][color=text_primary]{title;file_name}[/color][/b][/size]\\n[size=body][color=text_secondary]{artist;album_artist}[/color][/size]\\n[size=body][color=text_muted]{album}[/color][/size]\\n[size=caption][color=text_muted]{date;year} • {genre}[/color][/size]";
 pub(crate) const PLAYING_SYMBOL_PLAYING: &str = "▶️";
 pub(crate) const PLAYING_SYMBOL_PAUSED: &str = "⏸️";
-pub(crate) const FAVORITE_SYMBOL_ON: &str = "♥";
-pub(crate) const FAVORITE_SYMBOL_OFF: &str = "♡";
+pub(crate) const FAVORITE_SYMBOL_ON: &str = "❤️";
+pub(crate) const FAVORITE_SYMBOL_OFF: &str = "♥";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum PaletteColor {
