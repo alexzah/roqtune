@@ -7,7 +7,8 @@
 use crate::config::{BufferingConfig, OutputConfig, ResamplerQuality};
 use crate::integration_uri::{parse_opensubsonic_track_uri, OpenSubsonicTrackLocator};
 use crate::protocol::{
-    self, AudioMessage, AudioPacket, ConfigMessage, IntegrationMessage, Message, TrackIdentifier,
+    self, AudioMessage, AudioPacket, ConfigMessage, IntegrationMessage, Message, PlaybackMessage,
+    PlaylistMessage, TrackIdentifier,
 };
 use audio_mixer::{Channel as MixChannel, Mixer};
 use log::{debug, error, warn};
@@ -1449,6 +1450,10 @@ pub struct AudioDecoder {
     worker_sender: MpscSender<DecodeWorkItem>,
     decode_request_inflight: Arc<AtomicBool>,
     decode_generation: u64,
+    /// True while a playback session exists (playing or paused with a selected track).
+    playback_session_active: bool,
+    /// Output deltas staged during active sessions to avoid mid-stream resample/output churn.
+    staged_output_delta: protocol::OutputConfigDelta,
 }
 
 impl AudioDecoder {
@@ -1466,6 +1471,8 @@ impl AudioDecoder {
             worker_sender,
             decode_request_inflight: Arc::new(AtomicBool::new(false)),
             decode_generation: 0,
+            playback_session_active: false,
+            staged_output_delta: protocol::OutputConfigDelta::default(),
         };
         audio_decoder.spawn_decode_worker(
             worker_receiver,
@@ -1473,6 +1480,55 @@ impl AudioDecoder {
             initial_buffering_config,
         );
         audio_decoder
+    }
+
+    fn set_playback_session_active(&mut self, active: bool) {
+        self.playback_session_active = active;
+        if !active {
+            self.flush_staged_output_config();
+        }
+    }
+
+    fn flush_staged_output_config(&mut self) {
+        if self.playback_session_active || self.staged_output_delta.is_empty() {
+            return;
+        }
+        let staged = std::mem::take(&mut self.staged_output_delta);
+        self.worker_sender
+            .blocking_send(DecodeWorkItem::ConfigChanged(vec![
+                protocol::ConfigDeltaEntry::Output(staged),
+            ]))
+            .unwrap();
+    }
+
+    fn handle_config_changed(&mut self, changes: Vec<protocol::ConfigDeltaEntry>) {
+        debug!("AudioDecoder: Received config delta command: {:?}", changes);
+        let mut latest_output = protocol::OutputConfigDelta::default();
+        let mut forward_changes = Vec::new();
+        for change in changes {
+            match change {
+                protocol::ConfigDeltaEntry::Output(output) => latest_output.merge_from(output),
+                other => forward_changes.push(other),
+            }
+        }
+        if !latest_output.is_empty() {
+            if self.playback_session_active {
+                // Receiver-side staging is intentional: changing decode/output config mid-session
+                // can produce audible artifacts. Apply once the active session fully ends.
+                self.staged_output_delta.merge_from(latest_output);
+            } else {
+                let mut merged_output = std::mem::take(&mut self.staged_output_delta);
+                merged_output.merge_from(latest_output);
+                if !merged_output.is_empty() {
+                    forward_changes.push(protocol::ConfigDeltaEntry::Output(merged_output));
+                }
+            }
+        }
+        if !forward_changes.is_empty() {
+            self.worker_sender
+                .blocking_send(DecodeWorkItem::ConfigChanged(forward_changes))
+                .unwrap();
+        }
     }
 
     /// Starts the blocking event loop that translates bus commands into decode work.
@@ -1484,6 +1540,7 @@ impl AudioDecoder {
                         debug!("AudioDecoder: Queueing tracks for decode {:?}", paths);
                         if paths.iter().any(|track| track.play_immediately) {
                             self.decode_generation = self.decode_generation.saturating_add(1);
+                            self.set_playback_session_active(true);
                         }
                         let generation = self.decode_generation;
                         self.worker_sender
@@ -1507,10 +1564,7 @@ impl AudioDecoder {
                             .blocking_send(DecodeWorkItem::Stop { generation });
                     }
                     Message::Config(ConfigMessage::ConfigChanged(changes)) => {
-                        debug!("AudioDecoder: Received config delta command: {:?}", changes);
-                        self.worker_sender
-                            .blocking_send(DecodeWorkItem::ConfigChanged(changes))
-                            .unwrap();
+                        self.handle_config_changed(changes);
                     }
                     Message::Config(ConfigMessage::RuntimeOutputSampleRateChanged {
                         sample_rate_hz,
@@ -1535,6 +1589,26 @@ impl AudioDecoder {
                         self.worker_sender
                             .blocking_send(DecodeWorkItem::AudioDeviceOpened { stream_info })
                             .unwrap();
+                    }
+                    Message::Playlist(PlaylistMessage::PlaylistIndicesChanged {
+                        is_playing,
+                        playing_index,
+                        ..
+                    }) => {
+                        self.set_playback_session_active(is_playing || playing_index.is_some());
+                    }
+                    Message::Playback(
+                        PlaybackMessage::Play
+                        | PlaybackMessage::PlayActiveCollection
+                        | PlaybackMessage::PlayTrackById(_)
+                        | PlaybackMessage::TrackStarted(_),
+                    ) => {
+                        self.set_playback_session_active(true);
+                    }
+                    Message::Playback(
+                        PlaybackMessage::Stop | PlaybackMessage::ClearPlayerCache,
+                    ) => {
+                        self.set_playback_session_active(false);
                     }
                     Message::Integration(IntegrationMessage::UpsertBackendProfile {
                         profile,
@@ -1632,7 +1706,7 @@ mod tests {
     use super::{AudioDecoder, DecodeWorkItem, DecodeWorker};
     use crate::config::{BufferingConfig, OutputConfig};
     use crate::integration_uri::OpenSubsonicTrackLocator;
-    use crate::protocol::TrackIdentifier;
+    use crate::protocol::{self, BufferingConfigDelta, OutputConfigDelta, TrackIdentifier};
     use std::path::PathBuf;
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::Arc;
@@ -1649,6 +1723,8 @@ mod tests {
             worker_sender: _worker_tx,
             decode_request_inflight: Arc::new(AtomicBool::new(false)),
             decode_generation: 0,
+            playback_session_active: false,
+            staged_output_delta: OutputConfigDelta::default(),
         };
 
         decoder
@@ -1834,6 +1910,8 @@ mod tests {
             worker_sender: worker_tx,
             decode_request_inflight: inflight.clone(),
             decode_generation: 0,
+            playback_session_active: false,
+            staged_output_delta: OutputConfigDelta::default(),
         };
 
         decoder.enqueue_decode_chunk_request(0, 10_000);
@@ -1854,6 +1932,66 @@ mod tests {
             "second request should be coalesced while inflight"
         );
         assert!(inflight.load(Ordering::Relaxed));
+    }
+
+    #[test]
+    fn test_output_deltas_are_staged_during_active_session_and_flushed_on_stop() {
+        let (bus_sender, _) = broadcast::channel(8);
+        let (worker_tx, mut worker_rx) = mpsc::channel(8);
+        let mut decoder = AudioDecoder {
+            bus_receiver: bus_sender.subscribe(),
+            bus_sender: bus_sender.clone(),
+            worker_sender: worker_tx,
+            decode_request_inflight: Arc::new(AtomicBool::new(false)),
+            decode_generation: 0,
+            playback_session_active: true,
+            staged_output_delta: OutputConfigDelta::default(),
+        };
+
+        decoder.handle_config_changed(vec![
+            protocol::ConfigDeltaEntry::Output(OutputConfigDelta {
+                sample_rate_khz: Some(96_000),
+                ..OutputConfigDelta::default()
+            }),
+            protocol::ConfigDeltaEntry::Buffering(BufferingConfigDelta {
+                decoder_request_chunk_ms: Some(64),
+                ..BufferingConfigDelta::default()
+            }),
+        ]);
+
+        let forwarded = worker_rx
+            .try_recv()
+            .expect("expected buffering delta to forward immediately");
+        match forwarded {
+            DecodeWorkItem::ConfigChanged(changes) => {
+                assert_eq!(changes.len(), 1);
+                assert!(matches!(
+                    changes[0],
+                    protocol::ConfigDeltaEntry::Buffering(_)
+                ));
+            }
+            other => panic!("unexpected work item: {:?}", other),
+        }
+
+        assert_eq!(decoder.staged_output_delta.sample_rate_khz, Some(96_000));
+
+        decoder.set_playback_session_active(false);
+
+        let flushed = worker_rx
+            .try_recv()
+            .expect("expected staged output delta flush");
+        match flushed {
+            DecodeWorkItem::ConfigChanged(changes) => {
+                assert_eq!(changes.len(), 1);
+                match &changes[0] {
+                    protocol::ConfigDeltaEntry::Output(output) => {
+                        assert_eq!(output.sample_rate_khz, Some(96_000));
+                    }
+                    other => panic!("unexpected config delta: {:?}", other),
+                }
+            }
+            other => panic!("unexpected work item: {:?}", other),
+        }
     }
 
     #[test]

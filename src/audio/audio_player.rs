@@ -5,7 +5,7 @@
 
 use crate::protocol::{
     AudioMessage, AudioPacket, ChannelTransformKind, ConfigMessage, Message, OutputPathInfo,
-    OutputSampleFormat, OutputStreamInfo, PlaybackMessage, TrackStarted,
+    OutputSampleFormat, OutputStreamInfo, PlaybackMessage, PlaylistMessage, TrackStarted,
 };
 use crate::{config::BufferingConfig, config::OutputConfig};
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
@@ -85,6 +85,10 @@ pub struct AudioPlayer {
     // Setup cache
     cached_track_indices: Arc<Mutex<HashMap<String, TrackIndex>>>,
     pending_immediate_start_track_id: Option<String>,
+    /// Tracks whether a playback session exists (playing or paused with a selected track).
+    playback_session_active: bool,
+    /// Output deltas staged during active sessions to avoid mid-stream device reopens/pops.
+    staged_output_delta: crate::protocol::OutputConfigDelta,
 
     // Audio stream
     config: Option<cpal::StreamConfig>,
@@ -414,6 +418,8 @@ impl AudioPlayer {
             buffer_target_ms: buffer_target_ms.clone(),
             buffer_request_interval_ms: buffer_request_interval_ms.clone(),
             last_output_signature: None,
+            playback_session_active: false,
+            staged_output_delta: crate::protocol::OutputConfigDelta::default(),
         };
 
         if player.setup_audio_device() {
@@ -848,6 +854,116 @@ impl AudioPlayer {
         }
     }
 
+    fn should_stage_output_config_change(&self) -> bool {
+        self.playback_session_active
+            || self.is_playing.load(Ordering::Relaxed)
+            || self.decode_bootstrap_pending.load(Ordering::Relaxed)
+            || self.pending_immediate_start_track_id.is_some()
+    }
+
+    fn set_playback_session_active(&mut self, active: bool) {
+        self.playback_session_active = active;
+        if !active {
+            self.flush_staged_output_config_if_idle();
+        }
+    }
+
+    fn flush_staged_output_config_if_idle(&mut self) {
+        if self.should_stage_output_config_change() || self.staged_output_delta.is_empty() {
+            return;
+        }
+        let staged_output = std::mem::take(&mut self.staged_output_delta);
+        self.apply_output_config_delta(staged_output);
+    }
+
+    fn stage_or_apply_output_config_delta(
+        &mut self,
+        latest_output: crate::protocol::OutputConfigDelta,
+    ) {
+        if latest_output.is_empty() {
+            return;
+        }
+
+        if self.should_stage_output_config_change() {
+            // Receiver-side staging is intentional: do not reopen audio output mid-session.
+            // Applying output deltas while samples are flowing causes audible artifacts.
+            self.staged_output_delta.merge_from(latest_output);
+            return;
+        }
+
+        let mut merged_output = std::mem::take(&mut self.staged_output_delta);
+        merged_output.merge_from(latest_output);
+        if merged_output.is_empty() {
+            return;
+        }
+        self.apply_output_config_delta(merged_output);
+    }
+
+    fn apply_output_config_delta(&mut self, latest_output: crate::protocol::OutputConfigDelta) {
+        if let Some(downmix) = latest_output.downmix_higher_channel_tracks {
+            self.downmix_higher_channel_tracks = downmix;
+        }
+        if latest_output.is_empty() {
+            return;
+        }
+        let mut next_output_signature = self.current_output_signature();
+        if let Some(device_name) = latest_output.output_device_name.as_deref() {
+            next_output_signature.device_name =
+                Self::canonicalize_requested_device_name(device_name);
+        }
+        if let Some(sample_rate_hz) = latest_output.sample_rate_khz {
+            next_output_signature.sample_rate_hz = sample_rate_hz.max(8_000);
+        }
+        if let Some(channel_count) = latest_output.channel_count {
+            next_output_signature.channel_count = channel_count.max(1);
+        }
+        if let Some(bits_per_sample) = latest_output.bits_per_sample {
+            next_output_signature.bits_per_sample = bits_per_sample.max(8);
+        }
+        if let Some(dither) = latest_output.dither_on_bitdepth_reduce {
+            next_output_signature.dither_on_bitdepth_reduce = dither;
+        }
+        if self.last_output_signature.as_ref() != Some(&next_output_signature) {
+            let previous_sample_rate = self.target_sample_rate.load(Ordering::Relaxed);
+            let previous_channels = self.target_channels.load(Ordering::Relaxed);
+            let previous_bits_per_sample = self.target_bits_per_sample;
+            let previous_dither = self.dither_on_bitdepth_reduce;
+            let previous_device_name = self.target_output_device_name.lock().unwrap().clone();
+
+            self.target_sample_rate.store(
+                next_output_signature.sample_rate_hz as usize,
+                Ordering::Relaxed,
+            );
+            self.target_channels.store(
+                next_output_signature.channel_count as usize,
+                Ordering::Relaxed,
+            );
+            self.target_bits_per_sample = next_output_signature.bits_per_sample;
+            self.dither_on_bitdepth_reduce = next_output_signature.dither_on_bitdepth_reduce;
+            *self.target_output_device_name.lock().unwrap() =
+                next_output_signature.device_name.clone();
+
+            if self.setup_audio_device() {
+                if self.stream.is_some() {
+                    self.stream = None;
+                    self.create_stream();
+                }
+                self.last_output_signature = Some(next_output_signature);
+                if let Some(metadata) = self.current_metadata.lock().unwrap().clone() {
+                    self.emit_output_path_for_metadata(&metadata);
+                }
+            } else {
+                self.target_sample_rate
+                    .store(previous_sample_rate, Ordering::Relaxed);
+                self.target_channels
+                    .store(previous_channels, Ordering::Relaxed);
+                self.target_bits_per_sample = previous_bits_per_sample;
+                self.dither_on_bitdepth_reduce = previous_dither;
+                *self.target_output_device_name.lock().unwrap() = previous_device_name;
+            }
+        }
+    }
+
     fn create_stream(&mut self) {
         if self.stream.is_some() {
             return;
@@ -1122,6 +1238,7 @@ impl AudioPlayer {
                     Message::Playback(PlaybackMessage::Play) => {
                         self.pending_immediate_start_track_id = None;
                         self.is_playing.store(true, Ordering::Relaxed);
+                        self.set_playback_session_active(true);
                         debug!("AudioPlayer: Playback resumed");
                     }
                     Message::Playback(PlaybackMessage::Pause) => {
@@ -1133,7 +1250,11 @@ impl AudioPlayer {
                         self.is_playing.store(false, Ordering::Relaxed);
                         self.decode_bootstrap_pending
                             .store(false, Ordering::Relaxed);
+                        self.set_playback_session_active(false);
                         debug!("AudioPlayer: Playback stopped");
+                    }
+                    Message::Playback(PlaybackMessage::PlayActiveCollection) => {
+                        self.set_playback_session_active(true);
                     }
                     Message::Playback(PlaybackMessage::PlayTrackById(id)) => {
                         self.pending_immediate_start_track_id = None;
@@ -1154,7 +1275,9 @@ impl AudioPlayer {
                             self.current_track_position
                                 .store(info.start, Ordering::Relaxed);
                             self.current_track_offset_ms.store(0, Ordering::Relaxed);
+                            drop(indices);
                             self.is_playing.store(true, Ordering::Relaxed);
+                            self.set_playback_session_active(true);
                             debug!("AudioPlayer: Playback started (manual)");
                             let _ = self.bus_sender.send(Message::Playback(
                                 PlaybackMessage::TechnicalMetadataChanged(info.technical_metadata),
@@ -1205,6 +1328,7 @@ impl AudioPlayer {
                         self.queue_end_position.store(0, Ordering::Relaxed);
                         self.current_track_position.store(0, Ordering::Relaxed);
                         *self.current_metadata.lock().unwrap() = None;
+                        self.set_playback_session_active(false);
                         debug!("AudioPlayer: Cache cleared");
                     }
                     Message::Audio(AudioMessage::StopDecoding) => {
@@ -1213,6 +1337,7 @@ impl AudioPlayer {
                     }
                     Message::Playback(PlaybackMessage::TrackStarted(track_started)) => {
                         debug!("AudioPlayer: Track started: {}", track_started.id);
+                        self.set_playback_session_active(true);
                         // Handle the case when a track automatically starts playing (not caused by a user action)
                         self.current_track_id
                             .lock()
@@ -1238,6 +1363,13 @@ impl AudioPlayer {
                                 self.emit_output_path_for_metadata(metadata_for_path);
                             }
                         }
+                    }
+                    Message::Playlist(PlaylistMessage::PlaylistIndicesChanged {
+                        is_playing,
+                        playing_index,
+                        ..
+                    }) => {
+                        self.set_playback_session_active(is_playing || playing_index.is_some());
                     }
                     Message::Config(ConfigMessage::ConfigChanged(changes)) => {
                         let mut latest_output = crate::protocol::OutputConfigDelta::default();
@@ -1282,74 +1414,7 @@ impl AudioPlayer {
                             self.buffer_request_interval_ms
                                 .store(request_interval_ms, Ordering::Relaxed);
                         }
-                        if let Some(downmix) = latest_output.downmix_higher_channel_tracks {
-                            self.downmix_higher_channel_tracks = downmix;
-                        }
-                        if latest_output.is_empty() {
-                            continue;
-                        }
-                        let mut next_output_signature = self.current_output_signature();
-                        if let Some(device_name) = latest_output.output_device_name.as_deref() {
-                            next_output_signature.device_name =
-                                Self::canonicalize_requested_device_name(device_name);
-                        }
-                        if let Some(sample_rate_hz) = latest_output.sample_rate_khz {
-                            next_output_signature.sample_rate_hz = sample_rate_hz.max(8_000);
-                        }
-                        if let Some(channel_count) = latest_output.channel_count {
-                            next_output_signature.channel_count = channel_count.max(1);
-                        }
-                        if let Some(bits_per_sample) = latest_output.bits_per_sample {
-                            next_output_signature.bits_per_sample = bits_per_sample.max(8);
-                        }
-                        if let Some(dither) = latest_output.dither_on_bitdepth_reduce {
-                            next_output_signature.dither_on_bitdepth_reduce = dither;
-                        }
-                        if self.last_output_signature.as_ref() != Some(&next_output_signature) {
-                            let previous_sample_rate =
-                                self.target_sample_rate.load(Ordering::Relaxed);
-                            let previous_channels = self.target_channels.load(Ordering::Relaxed);
-                            let previous_bits_per_sample = self.target_bits_per_sample;
-                            let previous_dither = self.dither_on_bitdepth_reduce;
-                            let previous_device_name =
-                                self.target_output_device_name.lock().unwrap().clone();
-
-                            self.target_sample_rate.store(
-                                next_output_signature.sample_rate_hz as usize,
-                                Ordering::Relaxed,
-                            );
-                            self.target_channels.store(
-                                next_output_signature.channel_count as usize,
-                                Ordering::Relaxed,
-                            );
-                            self.target_bits_per_sample = next_output_signature.bits_per_sample;
-                            self.dither_on_bitdepth_reduce =
-                                next_output_signature.dither_on_bitdepth_reduce;
-                            *self.target_output_device_name.lock().unwrap() =
-                                next_output_signature.device_name.clone();
-
-                            if self.setup_audio_device() {
-                                if self.stream.is_some() {
-                                    self.stream = None;
-                                    self.create_stream();
-                                }
-                                self.last_output_signature = Some(next_output_signature);
-                                if let Some(metadata) =
-                                    self.current_metadata.lock().unwrap().clone()
-                                {
-                                    self.emit_output_path_for_metadata(&metadata);
-                                }
-                            } else {
-                                self.target_sample_rate
-                                    .store(previous_sample_rate, Ordering::Relaxed);
-                                self.target_channels
-                                    .store(previous_channels, Ordering::Relaxed);
-                                self.target_bits_per_sample = previous_bits_per_sample;
-                                self.dither_on_bitdepth_reduce = previous_dither;
-                                *self.target_output_device_name.lock().unwrap() =
-                                    previous_device_name;
-                            }
-                        }
+                        self.stage_or_apply_output_config_delta(latest_output);
                     }
                     Message::Config(ConfigMessage::RuntimeOutputSampleRateChanged {
                         sample_rate_hz,
@@ -1376,7 +1441,9 @@ impl AudioPlayer {
 mod tests {
     use super::{AudioPlayer, AudioQueueEntry, TrackHeader};
     use crate::config::{BufferingConfig, Config, OutputConfig};
-    use crate::protocol::{AudioPacket, Message, PlaybackMessage, TechnicalMetadata};
+    use crate::protocol::{
+        AudioPacket, Message, OutputConfigDelta, PlaybackMessage, TechnicalMetadata,
+    };
     use std::collections::{HashMap, VecDeque};
     use std::sync::{
         atomic::{AtomicBool, AtomicU32, AtomicUsize, Ordering},
@@ -1463,6 +1530,34 @@ mod tests {
 
         let signature = AudioPlayer::output_signature_from_output_config(&config.output);
         assert_eq!(signature.device_name, None);
+    }
+
+    #[test]
+    fn test_output_config_changes_are_staged_until_session_is_idle() {
+        let (bus_sender, bus_receiver) = broadcast::channel(32);
+        let mut player = AudioPlayer::new(
+            bus_receiver,
+            bus_sender,
+            OutputConfig::default(),
+            BufferingConfig::default(),
+        );
+
+        player.set_playback_session_active(true);
+        player.stage_or_apply_output_config_delta(OutputConfigDelta {
+            downmix_higher_channel_tracks: Some(false),
+            ..OutputConfigDelta::default()
+        });
+
+        assert!(player.downmix_higher_channel_tracks);
+        assert_eq!(
+            player.staged_output_delta.downmix_higher_channel_tracks,
+            Some(false)
+        );
+
+        player.set_playback_session_active(false);
+
+        assert!(!player.downmix_higher_channel_tracks);
+        assert!(player.staged_output_delta.is_empty());
     }
 
     #[test]

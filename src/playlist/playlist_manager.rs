@@ -963,6 +963,13 @@ impl PlaylistManager {
         sample_rate_hz: u32,
         play_immediately: bool,
     ) -> bool {
+        if !self.can_apply_runtime_rate_switch_now() {
+            debug!(
+                "PlaylistManager: Deferring runtime output-rate switch to {} Hz until playback session is idle",
+                sample_rate_hz
+            );
+            return false;
+        }
         if self.current_output_rate_hz == Some(sample_rate_hz) {
             debug!(
                 "PlaylistManager: Runtime output-rate switch to {} Hz skipped (already active)",
@@ -1012,6 +1019,16 @@ impl PlaylistManager {
         self.cache_tracks(play_immediately);
     }
 
+    fn playback_session_active(&self) -> bool {
+        self.playback_playlist.is_playing()
+            || self.playback_playlist.get_playing_track_index().is_some()
+    }
+
+    fn can_apply_runtime_rate_switch_now(&self) -> bool {
+        self.playback_route == protocol::PlaybackRoute::Local
+            && !(self.playback_session_active() && self.started_track_id.is_some())
+    }
+
     fn handle_technical_metadata_changed(&mut self, meta: protocol::TechnicalMetadata) {
         debug!(
             "PlaylistManager: Received technical metadata changed for track: {:?}",
@@ -1023,7 +1040,8 @@ impl PlaylistManager {
             && self.sample_rate_auto_enabled
             && self.pending_rate_switch.is_none()
             && self.current_output_rate_hz != Some(meta.sample_rate_hz)
-            && source_rate_supported;
+            && source_rate_supported
+            && self.can_apply_runtime_rate_switch_now();
         if should_switch {
             debug!(
                 "PlaylistManager: Source {} Hz differs from output {:?}; requesting runtime switch before continuing playback",
@@ -1684,10 +1702,17 @@ impl PlaylistManager {
                         if playback_changed {
                             self.broadcast_playlist_changed();
                         }
-                        if self.playback_playlist.is_playing()
-                            && previous_sample_rate_auto != self.sample_rate_auto_enabled
-                        {
-                            self.cache_tracks(false);
+                        if previous_sample_rate_auto != self.sample_rate_auto_enabled {
+                            if self.playback_session_active() {
+                                // Output-policy deltas can arrive while audio is running (e.g.
+                                // async startup probe). Defer policy recache to avoid live
+                                // output-rate switches and audible artifacts mid-session.
+                                debug!(
+                                    "PlaylistManager: Deferring sample-rate-auto policy apply until playback session is idle"
+                                );
+                            } else {
+                                self.cache_tracks(false);
+                            }
                         }
                     }
                     protocol::Message::Config(
@@ -1696,7 +1721,12 @@ impl PlaylistManager {
                         },
                     ) => {
                         self.update_verified_output_rates(verified_sample_rates);
-                        if self.playback_playlist.is_playing() {
+                        if self.playback_session_active() {
+                            // Keep capability refresh non-disruptive while a session is active.
+                            debug!(
+                                "PlaylistManager: Deferring output capability policy refresh until playback session is idle"
+                            );
+                        } else {
                             self.cache_tracks(false);
                         }
                     }
@@ -5075,7 +5105,36 @@ mod tests {
     }
 
     #[test]
-    fn test_technical_metadata_switches_output_rate_even_after_track_started() {
+    fn test_cache_tracks_does_not_request_runtime_rate_switch_after_track_started() {
+        let (mut manager, mut receiver) = make_direct_manager();
+        manager.sample_rate_auto_enabled = true;
+        manager.verified_output_rates = vec![44_100, 48_000, 192_000];
+        manager.current_output_rate_hz = Some(192_000);
+        manager.playback_playlist = Playlist::new();
+        manager.playback_playlist.add_track(Track {
+            id: "t0".to_string(),
+            path: PathBuf::from("/tmp/t0_44.flac"),
+        });
+        manager.playback_playlist.set_playing_track_index(Some(0));
+        manager.playback_playlist.set_playing(true);
+        manager.started_track_id = Some("t0".to_string());
+        manager
+            .track_sample_rate_cache
+            .insert(PathBuf::from("/tmp/t0_44.flac"), Some(44_100));
+
+        manager.cache_tracks(false);
+
+        assert_no_message(&mut receiver, Duration::from_millis(250), |message| {
+            matches!(
+                message,
+                protocol::Message::Config(protocol::ConfigMessage::SetRuntimeOutputRate { .. })
+            )
+        });
+        assert_eq!(manager.pending_rate_switch, None);
+    }
+
+    #[test]
+    fn test_technical_metadata_does_not_switch_output_rate_after_track_started() {
         let (mut manager, mut receiver) = make_direct_manager();
         manager.sample_rate_auto_enabled = true;
         manager.verified_output_rates = vec![44_100, 48_000, 192_000];
@@ -5100,28 +5159,17 @@ mod tests {
             bits_per_sample: 16,
         });
 
-        let _ = wait_for_message(&mut receiver, Duration::from_secs(1), |message| {
+        assert_no_message(&mut receiver, Duration::from_millis(250), |message| {
             matches!(
                 message,
                 protocol::Message::Audio(protocol::AudioMessage::StopDecoding)
+                    | protocol::Message::Config(
+                        protocol::ConfigMessage::SetRuntimeOutputRate { .. }
+                    )
             )
         });
-        let message = wait_for_message(&mut receiver, Duration::from_secs(1), |message| {
-            matches!(
-                message,
-                protocol::Message::Config(protocol::ConfigMessage::SetRuntimeOutputRate { .. })
-            )
-        });
-        let protocol::Message::Config(protocol::ConfigMessage::SetRuntimeOutputRate {
-            sample_rate_hz,
-            ..
-        }) = message
-        else {
-            panic!("expected runtime output-rate switch request");
-        };
-        assert_eq!(sample_rate_hz, 44_100);
-        assert_eq!(manager.pending_rate_switch, Some(44_100));
-        assert!(manager.pending_rate_switch_play_immediately);
+        assert_eq!(manager.pending_rate_switch, None);
+        assert!(!manager.pending_rate_switch_play_immediately);
     }
 
     #[test]
