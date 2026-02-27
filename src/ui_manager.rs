@@ -515,7 +515,7 @@ const DETAIL_COMPACT_RENDER_MAX_EDGE_PX: u32 = 384;
 const LIBRARY_REMOVE_CONFIRM_DEFAULT_MESSAGE: &str =
     "Remove from library? This will not delete any files\n\nNote: tracks may be re-added in a rescan if files remain in library folders";
 const LIBRARY_REMOVE_CONFIRM_PLAYLIST_SYNC_MESSAGE: &str =
-    "Playlist to library sync is enabled. Removing these tracks will must delete them from playlists. Do you want to proceed?";
+    "Playlist to library sync is enabled. Removing these tracks will delete them from playlists. Do you want to proceed?";
 
 static COVER_ART_MEMORY_CACHE_BUDGET_BYTES: AtomicU64 =
     AtomicU64::new(DEFAULT_IMAGE_MEMORY_CACHE_MAX_BYTES);
