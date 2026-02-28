@@ -38,6 +38,8 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y \
+            pkg-config \
+            libfontconfig1-dev \
             libasound2-dev \
             libudev-dev \
             libxkbcommon-dev \
@@ -64,6 +66,8 @@ jobs:
           New-Item -ItemType Directory -Path dist -Force | Out-Null
           Copy-Item target\release\roqtune.exe dist\roqtune.exe
           Compress-Archive -Path dist\roqtune.exe -DestinationPath "${{ matrix.asset_name }}" -Force
+        env:
+          RUSTFLAGS: -C link-arg=/STACK:16777216
 
       - name: Build macOS universal binary
         if: runner.os == 'macOS'
@@ -99,4 +103,3 @@ jobs:
           tag_name: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.tag || github.ref_name }}
           files: |
             dist/*
-
