@@ -23,11 +23,11 @@ jobs:
       matrix:
         include:
           - os: ubuntu-latest
-            asset_name: roqtune-linux-x86_64
+            asset_name: roqtune-linux-x86_64.AppImage
           - os: windows-latest
             asset_name: roqtune-windows-x86_64.exe
           - os: macos-14
-            asset_name: roqtune-macos-universal.command
+            asset_name: roqtune-macos-universal.app.zip
     steps:
       - uses: actions/checkout@v4
         with:
@@ -57,7 +57,29 @@ jobs:
         if: runner.os == 'Linux'
         run: |
           cargo build --release --locked
-          cp target/release/roqtune "${{ matrix.asset_name }}"
+          mkdir -p AppDir/usr/bin
+          cp target/release/roqtune AppDir/usr/bin/roqtune
+          cp flatpak/io.github.alexzah.roqtune.desktop AppDir/roqtune.desktop
+          cp flatpak/io.github.alexzah.roqtune.png AppDir/io.github.alexzah.roqtune.png
+
+          cat > AppDir/AppRun <<'EOF'
+          #!/bin/sh
+          HERE="$(dirname "$(readlink -f "$0")")"
+          exec "$HERE/usr/bin/roqtune" "$@"
+          EOF
+          chmod +x AppDir/AppRun AppDir/usr/bin/roqtune
+
+          curl -L -o linuxdeploy-x86_64.AppImage "https://github.com/linuxdeploy/linuxdeploy/releases/download/continuous/linuxdeploy-x86_64.AppImage"
+          curl -L -o appimagetool-x86_64.AppImage "https://github.com/AppImage/AppImageKit/releases/download/continuous/appimagetool-x86_64.AppImage"
+          chmod +x linuxdeploy-x86_64.AppImage appimagetool-x86_64.AppImage
+
+          export APPIMAGE_EXTRACT_AND_RUN=1
+          ./linuxdeploy-x86_64.AppImage \
+            --appdir AppDir \
+            --desktop-file AppDir/roqtune.desktop \
+            --icon-file AppDir/io.github.alexzah.roqtune.png \
+            --executable AppDir/usr/bin/roqtune
+          ARCH=x86_64 ./appimagetool-x86_64.AppImage AppDir "${{ matrix.asset_name }}"
 
       - name: Build Windows binary
         if: runner.os == 'Windows'
@@ -74,11 +96,45 @@ jobs:
           rustup target add aarch64-apple-darwin x86_64-apple-darwin
           cargo build --release --locked --target aarch64-apple-darwin
           cargo build --release --locked --target x86_64-apple-darwin
+
+          mkdir -p roqtune.app/Contents/MacOS
+          mkdir -p roqtune.app/Contents/Resources
           lipo -create \
             target/aarch64-apple-darwin/release/roqtune \
             target/x86_64-apple-darwin/release/roqtune \
-            -output "${{ matrix.asset_name }}"
-          chmod +x "${{ matrix.asset_name }}"
+            -output roqtune.app/Contents/MacOS/roqtune
+          chmod +x roqtune.app/Contents/MacOS/roqtune
+
+          cp flatpak/io.github.alexzah.roqtune.png roqtune.app/Contents/Resources/roqtune.png
+          cat > roqtune.app/Contents/Info.plist <<'EOF'
+          <?xml version="1.0" encoding="UTF-8"?>
+          <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+          <plist version="1.0">
+          <dict>
+            <key>CFBundleName</key>
+            <string>roqtune</string>
+            <key>CFBundleDisplayName</key>
+            <string>roqtune</string>
+            <key>CFBundleExecutable</key>
+            <string>roqtune</string>
+            <key>CFBundleIdentifier</key>
+            <string>io.github.alexzah.roqtune</string>
+            <key>CFBundlePackageType</key>
+            <string>APPL</string>
+            <key>CFBundleVersion</key>
+            <string>1</string>
+            <key>CFBundleShortVersionString</key>
+            <string>1.0.0</string>
+            <key>LSMinimumSystemVersion</key>
+            <string>11.0</string>
+            <key>NSHighResolutionCapable</key>
+            <true/>
+          </dict>
+          </plist>
+          EOF
+
+          # GitHub Releases expects file assets; zip preserves the app bundle structure.
+          ditto -c -k --sequesterRsrc --keepParent roqtune.app "${{ matrix.asset_name }}"
 
       - uses: actions/upload-artifact@v4
         with:
