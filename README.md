@@ -42,10 +42,11 @@ Detailed installation and packaging instructions live in [`INSTALL.md`](INSTALL.
 
 ### Tests and Quality
 
-- Run all tests: `cargo test`
+- Run all tests: `cargo test --locked`
 - Run tests with output: `cargo test -- --nocapture`
 - Format code: `cargo fmt`
-- Lint (deny warnings): `cargo clippy -- -D warnings`
+- Format check (CI parity): `cargo fmt --all --check`
+- Lint (deny warnings): `cargo clippy --all-targets --locked -- -D warnings`
 
 ## Keyboard Shortcuts
 

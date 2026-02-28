@@ -4144,9 +4144,9 @@ mod tests {
             )
         });
 
-        for index in 0..10usize {
+        for (index, id) in ids.iter().enumerate().take(10usize) {
             harness.send(protocol::Message::Playback(
-                protocol::PlaybackMessage::TrackFinished(ids[index].clone()),
+                protocol::PlaybackMessage::TrackFinished(id.clone()),
             ));
             let expected_next_index = index + 1;
             let _ = wait_for_message(&mut harness.receiver, Duration::from_secs(1), |message| {
