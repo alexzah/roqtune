@@ -23,11 +23,11 @@ jobs:
       matrix:
         include:
           - os: ubuntu-latest
-            asset_name: roqtune-linux-x86_64.tar.gz
+            asset_name: roqtune-linux-x86_64
           - os: windows-latest
-            asset_name: roqtune-windows-x86_64.zip
+            asset_name: roqtune-windows-x86_64.exe
           - os: macos-14
-            asset_name: roqtune-macos-universal.tar.gz
+            asset_name: roqtune-macos-universal.command
     steps:
       - uses: actions/checkout@v4
         with:
@@ -57,18 +57,14 @@ jobs:
         if: runner.os == 'Linux'
         run: |
           cargo build --release --locked
-          mkdir -p dist
-          cp target/release/roqtune dist/roqtune
-          tar -C dist -czf "${{ matrix.asset_name }}" roqtune
+          cp target/release/roqtune "${{ matrix.asset_name }}"
 
       - name: Build Windows binary
         if: runner.os == 'Windows'
         shell: pwsh
         run: |
           cargo build --release --locked
-          New-Item -ItemType Directory -Path dist -Force | Out-Null
-          Copy-Item target\release\roqtune.exe dist\roqtune.exe
-          Compress-Archive -Path dist\roqtune.exe -DestinationPath "${{ matrix.asset_name }}" -Force
+          Copy-Item target\release\roqtune.exe "${{ matrix.asset_name }}"
         env:
           RUSTFLAGS: -C link-arg=/STACK:16777216
 
@@ -78,12 +74,11 @@ jobs:
           rustup target add aarch64-apple-darwin x86_64-apple-darwin
           cargo build --release --locked --target aarch64-apple-darwin
           cargo build --release --locked --target x86_64-apple-darwin
-          mkdir -p dist
           lipo -create \
             target/aarch64-apple-darwin/release/roqtune \
             target/x86_64-apple-darwin/release/roqtune \
-            -output dist/roqtune
-          tar -C dist -czf "${{ matrix.asset_name }}" roqtune
+            -output "${{ matrix.asset_name }}"
+          chmod +x "${{ matrix.asset_name }}"
 
       - uses: actions/upload-artifact@v4
         with:
