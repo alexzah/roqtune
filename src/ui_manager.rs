@@ -258,6 +258,14 @@ struct TrackMetadata {
     track_number: String,
 }
 
+#[derive(Clone, Default)]
+struct TechnicalInfoTemplateFields {
+    technical_info: String,
+    technical_source: String,
+    technical_cast_status: String,
+    technical_playback_path: String,
+}
+
 #[derive(Clone, Debug)]
 struct RenderedColumnValue {
     plain_text: String,
@@ -2069,16 +2077,15 @@ impl UiManager {
         }
     }
 
-    fn render_technical_info_text(&self) -> String {
+    fn render_technical_info_fields(&self) -> TechnicalInfoTemplateFields {
         if self.current_technical_metadata.is_none()
             && !self.cast_connected
             && !self.cast_connecting
         {
-            return String::new();
+            return TechnicalInfoTemplateFields::default();
         }
 
-        let mut sections = Vec::new();
-        let source_section = if let Some(meta) = self.current_technical_metadata.as_ref() {
+        let technical_source = if let Some(meta) = self.current_technical_metadata.as_ref() {
             let source_label = self.current_track_source_label();
             let source_format_text = Self::format_technical_metadata_text(meta);
             if let Some(source_label) = source_label {
@@ -2091,13 +2098,17 @@ impl UiManager {
         } else {
             String::new()
         };
-        if !source_section.is_empty() {
-            sections.push(source_section);
-        }
 
-        if self.cast_connected {
-            sections.push("Casting".to_string());
-            let cast_transform = match self.cast_playback_path_kind {
+        let technical_cast_status = if self.cast_connected {
+            "Casting".to_string()
+        } else if self.cast_connecting {
+            "Casting: Connecting...".to_string()
+        } else {
+            String::new()
+        };
+
+        let technical_playback_path = if self.cast_connected {
+            match self.cast_playback_path_kind {
                 Some(protocol::CastPlaybackPathKind::Direct) => Some("Direct play".to_string()),
                 Some(protocol::CastPlaybackPathKind::TranscodeWavPcm) => {
                     if let Some(meta) = self.cast_transcode_output_metadata.as_ref() {
@@ -2110,21 +2121,36 @@ impl UiManager {
                     }
                 }
                 None => None,
-            };
-            if let Some(cast_transform) = cast_transform {
-                sections.push(cast_transform);
             }
+            .unwrap_or_default()
         } else if self.cast_connecting {
-            sections.push("Casting: Connecting...".to_string());
+            String::new()
+        } else if self.current_technical_metadata.is_some() {
+            self.render_local_transform_text()
         } else {
-            sections.push(self.render_local_transform_text());
-        }
+            String::new()
+        };
 
-        sections
-            .into_iter()
-            .filter(|section| !section.trim().is_empty())
-            .collect::<Vec<_>>()
-            .join(" | ")
+        let technical_info = [
+            technical_source.as_str(),
+            technical_cast_status.as_str(),
+            technical_playback_path.as_str(),
+        ]
+        .into_iter()
+        .filter(|section| !section.trim().is_empty())
+        .collect::<Vec<_>>()
+        .join(" | ");
+
+        TechnicalInfoTemplateFields {
+            technical_info,
+            technical_source,
+            technical_cast_status,
+            technical_playback_path,
+        }
+    }
+
+    fn render_technical_info_text(&self) -> String {
+        self.render_technical_info_fields().technical_info
     }
 
     fn refresh_technical_info_ui(&self) {
@@ -5164,6 +5190,9 @@ impl UiManager {
         display_is_favorited_by_priority: Vec<bool>,
         selection_summary_text: String,
         technical_info_text: String,
+        technical_source_text: String,
+        technical_cast_status_text: String,
+        technical_playback_path_text: String,
     ) {
         let _ = self.ui.upgrade_in_event_loop(move |ui| {
             let metadata_model = ui.get_layout_metadata_viewer_panels();
@@ -5283,7 +5312,13 @@ impl UiManager {
                             display_path,
                         )
                         .with_indicator_symbols(Some(playing_indicator), Some(favorite_indicator))
-                        .with_status_fields(&selection_summary_text, &technical_info_text);
+                        .with_status_fields(
+                            &selection_summary_text,
+                            &technical_info_text,
+                            &technical_source_text,
+                            &technical_cast_status_text,
+                            &technical_playback_path_text,
+                        );
                         let content_inset_px = Self::text_panel_content_inset_px(
                             row_data.width_px,
                             row_data.height_px,
@@ -5424,7 +5459,7 @@ impl UiManager {
             self.selected_indices.len()
         };
         let selection_summary_text = Self::status_selection_summary_text(selected_track_count);
-        let technical_info_text = self.render_technical_info_text();
+        let technical_fields = self.render_technical_info_fields();
         for display_path in &display_paths_by_priority {
             let is_playing_track = match (display_path.as_ref(), playing_track_path) {
                 (Some(display_path), Some(playing_path)) => display_path == playing_path,
@@ -5514,7 +5549,10 @@ impl UiManager {
             display_is_playing_by_priority,
             display_is_favorited_by_priority,
             selection_summary_text,
-            technical_info_text,
+            technical_fields.technical_info,
+            technical_fields.technical_source,
+            technical_fields.technical_cast_status,
+            technical_fields.technical_playback_path,
         );
     }
 
@@ -12944,6 +12982,9 @@ mod tests {
             favorite: None,
             selection_summary: "",
             technical_info: "",
+            technical_source: "",
+            technical_cast_status: "",
+            technical_playback_path: "",
         }
     }
 

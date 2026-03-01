@@ -9,7 +9,7 @@ const DEFAULT_FONT_SIZE_PX: u32 = 13;
 pub(crate) const DEFAULT_METADATA_PANEL_TEMPLATE: &str =
     "[size=title][b][color=text_primary]{title;file_name}[/color][/b][/size]\\n[size=body][color=text_secondary]{artist;album_artist}[/color][/size]\\n[size=body][color=text_muted]{album}[/color][/size]\\n[size=caption][color=text_muted]{date;year} • {genre}[/color][/size]";
 pub(crate) const DEFAULT_STATUS_PANEL_TEMPLATE: &str =
-    "[valign=center][halign=left][color=text_secondary][if=title]Now Playing: [if=artist;album_artist]{artist;album_artist} - [/if]{title}[if=album] • {album}[/if][if=selection_summary] | {selection_summary}[/if][else][if=selection_summary]{selection_summary}[else]No track selected[/if][/if][/color][/halign][halign=right][size=caption][color=text_muted]{technical_info}[/color][/size][/halign][/valign]";
+    "[valign=center][halign=left][size=body][if=title][color=text_secondary]Now Playing: [/color][color=text_primary][if=artist;album_artist]{artist;album_artist} - [/if]{title}[/color][else][color=text_secondary]No track selected[/color][/if][if=selection_summary][color=text_muted][if=title] | [/if]{selection_summary}[/color][/if][/size][/halign][halign=right][size=caption][color=text_muted][if=technical_source]{technical_source}[/if][if=technical_cast_status][if=technical_source] | [/if]{technical_cast_status}[/if][if=technical_playback_path][if=technical_source;technical_cast_status] | [/if]{technical_playback_path}[/if][/color][/size][/halign][/valign]";
 pub(crate) const PLAYING_SYMBOL_PLAYING: &str = "▶️";
 pub(crate) const PLAYING_SYMBOL_PAUSED: &str = "⏸️";
 pub(crate) const FAVORITE_SYMBOL_ON: &str = "❤️";
@@ -251,6 +251,9 @@ pub(crate) struct TemplateContext<'a> {
     pub favorite: Option<&'a str>,
     pub selection_summary: &'a str,
     pub technical_info: &'a str,
+    pub technical_source: &'a str,
+    pub technical_cast_status: &'a str,
+    pub technical_playback_path: &'a str,
 }
 
 impl<'a> TemplateContext<'a> {
@@ -285,6 +288,9 @@ impl<'a> TemplateContext<'a> {
             favorite: None,
             selection_summary: "",
             technical_info: "",
+            technical_source: "",
+            technical_cast_status: "",
+            technical_playback_path: "",
         }
     }
 
@@ -302,9 +308,15 @@ impl<'a> TemplateContext<'a> {
         mut self,
         selection_summary: &'a str,
         technical_info: &'a str,
+        technical_source: &'a str,
+        technical_cast_status: &'a str,
+        technical_playback_path: &'a str,
     ) -> Self {
         self.selection_summary = selection_summary;
         self.technical_info = technical_info;
+        self.technical_source = technical_source;
+        self.technical_cast_status = technical_cast_status;
+        self.technical_playback_path = technical_playback_path;
         self
     }
 
@@ -335,6 +347,13 @@ impl<'a> TemplateContext<'a> {
             "path" => Some(self.path.unwrap_or_default().to_string()),
             "selection_summary" | "selectionsummary" => Some(self.selection_summary.to_string()),
             "technical_info" | "technicalinfo" => Some(self.technical_info.to_string()),
+            "technical_source" | "technicalsource" => Some(self.technical_source.to_string()),
+            "technical_cast_status" | "technicalcaststatus" => {
+                Some(self.technical_cast_status.to_string())
+            }
+            "technical_playback_path" | "technicalplaybackpath" => {
+                Some(self.technical_playback_path.to_string())
+            }
             "album_art" | "disc" | "disc_number" | "duration" => Some(String::new()),
             _ => None,
         }
@@ -1057,6 +1076,9 @@ mod tests {
             favorite: None,
             selection_summary: "",
             technical_info: "",
+            technical_source: "",
+            technical_cast_status: "",
+            technical_playback_path: "",
         }
     }
 
@@ -1133,10 +1155,19 @@ mod tests {
     #[test]
     fn test_status_placeholders_render_from_context() {
         let rendered = render_template(
-            "{selection_summary}|{technical_info}",
-            &context("Song").with_status_fields("2 tracks selected", "Source: FLAC"),
+            "{selection_summary}|{technical_info}|{technical_source}|{technical_cast_status}|{technical_playback_path}",
+            &context("Song").with_status_fields(
+                "2 tracks selected",
+                "Source: FLAC | Casting | Direct play",
+                "Source: FLAC",
+                "Casting",
+                "Direct play",
+            ),
         );
-        assert_eq!(rendered.plain_text, "2 tracks selected|Source: FLAC");
+        assert_eq!(
+            rendered.plain_text,
+            "2 tracks selected|Source: FLAC | Casting | Direct play|Source: FLAC|Casting|Direct play"
+        );
     }
 
     #[test]

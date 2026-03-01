@@ -290,7 +290,7 @@ text_format = '[size=title][b][color=text_primary]{title;file_name}[/color][/b][
 leaf_id = "n19"
 display_priority = "now_playing_only"
 text_source = "status_bar"
-text_format = '[valign=center][halign=left][color=text_secondary][if=title]Now Playing: [if=artist;album_artist]{artist;album_artist} - [/if]{title}[if=album] • {album}[/if][if=selection_summary] | {selection_summary}[/if][else][if=selection_summary]{selection_summary}[else]No track selected[/if][/if][/color][/halign][halign=right][size=caption][color=text_muted]{technical_info}[/color][/size][/halign][/valign]'
+text_format = '[valign=center][halign=left][size=body][if=title][color=text_muted]Now Playing: [/color][color=text_secondary][if=artist;album_artist]{artist;album_artist} - [/if]{title}[/color][else][color=text_secondary]No track selected[/color][/if][if=selection_summary][color=text_muted][if=title] | [/if]{selection_summary}[/color][/if][/size][/halign][halign=right][size=body][color=text_muted][if=technical_source]{technical_source}[/if][if=technical_cast_status][if=technical_source] | [/if]{technical_cast_status}[/if][if=technical_playback_path][if=technical_source;technical_cast_status] | [/if]{technical_playback_path}[/if][/color][/size][/halign][/valign]'
 
 [root.first.first.second]
 node_type = "split"
