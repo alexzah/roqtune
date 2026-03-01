@@ -9,7 +9,7 @@ const DEFAULT_FONT_SIZE_PX: u32 = 13;
 pub(crate) const DEFAULT_METADATA_PANEL_TEMPLATE: &str =
     "[size=title][b][color=text_primary]{title;file_name}[/color][/b][/size]\\n[size=body][color=text_secondary]{artist;album_artist}[/color][/size]\\n[size=body][color=text_muted]{album}[/color][/size]\\n[size=caption][color=text_muted]{date;year} • {genre}[/color][/size]";
 pub(crate) const DEFAULT_STATUS_PANEL_TEMPLATE: &str =
-    "[valign=center][halign=left][size=12][color=text_secondary][if=path]Now Playing: [if=artist]{artist} - [/if][if=title]{title}[else]Unknown[/if][if=selection_summary] | {selection_summary}[/if][else]{selection_summary}[/if][/color][/size][/halign][halign=right][size=11][color=text_muted][if=technical_format]Source: [if=technical_source_provider]{technical_source_provider} | [/if]{technical_format}[if=technical_bit_depth] ({technical_bit_depth} bit[/if][if=technical_sample_rate_hz], {technical_sample_rate_hz}[/if][if=technical_channels], {technical_channels}ch[/if][if=technical_bitrate_kbps], {technical_bitrate_kbps}kbps[/if][if=technical_bit_depth])[/if][else][if=technical_cast_state]Source: Unknown[/if][/if][if=technical_cast_state] | {technical_cast_state}[/if][if=technical_playback_mode] | [if=technical_output_format]{technical_playback_mode}: {technical_output_format}[if=technical_output_bit_depth] ({technical_output_bit_depth} bit[/if][if=technical_output_sample_rate_hz], {technical_output_sample_rate_hz}[/if][if=technical_output_channels], {technical_output_channels}ch[/if][if=technical_output_bitrate_kbps], {technical_output_bitrate_kbps}kbps[/if][if=technical_output_bit_depth])[/if][if=technical_output_format][else]{technical_playback_mode}[/if][/if][if=technical_resampled] | Resample: {technical_resample_from_hz} -> {technical_resample_to_hz}[/if][if=technical_channel_transform][if=technical_resampled] / [/if][if=technical_resampled][else] | [/if]{technical_channel_transform}: {technical_channel_from_channels}ch -> {technical_channel_to_channels}ch[/if][if=technical_dithered][if=technical_resampled;technical_channel_transform] / [/if][if=technical_resampled;technical_channel_transform][else] | [/if]Dither[/if][/color][/size][/halign][/valign]";
+    "[valign=center][halign=left][size=12][color=text_secondary][if=path]Now Playing: [if=artist]{artist} - [/if][if=title]{title}[else]Unknown[/if][if=selection_summary] | {selection_summary}[/if][else]{selection_summary}[/if][/color][/size][/halign][halign=right][size=11][color=text_muted][if=technical_format]Source: [if=technical_source_provider]{technical_source_provider} | [/if]{technical_format}[if=technical_bit_depth] ({technical_bit_depth} bit[/if][if=technical_sample_rate_hz], {technical_sample_rate_hz}[/if][if=technical_channels], {technical_channels}ch[/if][if=technical_bitrate_kbps], {technical_bitrate_kbps}kbps[/if][if=technical_bit_depth])[/if][else][if=technical_cast_state]Source: Unknown[/if][/if][if=technical_cast_state] | {technical_cast_state}[/if][if=technical_playback_mode] | [if=technical_output_format]{technical_playback_mode}: {technical_output_format}[if=technical_output_bit_depth] ({technical_output_bit_depth} bit[/if][if=technical_output_sample_rate_hz], {technical_output_sample_rate_hz}[/if][if=technical_output_channels], {technical_output_channels}ch[/if][if=technical_output_bitrate_kbps], {technical_output_bitrate_kbps}kbps[/if][if=technical_output_bit_depth])[/if][else]{technical_playback_mode}[/if][/if][if=technical_resampled] | Resample: {technical_resample_from_hz} -> {technical_resample_to_hz}[/if][if=technical_channel_transform][if=technical_resampled] / [/if][if=technical_resampled][else] | [/if]{technical_channel_transform}: {technical_channel_from_channels}ch -> {technical_channel_to_channels}ch[/if][if=technical_dithered][if=technical_resampled;technical_channel_transform] / [/if][if=technical_resampled;technical_channel_transform][else] | [/if]Dither[/if][/color][/size][/halign][/valign]";
 pub(crate) const PLAYING_SYMBOL_PLAYING: &str = "▶️";
 pub(crate) const PLAYING_SYMBOL_PAUSED: &str = "⏸️";
 pub(crate) const FAVORITE_SYMBOL_ON: &str = "❤️";
@@ -1177,7 +1177,7 @@ mod tests {
     use super::{
         render_template, render_template_with_options, template_metrics, HorizontalAlign,
         PaletteColor, RenderOptions, RunColor, StatusTemplateFields, TemplateContext,
-        VerticalAlign,
+        VerticalAlign, DEFAULT_STATUS_PANEL_TEMPLATE,
     };
 
     fn context<'a>(title: &'a str) -> TemplateContext<'a> {
@@ -1340,6 +1340,62 @@ mod tests {
             },
         );
         assert_eq!(rendered.plain_text, "Fallback Artist");
+    }
+
+    #[test]
+    fn test_if_condition_renders_else_branch_with_empty_true_branch() {
+        let rendered = render_template(
+            "[if=technical_output_format][else]{technical_playback_mode}[/if]",
+            &context("Song").with_status_fields(StatusTemplateFields {
+                technical_playback_mode: "Direct play",
+                technical_output_format: "",
+                ..StatusTemplateFields::default()
+            }),
+        );
+        assert_eq!(rendered.plain_text, "Direct play");
+    }
+
+    #[test]
+    fn test_default_status_template_renders_direct_play_segment() {
+        let rendered = render_template(
+            DEFAULT_STATUS_PANEL_TEMPLATE,
+            &context("Song").with_status_fields(StatusTemplateFields {
+                technical_format: "FLAC",
+                technical_bit_depth: "24",
+                technical_sample_rate_hz: "192kHz",
+                technical_channels: "2",
+                technical_bitrate_kbps: "5501",
+                technical_playback_mode: "Direct play",
+                ..StatusTemplateFields::default()
+            }),
+        );
+        assert!(rendered
+            .plain_text
+            .contains("Source: FLAC (24 bit, 192kHz, 2ch, 5501kbps)"));
+        assert!(rendered.plain_text.contains(" | Direct play"));
+    }
+
+    #[test]
+    fn test_default_status_template_renders_transform_segments() {
+        let rendered = render_template(
+            DEFAULT_STATUS_PANEL_TEMPLATE,
+            &context("Song").with_status_fields(StatusTemplateFields {
+                technical_format: "FLAC",
+                technical_bit_depth: "24",
+                technical_sample_rate_hz: "96kHz",
+                technical_channels: "2",
+                technical_bitrate_kbps: "2800",
+                technical_resampled: "true",
+                technical_resample_from_hz: "96kHz",
+                technical_resample_to_hz: "48kHz",
+                technical_channel_transform: "Downmix",
+                technical_channel_from_channels: "2",
+                technical_channel_to_channels: "2",
+                ..StatusTemplateFields::default()
+            }),
+        );
+        assert!(rendered.plain_text.contains(" | Resample: 96kHz -> 48kHz"));
+        assert!(rendered.plain_text.contains(" / Downmix: 2ch -> 2ch"));
     }
 
     #[test]

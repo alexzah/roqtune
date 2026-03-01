@@ -4889,30 +4889,86 @@ impl UiManager {
             .unwrap_or(fallback_font_size_px.max(1));
         let ellipsis_width_px =
             Self::text_panel_estimated_text_width_px(TEXT_PANEL_ELLIPSIS, ellipsis_font_size_px);
+        let has_left_aligned = line
+            .runs
+            .iter()
+            .any(|run| run.horizontal_align == text_template::HorizontalAlign::Left);
+        let has_center_aligned = line
+            .runs
+            .iter()
+            .any(|run| run.horizontal_align == text_template::HorizontalAlign::Center);
+        let has_right_aligned = line
+            .runs
+            .iter()
+            .any(|run| run.horizontal_align == text_template::HorizontalAlign::Right);
         loop {
             let line_width_px = Self::text_panel_estimated_line_width_px(line);
             if line_width_px.saturating_add(ellipsis_width_px) <= max_width_px {
                 break;
             }
-            let mut remove_run = false;
-            if let Some(last_run) = line.runs.last_mut() {
-                if let Some((last_char_byte_index, _)) = last_run.text.char_indices().next_back() {
-                    last_run.text.truncate(last_char_byte_index);
-                }
-                if last_run.text.is_empty() {
-                    remove_run = true;
-                }
-            } else {
-                break;
+            let mut removed = false;
+            if has_left_aligned {
+                removed = Self::text_panel_trim_last_char_for_alignment(
+                    line,
+                    text_template::HorizontalAlign::Left,
+                );
             }
-            if remove_run {
-                line.runs.pop();
+            if !removed && has_center_aligned {
+                removed = Self::text_panel_trim_last_char_for_alignment(
+                    line,
+                    text_template::HorizontalAlign::Center,
+                );
+            }
+            if !removed && has_right_aligned {
+                removed = Self::text_panel_trim_last_char_for_alignment(
+                    line,
+                    text_template::HorizontalAlign::Right,
+                );
+            }
+            if !removed {
+                removed = Self::text_panel_trim_last_char_from_line(line);
+            }
+            if !removed {
+                break;
             }
             if line.runs.is_empty() {
                 break;
             }
         }
 
+        if has_left_aligned {
+            if let Some(target_run) = line
+                .runs
+                .iter_mut()
+                .rev()
+                .find(|run| run.horizontal_align == text_template::HorizontalAlign::Left)
+            {
+                target_run.text.push('…');
+                return;
+            }
+        }
+        if has_center_aligned {
+            if let Some(target_run) = line
+                .runs
+                .iter_mut()
+                .rev()
+                .find(|run| run.horizontal_align == text_template::HorizontalAlign::Center)
+            {
+                target_run.text.push('…');
+                return;
+            }
+        }
+        if has_right_aligned {
+            if let Some(target_run) = line
+                .runs
+                .iter_mut()
+                .rev()
+                .find(|run| run.horizontal_align == text_template::HorizontalAlign::Right)
+            {
+                target_run.text.push('…');
+                return;
+            }
+        }
         if let Some(last_run) = line.runs.last_mut() {
             last_run.text.push('…');
         } else {
@@ -4928,6 +4984,46 @@ impl UiManager {
                 link: None,
             });
         }
+    }
+
+    fn text_panel_trim_last_char_from_line(line: &mut text_template::RichTextLine) -> bool {
+        if let Some(last_run) = line.runs.last_mut() {
+            if let Some((last_char_byte_index, _)) = last_run.text.char_indices().next_back() {
+                last_run.text.truncate(last_char_byte_index);
+            }
+            if last_run.text.is_empty() {
+                line.runs.pop();
+            }
+            return true;
+        }
+        false
+    }
+
+    fn text_panel_trim_last_char_for_alignment(
+        line: &mut text_template::RichTextLine,
+        alignment: text_template::HorizontalAlign,
+    ) -> bool {
+        if let Some(run_index) = line
+            .runs
+            .iter()
+            .rposition(|run| run.horizontal_align == alignment)
+        {
+            let mut should_remove_run = false;
+            {
+                let run = &mut line.runs[run_index];
+                if let Some((last_char_byte_index, _)) = run.text.char_indices().next_back() {
+                    run.text.truncate(last_char_byte_index);
+                }
+                if run.text.is_empty() {
+                    should_remove_run = true;
+                }
+            }
+            if should_remove_run {
+                line.runs.remove(run_index);
+            }
+            return true;
+        }
+        false
     }
 
     fn text_panel_elide_overflowing_lines(
@@ -13282,6 +13378,23 @@ mod tests {
         assert!(fitted.was_elided);
         assert_eq!(fitted.rendered.lines.len(), 1);
         assert!(fitted.rendered.plain_text.contains('…'));
+    }
+
+    #[test]
+    fn test_fit_text_panel_rendered_text_preserves_right_aligned_status_segment_when_eliding() {
+        let fitted = UiManager::fit_text_panel_rendered_text(
+            "[halign=left]{title}[/halign][halign=right] | {technical_playback_mode}[/halign]",
+            &text_template::TemplateContext {
+                title: "A very long now playing title that should be truncated first",
+                ..test_template_context().with_status_fields(text_template::StatusTemplateFields {
+                    technical_playback_mode: "Direct play",
+                    ..text_template::StatusTemplateFields::default()
+                })
+            },
+            180,
+            18,
+        );
+        assert!(fitted.rendered.plain_text.contains("Direct play"));
     }
 
     #[test]
