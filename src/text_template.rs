@@ -9,7 +9,7 @@ const DEFAULT_FONT_SIZE_PX: u32 = 13;
 pub(crate) const DEFAULT_METADATA_PANEL_TEMPLATE: &str =
     "[size=title][b][color=text_primary]{title;file_name}[/color][/b][/size]\\n[size=body][color=text_secondary]{artist;album_artist}[/color][/size]\\n[size=body][color=text_muted]{album}[/color][/size]\\n[size=caption][color=text_muted]{date;year} • {genre}[/color][/size]";
 pub(crate) const DEFAULT_STATUS_PANEL_TEMPLATE: &str =
-    "[valign=center][halign=left][size=body][if=title][color=text_secondary]Now Playing: [/color][color=text_primary][if=artist;album_artist]{artist;album_artist} - [/if]{title}[/color][else][color=text_secondary]No track selected[/color][/if][if=selection_summary][color=text_muted][if=title] | [/if]{selection_summary}[/color][/if][/size][/halign][halign=right][size=caption][color=text_muted][if=technical_format]Source: [if=technical_source_provider]{technical_source_provider} | [/if]{technical_format}[if=technical_bit_depth] ({technical_bit_depth} bit[/if][if=technical_sample_rate_hz], {technical_sample_rate_hz}Hz[/if][if=technical_channels], {technical_channels}ch[/if][if=technical_bitrate_kbps], {technical_bitrate_kbps}kbps[/if][if=technical_bit_depth])[/if][else][if=technical_cast_state]Source: Unknown[/if][/if][if=technical_cast_state][if=technical_format;technical_source_provider] | [/if]Cast: {technical_cast_state}[/if][if=technical_playback_mode][if=technical_format;technical_source_provider;technical_cast_state] | [/if]Path: {technical_playback_mode}[/if][if=technical_output_format][if=technical_playback_mode] [/if]({technical_output_format}[if=technical_output_bit_depth], {technical_output_bit_depth} bit[/if][if=technical_output_sample_rate_hz], {technical_output_sample_rate_hz}Hz[/if][if=technical_output_channels], {technical_output_channels}ch[/if])[/if][if=technical_resampled][if=technical_playback_mode;technical_output_format] | [/if]Resample: {technical_resample_from_hz}->{technical_resample_to_hz}[/if][if=technical_channel_transform][if=technical_playback_mode;technical_output_format;technical_resampled] | [/if]{technical_channel_transform}: {technical_channel_from_channels}->{technical_channel_to_channels}ch[/if][if=technical_dithered][if=technical_playback_mode;technical_output_format;technical_resampled;technical_channel_transform] | [/if]Dither[/if][/color][/size][/halign][/valign]";
+    "[valign=center][halign=left][size=12][color=text_secondary][if=path]Now Playing: [if=artist]{artist} - [/if][if=title]{title}[else]Unknown[/if][if=selection_summary] | {selection_summary}[/if][else]{selection_summary}[/if][/color][/size][/halign][halign=right][size=11][color=text_muted][if=technical_format]Source: [if=technical_source_provider]{technical_source_provider} | [/if]{technical_format}[if=technical_bit_depth] ({technical_bit_depth} bit[/if][if=technical_sample_rate_hz], {technical_sample_rate_hz}[/if][if=technical_channels], {technical_channels}ch[/if][if=technical_bitrate_kbps], {technical_bitrate_kbps}kbps[/if][if=technical_bit_depth])[/if][else][if=technical_cast_state]Source: Unknown[/if][/if][if=technical_cast_state] | {technical_cast_state}[/if][if=technical_playback_mode] | [if=technical_output_format]{technical_playback_mode}: {technical_output_format}[if=technical_output_bit_depth] ({technical_output_bit_depth} bit[/if][if=technical_output_sample_rate_hz], {technical_output_sample_rate_hz}[/if][if=technical_output_channels], {technical_output_channels}ch[/if][if=technical_output_bitrate_kbps], {technical_output_bitrate_kbps}kbps[/if][if=technical_output_bit_depth])[/if][if=technical_output_format][else]{technical_playback_mode}[/if][/if][if=technical_resampled] | Resample: {technical_resample_from_hz} -> {technical_resample_to_hz}[/if][if=technical_channel_transform][if=technical_resampled] / [/if][if=technical_resampled][else] | [/if]{technical_channel_transform}: {technical_channel_from_channels}ch -> {technical_channel_to_channels}ch[/if][if=technical_dithered][if=technical_resampled;technical_channel_transform] / [/if][if=technical_resampled;technical_channel_transform][else] | [/if]Dither[/if][/color][/size][/halign][/valign]";
 pub(crate) const PLAYING_SYMBOL_PLAYING: &str = "▶️";
 pub(crate) const PLAYING_SYMBOL_PAUSED: &str = "⏸️";
 pub(crate) const FAVORITE_SYMBOL_ON: &str = "❤️";
@@ -263,6 +263,7 @@ pub(crate) struct TemplateContext<'a> {
     pub technical_output_bit_depth: &'a str,
     pub technical_output_sample_rate_hz: &'a str,
     pub technical_output_channels: &'a str,
+    pub technical_output_bitrate_kbps: &'a str,
     pub technical_resampled: &'a str,
     pub technical_resample_from_hz: &'a str,
     pub technical_resample_to_hz: &'a str,
@@ -288,6 +289,7 @@ pub(crate) struct StatusTemplateFields<'a> {
     pub technical_output_bit_depth: &'a str,
     pub technical_output_sample_rate_hz: &'a str,
     pub technical_output_channels: &'a str,
+    pub technical_output_bitrate_kbps: &'a str,
     pub technical_resampled: &'a str,
     pub technical_resample_from_hz: &'a str,
     pub technical_resample_to_hz: &'a str,
@@ -341,6 +343,7 @@ impl<'a> TemplateContext<'a> {
             technical_output_bit_depth: "",
             technical_output_sample_rate_hz: "",
             technical_output_channels: "",
+            technical_output_bitrate_kbps: "",
             technical_resampled: "",
             technical_resample_from_hz: "",
             technical_resample_to_hz: "",
@@ -376,6 +379,7 @@ impl<'a> TemplateContext<'a> {
         self.technical_output_bit_depth = fields.technical_output_bit_depth;
         self.technical_output_sample_rate_hz = fields.technical_output_sample_rate_hz;
         self.technical_output_channels = fields.technical_output_channels;
+        self.technical_output_bitrate_kbps = fields.technical_output_bitrate_kbps;
         self.technical_resampled = fields.technical_resampled;
         self.technical_resample_from_hz = fields.technical_resample_from_hz;
         self.technical_resample_to_hz = fields.technical_resample_to_hz;
@@ -446,6 +450,9 @@ impl<'a> TemplateContext<'a> {
             }
             "technical_output_channels" | "technicaloutputchannels" => {
                 Some(self.technical_output_channels.to_string())
+            }
+            "technical_output_bitrate_kbps" | "technicaloutputbitratekbps" => {
+                Some(self.technical_output_bitrate_kbps.to_string())
             }
             "technical_resampled" | "technicalresampled" => {
                 Some(self.technical_resampled.to_string())
@@ -1201,6 +1208,7 @@ mod tests {
             technical_output_bit_depth: "",
             technical_output_sample_rate_hz: "",
             technical_output_channels: "",
+            technical_output_bitrate_kbps: "",
             technical_resampled: "",
             technical_resample_from_hz: "",
             technical_resample_to_hz: "",
