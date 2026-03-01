@@ -264,6 +264,57 @@ struct TechnicalInfoTemplateFields {
     technical_source: String,
     technical_cast_status: String,
     technical_playback_path: String,
+    technical_source_provider: String,
+    technical_format: String,
+    technical_bit_depth: String,
+    technical_sample_rate_hz: String,
+    technical_channels: String,
+    technical_bitrate_kbps: String,
+    technical_duration_ms: String,
+    technical_cast_state: String,
+    technical_playback_mode: String,
+    technical_output_format: String,
+    technical_output_bit_depth: String,
+    technical_output_sample_rate_hz: String,
+    technical_output_channels: String,
+    technical_resampled: String,
+    technical_resample_from_hz: String,
+    technical_resample_to_hz: String,
+    technical_channel_transform: String,
+    technical_channel_from_channels: String,
+    technical_channel_to_channels: String,
+    technical_dithered: String,
+}
+
+impl TechnicalInfoTemplateFields {
+    fn status_template_fields<'a>(
+        &'a self,
+        selection_summary: &'a str,
+    ) -> text_template::StatusTemplateFields<'a> {
+        text_template::StatusTemplateFields {
+            selection_summary,
+            technical_source_provider: &self.technical_source_provider,
+            technical_format: &self.technical_format,
+            technical_bit_depth: &self.technical_bit_depth,
+            technical_sample_rate_hz: &self.technical_sample_rate_hz,
+            technical_channels: &self.technical_channels,
+            technical_bitrate_kbps: &self.technical_bitrate_kbps,
+            technical_duration_ms: &self.technical_duration_ms,
+            technical_cast_state: &self.technical_cast_state,
+            technical_playback_mode: &self.technical_playback_mode,
+            technical_output_format: &self.technical_output_format,
+            technical_output_bit_depth: &self.technical_output_bit_depth,
+            technical_output_sample_rate_hz: &self.technical_output_sample_rate_hz,
+            technical_output_channels: &self.technical_output_channels,
+            technical_resampled: &self.technical_resampled,
+            technical_resample_from_hz: &self.technical_resample_from_hz,
+            technical_resample_to_hz: &self.technical_resample_to_hz,
+            technical_channel_transform: &self.technical_channel_transform,
+            technical_channel_from_channels: &self.technical_channel_from_channels,
+            technical_channel_to_channels: &self.technical_channel_to_channels,
+            technical_dithered: &self.technical_dithered,
+        }
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -2045,6 +2096,22 @@ impl UiManager {
             .and_then(|path| is_remote_track_path(path.as_path()).then_some("OpenSubsonic"))
     }
 
+    fn current_track_source_provider(&self) -> Option<&'static str> {
+        self.playing_track
+            .path
+            .as_ref()
+            .and_then(|path| is_remote_track_path(path.as_path()).then_some("opensubsonic"))
+    }
+
+    fn output_sample_format_key(sample_format: protocol::OutputSampleFormat) -> &'static str {
+        match sample_format {
+            protocol::OutputSampleFormat::F32 => "f32",
+            protocol::OutputSampleFormat::I16 => "i16",
+            protocol::OutputSampleFormat::U16 => "u16",
+            protocol::OutputSampleFormat::Unknown => "",
+        }
+    }
+
     fn render_local_transform_text(&self) -> String {
         let Some(path_info) = self.current_output_path_info.as_ref() else {
             return "Direct play".to_string();
@@ -2085,7 +2152,90 @@ impl UiManager {
             return TechnicalInfoTemplateFields::default();
         }
 
-        let technical_source = if let Some(meta) = self.current_technical_metadata.as_ref() {
+        let mut fields = TechnicalInfoTemplateFields::default();
+        if let Some(source_provider) = self.current_track_source_provider() {
+            fields.technical_source_provider = source_provider.to_string();
+        } else if self.current_technical_metadata.is_some() {
+            fields.technical_source_provider = "local".to_string();
+        } else if self.cast_connected || self.cast_connecting {
+            fields.technical_source_provider = "unknown".to_string();
+        }
+
+        if let Some(meta) = self.current_technical_metadata.as_ref() {
+            fields.technical_format = meta.format.clone();
+            fields.technical_bit_depth = meta.bits_per_sample.to_string();
+            fields.technical_sample_rate_hz = meta.sample_rate_hz.to_string();
+            fields.technical_channels = meta.channel_count.to_string();
+            fields.technical_bitrate_kbps = meta.bitrate_kbps.to_string();
+            fields.technical_duration_ms = meta.duration_ms.to_string();
+        }
+
+        if self.cast_connected {
+            fields.technical_cast_state = "connected".to_string();
+            match self.cast_playback_path_kind {
+                Some(protocol::CastPlaybackPathKind::Direct) => {
+                    fields.technical_playback_mode = "direct".to_string();
+                }
+                Some(protocol::CastPlaybackPathKind::TranscodeWavPcm) => {
+                    fields.technical_playback_mode = "transcode".to_string();
+                    if let Some(meta) = self.cast_transcode_output_metadata.as_ref() {
+                        fields.technical_output_format = meta.format.clone();
+                        fields.technical_output_bit_depth = meta.bits_per_sample.to_string();
+                        fields.technical_output_sample_rate_hz = meta.sample_rate_hz.to_string();
+                        fields.technical_output_channels = meta.channel_count.to_string();
+                    } else {
+                        fields.technical_output_format = "wav".to_string();
+                    }
+                }
+                None => {}
+            }
+        } else if self.cast_connecting {
+            fields.technical_cast_state = "connecting".to_string();
+            fields.technical_playback_mode = "connecting".to_string();
+        } else if self.current_technical_metadata.is_some() {
+            if let Some(path_info) = self.current_output_path_info.as_ref() {
+                let local_processed = path_info.resampled
+                    || path_info.channel_transform.is_some()
+                    || path_info.dithered;
+                fields.technical_playback_mode = if local_processed {
+                    "processed".to_string()
+                } else {
+                    "direct".to_string()
+                };
+                fields.technical_output_format =
+                    Self::output_sample_format_key(path_info.output_stream.sample_format)
+                        .to_string();
+                fields.technical_output_bit_depth =
+                    path_info.output_stream.bits_per_sample.to_string();
+                fields.technical_output_sample_rate_hz =
+                    path_info.output_stream.sample_rate_hz.to_string();
+                fields.technical_output_channels =
+                    path_info.output_stream.channel_count.to_string();
+                if path_info.resampled {
+                    fields.technical_resampled = "true".to_string();
+                    fields.technical_resample_from_hz = path_info.source_sample_rate_hz.to_string();
+                    fields.technical_resample_to_hz =
+                        path_info.output_stream.sample_rate_hz.to_string();
+                }
+                if let Some(channel_transform) = path_info.channel_transform {
+                    fields.technical_channel_transform = match channel_transform {
+                        protocol::ChannelTransformKind::Downmix => "downmix".to_string(),
+                        protocol::ChannelTransformKind::ChannelMap => "channel_map".to_string(),
+                    };
+                    fields.technical_channel_from_channels =
+                        path_info.source_channel_count.to_string();
+                    fields.technical_channel_to_channels =
+                        path_info.output_stream.channel_count.to_string();
+                }
+                if path_info.dithered {
+                    fields.technical_dithered = "true".to_string();
+                }
+            } else {
+                fields.technical_playback_mode = "direct".to_string();
+            }
+        }
+
+        fields.technical_source = if let Some(meta) = self.current_technical_metadata.as_ref() {
             let source_label = self.current_track_source_label();
             let source_format_text = Self::format_technical_metadata_text(meta);
             if let Some(source_label) = source_label {
@@ -2098,31 +2248,25 @@ impl UiManager {
         } else {
             String::new()
         };
-
-        let technical_cast_status = if self.cast_connected {
+        fields.technical_cast_status = if self.cast_connected {
             "Casting".to_string()
         } else if self.cast_connecting {
             "Casting: Connecting...".to_string()
         } else {
             String::new()
         };
-
-        let technical_playback_path = if self.cast_connected {
+        fields.technical_playback_path = if self.cast_connected {
             match self.cast_playback_path_kind {
-                Some(protocol::CastPlaybackPathKind::Direct) => Some("Direct play".to_string()),
+                Some(protocol::CastPlaybackPathKind::Direct) => "Direct play".to_string(),
                 Some(protocol::CastPlaybackPathKind::TranscodeWavPcm) => {
                     if let Some(meta) = self.cast_transcode_output_metadata.as_ref() {
-                        Some(format!(
-                            "Transcode: {}",
-                            Self::format_technical_metadata_text(meta)
-                        ))
+                        format!("Transcode: {}", Self::format_technical_metadata_text(meta))
                     } else {
-                        Some("Transcode: WAV".to_string())
+                        "Transcode: WAV".to_string()
                     }
                 }
-                None => None,
+                None => String::new(),
             }
-            .unwrap_or_default()
         } else if self.cast_connecting {
             String::new()
         } else if self.current_technical_metadata.is_some() {
@@ -2130,23 +2274,16 @@ impl UiManager {
         } else {
             String::new()
         };
-
-        let technical_info = [
-            technical_source.as_str(),
-            technical_cast_status.as_str(),
-            technical_playback_path.as_str(),
+        fields.technical_info = [
+            fields.technical_source.as_str(),
+            fields.technical_cast_status.as_str(),
+            fields.technical_playback_path.as_str(),
         ]
         .into_iter()
         .filter(|section| !section.trim().is_empty())
         .collect::<Vec<_>>()
         .join(" | ");
-
-        TechnicalInfoTemplateFields {
-            technical_info,
-            technical_source,
-            technical_cast_status,
-            technical_playback_path,
-        }
+        fields
     }
 
     fn render_technical_info_text(&self) -> String {
@@ -5189,10 +5326,7 @@ impl UiManager {
         display_is_playing_by_priority: Vec<bool>,
         display_is_favorited_by_priority: Vec<bool>,
         selection_summary_text: String,
-        technical_info_text: String,
-        technical_source_text: String,
-        technical_cast_status_text: String,
-        technical_playback_path_text: String,
+        technical_fields: TechnicalInfoTemplateFields,
     ) {
         let _ = self.ui.upgrade_in_event_loop(move |ui| {
             let metadata_model = ui.get_layout_metadata_viewer_panels();
@@ -5313,11 +5447,7 @@ impl UiManager {
                         )
                         .with_indicator_symbols(Some(playing_indicator), Some(favorite_indicator))
                         .with_status_fields(
-                            &selection_summary_text,
-                            &technical_info_text,
-                            &technical_source_text,
-                            &technical_cast_status_text,
-                            &technical_playback_path_text,
+                            technical_fields.status_template_fields(&selection_summary_text),
                         );
                         let content_inset_px = Self::text_panel_content_inset_px(
                             row_data.width_px,
@@ -5549,10 +5679,7 @@ impl UiManager {
             display_is_playing_by_priority,
             display_is_favorited_by_priority,
             selection_summary_text,
-            technical_fields.technical_info,
-            technical_fields.technical_source,
-            technical_fields.technical_cast_status,
-            technical_fields.technical_playback_path,
+            technical_fields,
         );
     }
 
@@ -12981,10 +13108,26 @@ mod tests {
             playing: None,
             favorite: None,
             selection_summary: "",
-            technical_info: "",
-            technical_source: "",
-            technical_cast_status: "",
-            technical_playback_path: "",
+            technical_source_provider: "",
+            technical_format: "",
+            technical_bit_depth: "",
+            technical_sample_rate_hz: "",
+            technical_channels: "",
+            technical_bitrate_kbps: "",
+            technical_duration_ms: "",
+            technical_cast_state: "",
+            technical_playback_mode: "",
+            technical_output_format: "",
+            technical_output_bit_depth: "",
+            technical_output_sample_rate_hz: "",
+            technical_output_channels: "",
+            technical_resampled: "",
+            technical_resample_from_hz: "",
+            technical_resample_to_hz: "",
+            technical_channel_transform: "",
+            technical_channel_from_channels: "",
+            technical_channel_to_channels: "",
+            technical_dithered: "",
         }
     }
 
