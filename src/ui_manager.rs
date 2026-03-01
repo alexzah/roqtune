@@ -464,6 +464,7 @@ const VIEWER_METADATA_SOURCE_TRACK: i32 = 0;
 const VIEWER_METADATA_SOURCE_ALBUM_DESCRIPTION: i32 = 1;
 const VIEWER_METADATA_SOURCE_ARTIST_BIO: i32 = 2;
 const VIEWER_METADATA_SOURCE_CUSTOM_TEXT: i32 = 3;
+const VIEWER_METADATA_SOURCE_STATUS_BAR: i32 = 4;
 const VIEWER_IMAGE_SOURCE_ALBUM_ART: i32 = 0;
 const VIEWER_IMAGE_SOURCE_ARTIST_IMAGE: i32 = 1;
 const TEXT_PANEL_COMPACT_WIDTH_THRESHOLD_PX: i32 = 220;
@@ -2582,6 +2583,7 @@ impl UiManager {
         text_template::RenderedText {
             plain_text: String::new(),
             lines: vec![text_template::RichTextLine { runs: Vec::new() }],
+            vertical_align: text_template::VerticalAlign::Center,
         }
     }
 
@@ -2596,6 +2598,7 @@ impl UiManager {
         text_template::RenderedText {
             plain_text,
             lines: vec![text_template::RichTextLine { runs }],
+            vertical_align: text_template::VerticalAlign::Center,
         }
     }
 
@@ -2656,6 +2659,7 @@ impl UiManager {
             bold: false,
             italic: false,
             underline: false,
+            horizontal_align: text_template::HorizontalAlign::Left,
             font_size_px: font_size_px.max(1),
             font_family: String::new(),
             color: None,
@@ -2794,12 +2798,14 @@ impl UiManager {
                                 bold: false,
                                 italic: false,
                                 underline: false,
+                                horizontal_align: text_template::HorizontalAlign::Left,
                                 font_size_px: 13,
                                 font_family: String::new(),
                                 color: None,
                                 link: None,
                             }],
                         }],
+                        vertical_align: text_template::VerticalAlign::Center,
                     };
                 }
                 break;
@@ -2808,6 +2814,11 @@ impl UiManager {
     }
 
     fn to_ui_rich_text_run(run: &text_template::RichTextRun) -> UiRichTextRun {
+        let horizontal_align = match run.horizontal_align {
+            text_template::HorizontalAlign::Left => 0,
+            text_template::HorizontalAlign::Center => 1,
+            text_template::HorizontalAlign::Right => 2,
+        };
         let (color_mode, palette_color, color_rgba) = match run.color.as_ref() {
             Some(text_template::RunColor::Palette(color)) => {
                 (1, color.code(), slint::Color::from_argb_u8(255, 0, 0, 0))
@@ -2847,6 +2858,7 @@ impl UiManager {
             bold: run.bold,
             italic: run.italic,
             underline: run.underline,
+            horizontal_align,
             font_size_px: run.font_size_px.min(i32::MAX as u32) as i32,
             font_family: run.font_family.as_str().into(),
             color_mode,
@@ -2861,6 +2873,11 @@ impl UiManager {
     }
 
     fn to_ui_rich_text_block(rendered: &text_template::RenderedText) -> UiRichTextBlock {
+        let vertical_align = match rendered.vertical_align {
+            text_template::VerticalAlign::Top => 0,
+            text_template::VerticalAlign::Center => 1,
+            text_template::VerticalAlign::Bottom => 2,
+        };
         let mut lines: Vec<UiRichTextLine> = rendered
             .lines
             .iter()
@@ -2880,6 +2897,7 @@ impl UiManager {
         UiRichTextBlock {
             plain_text: rendered.plain_text.as_str().into(),
             lines: ModelRc::from(Rc::new(VecModel::from(lines))),
+            vertical_align,
         }
     }
 
@@ -4272,6 +4290,7 @@ impl UiManager {
             VIEWER_METADATA_SOURCE_ALBUM_DESCRIPTION => 1,
             VIEWER_METADATA_SOURCE_ARTIST_BIO => 2,
             VIEWER_METADATA_SOURCE_CUSTOM_TEXT => 3,
+            VIEWER_METADATA_SOURCE_STATUS_BAR => 4,
             VIEWER_METADATA_SOURCE_TRACK => 0,
             _ => 0,
         }
@@ -4399,6 +4418,7 @@ impl UiManager {
         existing.bold == next.bold
             && existing.italic == next.italic
             && existing.underline == next.underline
+            && existing.horizontal_align == next.horizontal_align
             && existing.font_size_px == next.font_size_px
             && existing.font_family == next.font_family
             && existing.color == next.color
@@ -4650,6 +4670,7 @@ impl UiManager {
         text_template::RenderedText {
             plain_text: Self::rendered_plain_text_for_lines(&wrapped_lines),
             lines: wrapped_lines,
+            vertical_align: rendered.vertical_align,
         }
     }
 
@@ -4757,6 +4778,7 @@ impl UiManager {
                 bold: false,
                 italic: false,
                 underline: false,
+                horizontal_align: text_template::HorizontalAlign::Left,
                 font_size_px: fallback_font_size_px.max(1),
                 font_family: String::new(),
                 color: None,
@@ -5140,6 +5162,8 @@ impl UiManager {
         playback_active: bool,
         display_is_playing_by_priority: Vec<bool>,
         display_is_favorited_by_priority: Vec<bool>,
+        selection_summary_text: String,
+        technical_info_text: String,
     ) {
         let _ = self.ui.upgrade_in_event_loop(move |ui| {
             let metadata_model = ui.get_layout_metadata_viewer_panels();
@@ -5158,6 +5182,8 @@ impl UiManager {
                     let metadata_source_index =
                         UiManager::viewer_panel_metadata_source_index(row_data.metadata_source);
                     row_data.metadata_source = metadata_source_index as i32;
+                    let is_status_source =
+                        metadata_source_index == VIEWER_METADATA_SOURCE_STATUS_BAR as usize;
                     let metadata = match metadata_source_index {
                         1 => album_description_by_priority
                             .get(priority_index)
@@ -5185,18 +5211,21 @@ impl UiManager {
                             track_number: String::new(),
                         });
 
-                    let fitted_text = if let Some(metadata) = metadata {
-                        template_metadata.title = metadata.title.clone();
-                        template_metadata.artist = metadata.artist.clone();
-                        template_metadata.album = metadata.album.clone();
-                        template_metadata.album_artist = metadata.album_artist.clone();
-                        template_metadata.date = metadata.date.clone();
-                        template_metadata.year = if metadata.date.len() >= 4 {
-                            metadata.date[0..4].to_string()
-                        } else {
-                            String::new()
-                        };
-                        template_metadata.genre = metadata.genre.clone();
+                    let should_render_template = metadata.is_some() || is_status_source;
+                    let fitted_text = if should_render_template {
+                        if let Some(metadata) = metadata {
+                            template_metadata.title = metadata.title.clone();
+                            template_metadata.artist = metadata.artist.clone();
+                            template_metadata.album = metadata.album.clone();
+                            template_metadata.album_artist = metadata.album_artist.clone();
+                            template_metadata.date = metadata.date.clone();
+                            template_metadata.year = if metadata.date.len() >= 4 {
+                                metadata.date[0..4].to_string()
+                            } else {
+                                String::new()
+                            };
+                            template_metadata.genre = metadata.genre.clone();
+                        }
                         if template_metadata.album_artist.is_empty() {
                             template_metadata.album_artist = template_metadata.artist.clone();
                         }
@@ -5206,6 +5235,13 @@ impl UiManager {
                             let custom = row_data.metadata_text_format.to_string();
                             if custom.trim().is_empty() {
                                 text_template::DEFAULT_METADATA_PANEL_TEMPLATE.to_string()
+                            } else {
+                                custom
+                            }
+                        } else if is_status_source {
+                            let custom = row_data.metadata_text_format.to_string();
+                            if custom.trim().is_empty() {
+                                text_template::DEFAULT_STATUS_PANEL_TEMPLATE.to_string()
                             } else {
                                 custom
                             }
@@ -5246,7 +5282,8 @@ impl UiManager {
                             &template_metadata.track_number,
                             display_path,
                         )
-                        .with_indicator_symbols(Some(playing_indicator), Some(favorite_indicator));
+                        .with_indicator_symbols(Some(playing_indicator), Some(favorite_indicator))
+                        .with_status_fields(&selection_summary_text, &technical_info_text);
                         let content_inset_px = Self::text_panel_content_inset_px(
                             row_data.width_px,
                             row_data.height_px,
@@ -5381,6 +5418,13 @@ impl UiManager {
             Vec::with_capacity(display_paths_by_priority.len());
         let mut display_is_favorited_by_priority =
             Vec::with_capacity(display_paths_by_priority.len());
+        let selected_track_count = if self.collection_mode == COLLECTION_MODE_LIBRARY {
+            self.library_selected_indices.len()
+        } else {
+            self.selected_indices.len()
+        };
+        let selection_summary_text = Self::status_selection_summary_text(selected_track_count);
+        let technical_info_text = self.render_technical_info_text();
         for display_path in &display_paths_by_priority {
             let is_playing_track = match (display_path.as_ref(), playing_track_path) {
                 (Some(display_path), Some(playing_path)) => display_path == playing_path,
@@ -5469,6 +5513,8 @@ impl UiManager {
             self.playback_active,
             display_is_playing_by_priority,
             display_is_favorited_by_priority,
+            selection_summary_text,
+            technical_info_text,
         );
     }
 
@@ -11246,6 +11292,7 @@ impl UiManager {
         self.sync_library_ui();
         self.sync_cast_state_to_ui();
         self.refresh_technical_info_ui();
+        self.update_display_for_active_collection();
         self.sync_library_add_to_playlist_ui();
         self.sync_library_root_counts_to_ui();
         self.sync_now_playing_favorite_state_to_ui();
@@ -12202,12 +12249,14 @@ impl UiManager {
                             debug!("UiManager: Technical metadata changed: {:?}", meta);
                             self.current_technical_metadata = Some(meta);
                             self.refresh_technical_info_ui();
+                            self.update_display_for_active_collection();
                         }
                         protocol::Message::Playback(
                             protocol::PlaybackMessage::OutputPathChanged(path_info),
                         ) => {
                             self.current_output_path_info = Some(path_info);
                             self.refresh_technical_info_ui();
+                            self.update_display_for_active_collection();
                         }
                         protocol::Message::Cast(protocol::CastMessage::DevicesUpdated(devices)) => {
                             self.cast_device_ids =
@@ -12251,6 +12300,7 @@ impl UiManager {
                             }
                             self.sync_cast_state_to_ui();
                             self.refresh_technical_info_ui();
+                            self.update_display_for_active_collection();
                         }
                         protocol::Message::Cast(protocol::CastMessage::PlaybackPathChanged {
                             kind,
@@ -12260,6 +12310,7 @@ impl UiManager {
                             self.cast_playback_path_kind = Some(kind);
                             self.cast_transcode_output_metadata = transcode_output_metadata;
                             self.refresh_technical_info_ui();
+                            self.update_display_for_active_collection();
                         }
                         protocol::Message::Cast(protocol::CastMessage::PlaybackError {
                             track_id,
@@ -12862,6 +12913,7 @@ mod tests {
                     bold: false,
                     italic: false,
                     underline: false,
+                    horizontal_align: text_template::HorizontalAlign::Left,
                     font_size_px: *size,
                     font_family: String::new(),
                     color: None,
@@ -12869,7 +12921,11 @@ mod tests {
                 }],
             })
             .collect();
-        text_template::RenderedText { plain_text, lines }
+        text_template::RenderedText {
+            plain_text,
+            lines,
+            vertical_align: text_template::VerticalAlign::Center,
+        }
     }
 
     fn test_template_context<'a>() -> text_template::TemplateContext<'a> {
@@ -12886,6 +12942,8 @@ mod tests {
             path: Some("/music/example.mp3"),
             playing: None,
             favorite: None,
+            selection_summary: "",
+            technical_info: "",
         }
     }
 
@@ -12960,12 +13018,14 @@ mod tests {
                     bold: false,
                     italic: false,
                     underline: false,
+                    horizontal_align: text_template::HorizontalAlign::Left,
                     font_size_px: 13,
                     font_family: String::new(),
                     color: None,
                     link: None,
                 }],
             }],
+            vertical_align: text_template::VerticalAlign::Center,
         };
         let wrapped = UiManager::text_panel_wrap_rendered_text_for_width(&rendered, 80);
         assert!(wrapped.lines.len() > 1);
@@ -12980,6 +13040,36 @@ mod tests {
             .filter(|ch| !ch.is_whitespace())
             .collect();
         assert_eq!(wrapped_compact, source_compact);
+    }
+
+    #[test]
+    fn test_text_panel_wrap_rendered_text_for_width_preserves_alignment_metadata() {
+        let rendered = text_template::RenderedText {
+            plain_text: "alignment metadata should survive wrapping".to_string(),
+            lines: vec![text_template::RichTextLine {
+                runs: vec![text_template::RichTextRun {
+                    text: "alignment metadata should survive wrapping".to_string(),
+                    bold: false,
+                    italic: false,
+                    underline: false,
+                    horizontal_align: text_template::HorizontalAlign::Right,
+                    font_size_px: 13,
+                    font_family: String::new(),
+                    color: None,
+                    link: None,
+                }],
+            }],
+            vertical_align: text_template::VerticalAlign::Bottom,
+        };
+
+        let wrapped = UiManager::text_panel_wrap_rendered_text_for_width(&rendered, 90);
+        assert!(wrapped.lines.len() > 1);
+        assert_eq!(wrapped.vertical_align, text_template::VerticalAlign::Bottom);
+        assert!(wrapped
+            .lines
+            .iter()
+            .flat_map(|line| line.runs.iter())
+            .all(|run| run.horizontal_align == text_template::HorizontalAlign::Right));
     }
 
     #[test]
@@ -13037,6 +13127,7 @@ mod tests {
                 bold: false,
                 italic: false,
                 underline: false,
+                horizontal_align: text_template::HorizontalAlign::Left,
                 font_size_px: 13,
                 font_family: String::new(),
                 color: None,
@@ -13849,6 +13940,7 @@ mod tests {
                     bold: false,
                     italic: false,
                     underline: false,
+                    horizontal_align: text_template::HorizontalAlign::Left,
                     font_size_px: 12,
                     font_family: String::new(),
                     color: None,
@@ -13861,6 +13953,7 @@ mod tests {
                     }),
                 }],
             }],
+            vertical_align: text_template::VerticalAlign::Center,
         };
 
         UiManager::enrich_metadata_links_for_rendered_text(

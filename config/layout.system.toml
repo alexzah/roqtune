@@ -144,6 +144,7 @@ custom = false
 # - "album_description"
 # - "artist_bio"
 # - "custom_text"
+# - "status_bar"
 # [[text_panel_instances]]
 # leaf_id = "l1"
 # display_priority = "default"
@@ -285,6 +286,12 @@ display_priority = "default"
 text_source = "track"
 text_format = '[size=title][b][color=text_primary]{title;file_name}[/color][/b][/size]\n[size=body][color=text_secondary]{artist;album_artist}[/color][/size]\n[size=body][color=text_muted]{album}[/color][/size]\n[size=caption][color=text_muted]{date;year} • {genre}[/color][/size]'
 
+[[text_panel_instances]]
+leaf_id = "n19"
+display_priority = "now_playing_only"
+text_source = "status_bar"
+text_format = '[valign=center][halign=left][color=text_secondary][if=title]Now Playing: [if=artist;album_artist]{artist;album_artist} - [/if]{title}[if=album] • {album}[/if][if=selection_summary] | {selection_summary}[/if][else][if=selection_summary]{selection_summary}[else]No track selected[/if][/if][/color][/halign][halign=right][size=caption][color=text_muted]{technical_info}[/color][/size][/halign][/valign]'
+
 [root.first.first.second]
 node_type = "split"
 id = "n14"
@@ -381,4 +388,4 @@ panel = "track_list"
 [root.second.second]
 node_type = "leaf"
 id = "n19"
-panel = "status_bar"
+panel = "text_panel"

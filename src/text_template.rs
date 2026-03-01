@@ -8,10 +8,50 @@ const DEFAULT_FONT_SIZE_PX: u32 = 13;
 
 pub(crate) const DEFAULT_METADATA_PANEL_TEMPLATE: &str =
     "[size=title][b][color=text_primary]{title;file_name}[/color][/b][/size]\\n[size=body][color=text_secondary]{artist;album_artist}[/color][/size]\\n[size=body][color=text_muted]{album}[/color][/size]\\n[size=caption][color=text_muted]{date;year} • {genre}[/color][/size]";
+pub(crate) const DEFAULT_STATUS_PANEL_TEMPLATE: &str =
+    "[valign=center][halign=left][color=text_secondary][if=title]Now Playing: [if=artist;album_artist]{artist;album_artist} - [/if]{title}[if=album] • {album}[/if][if=selection_summary] | {selection_summary}[/if][else][if=selection_summary]{selection_summary}[else]No track selected[/if][/if][/color][/halign][halign=right][size=caption][color=text_muted]{technical_info}[/color][/size][/halign][/valign]";
 pub(crate) const PLAYING_SYMBOL_PLAYING: &str = "▶️";
 pub(crate) const PLAYING_SYMBOL_PAUSED: &str = "⏸️";
 pub(crate) const FAVORITE_SYMBOL_ON: &str = "❤️";
 pub(crate) const FAVORITE_SYMBOL_OFF: &str = "♥";
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub(crate) enum HorizontalAlign {
+    #[default]
+    Left,
+    Center,
+    Right,
+}
+
+impl HorizontalAlign {
+    fn from_name(name: &str) -> Option<Self> {
+        match normalize_name(name).as_str() {
+            "left" | "start" => Some(Self::Left),
+            "center" | "middle" => Some(Self::Center),
+            "right" | "end" => Some(Self::Right),
+            _ => None,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub(crate) enum VerticalAlign {
+    Top,
+    #[default]
+    Center,
+    Bottom,
+}
+
+impl VerticalAlign {
+    fn from_name(name: &str) -> Option<Self> {
+        match normalize_name(name).as_str() {
+            "top" => Some(Self::Top),
+            "center" | "middle" => Some(Self::Center),
+            "bottom" => Some(Self::Bottom),
+            _ => None,
+        }
+    }
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum PaletteColor {
@@ -91,6 +131,7 @@ pub(crate) struct RichTextRun {
     pub bold: bool,
     pub italic: bool,
     pub underline: bool,
+    pub horizontal_align: HorizontalAlign,
     pub font_size_px: u32,
     pub font_family: String,
     pub color: Option<RunColor>,
@@ -106,6 +147,7 @@ pub(crate) struct RichTextLine {
 pub(crate) struct RenderedText {
     pub plain_text: String,
     pub lines: Vec<RichTextLine>,
+    pub vertical_align: VerticalAlign,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -207,6 +249,8 @@ pub(crate) struct TemplateContext<'a> {
     pub path: Option<&'a str>,
     pub playing: Option<&'a str>,
     pub favorite: Option<&'a str>,
+    pub selection_summary: &'a str,
+    pub technical_info: &'a str,
 }
 
 impl<'a> TemplateContext<'a> {
@@ -239,6 +283,8 @@ impl<'a> TemplateContext<'a> {
             path: path_text,
             playing: None,
             favorite: None,
+            selection_summary: "",
+            technical_info: "",
         }
     }
 
@@ -249,6 +295,16 @@ impl<'a> TemplateContext<'a> {
     ) -> Self {
         self.playing = playing;
         self.favorite = favorite;
+        self
+    }
+
+    pub(crate) fn with_status_fields(
+        mut self,
+        selection_summary: &'a str,
+        technical_info: &'a str,
+    ) -> Self {
+        self.selection_summary = selection_summary;
+        self.technical_info = technical_info;
         self
     }
 
@@ -277,6 +333,8 @@ impl<'a> TemplateContext<'a> {
                 Some(self.file_name.unwrap_or_default().to_string())
             }
             "path" => Some(self.path.unwrap_or_default().to_string()),
+            "selection_summary" | "selectionsummary" => Some(self.selection_summary.to_string()),
+            "technical_info" | "technicalinfo" => Some(self.technical_info.to_string()),
             "album_art" | "disc" | "disc_number" | "duration" => Some(String::new()),
             _ => None,
         }
@@ -326,6 +384,9 @@ enum TemplateSegment {
     Text(String),
     Placeholder { raw: String, fallbacks: Vec<String> },
     NewLine,
+    IfOpen { fallbacks: Vec<String> },
+    IfElse { literal: String },
+    IfClose { literal: String },
     OpenStyle(StyleTag),
     CloseStyle { kind: StyleKind, literal: String },
 }
@@ -335,6 +396,8 @@ enum StyleKind {
     Bold,
     Italic,
     Underline,
+    HorizontalAlign,
+    VerticalAlign,
     Size,
     Font,
     Color,
@@ -345,6 +408,8 @@ enum StyleTag {
     Bold,
     Italic,
     Underline,
+    HorizontalAlign(HorizontalAlign),
+    VerticalAlign(VerticalAlign),
     Size(FontSizeSpec),
     Font(String),
     Color(RunColor),
@@ -355,9 +420,32 @@ struct StyleState {
     bold: bool,
     italic: bool,
     underline: bool,
+    horizontal_align: HorizontalAlign,
     font_size_px: u32,
     font_family: String,
     color: Option<RunColor>,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+struct ConditionFrame {
+    parent_active: bool,
+    condition_true: bool,
+    else_seen: bool,
+}
+
+impl ConditionFrame {
+    fn active(self) -> bool {
+        let branch_true = if self.else_seen {
+            !self.condition_true
+        } else {
+            self.condition_true
+        };
+        self.parent_active && branch_true
+    }
+}
+
+fn conditions_active(stack: &[ConditionFrame]) -> bool {
+    stack.iter().copied().all(ConditionFrame::active)
 }
 
 pub(crate) fn parse_template(source: &str) -> ParsedTemplate {
@@ -397,23 +485,13 @@ pub(crate) fn parse_template(source: &str) -> ParsedTemplate {
                         segments.push(TemplateSegment::Text(format!("{{{content}}}")));
                         continue;
                     }
-                    let mut fallbacks = Vec::new();
-                    let mut invalid = false;
-                    for part in content.split(';') {
-                        let key = part.trim();
-                        if key.is_empty() {
-                            invalid = true;
-                            break;
-                        }
-                        fallbacks.push(key.to_string());
-                    }
-                    if invalid || fallbacks.is_empty() {
-                        segments.push(TemplateSegment::Text(format!("{{{content}}}")));
-                    } else {
+                    if let Some(fallbacks) = parse_fallback_chain(&content) {
                         segments.push(TemplateSegment::Placeholder {
                             raw: content,
                             fallbacks,
                         });
+                    } else {
+                        segments.push(TemplateSegment::Text(format!("{{{content}}}")));
                     }
                 } else {
                     text_buffer.push('{');
@@ -425,6 +503,15 @@ pub(crate) fn parse_template(source: &str) -> ParsedTemplate {
                     match parse_tag_segment(&content) {
                         Some(ParsedTag::NewLine) => {
                             segments.push(TemplateSegment::NewLine);
+                        }
+                        Some(ParsedTag::OpenIf { fallbacks }) => {
+                            segments.push(TemplateSegment::IfOpen { fallbacks });
+                        }
+                        Some(ParsedTag::Else { literal }) => {
+                            segments.push(TemplateSegment::IfElse { literal });
+                        }
+                        Some(ParsedTag::CloseIf { literal }) => {
+                            segments.push(TemplateSegment::IfClose { literal });
                         }
                         Some(ParsedTag::Open(style)) => {
                             if let StyleTag::Size(size_spec) = style {
@@ -473,10 +560,60 @@ pub(crate) fn render(
     let mut lines = vec![RichTextLine { runs: Vec::new() }];
     let mut plain_text = String::new();
     let mut style_stack: Vec<StyleTag> = Vec::new();
+    let mut condition_stack: Vec<ConditionFrame> = Vec::new();
+    let mut vertical_align = VerticalAlign::Center;
 
     for segment in &parsed.segments {
         match segment {
+            TemplateSegment::IfOpen { fallbacks } => {
+                let parent_active = conditions_active(&condition_stack);
+                let condition_true = resolve_placeholder(context, fallbacks)
+                    .map(|resolved| !resolved.value.trim().is_empty())
+                    .unwrap_or(false);
+                condition_stack.push(ConditionFrame {
+                    parent_active,
+                    condition_true,
+                    else_seen: false,
+                });
+            }
+            TemplateSegment::IfElse { literal } => {
+                let mut duplicate_else = false;
+                if let Some(frame) = condition_stack.last_mut() {
+                    if frame.else_seen {
+                        duplicate_else = true;
+                    } else {
+                        frame.else_seen = true;
+                    }
+                } else {
+                    duplicate_else = true;
+                }
+                if duplicate_else && conditions_active(&condition_stack) {
+                    append_text(
+                        &mut lines,
+                        &mut plain_text,
+                        literal,
+                        &style_stack,
+                        render_options,
+                        None,
+                    );
+                }
+            }
+            TemplateSegment::IfClose { literal } => {
+                if condition_stack.pop().is_none() && conditions_active(&condition_stack) {
+                    append_text(
+                        &mut lines,
+                        &mut plain_text,
+                        literal,
+                        &style_stack,
+                        render_options,
+                        None,
+                    );
+                }
+            }
             TemplateSegment::Text(text) => {
+                if !conditions_active(&condition_stack) {
+                    continue;
+                }
                 append_text(
                     &mut lines,
                     &mut plain_text,
@@ -487,6 +624,9 @@ pub(crate) fn render(
                 );
             }
             TemplateSegment::Placeholder { raw, fallbacks } => {
+                if !conditions_active(&condition_stack) {
+                    continue;
+                }
                 if let Some(resolved) = resolve_placeholder(context, fallbacks) {
                     let link_payload =
                         context.link_payload_for_key_value(&resolved.selected_key, &resolved.value);
@@ -510,13 +650,25 @@ pub(crate) fn render(
                 }
             }
             TemplateSegment::NewLine => {
+                if !conditions_active(&condition_stack) {
+                    continue;
+                }
                 plain_text.push('\n');
                 lines.push(RichTextLine { runs: Vec::new() });
             }
             TemplateSegment::OpenStyle(style) => {
+                if !conditions_active(&condition_stack) {
+                    continue;
+                }
+                if let StyleTag::VerticalAlign(next_align) = style {
+                    vertical_align = *next_align;
+                }
                 style_stack.push(style.clone());
             }
             TemplateSegment::CloseStyle { kind, literal } => {
+                if !conditions_active(&condition_stack) {
+                    continue;
+                }
                 if style_stack.last().map(style_kind) == Some(*kind) {
                     style_stack.pop();
                 } else {
@@ -533,7 +685,11 @@ pub(crate) fn render(
         }
     }
 
-    RenderedText { plain_text, lines }
+    RenderedText {
+        plain_text,
+        lines,
+        vertical_align,
+    }
 }
 
 pub(crate) fn render_template(source: &str, context: &TemplateContext<'_>) -> RenderedText {
@@ -614,6 +770,7 @@ fn append_text(
             bold: state.bold,
             italic: state.italic,
             underline: state.underline,
+            horizontal_align: state.horizontal_align,
             font_size_px: state.font_size_px,
             font_family: state.font_family.clone(),
             color: state.color.clone(),
@@ -624,6 +781,7 @@ fn append_text(
                 if previous.bold == run.bold
                     && previous.italic == run.italic
                     && previous.underline == run.underline
+                    && previous.horizontal_align == run.horizontal_align
                     && previous.font_size_px == run.font_size_px
                     && previous.font_family == run.font_family
                     && previous.color == run.color
@@ -640,6 +798,7 @@ fn append_text(
 
 fn style_state(style_stack: &[StyleTag], render_options: RenderOptions) -> StyleState {
     let mut state = StyleState {
+        horizontal_align: HorizontalAlign::Left,
         font_size_px: render_options.base_font_size_px.max(1),
         ..StyleState::default()
     };
@@ -648,6 +807,8 @@ fn style_state(style_stack: &[StyleTag], render_options: RenderOptions) -> Style
             StyleTag::Bold => state.bold = true,
             StyleTag::Italic => state.italic = true,
             StyleTag::Underline => state.underline = true,
+            StyleTag::HorizontalAlign(align) => state.horizontal_align = *align,
+            StyleTag::VerticalAlign(_) => {}
             StyleTag::Size(size_spec) => state.font_size_px = size_spec.resolve_px(render_options),
             StyleTag::Font(font) => state.font_family = font.clone(),
             StyleTag::Color(color) => state.color = Some(color.clone()),
@@ -661,6 +822,8 @@ fn style_kind(style: &StyleTag) -> StyleKind {
         StyleTag::Bold => StyleKind::Bold,
         StyleTag::Italic => StyleKind::Italic,
         StyleTag::Underline => StyleKind::Underline,
+        StyleTag::HorizontalAlign(_) => StyleKind::HorizontalAlign,
+        StyleTag::VerticalAlign(_) => StyleKind::VerticalAlign,
         StyleTag::Size(_) => StyleKind::Size,
         StyleTag::Font(_) => StyleKind::Font,
         StyleTag::Color(_) => StyleKind::Color,
@@ -702,6 +865,9 @@ fn read_until(
 
 enum ParsedTag {
     NewLine,
+    OpenIf { fallbacks: Vec<String> },
+    Else { literal: String },
+    CloseIf { literal: String },
     Open(StyleTag),
     Close { kind: StyleKind, literal: String },
 }
@@ -715,6 +881,9 @@ fn parse_tag_segment(content: &str) -> Option<ParsedTag> {
     if let Some(rest) = trimmed.strip_prefix('/') {
         let name = normalize_name(rest);
         return match name.as_str() {
+            "if" => Some(ParsedTag::CloseIf {
+                literal: format!("[/{rest}]"),
+            }),
             "b" => Some(ParsedTag::Close {
                 kind: StyleKind::Bold,
                 literal: format!("[/{rest}]"),
@@ -725,6 +894,14 @@ fn parse_tag_segment(content: &str) -> Option<ParsedTag> {
             }),
             "u" => Some(ParsedTag::Close {
                 kind: StyleKind::Underline,
+                literal: format!("[/{rest}]"),
+            }),
+            "halign" => Some(ParsedTag::Close {
+                kind: StyleKind::HorizontalAlign,
+                literal: format!("[/{rest}]"),
+            }),
+            "valign" => Some(ParsedTag::Close {
+                kind: StyleKind::VerticalAlign,
                 literal: format!("[/{rest}]"),
             }),
             "size" => Some(ParsedTag::Close {
@@ -750,19 +927,43 @@ fn parse_tag_segment(content: &str) -> Option<ParsedTag> {
             return None;
         }
         return match name.as_str() {
+            "if" => parse_fallback_chain(value).map(|fallbacks| ParsedTag::OpenIf { fallbacks }),
             "size" => parse_size_spec(value).map(|size| ParsedTag::Open(StyleTag::Size(size))),
             "font" => Some(ParsedTag::Open(StyleTag::Font(value.to_string()))),
             "color" => parse_color(value).map(|color| ParsedTag::Open(StyleTag::Color(color))),
+            "halign" => parse_horizontal_align(value)
+                .map(|align| ParsedTag::Open(StyleTag::HorizontalAlign(align))),
+            "valign" => parse_vertical_align(value)
+                .map(|align| ParsedTag::Open(StyleTag::VerticalAlign(align))),
             _ => None,
         };
     }
 
     let name = normalize_name(trimmed);
     match name.as_str() {
+        "else" => Some(ParsedTag::Else {
+            literal: format!("[{trimmed}]"),
+        }),
         "b" => Some(ParsedTag::Open(StyleTag::Bold)),
         "i" => Some(ParsedTag::Open(StyleTag::Italic)),
         "u" => Some(ParsedTag::Open(StyleTag::Underline)),
         _ => None,
+    }
+}
+
+fn parse_fallback_chain(value: &str) -> Option<Vec<String>> {
+    let mut fallbacks = Vec::new();
+    for part in value.split(';') {
+        let key = part.trim();
+        if key.is_empty() {
+            return None;
+        }
+        fallbacks.push(key.to_string());
+    }
+    if fallbacks.is_empty() {
+        None
+    } else {
+        Some(fallbacks)
     }
 }
 
@@ -783,6 +984,14 @@ fn parse_color(value: &str) -> Option<RunColor> {
         });
     }
     PaletteColor::from_name(value).map(RunColor::Palette)
+}
+
+fn parse_horizontal_align(value: &str) -> Option<HorizontalAlign> {
+    HorizontalAlign::from_name(value)
+}
+
+fn parse_vertical_align(value: &str) -> Option<VerticalAlign> {
+    VerticalAlign::from_name(value)
 }
 
 fn parse_hex_color(value: &str) -> Option<(u8, u8, u8, u8)> {
@@ -828,8 +1037,8 @@ fn parse_hex_color(value: &str) -> Option<(u8, u8, u8, u8)> {
 #[cfg(test)]
 mod tests {
     use super::{
-        render_template, render_template_with_options, template_metrics, PaletteColor,
-        RenderOptions, RunColor, TemplateContext,
+        render_template, render_template_with_options, template_metrics, HorizontalAlign,
+        PaletteColor, RenderOptions, RunColor, TemplateContext, VerticalAlign,
     };
 
     fn context<'a>(title: &'a str) -> TemplateContext<'a> {
@@ -846,6 +1055,8 @@ mod tests {
             path: Some("/music/track.flac"),
             playing: None,
             favorite: None,
+            selection_summary: "",
+            technical_info: "",
         }
     }
 
@@ -894,6 +1105,86 @@ mod tests {
         assert_eq!(
             rendered.lines[0].runs[2].color,
             Some(RunColor::Palette(PaletteColor::Accent))
+        );
+    }
+
+    #[test]
+    fn test_alignment_tags_are_applied() {
+        let rendered = render_template(
+            "[valign=bottom][halign=right]{title}[/halign]",
+            &context("Song"),
+        );
+        assert_eq!(rendered.vertical_align, VerticalAlign::Bottom);
+        assert_eq!(
+            rendered.lines[0].runs[0].horizontal_align,
+            HorizontalAlign::Right
+        );
+    }
+
+    #[test]
+    fn test_last_valign_open_tag_wins_for_block() {
+        let rendered = render_template(
+            "[valign=top]{title}[/valign][valign=center]{artist}",
+            &context("Song"),
+        );
+        assert_eq!(rendered.vertical_align, VerticalAlign::Center);
+    }
+
+    #[test]
+    fn test_status_placeholders_render_from_context() {
+        let rendered = render_template(
+            "{selection_summary}|{technical_info}",
+            &context("Song").with_status_fields("2 tracks selected", "Source: FLAC"),
+        );
+        assert_eq!(rendered.plain_text, "2 tracks selected|Source: FLAC");
+    }
+
+    #[test]
+    fn test_if_condition_renders_true_branch() {
+        let rendered = render_template("[if=title]{title}[else]No track[/if]", &context("Song"));
+        assert_eq!(rendered.plain_text, "Song");
+    }
+
+    #[test]
+    fn test_if_condition_renders_else_branch_when_false() {
+        let rendered = render_template(
+            "[if=title]{title}[else]No track[/if]",
+            &TemplateContext {
+                title: "",
+                ..context("Song")
+            },
+        );
+        assert_eq!(rendered.plain_text, "No track");
+    }
+
+    #[test]
+    fn test_if_condition_supports_fallback_chains() {
+        let rendered = render_template(
+            "[if=artist;album_artist]{artist;album_artist}[else]Unknown artist[/if]",
+            &TemplateContext {
+                artist: "",
+                album_artist: "Fallback Artist",
+                ..context("Song")
+            },
+        );
+        assert_eq!(rendered.plain_text, "Fallback Artist");
+    }
+
+    #[test]
+    fn test_if_else_and_close_tags_render_literal_when_malformed() {
+        let rendered = render_template("[if=]{title} [else]x[/if]", &context("Song"));
+        assert_eq!(rendered.plain_text, "[if=]Song [else]x[/if]");
+    }
+
+    #[test]
+    fn test_malformed_alignment_tags_render_as_literal_text() {
+        let rendered = render_template(
+            "[halign=diagonal]x[/halign] [valign=middle-ish]y[/valign]",
+            &context("Song"),
+        );
+        assert_eq!(
+            rendered.plain_text,
+            "[halign=diagonal]x[/halign] [valign=middle-ish]y[/valign]"
         );
     }
 

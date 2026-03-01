@@ -346,15 +346,18 @@ export component RichTextBlockView inherits Rectangle {
         for line[index] in root.block.lines : Rectangle {
             visible: root.max-lines <= 0 || index < root.max-lines;
             clip: root.clip-lines;
-            HorizontalLayout {
+
+            left-lane := HorizontalLayout {
+                width: parent.width;
                 spacing: 0px;
                 for run in line.runs : Rectangle {
                     property <bool> run-link-clickable: root.link-is-clickable(run.link_kind);
                     property <bool> run-link-hovered: self.run-link-clickable
-                        && (root.force-link-hover || run-link-ta.has-hover);
-                    width: run-text.preferred-width;
-                    height: run-text.preferred-height;
-                    run-text := Text {
+                        && (root.force-link-hover || left-run-link-ta.has-hover);
+                    visible: run.horizontal_align == 0;
+                    width: self.visible ? left-run-text.preferred-width : 0px;
+                    height: left-run-text.preferred-height;
+                    left-run-text := Text {
                         text: run.text;
                         color: parent.run-link-hovered
                             ? AppPalette.accent
@@ -368,14 +371,14 @@ export component RichTextBlockView inherits Rectangle {
                         overflow: clip;
                     }
                     if run.underline : Rectangle {
-                        y: run-text.y + run-text.height - 1px;
-                        width: run-text.preferred-width;
+                        y: left-run-text.y + left-run-text.height - 1px;
+                        width: left-run-text.preferred-width;
                         height: 1px;
                         background: parent.run-link-hovered
                             ? AppPalette.accent
                             : root.run-color(run.color_mode, run.palette_color, run.color_rgba);
                     }
-                    run-link-ta := TouchArea {
+                    left-run-link-ta := TouchArea {
                         enabled: run.link_kind != 0;
                         mouse-cursor: self.has-hover && parent.run-link-clickable ? pointer : default;
                         clicked => {
@@ -392,6 +395,107 @@ export component RichTextBlockView inherits Rectangle {
                     }
                 }
                 Rectangle { horizontal-stretch: 1; }
+            }
+
+            center-lane := HorizontalLayout {
+                width: parent.width;
+                spacing: 0px;
+                Rectangle { horizontal-stretch: 1; }
+                for run in line.runs : Rectangle {
+                    property <bool> run-link-clickable: root.link-is-clickable(run.link_kind);
+                    property <bool> run-link-hovered: self.run-link-clickable
+                        && (root.force-link-hover || center-run-link-ta.has-hover);
+                    visible: run.horizontal_align == 1;
+                    width: self.visible ? center-run-text.preferred-width : 0px;
+                    height: center-run-text.preferred-height;
+                    center-run-text := Text {
+                        text: run.text;
+                        color: parent.run-link-hovered
+                            ? AppPalette.accent
+                            : root.run-color(run.color_mode, run.palette_color, run.color_rgba);
+                        font-size: max(1px, run.font_size_px * 1px);
+                        font-family: run.font_family;
+                        font-weight: run.bold ? 700 : 400;
+                        font-italic: run.italic;
+                        vertical-alignment: center;
+                        horizontal-alignment: left;
+                        overflow: clip;
+                    }
+                    if run.underline : Rectangle {
+                        y: center-run-text.y + center-run-text.height - 1px;
+                        width: center-run-text.preferred-width;
+                        height: 1px;
+                        background: parent.run-link-hovered
+                            ? AppPalette.accent
+                            : root.run-color(run.color_mode, run.palette_color, run.color_rgba);
+                    }
+                    center-run-link-ta := TouchArea {
+                        enabled: run.link_kind != 0;
+                        mouse-cursor: self.has-hover && parent.run-link-clickable ? pointer : default;
+                        clicked => {
+                            if (parent.run-link-clickable) {
+                                root.metadata_link_activated(
+                                    run.link_kind,
+                                    run.link_value,
+                                    run.link_album,
+                                    run.link_album_artist,
+                                    run.link_track_path
+                                );
+                            }
+                        }
+                    }
+                }
+                Rectangle { horizontal-stretch: 1; }
+            }
+
+            right-lane := HorizontalLayout {
+                width: parent.width;
+                spacing: 0px;
+                Rectangle { horizontal-stretch: 1; }
+                for run in line.runs : Rectangle {
+                    property <bool> run-link-clickable: root.link-is-clickable(run.link_kind);
+                    property <bool> run-link-hovered: self.run-link-clickable
+                        && (root.force-link-hover || right-run-link-ta.has-hover);
+                    visible: run.horizontal_align == 2;
+                    width: self.visible ? right-run-text.preferred-width : 0px;
+                    height: right-run-text.preferred-height;
+                    right-run-text := Text {
+                        text: run.text;
+                        color: parent.run-link-hovered
+                            ? AppPalette.accent
+                            : root.run-color(run.color_mode, run.palette_color, run.color_rgba);
+                        font-size: max(1px, run.font_size_px * 1px);
+                        font-family: run.font_family;
+                        font-weight: run.bold ? 700 : 400;
+                        font-italic: run.italic;
+                        vertical-alignment: center;
+                        horizontal-alignment: left;
+                        overflow: clip;
+                    }
+                    if run.underline : Rectangle {
+                        y: right-run-text.y + right-run-text.height - 1px;
+                        width: right-run-text.preferred-width;
+                        height: 1px;
+                        background: parent.run-link-hovered
+                            ? AppPalette.accent
+                            : root.run-color(run.color_mode, run.palette_color, run.color_rgba);
+                    }
+                    right-run-link-ta := TouchArea {
+                        enabled: run.link_kind != 0;
+                        mouse-cursor: self.has-hover && parent.run-link-clickable ? pointer : default;
+                        clicked => {
+                            if (parent.run-link-clickable) {
+                                root.metadata_link_activated(
+                                    run.link_kind,
+                                    run.link_value,
+                                    run.link_album,
+                                    run.link_album_artist,
+                                    run.link_track_path
+                                );
+                            }
+                        }
+                    }
+                }
             }
         }
     }
@@ -427,7 +531,11 @@ export component TextPanel inherits Rectangle {
     if root.has-metadata : RichTextBlockView {
         width: parent.width;
         height: min(parent.height, self.preferred-height);
-        y: (parent.height - self.height) / 2;
+        y: root.display-text.vertical_align == 0
+            ? 0px
+            : (root.display-text.vertical_align == 2
+                ? max(0px, parent.height - self.height)
+                : (parent.height - self.height) / 2);
         block: root.display-text;
         compact: root.compact;
         default-color: root.text-secondary;

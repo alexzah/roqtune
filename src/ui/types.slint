@@ -3,6 +3,7 @@ export struct RichTextRun {
     bold: bool,
     italic: bool,
     underline: bool,
+    horizontal_align: int, // 0 left, 1 center, 2 right
     font_size_px: int,
     font_family: string,
     color_mode: int, // 0 default, 1 palette, 2 rgba
@@ -22,6 +23,7 @@ export struct RichTextLine {
 export struct RichTextBlock {
     plain_text: string,
     lines: [RichTextLine],
+    vertical_align: int, // 0 top, 1 center, 2 bottom
 }
 
 export struct TrackRowData {

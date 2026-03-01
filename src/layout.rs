@@ -243,6 +243,8 @@ pub enum ViewerPanelMetadataSource {
     ArtistBio,
     /// Render custom template text using track metadata placeholders.
     CustomText,
+    /// Render status bar fields through template placeholders.
+    StatusBar,
 }
 
 /// Image payload source for image panels.
@@ -290,7 +292,7 @@ pub struct MetadataViewerPanelInstanceConfig {
     /// Text source strategy for text panels.
     #[serde(default, rename = "text_source", alias = "metadata_source")]
     pub metadata_source: ViewerPanelMetadataSource,
-    /// Custom text template string used when `text_source = "custom_text"`.
+    /// Template string used for `text_source` modes that render template text.
     #[serde(
         default = "default_metadata_text_format",
         rename = "text_format",
@@ -815,7 +817,7 @@ fn build_default_layout_root() -> LayoutNode {
             first: Box::new(middle),
             second: Box::new(LayoutNode::Leaf {
                 id: next(),
-                panel: LayoutPanelKind::StatusBar,
+                panel: LayoutPanelKind::MetadataViewer,
             }),
         }),
     }
@@ -952,6 +954,7 @@ fn normalize_node(
                 LayoutPanelKind::ImportButtonCluster
                 | LayoutPanelKind::TransportButtonCluster
                 | LayoutPanelKind::UtilityButtonCluster => LayoutPanelKind::ButtonCluster,
+                LayoutPanelKind::StatusBar => LayoutPanelKind::MetadataViewer,
                 other => other,
             };
             if mapped_panel == LayoutPanelKind::None {
@@ -1700,6 +1703,25 @@ mod tests {
             .filter(|leaf| leaf.panel == LayoutPanelKind::TrackList)
             .count();
         assert_eq!(track_count, 2);
+    }
+
+    #[test]
+    fn sanitize_layout_config_migrates_status_bar_leaf_to_metadata_viewer() {
+        let config = LayoutConfig {
+            root: LayoutNode::Leaf {
+                id: "legacy-status".to_string(),
+                panel: LayoutPanelKind::StatusBar,
+            },
+            ..LayoutConfig::default()
+        };
+
+        let sanitized = sanitize_layout_config(&config, 900, 650);
+        match sanitized.root {
+            LayoutNode::Leaf { panel, .. } => {
+                assert_eq!(panel, LayoutPanelKind::MetadataViewer);
+            }
+            _ => panic!("sanitized root should remain a leaf"),
+        }
     }
 
     #[test]
