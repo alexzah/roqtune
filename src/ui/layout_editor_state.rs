@@ -37,8 +37,15 @@ pub(crate) const PANEL_PRESET_IMAGE_ARTIST_IMAGE: i32 = 112;
 
 fn default_metadata_text_format_for_source(source: ViewerPanelMetadataSource) -> &'static str {
     match source {
+        ViewerPanelMetadataSource::Track => crate::text_template::DEFAULT_TRACK_PANEL_TEMPLATE,
+        ViewerPanelMetadataSource::AlbumDescription => {
+            crate::text_template::DEFAULT_ALBUM_DESCRIPTION_PANEL_TEMPLATE
+        }
+        ViewerPanelMetadataSource::ArtistBio => {
+            crate::text_template::DEFAULT_ARTIST_BIO_PANEL_TEMPLATE
+        }
+        ViewerPanelMetadataSource::CustomText => crate::text_template::DEFAULT_TRACK_PANEL_TEMPLATE,
         ViewerPanelMetadataSource::StatusBar => crate::text_template::DEFAULT_STATUS_PANEL_TEMPLATE,
-        _ => crate::text_template::DEFAULT_METADATA_PANEL_TEMPLATE,
     }
 }
 
@@ -428,6 +435,7 @@ pub(crate) fn apply_layout_panel_selection_preset_to_leaf(
     if panel == LayoutPanelKind::MetadataViewer {
         match panel_code {
             PANEL_PRESET_TEXT_TRACK_DETAILS => {
+                let metadata_source = ViewerPanelMetadataSource::Track;
                 upsert_metadata_viewer_panel_display_priority_for_leaf(
                     &mut layout.metadata_viewer_panel_instances,
                     leaf_id,
@@ -436,15 +444,16 @@ pub(crate) fn apply_layout_panel_selection_preset_to_leaf(
                 upsert_metadata_viewer_panel_metadata_source_for_leaf(
                     &mut layout.metadata_viewer_panel_instances,
                     leaf_id,
-                    ViewerPanelMetadataSource::Track,
+                    metadata_source,
                 );
                 upsert_metadata_viewer_panel_text_format_for_leaf(
                     &mut layout.metadata_viewer_panel_instances,
                     leaf_id,
-                    crate::text_template::DEFAULT_METADATA_PANEL_TEMPLATE.to_string(),
+                    default_metadata_text_format_for_source(metadata_source).to_string(),
                 );
             }
             PANEL_PRESET_TEXT_ALBUM_DESCRIPTION => {
+                let metadata_source = ViewerPanelMetadataSource::AlbumDescription;
                 upsert_metadata_viewer_panel_display_priority_for_leaf(
                     &mut layout.metadata_viewer_panel_instances,
                     leaf_id,
@@ -453,15 +462,16 @@ pub(crate) fn apply_layout_panel_selection_preset_to_leaf(
                 upsert_metadata_viewer_panel_metadata_source_for_leaf(
                     &mut layout.metadata_viewer_panel_instances,
                     leaf_id,
-                    ViewerPanelMetadataSource::AlbumDescription,
+                    metadata_source,
                 );
                 upsert_metadata_viewer_panel_text_format_for_leaf(
                     &mut layout.metadata_viewer_panel_instances,
                     leaf_id,
-                    crate::text_template::DEFAULT_METADATA_PANEL_TEMPLATE.to_string(),
+                    default_metadata_text_format_for_source(metadata_source).to_string(),
                 );
             }
             PANEL_PRESET_TEXT_ARTIST_BIO => {
+                let metadata_source = ViewerPanelMetadataSource::ArtistBio;
                 upsert_metadata_viewer_panel_display_priority_for_leaf(
                     &mut layout.metadata_viewer_panel_instances,
                     leaf_id,
@@ -470,15 +480,16 @@ pub(crate) fn apply_layout_panel_selection_preset_to_leaf(
                 upsert_metadata_viewer_panel_metadata_source_for_leaf(
                     &mut layout.metadata_viewer_panel_instances,
                     leaf_id,
-                    ViewerPanelMetadataSource::ArtistBio,
+                    metadata_source,
                 );
                 upsert_metadata_viewer_panel_text_format_for_leaf(
                     &mut layout.metadata_viewer_panel_instances,
                     leaf_id,
-                    crate::text_template::DEFAULT_METADATA_PANEL_TEMPLATE.to_string(),
+                    default_metadata_text_format_for_source(metadata_source).to_string(),
                 );
             }
             PANEL_PRESET_TEXT_STATUS_BAR => {
+                let metadata_source = ViewerPanelMetadataSource::StatusBar;
                 upsert_metadata_viewer_panel_display_priority_for_leaf(
                     &mut layout.metadata_viewer_panel_instances,
                     leaf_id,
@@ -487,12 +498,12 @@ pub(crate) fn apply_layout_panel_selection_preset_to_leaf(
                 upsert_metadata_viewer_panel_metadata_source_for_leaf(
                     &mut layout.metadata_viewer_panel_instances,
                     leaf_id,
-                    ViewerPanelMetadataSource::StatusBar,
+                    metadata_source,
                 );
                 upsert_metadata_viewer_panel_text_format_for_leaf(
                     &mut layout.metadata_viewer_panel_instances,
                     leaf_id,
-                    crate::text_template::DEFAULT_STATUS_PANEL_TEMPLATE.to_string(),
+                    default_metadata_text_format_for_source(metadata_source).to_string(),
                 );
             }
             _ => {}
@@ -892,7 +903,7 @@ pub(crate) fn metadata_viewer_panel_text_format_for_leaf(
             instance.metadata_text_format.clone(),
         );
     }
-    crate::text_template::DEFAULT_METADATA_PANEL_TEMPLATE.to_string()
+    default_metadata_text_format_for_source(ViewerPanelMetadataSource::default()).to_string()
 }
 
 /// Returns album-art-viewer display-priority for a leaf with a default fallback.
@@ -1250,7 +1261,8 @@ mod tests {
         apply_layout_panel_selection_preset_to_leaf, default_button_cluster_actions_by_index,
         quantize_splitter_ratio_to_precision, resolve_layout_panel_selection,
         sidebar_width_from_window, update_or_replace_vec_model, PANEL_PRESET_IMAGE_ARTIST_IMAGE,
-        PANEL_PRESET_TEXT_ARTIST_BIO, PANEL_PRESET_TEXT_STATUS_BAR,
+        PANEL_PRESET_TEXT_ALBUM_DESCRIPTION, PANEL_PRESET_TEXT_ARTIST_BIO,
+        PANEL_PRESET_TEXT_STATUS_BAR,
     };
     use crate::layout::{
         AlbumArtViewerPanelInstanceConfig, LayoutConfig, LayoutNode, LayoutPanelKind,
@@ -1459,6 +1471,91 @@ mod tests {
         assert_eq!(
             panel.metadata_text_format,
             crate::text_template::DEFAULT_STATUS_PANEL_TEMPLATE
+        );
+    }
+
+    #[test]
+    fn test_apply_layout_panel_selection_preset_to_leaf_sets_album_description_preset_settings() {
+        let mut layout = LayoutConfig {
+            root: LayoutNode::Leaf {
+                id: "leaf-album".to_string(),
+                panel: LayoutPanelKind::MetadataViewer,
+            },
+            selected_leaf_id: Some("leaf-album".to_string()),
+            button_cluster_instances: Vec::new(),
+            metadata_viewer_panel_instances: vec![MetadataViewerPanelInstanceConfig {
+                leaf_id: "leaf-album".to_string(),
+                display_priority: ViewerPanelDisplayPriority::Default,
+                metadata_source: ViewerPanelMetadataSource::Track,
+                metadata_text_format: crate::text_template::DEFAULT_METADATA_PANEL_TEMPLATE
+                    .to_string(),
+            }],
+            album_art_viewer_panel_instances: Vec::new(),
+            ..LayoutConfig::default()
+        };
+
+        apply_layout_panel_selection_preset_to_leaf(
+            &mut layout,
+            "leaf-album",
+            LayoutPanelKind::MetadataViewer,
+            PANEL_PRESET_TEXT_ALBUM_DESCRIPTION,
+            None,
+        );
+
+        let panel = layout
+            .metadata_viewer_panel_instances
+            .iter()
+            .find(|instance| instance.leaf_id == "leaf-album")
+            .expect("metadata panel instance should exist");
+        assert_eq!(panel.display_priority, ViewerPanelDisplayPriority::Default);
+        assert_eq!(
+            panel.metadata_source,
+            ViewerPanelMetadataSource::AlbumDescription
+        );
+        assert_eq!(
+            panel.metadata_text_format,
+            crate::text_template::DEFAULT_ALBUM_DESCRIPTION_PANEL_TEMPLATE
+        );
+    }
+
+    #[test]
+    fn test_apply_layout_panel_selection_preset_to_leaf_sets_artist_bio_preset_settings() {
+        let mut layout = LayoutConfig {
+            root: LayoutNode::Leaf {
+                id: "leaf-artist".to_string(),
+                panel: LayoutPanelKind::MetadataViewer,
+            },
+            selected_leaf_id: Some("leaf-artist".to_string()),
+            button_cluster_instances: Vec::new(),
+            metadata_viewer_panel_instances: vec![MetadataViewerPanelInstanceConfig {
+                leaf_id: "leaf-artist".to_string(),
+                display_priority: ViewerPanelDisplayPriority::Default,
+                metadata_source: ViewerPanelMetadataSource::Track,
+                metadata_text_format: crate::text_template::DEFAULT_METADATA_PANEL_TEMPLATE
+                    .to_string(),
+            }],
+            album_art_viewer_panel_instances: Vec::new(),
+            ..LayoutConfig::default()
+        };
+
+        apply_layout_panel_selection_preset_to_leaf(
+            &mut layout,
+            "leaf-artist",
+            LayoutPanelKind::MetadataViewer,
+            PANEL_PRESET_TEXT_ARTIST_BIO,
+            None,
+        );
+
+        let panel = layout
+            .metadata_viewer_panel_instances
+            .iter()
+            .find(|instance| instance.leaf_id == "leaf-artist")
+            .expect("metadata panel instance should exist");
+        assert_eq!(panel.display_priority, ViewerPanelDisplayPriority::Default);
+        assert_eq!(panel.metadata_source, ViewerPanelMetadataSource::ArtistBio);
+        assert_eq!(
+            panel.metadata_text_format,
+            crate::text_template::DEFAULT_ARTIST_BIO_PANEL_TEMPLATE
         );
     }
 }

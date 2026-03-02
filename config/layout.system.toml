@@ -149,7 +149,7 @@ custom = false
 # leaf_id = "l1"
 # display_priority = "default"
 # text_source = "track"
-# text_format = "[size=title][b][color=text_primary]{title;file_name}[/color][/b][/size]\\n[size=body][color=text_secondary]{artist;album_artist}[/color][/size]\\n[size=body][color=text_muted]{album}[/color][/size]\\n[size=caption][color=text_muted]{date;year} • {genre}[/color][/size]"
+# text_format = "[size=title][b][color=text_primary][if=title;file_name]{title;file_name}[else]Unknown[/if][/color][/b][/size][if=artist;album_artist]\\n[size=body][color=text_secondary]{artist;album_artist}[/color][/size][/if][if=album]\\n[size=body][color=text_muted]{album}[/color][/size][/if][if=date;year;genre]\\n[size=caption][color=text_muted][if=date;year]{date;year}[/if][if=genre][if=date;year] • [/if]{genre}[/if][/color][/size][/if]"
 #
 # Optional per-leaf image panel behavior overrides.
 # image_source options:
@@ -217,7 +217,7 @@ image_source = "album_art"
 leaf_id = "l5"
 display_priority = "now_playing_only"
 text_source = "track"
-text_format = '[size=title][b][color=text_primary]{title;file_name}[/color][/b][/size]\n[size=body][color=text_secondary]{artist;album_artist}[/color][/size]\n[size=body][color=text_muted]{album}[/color][/size]\n[size=caption][color=text_muted]{date;year} • {genre}[/color][/size]'
+text_format = '[size=title][b][color=text_primary][if=title;file_name]{title;file_name}[else]Unknown[/if][/color][/b][/size][if=artist;album_artist]\n[size=body][color=text_secondary]{artist;album_artist}[/color][/size][/if][if=album]\n[size=body][color=text_muted]{album}[/color][/size][/if][if=date;year;genre]\n[size=caption][color=text_secondary][if=date;year]{date;year}[/if][if=genre][if=date;year] • [/if]{genre}[/if][/color][/size][/if]'
 
 [root.first.first.first]
 node_type = "split"
@@ -284,7 +284,7 @@ panel = "spacer"
 leaf_id = "l1"
 display_priority = "default"
 text_source = "track"
-text_format = '[size=title][b][color=text_primary]{title;file_name}[/color][/b][/size]\n[size=body][color=text_secondary]{artist;album_artist}[/color][/size]\n[size=body][color=text_muted]{album}[/color][/size]\n[size=caption][color=text_muted]{date;year} • {genre}[/color][/size]'
+text_format = '[size=title][b][color=text_primary][if=title;file_name]{title;file_name}[else]Unknown[/if][/color][/b][/size][if=artist;album_artist]\n[size=body][color=text_secondary]{artist;album_artist}[/color][/size][/if][if=album]\n[size=body][color=text_muted]{album}[/color][/size][/if][if=date;year;genre]\n[size=caption][color=text_muted][if=date;year]{date;year}[/if][if=genre][if=date;year] • [/if]{genre}[/if][/color][/size][/if]'
 
 [[text_panel_instances]]
 leaf_id = "n19"

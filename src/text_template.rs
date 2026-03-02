@@ -6,8 +6,13 @@ use crate::protocol;
 
 const DEFAULT_FONT_SIZE_PX: u32 = 13;
 
-pub(crate) const DEFAULT_METADATA_PANEL_TEMPLATE: &str =
-    "[size=title][b][color=text_primary]{title;file_name}[/color][/b][/size]\\n[size=body][color=text_secondary]{artist;album_artist}[/color][/size]\\n[size=body][color=text_muted]{album}[/color][/size]\\n[size=caption][color=text_muted]{date;year} • {genre}[/color][/size]";
+pub(crate) const DEFAULT_TRACK_PANEL_TEMPLATE: &str =
+    "[size=title][b][color=text_primary][if=title;file_name]{title;file_name}[else]Unknown[/if][/color][/b][/size][if=artist;album_artist]\\n[size=body][color=text_secondary]{artist;album_artist}[/color][/size][/if][if=album]\\n[size=body][color=text_muted]{album}[/color][/size][/if][if=date;year;genre]\\n[size=caption][color=text_muted][if=date;year]{date;year}[/if][if=genre][if=date;year] • [/if]{genre}[/if][/color][/size][/if]";
+pub(crate) const DEFAULT_ALBUM_DESCRIPTION_PANEL_TEMPLATE: &str =
+    "[size=title][b][color=text_primary][if=title]{title}[else]Album Description[/if][/color][/b][/size][if=artist]\\n[size=body][color=text_secondary]{artist}[/color][/size][/if][if=genre]\\n[size=caption][color=text_muted]{genre}[/color][/size][/if]";
+pub(crate) const DEFAULT_ARTIST_BIO_PANEL_TEMPLATE: &str =
+    "[size=title][b][color=text_primary][if=title]{title}[else]Artist Bio[/if][/color][/b][/size][if=artist]\\n[size=body][color=text_secondary]{artist}[/color][/size][/if][if=genre]\\n[size=caption][color=text_muted]{genre}[/color][/size][/if]";
+pub(crate) const DEFAULT_METADATA_PANEL_TEMPLATE: &str = DEFAULT_TRACK_PANEL_TEMPLATE;
 pub(crate) const DEFAULT_STATUS_PANEL_TEMPLATE: &str =
     "[valign=center][halign=left][size=12][color=text_secondary][if=path]Now Playing: [if=artist]{artist} - [/if][if=title]{title}[else]Unknown[/if][if=selection_summary] | {selection_summary}[/if][else]{selection_summary}[/if][/color][/size][/halign][halign=right][size=11][color=text_muted][if=technical_format]Source: [if=technical_source_provider]{technical_source_provider} | [/if]{technical_format}[if=technical_bit_depth] ({technical_bit_depth} bit[/if][if=technical_sample_rate_hz], {technical_sample_rate_hz}[/if][if=technical_channels], {technical_channels}ch[/if][if=technical_bitrate_kbps], {technical_bitrate_kbps}kbps[/if][if=technical_bit_depth])[/if][else][if=technical_cast_state]Source: Unknown[/if][/if][if=technical_cast_state] | {technical_cast_state}[/if][if=technical_playback_mode] | [if=technical_output_format]{technical_playback_mode}: {technical_output_format}[if=technical_output_bit_depth] ({technical_output_bit_depth} bit[/if][if=technical_output_sample_rate_hz], {technical_output_sample_rate_hz}[/if][if=technical_output_channels], {technical_output_channels}ch[/if][if=technical_output_bitrate_kbps], {technical_output_bitrate_kbps}kbps[/if][if=technical_output_bit_depth])[/if][else]{technical_playback_mode}[/if][/if][if=technical_resampled] | Resample: {technical_resample_from_hz} -> {technical_resample_to_hz}[/if][if=technical_channel_transform][if=technical_resampled] / [/if][if=technical_resampled][else] | [/if]{technical_channel_transform}: {technical_channel_from_channels}ch -> {technical_channel_to_channels}ch[/if][if=technical_dithered][if=technical_resampled;technical_channel_transform] / [/if][if=technical_resampled;technical_channel_transform][else] | [/if]Dither[/if][/color][/size][/halign][/valign]";
 pub(crate) const PLAYING_SYMBOL_PLAYING: &str = "▶️";
@@ -1177,7 +1182,8 @@ mod tests {
     use super::{
         render_template, render_template_with_options, template_metrics, HorizontalAlign,
         PaletteColor, RenderOptions, RunColor, StatusTemplateFields, TemplateContext,
-        VerticalAlign, DEFAULT_STATUS_PANEL_TEMPLATE,
+        VerticalAlign, DEFAULT_ALBUM_DESCRIPTION_PANEL_TEMPLATE, DEFAULT_ARTIST_BIO_PANEL_TEMPLATE,
+        DEFAULT_STATUS_PANEL_TEMPLATE, DEFAULT_TRACK_PANEL_TEMPLATE,
     };
 
     fn context<'a>(title: &'a str) -> TemplateContext<'a> {
@@ -1396,6 +1402,53 @@ mod tests {
         );
         assert!(rendered.plain_text.contains(" | Resample: 96kHz -> 48kHz"));
         assert!(rendered.plain_text.contains(" / Downmix: 2ch -> 2ch"));
+    }
+
+    #[test]
+    fn test_default_track_template_omits_empty_optional_lines() {
+        let rendered = render_template(
+            DEFAULT_TRACK_PANEL_TEMPLATE,
+            &TemplateContext {
+                title: "",
+                artist: "",
+                album: "",
+                album_artist: "",
+                date: "",
+                year: "",
+                genre: "",
+                file_name: None,
+                ..context("Song")
+            },
+        );
+        assert_eq!(rendered.plain_text, "Unknown");
+        assert_eq!(rendered.lines.len(), 1);
+    }
+
+    #[test]
+    fn test_default_source_templates_omit_empty_optional_lines() {
+        let album_rendered = render_template(
+            DEFAULT_ALBUM_DESCRIPTION_PANEL_TEMPLATE,
+            &TemplateContext {
+                title: "",
+                artist: "",
+                genre: "",
+                ..context("Song")
+            },
+        );
+        assert_eq!(album_rendered.plain_text, "Album Description");
+        assert_eq!(album_rendered.lines.len(), 1);
+
+        let artist_rendered = render_template(
+            DEFAULT_ARTIST_BIO_PANEL_TEMPLATE,
+            &TemplateContext {
+                title: "",
+                artist: "",
+                genre: "",
+                ..context("Song")
+            },
+        );
+        assert_eq!(artist_rendered.plain_text, "Artist Bio");
+        assert_eq!(artist_rendered.lines.len(), 1);
     }
 
     #[test]

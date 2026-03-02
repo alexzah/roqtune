@@ -5473,7 +5473,7 @@ impl UiManager {
                         {
                             let custom = row_data.metadata_text_format.to_string();
                             if custom.trim().is_empty() {
-                                text_template::DEFAULT_METADATA_PANEL_TEMPLATE.to_string()
+                                text_template::DEFAULT_TRACK_PANEL_TEMPLATE.to_string()
                             } else {
                                 custom
                             }
@@ -5484,8 +5484,16 @@ impl UiManager {
                             } else {
                                 custom
                             }
+                        } else if metadata_source_index
+                            == VIEWER_METADATA_SOURCE_ALBUM_DESCRIPTION as usize
+                        {
+                            text_template::DEFAULT_ALBUM_DESCRIPTION_PANEL_TEMPLATE.to_string()
+                        } else if metadata_source_index
+                            == VIEWER_METADATA_SOURCE_ARTIST_BIO as usize
+                        {
+                            text_template::DEFAULT_ARTIST_BIO_PANEL_TEMPLATE.to_string()
                         } else {
-                            text_template::DEFAULT_METADATA_PANEL_TEMPLATE.to_string()
+                            text_template::DEFAULT_TRACK_PANEL_TEMPLATE.to_string()
                         };
                         let display_path = display_paths_by_priority
                             .get(priority_index)
