@@ -13391,7 +13391,7 @@ mod tests {
     #[test]
     fn test_fit_text_panel_rendered_text_preserves_right_aligned_status_segment_when_eliding() {
         let fitted = UiManager::fit_text_panel_rendered_text(
-            "[halign=left]{title}[/halign][halign=right] | {technical_playback_mode}[/halign]",
+            "[halign=left]{title}[/halign][halign=right] | {playback_mode}[/halign]",
             &text_template::TemplateContext {
                 title: "A very long now playing title that should be truncated first",
                 ..test_template_context().with_status_fields(text_template::StatusTemplateFields {

@@ -14,7 +14,7 @@ pub(crate) const DEFAULT_ARTIST_BIO_PANEL_TEMPLATE: &str =
     "[size=title][b][color=text_primary][if=title]{title}[else]Artist Bio[/if][/color][/b][/size][if=artist]\\n[size=body][color=text_secondary]{artist}[/color][/size][/if][if=genre]\\n[size=caption][color=text_muted]{genre}[/color][/size][/if]";
 pub(crate) const DEFAULT_METADATA_PANEL_TEMPLATE: &str = DEFAULT_TRACK_PANEL_TEMPLATE;
 pub(crate) const DEFAULT_STATUS_PANEL_TEMPLATE: &str =
-    "[valign=center][halign=left][size=12][color=text_secondary][if=path]Now Playing: [if=artist]{artist} - [/if][if=title]{title}[else]Unknown[/if][if=selection_summary] | {selection_summary}[/if][else]{selection_summary}[/if][/color][/size][/halign][halign=right][size=11][color=text_muted][if=technical_format]Source: [if=technical_source_provider]{technical_source_provider} | [/if]{technical_format}[if=technical_bit_depth] ({technical_bit_depth} bit[/if][if=technical_sample_rate_hz], {technical_sample_rate_hz}[/if][if=technical_channels], {technical_channels}ch[/if][if=technical_bitrate_kbps], {technical_bitrate_kbps}kbps[/if][if=technical_bit_depth])[/if][else][if=technical_cast_state]Source: Unknown[/if][/if][if=technical_cast_state] | {technical_cast_state}[/if][if=technical_playback_mode] | [if=technical_output_format]{technical_playback_mode}: {technical_output_format}[if=technical_output_bit_depth] ({technical_output_bit_depth} bit[/if][if=technical_output_sample_rate_hz], {technical_output_sample_rate_hz}[/if][if=technical_output_channels], {technical_output_channels}ch[/if][if=technical_output_bitrate_kbps], {technical_output_bitrate_kbps}kbps[/if][if=technical_output_bit_depth])[/if][else]{technical_playback_mode}[/if][/if][if=technical_resampled] | Resample: {technical_resample_from_hz} -> {technical_resample_to_hz}[/if][if=technical_channel_transform][if=technical_resampled] / [/if][if=technical_resampled][else] | [/if]{technical_channel_transform}: {technical_channel_from_channels}ch -> {technical_channel_to_channels}ch[/if][if=technical_dithered][if=technical_resampled;technical_channel_transform] / [/if][if=technical_resampled;technical_channel_transform][else] | [/if]Dither[/if][/color][/size][/halign][/valign]";
+    "[valign=center][halign=left][size=12][color=text_secondary][if=path]Now Playing: [if=artist]{artist} - [/if][if=title]{title}[else]Unknown[/if][if=selection_summary] | {selection_summary}[/if][else]{selection_summary}[/if][/color][/size][/halign][halign=right][size=11][color=text_muted][if=format]Source: [if=source_provider]{source_provider} | [/if]{format}[if=bit_depth] ({bit_depth} bit[/if][if=sample_rate_hz], {sample_rate_hz}[/if][if=channels], {channels}ch[/if][if=bitrate_kbps], {bitrate_kbps}kbps[/if][if=bit_depth])[/if][else][if=cast_state]Source: Unknown[/if][/if][if=cast_state] | {cast_state}[/if][if=playback_mode] | [if=output_format]{playback_mode}: {output_format}[if=output_bit_depth] ({output_bit_depth} bit[/if][if=output_sample_rate_hz], {output_sample_rate_hz}[/if][if=output_channels], {output_channels}ch[/if][if=output_bitrate_kbps], {output_bitrate_kbps}kbps[/if][if=output_bit_depth])[/if][else]{playback_mode}[/if][/if][if=resampled] | Resample: {resample_from_hz} -> {resample_to_hz}[/if][if=channel_transform][if=resampled] / [/if][if=resampled][else] | [/if]{channel_transform}: {channel_from_channels}ch -> {channel_to_channels}ch[/if][if=dithered][if=resampled;channel_transform] / [/if][if=resampled;channel_transform][else] | [/if]Dither[/if][/color][/size][/halign][/valign]";
 pub(crate) const PLAYING_SYMBOL_PLAYING: &str = "▶️";
 pub(crate) const PLAYING_SYMBOL_PAUSED: &str = "⏸️";
 pub(crate) const FAVORITE_SYMBOL_ON: &str = "❤️";
@@ -421,63 +421,45 @@ impl<'a> TemplateContext<'a> {
             }
             "path" => Some(self.path.unwrap_or_default().to_string()),
             "selection_summary" | "selectionsummary" => Some(self.selection_summary.to_string()),
-            "technical_source_provider" | "technicalsourceprovider" => {
+            "source_provider" | "sourceprovider" => {
                 Some(self.technical_source_provider.to_string())
             }
-            "technical_format" | "technicalformat" => Some(self.technical_format.to_string()),
-            "technical_bit_depth" | "technicalbitdepth" => {
-                Some(self.technical_bit_depth.to_string())
-            }
-            "technical_sample_rate_hz" | "technicalsampleratehz" => {
-                Some(self.technical_sample_rate_hz.to_string())
-            }
-            "technical_channels" | "technicalchannels" => Some(self.technical_channels.to_string()),
-            "technical_bitrate_kbps" | "technicalbitratekbps" => {
-                Some(self.technical_bitrate_kbps.to_string())
-            }
-            "technical_duration_ms" | "technicaldurationms" => {
-                Some(self.technical_duration_ms.to_string())
-            }
-            "technical_cast_state" | "technicalcaststate" => {
-                Some(self.technical_cast_state.to_string())
-            }
-            "technical_playback_mode" | "technicalplaybackmode" => {
-                Some(self.technical_playback_mode.to_string())
-            }
-            "technical_output_format" | "technicaloutputformat" => {
-                Some(self.technical_output_format.to_string())
-            }
-            "technical_output_bit_depth" | "technicaloutputbitdepth" => {
+            "format" => Some(self.technical_format.to_string()),
+            "bit_depth" | "bitdepth" => Some(self.technical_bit_depth.to_string()),
+            "sample_rate_hz" | "sampleratehz" => Some(self.technical_sample_rate_hz.to_string()),
+            "channels" => Some(self.technical_channels.to_string()),
+            "bitrate_kbps" | "bitratekbps" => Some(self.technical_bitrate_kbps.to_string()),
+            "duration_ms" | "durationms" => Some(self.technical_duration_ms.to_string()),
+            "cast_state" | "caststate" => Some(self.technical_cast_state.to_string()),
+            "playback_mode" | "playbackmode" => Some(self.technical_playback_mode.to_string()),
+            "output_format" | "outputformat" => Some(self.technical_output_format.to_string()),
+            "output_bit_depth" | "outputbitdepth" => {
                 Some(self.technical_output_bit_depth.to_string())
             }
-            "technical_output_sample_rate_hz" | "technicaloutputsampleratehz" => {
+            "output_sample_rate_hz" | "outputsampleratehz" => {
                 Some(self.technical_output_sample_rate_hz.to_string())
             }
-            "technical_output_channels" | "technicaloutputchannels" => {
+            "output_channels" | "outputchannels" => {
                 Some(self.technical_output_channels.to_string())
             }
-            "technical_output_bitrate_kbps" | "technicaloutputbitratekbps" => {
+            "output_bitrate_kbps" | "outputbitratekbps" => {
                 Some(self.technical_output_bitrate_kbps.to_string())
             }
-            "technical_resampled" | "technicalresampled" => {
-                Some(self.technical_resampled.to_string())
-            }
-            "technical_resample_from_hz" | "technicalresamplefromhz" => {
+            "resampled" => Some(self.technical_resampled.to_string()),
+            "resample_from_hz" | "resamplefromhz" => {
                 Some(self.technical_resample_from_hz.to_string())
             }
-            "technical_resample_to_hz" | "technicalresampletohz" => {
-                Some(self.technical_resample_to_hz.to_string())
-            }
-            "technical_channel_transform" | "technicalchanneltransform" => {
+            "resample_to_hz" | "resampletohz" => Some(self.technical_resample_to_hz.to_string()),
+            "channel_transform" | "channeltransform" => {
                 Some(self.technical_channel_transform.to_string())
             }
-            "technical_channel_from_channels" | "technicalchannelfromchannels" => {
+            "channel_from_channels" | "channelfromchannels" => {
                 Some(self.technical_channel_from_channels.to_string())
             }
-            "technical_channel_to_channels" | "technicalchanneltochannels" => {
+            "channel_to_channels" | "channeltochannels" => {
                 Some(self.technical_channel_to_channels.to_string())
             }
-            "technical_dithered" | "technicaldithered" => Some(self.technical_dithered.to_string()),
+            "dithered" => Some(self.technical_dithered.to_string()),
             "album_art" | "disc" | "disc_number" | "duration" => Some(String::new()),
             _ => None,
         }
@@ -1298,7 +1280,7 @@ mod tests {
     #[test]
     fn test_status_placeholders_render_from_context() {
         let rendered = render_template(
-            "{selection_summary}|{technical_source_provider}|{technical_format}|{technical_bit_depth}|{technical_sample_rate_hz}|{technical_channels}|{technical_bitrate_kbps}|{technical_playback_mode}",
+            "{selection_summary}|{source_provider}|{format}|{bit_depth}|{sample_rate_hz}|{channels}|{bitrate_kbps}|{playback_mode}",
             &context("Song").with_status_fields(StatusTemplateFields {
                 selection_summary: "2 tracks selected",
                 technical_source_provider: "opensubsonic",
@@ -1351,7 +1333,7 @@ mod tests {
     #[test]
     fn test_if_condition_renders_else_branch_with_empty_true_branch() {
         let rendered = render_template(
-            "[if=technical_output_format][else]{technical_playback_mode}[/if]",
+            "[if=output_format][else]{playback_mode}[/if]",
             &context("Song").with_status_fields(StatusTemplateFields {
                 technical_playback_mode: "Direct play",
                 technical_output_format: "",
