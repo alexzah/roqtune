@@ -7038,6 +7038,47 @@ impl UiManager {
         });
     }
 
+    fn sync_playlist_selection_to_ui(&self) {
+        let view_indices = self.view_indices.clone();
+        let track_count = self.track_paths.len();
+        let selected_set: HashSet<usize> = self.selected_indices.iter().copied().collect();
+        let selected_view_index = self
+            .selected_indices
+            .last()
+            .and_then(|source_index| self.map_source_to_view_index(*source_index))
+            .map(|index| index as i32)
+            .unwrap_or(-1);
+        let _ = self.ui.upgrade_in_event_loop(move |ui| {
+            let current_model = ui.get_track_model();
+            let Some(vec_model) = current_model
+                .as_any()
+                .downcast_ref::<VecModel<TrackRowData>>()
+            else {
+                return;
+            };
+            let source_indices: Vec<usize> = if view_indices.is_empty() {
+                (0..track_count).collect()
+            } else {
+                view_indices
+            };
+            if vec_model.row_count() != source_indices.len() {
+                return;
+            }
+            for (row_index, source_index) in source_indices.into_iter().enumerate() {
+                let Some(mut row_data) = vec_model.row_data(row_index) else {
+                    continue;
+                };
+                let selected = selected_set.contains(&source_index);
+                if row_data.selected == selected {
+                    continue;
+                }
+                row_data.selected = selected;
+                vec_model.set_row_data(row_index, row_data);
+            }
+            ui.set_selected_track_index(selected_view_index);
+        });
+    }
+
     fn prefetch_playlist_cover_art_window(&mut self, first_row: usize, row_count: usize) {
         if !self.is_album_art_column_visible() {
             return;
@@ -12727,7 +12768,7 @@ impl UiManager {
                             // Selection interaction is the most recent user change, so it
                             // temporarily owns metadata/cover-art display until playback changes.
                             self.update_display_for_active_collection();
-                            self.rebuild_track_model();
+                            self.sync_playlist_selection_to_ui();
                         }
                         protocol::Message::Playlist(protocol::PlaylistMessage::OnPointerDown {
                             index,
