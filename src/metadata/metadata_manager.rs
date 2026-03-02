@@ -435,15 +435,41 @@ impl MetadataManager {
 
     fn collect_embedded_image_slots(
         track_path: &Path,
-        source_tag: Option<&Tag>,
+        primary_tag: Option<&Tag>,
+        tags: &[Tag],
+        fallback_cover_art: Option<&[u8]>,
     ) -> (usize, Vec<PropertiesEmbeddedImageSlot>) {
-        let mut first_picture_by_code: HashMap<u8, &Picture> = HashMap::new();
+        let mut first_picture_by_code: HashMap<u8, Picture> = HashMap::new();
         let mut embedded_count = 0usize;
-        if let Some(tag) = source_tag {
+        if let Some(tag) = primary_tag {
             for picture in tag.pictures() {
                 embedded_count = embedded_count.saturating_add(1);
                 let picture_code = picture.pic_type().as_u8();
-                first_picture_by_code.entry(picture_code).or_insert(picture);
+                first_picture_by_code
+                    .entry(picture_code)
+                    .or_insert_with(|| picture.clone());
+            }
+        }
+        for tag in tags {
+            if primary_tag.is_some_and(|primary| std::ptr::eq(primary, tag)) {
+                continue;
+            }
+            for picture in tag.pictures() {
+                embedded_count = embedded_count.saturating_add(1);
+                let picture_code = picture.pic_type().as_u8();
+                first_picture_by_code
+                    .entry(picture_code)
+                    .or_insert_with(|| picture.clone());
+            }
+        }
+        if embedded_count == 0 {
+            if let Some(bytes) = fallback_cover_art {
+                let mut cursor = Cursor::new(bytes);
+                if let Ok(mut picture) = Picture::from_reader(&mut cursor) {
+                    picture.set_pic_type(PictureType::Other);
+                    first_picture_by_code.insert(PictureType::Other.as_u8(), picture);
+                    embedded_count = 1;
+                }
             }
         }
 
@@ -624,9 +650,19 @@ impl MetadataManager {
                 None
             }
         };
-        let source_tag = tagged_file
+        let fallback_tagged_file = if tagged_file.is_none() {
+            metadata_tags::read_tagged_file_for_metadata(path, true)
+        } else {
+            None
+        };
+        let tag_payload = tagged_file.as_ref().or(fallback_tagged_file.as_ref());
+        let source_tag = tag_payload
             .as_ref()
             .and_then(|tagged| tagged.primary_tag().or_else(|| tagged.first_tag()));
+        let source_tags = tag_payload
+            .as_ref()
+            .map(|tagged| tagged.tags())
+            .unwrap_or(&[]);
         let common_fallback = metadata_tags::read_common_track_metadata(path);
 
         let title = Self::get_common_value_from_sources(
@@ -701,8 +737,18 @@ impl MetadataManager {
             })
             .collect::<Vec<_>>();
 
-        let (embedded_artwork_count, embedded_image_slots) =
-            Self::collect_embedded_image_slots(path, source_tag);
+        let has_any_tag_pictures = source_tags.iter().any(|tag| !tag.pictures().is_empty());
+        let fallback_cover_art = if has_any_tag_pictures {
+            None
+        } else {
+            metadata_tags::read_embedded_cover_art(path)
+        };
+        let (embedded_artwork_count, embedded_image_slots) = Self::collect_embedded_image_slots(
+            path,
+            source_tag,
+            source_tags,
+            fallback_cover_art.as_deref(),
+        );
         let file_size_bytes = std::fs::metadata(path).map(|meta| meta.len()).unwrap_or(0);
         let modified_unix_secs = Self::format_modified_local_text(path);
         let extension = path
@@ -729,6 +775,8 @@ impl MetadataManager {
                 properties.overall_bitrate().unwrap_or(0),
                 format!("{:?}", tagged.primary_tag_type()),
             )
+        } else if let Some(tagged) = tag_payload {
+            (0, 0, 0, 0, 0, 0, format!("{:?}", tagged.primary_tag_type()))
         } else {
             (0, 0, 0, 0, 0, 0, "Unknown".to_string())
         };
@@ -1129,7 +1177,7 @@ mod tests {
         write_file(&track_path, b"audio");
 
         let (embedded_count, slots) =
-            MetadataManager::collect_embedded_image_slots(&track_path, None);
+            MetadataManager::collect_embedded_image_slots(&track_path, None, &[], None);
         assert_eq!(embedded_count, 0);
         assert_eq!(slots.len(), super::COMMON_IMAGE_SLOT_SPECS.len());
 
@@ -1156,9 +1204,10 @@ mod tests {
         tag.push_picture(make_picture(PictureType::CoverFront));
         tag.push_picture(make_picture(PictureType::Conductor));
         tag.push_picture(make_picture(PictureType::ScreenCapture));
+        let tags = vec![tag];
 
         let (embedded_count, slots) =
-            MetadataManager::collect_embedded_image_slots(&track_path, Some(&tag));
+            MetadataManager::collect_embedded_image_slots(&track_path, None, &tags, None);
         assert_eq!(embedded_count, 3);
 
         let common_len = super::COMMON_IMAGE_SLOT_SPECS.len();
@@ -1182,6 +1231,27 @@ mod tests {
             .collect();
         assert_eq!(extra_codes, vec![9, 16]);
         assert!(slots.iter().skip(common_len).all(|slot| !slot.common));
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_collect_embedded_image_slots_uses_secondary_tags_when_primary_has_no_pictures() {
+        let dir = make_temp_dir("slots-secondary");
+        let track_path = dir.join("track.mp3");
+        write_file(&track_path, b"audio");
+
+        let primary = Tag::new(TagType::Ape);
+        let mut secondary = Tag::new(TagType::Id3v2);
+        secondary.push_picture(make_picture(PictureType::CoverFront));
+        let tags = vec![primary, secondary];
+
+        let (embedded_count, slots) =
+            MetadataManager::collect_embedded_image_slots(&track_path, Some(&tags[0]), &tags, None);
+        assert_eq!(embedded_count, 1);
+        assert!(slots
+            .iter()
+            .any(|slot| slot.picture_type_code == 3 && slot.details != "No embedded image"));
 
         let _ = fs::remove_dir_all(&dir);
     }
@@ -1232,6 +1302,26 @@ mod tests {
         assert_eq!(prepared[1].1.pic_type().as_u8(), 4);
         assert_eq!(prepared[0].1.data(), front_b_bytes.as_slice());
         assert_eq!(prepared[1].1.data(), back_bytes.as_slice());
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_collect_embedded_image_slots_uses_fallback_cover_when_no_tags_have_pictures() {
+        let dir = make_temp_dir("slots-fallback-cover");
+        let track_path = dir.join("track.mp3");
+        write_file(&track_path, b"audio");
+
+        let (embedded_count, slots) = MetadataManager::collect_embedded_image_slots(
+            &track_path,
+            None,
+            &[],
+            Some(tiny_png_bytes()),
+        );
+        assert_eq!(embedded_count, 1);
+        assert!(slots
+            .iter()
+            .any(|slot| slot.picture_type_code == 0 && slot.details != "No embedded image"));
 
         let _ = fs::remove_dir_all(&dir);
     }
