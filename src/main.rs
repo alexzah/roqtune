@@ -531,49 +531,6 @@ pub(crate) fn sanitize_config(config: Config) -> Config {
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::sanitize_config;
-    use crate::{config::Config, layout::LayoutPanelKind};
-
-    #[test]
-    fn sanitize_config_migrates_legacy_status_bar_leaf_to_status_text_panel_instance() {
-        let mut config = Config::default();
-        config.ui.layout.root = crate::layout::LayoutNode::Leaf {
-            id: "legacy-status".to_string(),
-            panel: LayoutPanelKind::StatusBar,
-        };
-        config.ui.layout.metadata_viewer_panel_instances.clear();
-
-        let sanitized = sanitize_config(config);
-        match sanitized.ui.layout.root {
-            crate::layout::LayoutNode::Leaf { panel, .. } => {
-                assert_eq!(panel, LayoutPanelKind::MetadataViewer)
-            }
-            _ => panic!("expected leaf root after sanitize"),
-        }
-        let instance = sanitized
-            .ui
-            .layout
-            .metadata_viewer_panel_instances
-            .iter()
-            .find(|instance| instance.leaf_id == "legacy-status")
-            .expect("migrated status leaf should have metadata-viewer instance");
-        assert_eq!(
-            instance.display_priority,
-            crate::layout::ViewerPanelDisplayPriority::NowPlayingOnly
-        );
-        assert_eq!(
-            instance.metadata_source,
-            crate::layout::ViewerPanelMetadataSource::StatusBar
-        );
-        assert_eq!(
-            instance.metadata_text_format,
-            crate::text_template::DEFAULT_STATUS_PANEL_TEMPLATE
-        );
-    }
-}
-
 /// Applies a config snapshot to Slint UI properties and models.
 pub(crate) fn apply_theme_scheme_filter_to_ui(
     ui: &AppWindow,
@@ -883,4 +840,47 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     initialize_logging();
     install_panic_hook();
     app_runtime::AppRuntime::build()?.run()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::sanitize_config;
+    use crate::{config::Config, layout::LayoutPanelKind};
+
+    #[test]
+    fn sanitize_config_migrates_legacy_status_bar_leaf_to_status_text_panel_instance() {
+        let mut config = Config::default();
+        config.ui.layout.root = crate::layout::LayoutNode::Leaf {
+            id: "legacy-status".to_string(),
+            panel: LayoutPanelKind::StatusBar,
+        };
+        config.ui.layout.metadata_viewer_panel_instances.clear();
+
+        let sanitized = sanitize_config(config);
+        match sanitized.ui.layout.root {
+            crate::layout::LayoutNode::Leaf { panel, .. } => {
+                assert_eq!(panel, LayoutPanelKind::MetadataViewer)
+            }
+            _ => panic!("expected leaf root after sanitize"),
+        }
+        let instance = sanitized
+            .ui
+            .layout
+            .metadata_viewer_panel_instances
+            .iter()
+            .find(|instance| instance.leaf_id == "legacy-status")
+            .expect("migrated status leaf should have metadata-viewer instance");
+        assert_eq!(
+            instance.display_priority,
+            crate::layout::ViewerPanelDisplayPriority::NowPlayingOnly
+        );
+        assert_eq!(
+            instance.metadata_source,
+            crate::layout::ViewerPanelMetadataSource::StatusBar
+        );
+        assert_eq!(
+            instance.metadata_text_format,
+            crate::text_template::DEFAULT_STATUS_PANEL_TEMPLATE
+        );
+    }
 }
