@@ -680,6 +680,16 @@ impl PathImageCache {
         evicted
     }
 
+    fn remove(&mut self, path: &Path) -> bool {
+        let removed = self.entries.remove(path);
+        if let Some((_, bytes, _)) = removed {
+            self.total_bytes = self.total_bytes.saturating_sub(bytes);
+            self.lru.retain(|candidate| candidate != path);
+            return true;
+        }
+        false
+    }
+
     fn clear(&mut self) {
         self.entries.clear();
         self.lru.clear();
@@ -1060,6 +1070,15 @@ impl UiManager {
     fn clear_failed_cover_path(path: &Path) {
         TRACK_ROW_COVER_ART_FAILED_PATHS.with(|failed| {
             failed.borrow_mut().remove(path);
+        });
+    }
+
+    fn evict_cover_art_memory_cache_path(path: &Path) {
+        TRACK_ROW_COVER_ART_IMAGE_CACHE.with(|cache| {
+            cache.borrow_mut().remove(path);
+        });
+        TRACK_ROW_ARTIST_IMAGE_CACHE.with(|cache| {
+            cache.borrow_mut().remove(path);
         });
     }
 
@@ -6236,6 +6255,95 @@ impl UiManager {
         self.sync_properties_dialog_ui();
     }
 
+    fn apply_staged_overwrite_to_slot(
+        slot: &mut protocol::PropertiesEmbeddedImageSlot,
+        source_path: &Path,
+    ) {
+        let source_name = source_path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or("selected image");
+        slot.image_path = Some(source_path.to_path_buf());
+        slot.has_image = true;
+        slot.details = format!("Staged replacement: {source_name}");
+    }
+
+    fn apply_staged_delete_to_slot(slot: &mut protocol::PropertiesEmbeddedImageSlot) {
+        slot.image_path = None;
+        slot.has_image = false;
+        slot.details = "Staged for deletion".to_string();
+    }
+
+    fn invalidate_cover_art_caches_for_track(&mut self, track_path: &Path) {
+        let mut cached_paths_to_evict: HashSet<PathBuf> = HashSet::new();
+
+        if let Some(candidates) = Self::embedded_art_cache_candidates(track_path) {
+            for candidate in candidates {
+                Self::clear_failed_cover_path(candidate.as_path());
+                Self::delete_cached_image_file_if_managed(candidate.as_path());
+                cached_paths_to_evict.insert(candidate);
+            }
+        }
+
+        let library_keys: Vec<PathBuf> = self
+            .library_cover_art_paths
+            .keys()
+            .filter(|path| Self::is_equivalent_track_path(path.as_path(), track_path))
+            .cloned()
+            .collect();
+        for key in library_keys {
+            if let Some(Some(cached_path)) = self.library_cover_art_paths.remove(&key) {
+                cached_paths_to_evict.insert(cached_path);
+            }
+        }
+
+        let matching_indices: Vec<usize> = self
+            .track_paths
+            .iter()
+            .enumerate()
+            .filter_map(|(index, candidate)| {
+                Self::is_equivalent_track_path(candidate.as_path(), track_path).then_some(index)
+            })
+            .collect();
+        for index in matching_indices {
+            if let Some(Some(cached_path)) = self.track_cover_art_paths.get(index).cloned() {
+                cached_paths_to_evict.insert(cached_path);
+            }
+            if let Some(slot) = self.track_cover_art_paths.get_mut(index) {
+                *slot = None;
+            }
+        }
+
+        self.track_cover_art_missing_tracks
+            .retain(|path| !Self::is_equivalent_track_path(path.as_path(), track_path));
+
+        if let Some(parent) = track_path.parent() {
+            self.folder_cover_art_paths.remove(parent);
+        }
+
+        if self
+            .last_cover_art_lookup_path
+            .as_ref()
+            .is_some_and(|path| Self::is_equivalent_track_path(path.as_path(), track_path))
+        {
+            self.last_cover_art_lookup_path = None;
+        }
+        if self
+            .pending_cover_art_lookup_track_path
+            .as_ref()
+            .is_some_and(|path| Self::is_equivalent_track_path(path.as_path(), track_path))
+        {
+            self.pending_cover_art_lookup_track_path = None;
+            self.pending_cover_art_lookup_request_id = 0;
+        }
+
+        for cached_path in cached_paths_to_evict {
+            Self::clear_failed_cover_path(cached_path.as_path());
+            Self::evict_cover_art_memory_cache_path(cached_path.as_path());
+            Self::delete_cached_image_file_if_managed(cached_path.as_path());
+        }
+    }
+
     fn stage_properties_image_overwrite(&mut self, slot_index: usize, source_path: PathBuf) {
         if self.properties_busy || !self.properties_dialog_visible {
             return;
@@ -6263,6 +6371,7 @@ impl UiManager {
             return;
         };
         let picture_type_code = slot.picture_type_code;
+        let staged_source_path = source_path.clone();
         if let Some(existing) = self
             .properties_image_overwrites
             .iter_mut()
@@ -6280,8 +6389,11 @@ impl UiManager {
         }
         self.properties_image_deletes
             .retain(|delete| delete.picture_type_code != picture_type_code);
+        if let Some(slot) = self.properties_embedded_image_slots.get_mut(slot_index) {
+            Self::apply_staged_overwrite_to_slot(slot, staged_source_path.as_path());
+        }
         self.properties_error_text.clear();
-        self.sync_properties_edit_state_ui();
+        self.sync_properties_dialog_ui();
     }
 
     fn stage_properties_image_delete(&mut self, slot_index: usize) {
@@ -6302,6 +6414,9 @@ impl UiManager {
         let Some(slot) = self.properties_embedded_image_slots.get(slot_index) else {
             return;
         };
+        if !slot.has_image {
+            return;
+        }
         let picture_type_code = slot.picture_type_code;
         self.properties_image_overwrites
             .retain(|overwrite| overwrite.picture_type_code != picture_type_code);
@@ -6315,8 +6430,11 @@ impl UiManager {
             self.properties_image_deletes
                 .sort_by_key(|delete| delete.picture_type_code);
         }
+        if let Some(slot) = self.properties_embedded_image_slots.get_mut(slot_index) {
+            Self::apply_staged_delete_to_slot(slot);
+        }
         self.properties_error_text.clear();
-        self.sync_properties_edit_state_ui();
+        self.sync_properties_dialog_ui();
     }
 
     fn open_properties_external_image_location(&mut self, index: usize) {
@@ -6593,6 +6711,7 @@ impl UiManager {
         self.properties_pending_request_id = None;
         self.properties_pending_request_kind = None;
         self.properties_busy = false;
+        self.invalidate_cover_art_caches_for_track(path.as_path());
 
         let playlist_changed = self.apply_summary_to_playlist_metadata(&path, &summary);
         let library_changed = self.apply_summary_to_library_entries(&path, &summary);
@@ -6613,6 +6732,11 @@ impl UiManager {
 
         self.refresh_playing_track_metadata();
         self.update_display_for_active_collection();
+        if self.collection_mode == COLLECTION_MODE_PLAYLIST {
+            self.refresh_visible_playlist_cover_art_rows();
+        } else if self.collection_mode == COLLECTION_MODE_LIBRARY {
+            self.refresh_visible_library_cover_art_rows();
+        }
         self.sync_app_window_title_to_ui();
 
         if let Some(warning) = db_sync_warning {
@@ -13577,6 +13701,41 @@ mod tests {
         assert!(!UiManager::properties_external_image_index_valid(3, 3));
     }
 
+    #[test]
+    fn test_apply_staged_overwrite_to_slot_updates_preview_and_flags() {
+        let mut slot = protocol::PropertiesEmbeddedImageSlot {
+            picture_type_code: 3,
+            label: "Front Cover".to_string(),
+            image_path: None,
+            has_image: false,
+            details: "No embedded image".to_string(),
+            common: true,
+        };
+        let source = PathBuf::from("/tmp/new-front.jpg");
+        UiManager::apply_staged_overwrite_to_slot(&mut slot, source.as_path());
+
+        assert_eq!(slot.image_path, Some(source));
+        assert!(slot.has_image);
+        assert_eq!(slot.details, "Staged replacement: new-front.jpg");
+    }
+
+    #[test]
+    fn test_apply_staged_delete_to_slot_marks_slot_empty() {
+        let mut slot = protocol::PropertiesEmbeddedImageSlot {
+            picture_type_code: 4,
+            label: "Back Cover".to_string(),
+            image_path: Some(PathBuf::from("/tmp/old-back.jpg")),
+            has_image: true,
+            details: "600x600 | JPEG".to_string(),
+            common: true,
+        };
+        UiManager::apply_staged_delete_to_slot(&mut slot);
+
+        assert_eq!(slot.image_path, None);
+        assert!(!slot.has_image);
+        assert_eq!(slot.details, "Staged for deletion");
+    }
+
     fn make_library_track_in_album(
         id: &str,
         title: &str,
@@ -13939,6 +14098,17 @@ mod tests {
         assert_eq!(evicted, 1);
         assert!(cache.entries.contains_key(&protected));
         assert!(!cache.entries.contains_key(&evictable));
+    }
+
+    #[test]
+    fn test_path_image_cache_remove_removes_entry_and_updates_lru() {
+        let mut cache = PathImageCache::default();
+        let path = PathBuf::from("/tmp/remove-me.png");
+        cache.insert(path.clone(), slint::Image::default(), 64, 1024);
+        assert!(cache.remove(path.as_path()));
+        assert!(!cache.entries.contains_key(&path));
+        assert!(!cache.lru.contains(&path));
+        assert_eq!(cache.total_bytes, 0);
     }
 
     #[test]
