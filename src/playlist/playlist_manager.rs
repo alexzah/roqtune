@@ -369,7 +369,7 @@ impl PlaylistManager {
             .get_next_track_index(current_index)
             .and_then(|index| self.find_playable_index_from(index, true));
         if let Some(next_index) = next_index {
-            self.play_playback_track(next_index, true);
+            self.play_playback_track(next_index, true, false);
             return;
         }
         self.stop_playback_after_unavailable();
@@ -687,10 +687,15 @@ impl PlaylistManager {
         playback_playlist.force_re_randomize_shuffle();
         self.playback_playlist = playback_playlist;
         self.playback_queue_source = Some(request.source);
-        self.play_playback_track(clamped_start, true);
+        self.play_playback_track(clamped_start, true, false);
     }
 
-    fn play_playback_track(&mut self, index: usize, forward: bool) {
+    fn play_playback_track(
+        &mut self,
+        index: usize,
+        forward: bool,
+        allow_requested_start_handoff: bool,
+    ) {
         let Some(index) = self.find_playable_index_from(index, forward) else {
             self.stop_playback_after_unavailable();
             return;
@@ -726,14 +731,42 @@ impl PlaylistManager {
             return;
         }
 
-        if self.cached_track_ids.get(&track_id) == Some(&0) {
+        let is_cached_at_track_start = self.cached_track_ids.get(&track_id) == Some(&0);
+        let is_requested_at_track_start = self.requested_track_offsets.get(&track_id) == Some(&0);
+        if is_cached_at_track_start {
             // Already cached at start, tell player to switch immediately
+            debug!(
+                "PlaylistManager: PlayTrackById immediate cached handoff track={} allow_requested_start_handoff={}",
+                track_id, allow_requested_start_handoff
+            );
             let _ = self.bus_producer.send(protocol::Message::Playback(
                 protocol::PlaybackMessage::PlayTrackById(track_id),
             ));
             self.pending_start_track_id = Some(self.playback_playlist.get_track_id(index));
+        } else if allow_requested_start_handoff
+            && self.playback_route == protocol::PlaybackRoute::Local
+            && is_requested_at_track_start
+        {
+            // Natural transitions should preserve buffered audio so the player can overlap
+            // into already-requested next-track data (crossfade/gapless path).
+            debug!(
+                "PlaylistManager: PlayTrackById requested-start handoff track={} preserving buffer for crossfade/gapless",
+                track_id
+            );
+            let _ = self.bus_producer.send(protocol::Message::Playback(
+                protocol::PlaybackMessage::PlayTrackById(track_id),
+            ));
+            self.cache_tracks(false);
         } else {
             // Not cached or cached at wrong offset, start decoding process
+            debug!(
+                "PlaylistManager: PlayTrackById requires decode restart track={} cached_at_start={} requested_at_start={} allow_requested_start_handoff={} route={:?}",
+                track_id,
+                is_cached_at_track_start,
+                is_requested_at_track_start,
+                allow_requested_start_handoff,
+                self.playback_route
+            );
             self.stop_decoding();
             self.cached_track_ids.clear();
             self.fully_cached_track_ids.clear();
@@ -1858,7 +1891,7 @@ impl PlaylistManager {
                             if let Some(next_index) =
                                 self.playback_playlist.get_next_track_index(current_index)
                             {
-                                self.play_playback_track(next_index, true);
+                                self.play_playback_track(next_index, true, false);
                             }
                         }
                     }
@@ -1873,7 +1906,7 @@ impl PlaylistManager {
                                 .playback_playlist
                                 .get_previous_track_index(current_index)
                             {
-                                self.play_playback_track(prev_index, false);
+                                self.play_playback_track(prev_index, false, false);
                             }
                         }
                     }
@@ -1915,7 +1948,7 @@ impl PlaylistManager {
                                         self.fully_cached_track_ids.remove(&replay_track_id);
                                         self.requested_track_offsets.remove(&replay_track_id);
                                     }
-                                    self.play_playback_track(index, true);
+                                    self.play_playback_track(index, true, true);
                                     advanced = true;
                                 }
                             }
@@ -2782,16 +2815,44 @@ impl PlaylistManager {
                                     protocol::PlaybackMessage::ClearPlayerCache,
                                 ));
 
-                                // 3. Restart decoding at offset
+                                // 3. Restart decoding at offset and enqueue upcoming tracks so
+                                // crossfade handoff has next-track data available.
+                                let mut decode_tracks = vec![TrackIdentifier {
+                                    id: track_id.clone(),
+                                    path: track_path,
+                                    play_immediately: true,
+                                    start_offset_ms: target_ms,
+                                }];
+                                let mut requested_offsets = vec![(track_id, target_ms)];
+                                let mut current_index = playing_idx;
+                                while decode_tracks.len() < self.max_num_cached_tracks {
+                                    let Some(next_index) =
+                                        self.playback_playlist.get_next_track_index(current_index)
+                                    else {
+                                        break;
+                                    };
+                                    if next_index == current_index
+                                        || next_index >= self.playback_playlist.num_tracks()
+                                    {
+                                        break;
+                                    }
+                                    let next_track = self.playback_playlist.get_track(next_index);
+                                    decode_tracks.push(TrackIdentifier {
+                                        id: next_track.id.clone(),
+                                        path: next_track.path.clone(),
+                                        play_immediately: false,
+                                        start_offset_ms: 0,
+                                    });
+                                    requested_offsets.push((next_track.id.clone(), 0));
+                                    current_index = next_index;
+                                }
                                 let _ = self.bus_producer.send(protocol::Message::Audio(
-                                    protocol::AudioMessage::DecodeTracks(vec![TrackIdentifier {
-                                        id: track_id.clone(),
-                                        path: track_path,
-                                        play_immediately: true,
-                                        start_offset_ms: target_ms,
-                                    }]),
+                                    protocol::AudioMessage::DecodeTracks(decode_tracks),
                                 ));
-                                self.requested_track_offsets.insert(track_id, target_ms);
+                                for (requested_id, requested_offset) in requested_offsets {
+                                    self.requested_track_offsets
+                                        .insert(requested_id, requested_offset);
+                                }
                             }
                         }
                     }
@@ -4772,6 +4833,65 @@ mod tests {
                     ..
                 })
             )
+        });
+    }
+
+    #[test]
+    fn test_seek_prefetches_next_track_for_crossfade_handoff() {
+        let timeout = Duration::from_secs(1);
+        let mut harness = PlaylistManagerHarness::new();
+        let (id0, _) = harness.add_track("pm_seek_prefetch_0");
+        let (id1, _) = harness.add_track("pm_seek_prefetch_1");
+        harness.drain_messages();
+
+        harness.start_playlist_queue_from_ids(&[id0.clone(), id1.clone()], 0);
+        let _ = wait_for_message(&mut harness.receiver, timeout, |message| {
+            matches!(
+                message,
+                protocol::Message::Playlist(protocol::PlaylistMessage::PlaylistIndicesChanged {
+                    is_playing: true,
+                    playing_index: Some(0),
+                    ..
+                })
+            )
+        });
+        harness.drain_messages();
+
+        harness.send(protocol::Message::Playback(
+            protocol::PlaybackMessage::TechnicalMetadataChanged(protocol::TechnicalMetadata {
+                format: "MP3".to_string(),
+                bitrate_kbps: 320,
+                sample_rate_hz: 44_100,
+                channel_count: 2,
+                duration_ms: 120_000,
+                bits_per_sample: 16,
+            }),
+        ));
+        harness.send(protocol::Message::Playback(
+            protocol::PlaybackMessage::Seek(0.5),
+        ));
+
+        let _ = wait_for_message(&mut harness.receiver, timeout, |message| {
+            matches!(
+                message,
+                protocol::Message::Audio(protocol::AudioMessage::StopDecoding)
+            )
+        });
+        let _ = wait_for_message(&mut harness.receiver, timeout, |message| {
+            matches!(
+                message,
+                protocol::Message::Playback(protocol::PlaybackMessage::ClearPlayerCache)
+            )
+        });
+        let _ = wait_for_message(&mut harness.receiver, timeout, |message| match message {
+            protocol::Message::Audio(protocol::AudioMessage::DecodeTracks(tracks)) => {
+                tracks.iter().any(|track| {
+                    track.id == id0 && track.play_immediately && track.start_offset_ms == 60_000
+                }) && tracks.iter().any(|track| {
+                    track.id == id1 && !track.play_immediately && track.start_offset_ms == 0
+                })
+            }
+            _ => false,
         });
     }
 
