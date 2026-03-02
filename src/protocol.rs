@@ -545,6 +545,9 @@ pub enum MetadataMessage {
         slot_index: usize,
         source_path: PathBuf,
     },
+    StagePropertiesImageDelete {
+        slot_index: usize,
+    },
     OpenPropertiesExternalImageLocation {
         index: usize,
     },
@@ -573,6 +576,7 @@ pub enum MetadataMessage {
         path: PathBuf,
         metadata_fields: Vec<MetadataEditorField>,
         image_overwrites: Vec<PropertiesImageOverwrite>,
+        image_deletes: Vec<PropertiesImageDelete>,
     },
     TrackPropertiesSaved {
         request_id: u64,
@@ -1036,6 +1040,10 @@ pub struct PropertiesEmbeddedImageSlot {
 pub struct PropertiesExternalImage {
     /// Base filename (for display).
     pub file_name: String,
+    /// User-visible image-type label resolved from filename conventions.
+    pub label: String,
+    /// Supplemental read-only details.
+    pub details: String,
     /// Full filesystem path.
     pub path: PathBuf,
 }
@@ -1047,6 +1055,13 @@ pub struct PropertiesImageOverwrite {
     pub picture_type_code: u8,
     /// Source image path selected by the user.
     pub source_path: PathBuf,
+}
+
+/// One staged embedded-artwork delete to apply on save.
+#[derive(Debug, Clone)]
+pub struct PropertiesImageDelete {
+    /// Target picture type code based on ID3 APIC numbering.
+    pub picture_type_code: u8,
 }
 
 /// Metadata summary used to refresh playlist/library views after save.

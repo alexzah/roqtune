@@ -212,6 +212,18 @@ pub fn register_bus_forwarding_callbacks(ui: &AppWindow, context: BusForwardingC
     });
 
     let bus_sender_clone = bus_sender.clone();
+    ui.on_properties_delete_embedded_image(move |index| {
+        if index < 0 {
+            return;
+        }
+        let _ = bus_sender_clone.send(Message::Metadata(
+            MetadataMessage::StagePropertiesImageDelete {
+                slot_index: index as usize,
+            },
+        ));
+    });
+
+    let bus_sender_clone = bus_sender.clone();
     ui.on_properties_open_external_image_location(move |index| {
         if index < 0 {
             return;

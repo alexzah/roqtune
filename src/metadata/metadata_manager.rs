@@ -23,8 +23,8 @@ use crate::image_pipeline::{self, ManagedImageKind};
 use crate::metadata_tags;
 use crate::protocol::{
     Message, MetadataEditorField, MetadataMessage, PropertiesEmbeddedImageSlot,
-    PropertiesExternalImage, PropertiesImageOverwrite, PropertiesMediaInfoField,
-    TrackMetadataSummary,
+    PropertiesExternalImage, PropertiesImageDelete, PropertiesImageOverwrite,
+    PropertiesMediaInfoField, TrackMetadataSummary,
 };
 
 const COMMON_FIELD_SPECS: [(&str, &str); 17] = [
@@ -379,6 +379,42 @@ impl MetadataManager {
         parts.join(" | ")
     }
 
+    fn external_image_type_label(file_name: &str) -> String {
+        let stem = Path::new(file_name)
+            .file_stem()
+            .and_then(|value| value.to_str())
+            .unwrap_or("")
+            .trim();
+        if stem.eq_ignore_ascii_case("cover") || stem.eq_ignore_ascii_case("front") {
+            "Front Cover".to_string()
+        } else if stem.eq_ignore_ascii_case("folder") {
+            "Folder Cover".to_string()
+        } else if stem.eq_ignore_ascii_case("album") {
+            "Album Cover".to_string()
+        } else if stem.eq_ignore_ascii_case("art") {
+            "Artwork".to_string()
+        } else if stem.is_empty() {
+            "External Image".to_string()
+        } else {
+            format!("{stem} (external)")
+        }
+    }
+
+    fn external_image_details(path: &Path, file_name: &str) -> String {
+        let bytes = match std::fs::read(path) {
+            Ok(bytes) => bytes,
+            Err(_) => return format!("{file_name} | Unreadable"),
+        };
+        let mut cursor = Cursor::new(bytes.as_slice());
+        if let Ok(picture) = Picture::from_reader(&mut cursor) {
+            return format!("{file_name} | {}", Self::picture_details(&picture));
+        }
+        if let Ok((width, height)) = image::image_dimensions(path) {
+            return format!("{file_name} | {width}x{height} | {} bytes", bytes.len());
+        }
+        format!("{file_name} | {} bytes", bytes.len())
+    }
+
     fn image_preview_cache_path(
         track_path: &Path,
         picture_type_code: u8,
@@ -727,13 +763,18 @@ impl MetadataManager {
         let external_image_paths = Self::external_cover_image_paths(path);
         let external_images = external_image_paths
             .iter()
-            .map(|external_path| PropertiesExternalImage {
-                file_name: external_path
+            .map(|external_path| {
+                let file_name = external_path
                     .file_name()
                     .and_then(|name| name.to_str())
                     .unwrap_or("")
-                    .to_string(),
-                path: external_path.clone(),
+                    .to_string();
+                PropertiesExternalImage {
+                    label: Self::external_image_type_label(&file_name),
+                    details: Self::external_image_details(external_path, &file_name),
+                    file_name,
+                    path: external_path.clone(),
+                }
             })
             .collect::<Vec<_>>();
 
@@ -922,11 +963,22 @@ impl MetadataManager {
         Ok(prepared)
     }
 
+    fn prepare_image_deletes(image_deletes: &[PropertiesImageDelete]) -> Vec<u8> {
+        let mut delete_codes: Vec<u8> = image_deletes
+            .iter()
+            .map(|delete| delete.picture_type_code)
+            .collect();
+        delete_codes.sort_unstable();
+        delete_codes.dedup();
+        delete_codes
+    }
+
     fn save_track_properties(
         &self,
         path: &Path,
         metadata_fields: &[MetadataEditorField],
         image_overwrites: &[PropertiesImageOverwrite],
+        image_deletes: &[PropertiesImageDelete],
     ) -> Result<(TrackMetadataSummary, Option<String>), String> {
         if !path.is_file() {
             return Err(format!(
@@ -935,6 +987,7 @@ impl MetadataManager {
             ));
         }
         let prepared_image_overwrites = Self::prepare_image_overwrites(image_overwrites)?;
+        let prepared_image_deletes = Self::prepare_image_deletes(image_deletes);
         let mut tagged_file =
             read_from_path(path).map_err(|error| format!("Failed to read tags: {error}"))?;
         let tag_type = tagged_file.primary_tag_type();
@@ -973,6 +1026,11 @@ impl MetadataManager {
             } else {
                 tag.insert_text(item_key, field.value.trim().to_string());
             }
+        }
+
+        for picture_type_code in prepared_image_deletes {
+            let picture_type = PictureType::from_u8(picture_type_code);
+            tag.remove_picture_type(picture_type);
         }
 
         for (picture_type_code, picture) in prepared_image_overwrites {
@@ -1061,13 +1119,19 @@ impl MetadataManager {
                     path,
                     metadata_fields,
                     image_overwrites,
+                    image_deletes,
                 })) => {
                     debug!(
                         "MetadataManager: saving properties request_id={} path={}",
                         request_id,
                         path.display()
                     );
-                    match self.save_track_properties(&path, &metadata_fields, &image_overwrites) {
+                    match self.save_track_properties(
+                        &path,
+                        &metadata_fields,
+                        &image_overwrites,
+                        &image_deletes,
+                    ) {
                         Ok((summary, db_sync_warning)) => {
                             let _ = self.bus_producer.send(Message::Metadata(
                                 MetadataMessage::TrackPropertiesSaved {
@@ -1105,7 +1169,7 @@ impl MetadataManager {
 #[cfg(test)]
 mod tests {
     use super::MetadataManager;
-    use crate::protocol::PropertiesImageOverwrite;
+    use crate::protocol::{PropertiesImageDelete, PropertiesImageOverwrite};
     use lofty::picture::{Picture, PictureType};
     use lofty::tag::{Tag, TagType};
     use std::fs;
@@ -1304,6 +1368,28 @@ mod tests {
         assert_eq!(prepared[1].1.data(), back_bytes.as_slice());
 
         let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_prepare_image_deletes_deduplicates_and_sorts() {
+        let deletes = vec![
+            PropertiesImageDelete {
+                picture_type_code: 8,
+            },
+            PropertiesImageDelete {
+                picture_type_code: 3,
+            },
+            PropertiesImageDelete {
+                picture_type_code: 8,
+            },
+            PropertiesImageDelete {
+                picture_type_code: 4,
+            },
+        ];
+        assert_eq!(
+            MetadataManager::prepare_image_deletes(&deletes),
+            vec![3, 4, 8]
+        );
     }
 
     #[test]

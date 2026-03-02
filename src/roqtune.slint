@@ -5250,14 +5250,14 @@ export component AppWindow inherits Window {
                                     horizontal-stretch: 1;
                                     spacing: 3px;
                                     Text {
-                                        text: external.file_name;
+                                        text: external.label;
                                         color: AppPalette.text-primary;
                                         font-size: 12px;
                                         font-weight: 700;
                                         overflow: elide;
                                     }
                                     Text {
-                                        text: external.path;
+                                        text: external.details;
                                         color: AppPalette.text-secondary;
                                         font-size: 11px;
                                         wrap: word-wrap;
@@ -5265,8 +5265,10 @@ export component AppWindow inherits Window {
                                     }
                                 }
 
-                                Button {
-                                    text: "Open file location";
+                                PlayerButton {
+                                    icon-source: AppIcons.folder;
+                                    icon-text: "";
+                                    tooltip-text: "Open external image location";
                                     clicked => {
                                         root.properties_open_external_image_location(index);
                                     }
@@ -5339,11 +5341,25 @@ export component AppWindow inherits Window {
                                     }
                                 }
 
-                                Button {
-                                    text: "Replace...";
-                                    enabled: !root.properties_busy;
-                                    clicked => {
-                                        root.properties_replace_embedded_image(index);
+                                HorizontalLayout {
+                                    spacing: 4px;
+                                    PlayerButton {
+                                        icon-source: AppIcons.pencil-down;
+                                        icon-text: "";
+                                        tooltip-text: "Replace embedded image";
+                                        enabled: !root.properties_busy;
+                                        clicked => {
+                                            root.properties_replace_embedded_image(index);
+                                        }
+                                    }
+                                    PlayerButton {
+                                        icon-source: AppIcons.trash;
+                                        icon-text: "";
+                                        tooltip-text: "Delete embedded image";
+                                        enabled: !root.properties_busy;
+                                        clicked => {
+                                            root.properties_delete_embedded_image(index);
+                                        }
                                     }
                                 }
                             }
@@ -7173,6 +7189,7 @@ export component AppWindow inherits Window {
     callback properties_select_tab(int);
     callback properties_field_edited(int, string);
     callback properties_replace_embedded_image(int);
+    callback properties_delete_embedded_image(int);
     callback properties_open_external_image_location(int);
     callback properties_save();
     callback properties_cancel();

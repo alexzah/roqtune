@@ -247,6 +247,7 @@ pub struct UiManager {
     properties_embedded_image_slots: Vec<protocol::PropertiesEmbeddedImageSlot>,
     properties_external_images: Vec<protocol::PropertiesExternalImage>,
     properties_image_overwrites: Vec<protocol::PropertiesImageOverwrite>,
+    properties_image_deletes: Vec<protocol::PropertiesImageDelete>,
     properties_dialog_visible: bool,
     properties_busy: bool,
     properties_error_text: String,
@@ -2029,6 +2030,7 @@ impl UiManager {
             properties_embedded_image_slots: Vec::new(),
             properties_external_images: Vec::new(),
             properties_image_overwrites: Vec::new(),
+            properties_image_deletes: Vec::new(),
             properties_dialog_visible: false,
             properties_busy: false,
             properties_error_text: String::new(),
@@ -6038,6 +6040,8 @@ impl UiManager {
                 let has_preview = preview.is_some();
                 UiPropertiesExternalImage {
                     file_name: item.file_name.as_str().into(),
+                    label: item.label.as_str().into(),
+                    details: item.details.as_str().into(),
                     path: item.path.to_string_lossy().as_ref().into(),
                     preview: preview.unwrap_or_default(),
                     has_preview,
@@ -6067,9 +6071,11 @@ impl UiManager {
         current_fields: &[protocol::MetadataEditorField],
         original_fields: &[protocol::MetadataEditorField],
         image_overwrites: &[protocol::PropertiesImageOverwrite],
+        image_deletes: &[protocol::PropertiesImageDelete],
     ) -> bool {
         Self::properties_metadata_fields_changed(current_fields, original_fields)
             || !image_overwrites.is_empty()
+            || !image_deletes.is_empty()
     }
 
     fn properties_external_image_index_valid(index: usize, len: usize) -> bool {
@@ -6081,6 +6087,7 @@ impl UiManager {
             &self.properties_fields,
             &self.properties_original_fields,
             &self.properties_image_overwrites,
+            &self.properties_image_deletes,
         )
     }
 
@@ -6148,6 +6155,7 @@ impl UiManager {
         self.properties_embedded_image_slots.clear();
         self.properties_external_images.clear();
         self.properties_image_overwrites.clear();
+        self.properties_image_deletes.clear();
         self.properties_dialog_visible = false;
         self.properties_busy = false;
         self.properties_error_text.clear();
@@ -6167,6 +6175,7 @@ impl UiManager {
         self.properties_embedded_image_slots.clear();
         self.properties_external_images.clear();
         self.properties_image_overwrites.clear();
+        self.properties_image_deletes.clear();
         self.properties_error_text.clear();
         self.properties_dialog_visible = true;
         self.properties_busy = true;
@@ -6263,6 +6272,43 @@ impl UiManager {
             self.properties_image_overwrites
                 .sort_by_key(|overwrite| overwrite.picture_type_code);
         }
+        self.properties_image_deletes
+            .retain(|delete| delete.picture_type_code != picture_type_code);
+        self.properties_error_text.clear();
+        self.sync_properties_edit_state_ui();
+    }
+
+    fn stage_properties_image_delete(&mut self, slot_index: usize) {
+        if self.properties_busy || !self.properties_dialog_visible {
+            return;
+        }
+        let Some(path) = self.properties_target_path.as_ref() else {
+            return;
+        };
+        if !path.is_file() {
+            self.properties_error_text = format!(
+                "Track path is not a local file; image delete is unavailable: {}",
+                path.display()
+            );
+            self.sync_properties_edit_state_ui();
+            return;
+        }
+        let Some(slot) = self.properties_embedded_image_slots.get(slot_index) else {
+            return;
+        };
+        let picture_type_code = slot.picture_type_code;
+        self.properties_image_overwrites
+            .retain(|overwrite| overwrite.picture_type_code != picture_type_code);
+        if !self
+            .properties_image_deletes
+            .iter()
+            .any(|delete| delete.picture_type_code == picture_type_code)
+        {
+            self.properties_image_deletes
+                .push(protocol::PropertiesImageDelete { picture_type_code });
+            self.properties_image_deletes
+                .sort_by_key(|delete| delete.picture_type_code);
+        }
         self.properties_error_text.clear();
         self.sync_properties_edit_state_ui();
     }
@@ -6321,12 +6367,14 @@ impl UiManager {
         self.properties_error_text.clear();
         let metadata_fields = self.properties_fields.clone();
         let image_overwrites = self.properties_image_overwrites.clone();
+        let image_deletes = self.properties_image_deletes.clone();
         let _ = self.bus_sender.send(protocol::Message::Metadata(
             protocol::MetadataMessage::SaveTrackProperties {
                 request_id,
                 path,
                 metadata_fields,
                 image_overwrites,
+                image_deletes,
             },
         ));
         self.sync_properties_dialog_ui();
@@ -6378,6 +6426,7 @@ impl UiManager {
         self.properties_embedded_image_slots = embedded_image_slots;
         self.properties_external_images = external_images;
         self.properties_image_overwrites.clear();
+        self.properties_image_deletes.clear();
         self.sync_properties_dialog_ui();
     }
 
@@ -12364,6 +12413,11 @@ impl UiManager {
                             } => {
                                 self.stage_properties_image_overwrite(slot_index, source_path);
                             }
+                            protocol::MetadataMessage::StagePropertiesImageDelete {
+                                slot_index,
+                            } => {
+                                self.stage_properties_image_delete(slot_index);
+                            }
                             protocol::MetadataMessage::OpenPropertiesExternalImageLocation {
                                 index,
                             } => {
@@ -13466,10 +13520,12 @@ mod tests {
         let original = vec![make_properties_field("common:title", "Track")];
         let current = original.clone();
         let no_overwrites: Vec<protocol::PropertiesImageOverwrite> = Vec::new();
+        let no_deletes: Vec<protocol::PropertiesImageDelete> = Vec::new();
         assert!(!UiManager::properties_has_changes_from_parts(
             &current,
             &original,
-            &no_overwrites
+            &no_overwrites,
+            &no_deletes
         ));
 
         let image_overwrites = vec![protocol::PropertiesImageOverwrite {
@@ -13479,14 +13535,26 @@ mod tests {
         assert!(UiManager::properties_has_changes_from_parts(
             &current,
             &original,
-            &image_overwrites
+            &image_overwrites,
+            &no_deletes
+        ));
+
+        let image_deletes = vec![protocol::PropertiesImageDelete {
+            picture_type_code: 3,
+        }];
+        assert!(UiManager::properties_has_changes_from_parts(
+            &current,
+            &original,
+            &no_overwrites,
+            &image_deletes
         ));
 
         let edited = vec![make_properties_field("common:title", "Updated")];
         assert!(UiManager::properties_has_changes_from_parts(
             &edited,
             &original,
-            &no_overwrites
+            &no_overwrites,
+            &no_deletes
         ));
     }
 
