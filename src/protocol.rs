@@ -1029,6 +1029,8 @@ pub struct PropertiesEmbeddedImageSlot {
     pub label: String,
     /// Cached local image path used for preview, when available.
     pub image_path: Option<PathBuf>,
+    /// Whether an embedded image exists for this slot.
+    pub has_image: bool,
     /// Supplemental read-only details.
     pub details: String,
     /// Whether this slot is part of the built-in common set.

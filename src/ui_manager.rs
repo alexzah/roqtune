@@ -6013,6 +6013,7 @@ impl UiManager {
                     details: slot.details.as_str().into(),
                     preview: preview.unwrap_or_default(),
                     has_preview,
+                    has_image: slot.has_image,
                     common: slot.common,
                 }
             })
@@ -6109,6 +6110,10 @@ impl UiManager {
         let embedded_image_slots = self.properties_embedded_image_slots.clone();
         let external_images = self.properties_external_images.clone();
         let save_enabled = self.properties_save_enabled();
+        let track_is_local_file = self
+            .properties_target_path
+            .as_ref()
+            .is_some_and(|path| path.is_file());
         let _ = self.ui.upgrade_in_event_loop(move |ui| {
             let fields = Self::to_ui_metadata_fields(&fields);
             let media_info_fields = Self::to_ui_properties_media_info_fields(&media_info_fields);
@@ -6131,6 +6136,7 @@ impl UiManager {
                 external_images,
             ))));
             ui.set_properties_save_enabled(save_enabled);
+            ui.set_properties_track_is_local_file(track_is_local_file);
         });
     }
 

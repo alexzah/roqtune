@@ -524,6 +524,7 @@ impl MetadataManager {
                         picture_type_code,
                         picture,
                     ),
+                    has_image: true,
                     details: Self::picture_details(picture),
                     common: true,
                 });
@@ -532,6 +533,7 @@ impl MetadataManager {
                     picture_type_code,
                     label: label.to_string(),
                     image_path: None,
+                    has_image: false,
                     details: "No embedded image".to_string(),
                     common: true,
                 });
@@ -552,6 +554,7 @@ impl MetadataManager {
                 picture_type_code,
                 label: Self::picture_type_label_from_code(picture_type_code),
                 image_path: Self::image_preview_cache_path(track_path, picture_type_code, picture),
+                has_image: true,
                 details: Self::picture_details(picture),
                 common: false,
             });

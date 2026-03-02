@@ -486,6 +486,7 @@ export component AppWindow inherits Window {
     in-out property <[PropertiesEmbeddedImageSlot]> properties_embedded_image_slots: [];
     in-out property <[PropertiesExternalImage]> properties_external_images: [];
     in-out property <bool> properties_save_enabled: false;
+    in-out property <bool> properties_track_is_local_file: false;
     in-out property <[string]> settings_library_folders: [];
     in-out property <int> settings_library_selected_folder_index: -1;
     in-out property <bool> settings_library_online_metadata_enabled: false;
@@ -5344,7 +5345,7 @@ export component AppWindow inherits Window {
                                 HorizontalLayout {
                                     spacing: 4px;
                                     PlayerButton {
-                                        icon-source: AppIcons.pencil-down;
+                                        icon-source: AppIcons.pencil;
                                         icon-text: "";
                                         tooltip-text: "Replace embedded image";
                                         enabled: !root.properties_busy;
@@ -5352,10 +5353,11 @@ export component AppWindow inherits Window {
                                             root.properties_replace_embedded_image(index);
                                         }
                                     }
-                                    PlayerButton {
+                                    if slot.has_image && root.properties_track_is_local_file : PlayerButton {
                                         icon-source: AppIcons.trash;
                                         icon-text: "";
                                         tooltip-text: "Delete embedded image";
+                                        is-danger: true;
                                         enabled: !root.properties_busy;
                                         clicked => {
                                             root.properties_delete_embedded_image(index);
