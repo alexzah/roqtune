@@ -387,6 +387,8 @@ pub(crate) fn register_settings_ui_callbacks(ui: &AppWindow, shared_state: &AppS
               dither_on_bitdepth_reduce,
               downmix_higher_channel_tracks,
               cast_allow_transcode_fallback,
+              crossfade_enabled,
+              crossfade_duration_seconds,
               color_scheme_id,
               custom_color_values| {
             let previous_config = {
@@ -513,6 +515,10 @@ pub(crate) fn register_settings_ui_callbacks(ui: &AppWindow, shared_state: &AppS
                     volume: previous_config.ui.volume,
                     playback_order: previous_config.ui.playback_order,
                     repeat_mode: previous_config.ui.repeat_mode,
+                    crossfade_enabled,
+                    crossfade_duration_seconds: crossfade_duration_seconds
+                        .round()
+                        .clamp(1.0, 12.0) as u32,
                 },
                 library: previous_config.library.clone(),
                 buffering: previous_config.buffering.clone(),

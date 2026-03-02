@@ -5722,6 +5722,118 @@ export component AppWindow inherits Window {
 
                             Rectangle {
                                 height: 32px;
+                                background: settings-crossfade-toggle-ta.has-hover
+                                    ? AppPalette.control-hover-bg
+                                    : transparent;
+                                border-radius: 4px;
+                                HorizontalLayout {
+                                    spacing: 10px;
+                                    crossfade-label-host := Rectangle {
+                                        width: settings-dialog-panel.label_column_width + 24px;
+                                        height: parent.height;
+                                        background: transparent;
+                                        Text {
+                                            text: "Crossfade";
+                                            color: root.theme_text_primary;
+                                            font-size: 12px;
+                                            vertical-alignment: center;
+                                            horizontal-alignment: left;
+                                        }
+                                        settings-crossfade-label-tooltip-ta := TooltipHoverArea {
+                                            tooltip-text: "Blend the end of the current track into the start of the next track.";
+                                            tooltip_hover_changed(is-hovered, tooltip, anchor-x-px, anchor-y-px) => {
+                                                root.tooltip_hover_changed(is-hovered, tooltip, anchor-x-px, anchor-y-px);
+                                            }
+                                        }
+                                    }
+                                    Rectangle {
+                                        width: settings-dialog-panel.control_max_width;
+                                        height: parent.height;
+                                        background: transparent;
+                                        settings-crossfade-toggle := Switch {
+                                            x: parent.width - self.width - 8px;
+                                            y: (parent.height - self.height) / 2;
+                                            width: 36px;
+                                            text: "";
+                                            checked <=> root.settings_crossfade_enabled;
+                                        }
+                                    }
+                                    Rectangle { horizontal-stretch: 1; }
+                                }
+                                settings-crossfade-toggle-ta := TouchArea {
+                                    changed has-hover => {
+                                        root.tooltip_hover_changed(
+                                            self.has-hover,
+                                            "Blend the end of the current track into the start of the next track.",
+                                            floor((crossfade-label-host.absolute-position.x + crossfade-label-host.width / 2) / 1px),
+                                            floor((crossfade-label-host.absolute-position.y + crossfade-label-host.height) / 1px)
+                                        );
+                                    }
+                                    clicked => {
+                                        settings-crossfade-toggle.checked = !settings-crossfade-toggle.checked;
+                                    }
+                                }
+                            }
+
+                            if root.settings_crossfade_enabled : Rectangle {
+                                height: 38px;
+                                background: settings-crossfade-duration-label-tooltip-ta.has-hover
+                                    ? AppPalette.control-hover-bg
+                                    : transparent;
+                                border-radius: 4px;
+                                HorizontalLayout {
+                                    spacing: 10px;
+                                    crossfade-duration-label-host := Rectangle {
+                                        width: settings-dialog-panel.label_column_width + 24px;
+                                        height: parent.height;
+                                        background: transparent;
+                                        Text {
+                                            text: "Crossfade Duration";
+                                            color: root.theme_text_primary;
+                                            font-size: 12px;
+                                            vertical-alignment: center;
+                                            horizontal-alignment: left;
+                                        }
+                                        settings-crossfade-duration-label-tooltip-ta := TooltipHoverArea {
+                                            tooltip-text: "Length of overlap between tracks (1 to 12 seconds).";
+                                            tooltip_hover_changed(is-hovered, tooltip, anchor-x-px, anchor-y-px) => {
+                                                root.tooltip_hover_changed(is-hovered, tooltip, anchor-x-px, anchor-y-px);
+                                            }
+                                        }
+                                    }
+                                    Rectangle {
+                                        width: settings-dialog-panel.control_max_width;
+                                        height: parent.height;
+                                        background: transparent;
+                                        Slider {
+                                            x: 8px;
+                                            y: (parent.height - self.height) / 2;
+                                            width: parent.width - 64px;
+                                            minimum: 1;
+                                            maximum: 12;
+                                            value: root.settings_crossfade_duration_seconds;
+                                            changed(next-value) => {
+                                                root.settings_crossfade_duration_seconds = min(12.0, max(1.0, next-value));
+                                            }
+                                        }
+                                        Text {
+                                            width: 48px;
+                                            x: parent.width - self.width;
+                                            y: 0px;
+                                            height: parent.height;
+                                            color: root.theme_text_secondary;
+                                            font-size: 12px;
+                                            horizontal-alignment: right;
+                                            vertical-alignment: center;
+                                            text: floor(root.settings_crossfade_duration_seconds + 0.5) + "s";
+                                        }
+                                    }
+                                    Rectangle { horizontal-stretch: 1; }
+                                }
+                            }
+
+                            Rectangle {
+                                height: 32px;
                                 background: settings-cast-fallback-toggle-ta.has-hover
                                     ? AppPalette.control-hover-bg
                                     : transparent;
@@ -6201,6 +6313,8 @@ export component AppWindow inherits Window {
                             root.settings_dither_on_bitdepth_reduce,
                             root.settings_downmix_higher_channel_tracks,
                             root.settings_cast_allow_transcode_fallback,
+                            root.settings_crossfade_enabled,
+                            root.settings_crossfade_duration_seconds,
                             root.settings_selected_color_scheme_id,
                             root.settings_custom_color_values
                         );
@@ -6659,6 +6773,8 @@ export component AppWindow inherits Window {
     in-out property <bool> settings_dither_on_bitdepth_reduce: true;
     in-out property <bool> settings_downmix_higher_channel_tracks: true;
     in-out property <bool> settings_cast_allow_transcode_fallback: false;
+    in-out property <bool> settings_crossfade_enabled: false;
+    in-out property <float> settings_crossfade_duration_seconds: 6;
     in-out property <bool> settings_subsonic_enabled: false;
     in-out property <string> settings_subsonic_endpoint: "";
     in-out property <string> settings_subsonic_username: "";
@@ -6859,5 +6975,5 @@ export component AppWindow inherits Window {
     callback settings_refresh_custom_color_previews();
     callback settings_reset_custom_colors();
     callback settings_theme_mode_filter_changed(bool);
-    callback apply_settings(int, int, int, int, string, string, string, string, bool, bool, bool, int, int, bool, bool, bool, string, [string]);
+    callback apply_settings(int, int, int, int, string, string, string, string, bool, bool, bool, int, int, bool, bool, bool, bool, float, string, [string]);
 }

@@ -387,6 +387,7 @@ pub(crate) fn sanitize_config(config: Config) -> Config {
         &sanitized_layout.album_art_viewer_panel_instances,
     );
     let clamped_volume = config.ui.volume.clamp(0.0, 1.0);
+    let clamped_crossfade_duration_seconds = config.ui.crossfade_duration_seconds.clamp(1, 12);
     let mut clamped_album_art_column_min_width_px = config
         .ui
         .playlist_album_art_column_min_width_px
@@ -505,6 +506,8 @@ pub(crate) fn sanitize_config(config: Config) -> Config {
             volume: clamped_volume,
             playback_order: config.ui.playback_order,
             repeat_mode: config.ui.repeat_mode,
+            crossfade_enabled: config.ui.crossfade_enabled,
+            crossfade_duration_seconds: clamped_crossfade_duration_seconds,
         },
         library: LibraryConfig {
             folders: sanitized_library_folders,
@@ -696,6 +699,8 @@ pub(crate) fn apply_config_to_ui(
     ui.set_settings_show_layout_edit_tutorial(config.ui.show_layout_edit_intro);
     ui.set_settings_show_tooltips(config.ui.show_tooltips);
     ui.set_settings_auto_scroll_to_playing_track(config.ui.auto_scroll_to_playing_track);
+    ui.set_settings_crossfade_enabled(config.ui.crossfade_enabled);
+    ui.set_settings_crossfade_duration_seconds(config.ui.crossfade_duration_seconds as f32);
     let resolved_theme = resolve_theme(&config.ui.layout);
     let parse_theme_color = |value: &str| {
         parse_slint_color(value).unwrap_or_else(|| slint::Color::from_rgb_u8(0, 0, 0))
@@ -882,5 +887,17 @@ mod tests {
             instance.metadata_text_format,
             crate::text_template::DEFAULT_STATUS_PANEL_TEMPLATE
         );
+    }
+
+    #[test]
+    fn sanitize_config_clamps_crossfade_duration_seconds() {
+        let mut config = Config::default();
+        config.ui.crossfade_duration_seconds = 0;
+        let sanitized_low = sanitize_config(config.clone());
+        assert_eq!(sanitized_low.ui.crossfade_duration_seconds, 1);
+
+        config.ui.crossfade_duration_seconds = 99;
+        let sanitized_high = sanitize_config(config);
+        assert_eq!(sanitized_high.ui.crossfade_duration_seconds, 12);
     }
 }

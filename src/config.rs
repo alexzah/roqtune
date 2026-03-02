@@ -103,6 +103,10 @@ pub struct UiConfig {
     pub playback_order: UiPlaybackOrder,
     #[serde(default)]
     pub repeat_mode: UiRepeatMode,
+    #[serde(default)]
+    pub crossfade_enabled: bool,
+    #[serde(default = "default_crossfade_duration_seconds")]
+    pub crossfade_duration_seconds: u32,
 }
 
 /// Persisted playback-order preference for startup restore.
@@ -255,6 +259,8 @@ impl Default for UiConfig {
             volume: default_volume(),
             playback_order: UiPlaybackOrder::Default,
             repeat_mode: UiRepeatMode::Off,
+            crossfade_enabled: false,
+            crossfade_duration_seconds: default_crossfade_duration_seconds(),
         }
     }
 }
@@ -314,6 +320,10 @@ fn default_window_width() -> u32 {
 
 fn default_window_height() -> u32 {
     650
+}
+
+fn default_crossfade_duration_seconds() -> u32 {
+    6
 }
 
 fn default_volume() -> f32 {
@@ -469,6 +479,8 @@ mod tests {
         assert!((config.ui.volume - 1.0).abs() < f32::EPSILON);
         assert_eq!(config.ui.playback_order, UiPlaybackOrder::Default);
         assert_eq!(config.ui.repeat_mode, UiRepeatMode::Off);
+        assert!(!config.ui.crossfade_enabled);
+        assert_eq!(config.ui.crossfade_duration_seconds, 6);
         assert!(config.library.folders.is_empty());
         assert!(!config.library.online_metadata_enabled);
         assert!(config.library.online_metadata_prompt_pending);
@@ -524,6 +536,8 @@ decoder_request_chunk_ms = 1500
         assert!((parsed.ui.volume - 1.0).abs() < f32::EPSILON);
         assert_eq!(parsed.ui.playback_order, UiPlaybackOrder::Default);
         assert_eq!(parsed.ui.repeat_mode, UiRepeatMode::Off);
+        assert!(!parsed.ui.crossfade_enabled);
+        assert_eq!(parsed.ui.crossfade_duration_seconds, 6);
         assert!(parsed.library.folders.is_empty());
         assert!(!parsed.library.online_metadata_enabled);
         assert!(parsed.library.online_metadata_prompt_pending);
@@ -595,6 +609,8 @@ decoder_request_chunk_ms = 1500
         assert!(!config_text.contains("playlist_album_art_column_max_width_px"));
         assert!(config_text.contains("playback_order"));
         assert!(config_text.contains("repeat_mode"));
+        assert!(config_text.contains("crossfade_enabled"));
+        assert!(config_text.contains("crossfade_duration_seconds"));
         assert!(config_text.contains("allow_transcode_fallback"));
     }
 
@@ -671,6 +687,11 @@ decoder_request_chunk_ms = 1500
         assert!((parsed.ui.volume - defaults.ui.volume).abs() < f32::EPSILON);
         assert_eq!(parsed.ui.playback_order, defaults.ui.playback_order);
         assert_eq!(parsed.ui.repeat_mode, defaults.ui.repeat_mode);
+        assert_eq!(parsed.ui.crossfade_enabled, defaults.ui.crossfade_enabled);
+        assert_eq!(
+            parsed.ui.crossfade_duration_seconds,
+            defaults.ui.crossfade_duration_seconds
+        );
         assert_eq!(parsed.library.folders, defaults.library.folders);
         assert_eq!(
             parsed.library.online_metadata_enabled,

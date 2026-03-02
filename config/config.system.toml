@@ -70,6 +70,12 @@ playback_order = "default"
 # Options: "off", "playlist", "track"
 repeat_mode = "off"
 
+# Crossfade playback transitions between tracks.
+crossfade_enabled = false
+
+# Crossfade duration in seconds (1..12).
+crossfade_duration_seconds = 6
+
 [library]
 # Folders recursively scanned into Library mode.
 # Leave empty if you only use playlists.

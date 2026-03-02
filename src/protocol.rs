@@ -1041,6 +1041,8 @@ pub struct UiConfigDelta {
     pub volume: Option<f32>,
     pub playback_order: Option<UiPlaybackOrder>,
     pub repeat_mode: Option<UiRepeatMode>,
+    pub crossfade_enabled: Option<bool>,
+    pub crossfade_duration_seconds: Option<u32>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq)]

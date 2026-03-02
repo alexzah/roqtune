@@ -38,6 +38,20 @@ enum AudioQueueEntry {
     TrackFooter(String),
 }
 
+#[derive(Debug, Clone)]
+struct ActiveCrossfade {
+    from_position: usize,
+    to_position: usize,
+    duration_samples: usize,
+    mixed_samples: usize,
+}
+
+#[derive(Debug, Default)]
+struct CrossfadePlaybackState {
+    early_finished_track_id: Option<String>,
+    active: Option<ActiveCrossfade>,
+}
+
 /// Cached queue index span for one decoded track.
 #[derive(Debug, Clone)]
 struct TrackIndex {
@@ -81,6 +95,9 @@ pub struct AudioPlayer {
     buffer_low_watermark_ms: Arc<AtomicUsize>,
     buffer_target_ms: Arc<AtomicUsize>,
     buffer_request_interval_ms: Arc<AtomicUsize>,
+    crossfade_enabled: Arc<AtomicBool>,
+    crossfade_duration_seconds: Arc<AtomicUsize>,
+    crossfade_state: Arc<Mutex<CrossfadePlaybackState>>,
 
     // Setup cache
     cached_track_indices: Arc<Mutex<HashMap<String, TrackIndex>>>,
@@ -354,12 +371,114 @@ impl AudioPlayer {
         cursor
     }
 
+    fn crossfade_duration_samples(
+        sample_rate: usize,
+        channels: usize,
+        duration_seconds: usize,
+    ) -> usize {
+        Self::milliseconds_to_samples(
+            duration_seconds.saturating_mul(1_000),
+            sample_rate,
+            channels,
+        )
+        .max(1)
+    }
+
+    fn estimate_remaining_samples_for_track(
+        track: &TrackIndex,
+        current_position: usize,
+        sample_rate: usize,
+        channels: usize,
+    ) -> usize {
+        if let Some(end) = track.end {
+            return end.saturating_sub(current_position);
+        }
+        if track.technical_metadata.duration_ms == 0 {
+            return 0;
+        }
+        let elapsed_samples = current_position.saturating_sub(track.start);
+        let sr = sample_rate.max(1) as u128;
+        let ch = channels.max(1) as u128;
+        let elapsed_ms_from_samples = ((elapsed_samples as u128).saturating_mul(1_000)
+            / sr.saturating_mul(ch))
+        .min(u64::MAX as u128) as u64;
+        let elapsed_ms = track
+            .start_offset_ms
+            .saturating_add(elapsed_ms_from_samples);
+        let remaining_ms = track
+            .technical_metadata
+            .duration_ms
+            .saturating_sub(elapsed_ms)
+            .min(usize::MAX as u64) as usize;
+        Self::milliseconds_to_samples(remaining_ms, sample_rate, channels)
+    }
+
+    fn next_sample_from_queue_cursor(
+        queue: &VecDeque<AudioQueueEntry>,
+        cursor: &mut Option<(usize, usize)>,
+        position: &mut usize,
+        bus_sender: &Sender<Message>,
+        emit_track_started: bool,
+        emit_track_finished: bool,
+        stop_after_footer: bool,
+    ) -> Option<f32> {
+        loop {
+            let (entry_index, entry_offset) = (*cursor)?;
+            let entry = queue.get(entry_index)?;
+            match entry {
+                AudioQueueEntry::Samples(samples) => {
+                    if entry_offset >= samples.len() {
+                        *cursor = Some((entry_index + 1, 0));
+                        continue;
+                    }
+                    let sample = samples[entry_offset];
+                    *position = position.saturating_add(1);
+                    if entry_offset + 1 < samples.len() {
+                        *cursor = Some((entry_index, entry_offset + 1));
+                    } else {
+                        *cursor = Some((entry_index + 1, 0));
+                    }
+                    return Some(sample);
+                }
+                AudioQueueEntry::TrackHeader(TrackHeader {
+                    id,
+                    start_offset_ms,
+                }) => {
+                    if emit_track_started {
+                        let _ = bus_sender.send(Message::Playback(PlaybackMessage::TrackStarted(
+                            TrackStarted {
+                                id: id.clone(),
+                                start_offset_ms: *start_offset_ms,
+                            },
+                        )));
+                    }
+                    *position = position.saturating_add(1);
+                    *cursor = Some((entry_index + 1, 0));
+                }
+                AudioQueueEntry::TrackFooter(id) => {
+                    if emit_track_finished {
+                        let _ = bus_sender.send(Message::Playback(PlaybackMessage::TrackFinished(
+                            id.clone(),
+                        )));
+                    }
+                    *position = position.saturating_add(1);
+                    *cursor = Some((entry_index + 1, 0));
+                    if stop_after_footer {
+                        return None;
+                    }
+                }
+            }
+        }
+    }
+
     /// Creates an audio player, initializes output device, and spawns helper threads.
     pub fn new(
         bus_receiver: Receiver<Message>,
         bus_sender: Sender<Message>,
         initial_output_config: OutputConfig,
         initial_buffering_config: BufferingConfig,
+        initial_crossfade_enabled: bool,
+        initial_crossfade_duration_seconds: u32,
     ) -> Self {
         let is_playing = Arc::new(AtomicBool::new(false));
         let current_track_position = Arc::new(AtomicUsize::new(0));
@@ -387,6 +506,11 @@ impl AudioPlayer {
         let buffer_request_interval_ms = Arc::new(AtomicUsize::new(
             initial_buffering_config.player_request_interval_ms.max(20) as usize,
         ));
+        let crossfade_enabled = Arc::new(AtomicBool::new(initial_crossfade_enabled));
+        let crossfade_duration_seconds = Arc::new(AtomicUsize::new(
+            initial_crossfade_duration_seconds.clamp(1, 12) as usize,
+        ));
+        let crossfade_state = Arc::new(Mutex::new(CrossfadePlaybackState::default()));
 
         let mut player = Self {
             bus_receiver,
@@ -419,6 +543,9 @@ impl AudioPlayer {
             buffer_low_watermark_ms: buffer_low_watermark_ms.clone(),
             buffer_target_ms: buffer_target_ms.clone(),
             buffer_request_interval_ms: buffer_request_interval_ms.clone(),
+            crossfade_enabled: crossfade_enabled.clone(),
+            crossfade_duration_seconds: crossfade_duration_seconds.clone(),
+            crossfade_state: crossfade_state.clone(),
             last_output_signature: None,
             playback_session_active: false,
             staged_output_delta: crate::protocol::OutputConfigDelta::default(),
@@ -490,6 +617,8 @@ impl AudioPlayer {
         let buffer_low_watermark_ms_clone = buffer_low_watermark_ms.clone();
         let buffer_target_ms_clone = buffer_target_ms.clone();
         let buffer_request_interval_ms_clone = buffer_request_interval_ms.clone();
+        let crossfade_enabled_clone = crossfade_enabled.clone();
+        let crossfade_duration_seconds_clone = crossfade_duration_seconds.clone();
         thread::spawn(move || loop {
             let interval_ms = buffer_request_interval_ms_clone
                 .load(Ordering::Relaxed)
@@ -507,6 +636,19 @@ impl AudioPlayer {
                 Self::milliseconds_to_samples(low_watermark_ms, sample_rate, channels);
             let target_buffer_samples =
                 Self::milliseconds_to_samples(target_buffer_ms, sample_rate, channels);
+            let crossfade_enabled = crossfade_enabled_clone.load(Ordering::Relaxed);
+            let crossfade_duration_seconds = crossfade_duration_seconds_clone
+                .load(Ordering::Relaxed)
+                .clamp(1, 12);
+            let (effective_low_watermark_samples, effective_target_buffer_samples) =
+                Self::effective_decode_buffer_thresholds(
+                    low_watermark_samples,
+                    target_buffer_samples,
+                    sample_rate,
+                    channels,
+                    crossfade_enabled,
+                    crossfade_duration_seconds,
+                );
 
             let has_active_track = current_metadata_clone
                 .lock()
@@ -522,8 +664,8 @@ impl AudioPlayer {
                 has_active_track,
                 has_bootstrap_pending,
                 buffered_samples,
-                low_watermark_samples,
-                target_buffer_samples,
+                effective_low_watermark_samples,
+                effective_target_buffer_samples,
             );
             if requested_samples > 0 {
                 let _ = bus_sender_clone.send(Message::Audio(AudioMessage::RequestDecodeChunk {
@@ -570,6 +712,30 @@ impl AudioPlayer {
         )
     }
 
+    fn effective_decode_buffer_thresholds(
+        low_watermark_samples: usize,
+        target_buffer_samples: usize,
+        sample_rate: usize,
+        channels: usize,
+        crossfade_enabled: bool,
+        crossfade_duration_seconds: usize,
+    ) -> (usize, usize) {
+        let low = low_watermark_samples;
+        let target = target_buffer_samples.max(low);
+        if !crossfade_enabled || sample_rate == 0 || channels == 0 {
+            return (low, target);
+        }
+        // Keep at least one extra second beyond the fade window so the next track header/samples
+        // are available before we reach the overlap boundary.
+        let guard_samples = Self::milliseconds_to_samples(1_000, sample_rate, channels);
+        let crossfade_window_samples =
+            Self::crossfade_duration_samples(sample_rate, channels, crossfade_duration_seconds);
+        let crossfade_low = crossfade_window_samples.saturating_add(guard_samples);
+        let effective_low = low.max(crossfade_low);
+        let effective_target = target.max(effective_low.saturating_add(guard_samples));
+        (effective_low, effective_target)
+    }
+
     #[allow(clippy::too_many_arguments)]
     fn render_output_buffer<T, F>(
         output_buffer: &mut [T],
@@ -581,6 +747,11 @@ impl AudioPlayer {
         current_track_id: &Arc<Mutex<String>>,
         bus_sender: &Sender<Message>,
         current_track_position: &Arc<AtomicUsize>,
+        crossfade_enabled: &Arc<AtomicBool>,
+        crossfade_duration_seconds: &Arc<AtomicUsize>,
+        crossfade_state: &Arc<Mutex<CrossfadePlaybackState>>,
+        output_sample_rate: usize,
+        output_channels: usize,
         volume: &Arc<AtomicU32>,
         mut convert_sample: F,
         silence_value: T,
@@ -606,6 +777,132 @@ impl AudioPlayer {
             queue_start,
             input_current_position,
         );
+        let mut cleanup_position = input_current_position;
+        let mut active_crossfade = {
+            let mut state = crossfade_state.lock().unwrap();
+            state.active.take()
+        };
+
+        let mut deferred_crossfade_without_progress = false;
+        if let Some(mut transition) = active_crossfade.take() {
+            let mixed_before = transition.mixed_samples;
+            if transition.mixed_samples == 0 {
+                debug!(
+                    "AudioPlayer: Crossfade render begin from_pos={} to_pos={} duration_samples={} queue_start={} current_pos={}",
+                    transition.from_position,
+                    transition.to_position,
+                    transition.duration_samples,
+                    queue_start,
+                    input_current_position
+                );
+            }
+            let mut from_cursor = Self::locate_position_in_queue(
+                &sample_queue_unlocked,
+                queue_start,
+                transition.from_position,
+            );
+            let mut to_cursor = Self::locate_position_in_queue(
+                &sample_queue_unlocked,
+                queue_start,
+                transition.to_position,
+            );
+            if from_cursor.is_none() || to_cursor.is_none() {
+                debug!(
+                    "AudioPlayer: Crossfade render missing cursor from_cursor_none={} to_cursor_none={} from_pos={} to_pos={} queue_start={} queue_end={}",
+                    from_cursor.is_none(),
+                    to_cursor.is_none(),
+                    transition.from_position,
+                    transition.to_position,
+                    queue_start,
+                    queue_end_position.load(Ordering::Relaxed)
+                );
+            }
+            let missing_initial_cursor =
+                transition.mixed_samples == 0 && (from_cursor.is_none() || to_cursor.is_none());
+            if missing_initial_cursor {
+                debug!(
+                    "AudioPlayer: Crossfade render waiting for overlap data from_pos={} to_pos={} queue_start={} queue_end={}",
+                    transition.from_position,
+                    transition.to_position,
+                    queue_start,
+                    queue_end_position.load(Ordering::Relaxed)
+                );
+                deferred_crossfade_without_progress = true;
+                active_crossfade = Some(transition);
+            } else {
+                while output_current_position < output_buffer.len() {
+                    let fade_ratio = (transition.mixed_samples as f32
+                        / transition.duration_samples.max(1) as f32)
+                        .clamp(0.0, 1.0);
+                    let from_sample = Self::next_sample_from_queue_cursor(
+                        &sample_queue_unlocked,
+                        &mut from_cursor,
+                        &mut transition.from_position,
+                        bus_sender,
+                        false,
+                        false,
+                        true,
+                    );
+                    let to_sample = Self::next_sample_from_queue_cursor(
+                        &sample_queue_unlocked,
+                        &mut to_cursor,
+                        &mut transition.to_position,
+                        bus_sender,
+                        true,
+                        false,
+                        true,
+                    );
+                    if from_sample.is_none() && to_sample.is_none() {
+                        break;
+                    }
+                    let mixed = from_sample.unwrap_or(0.0) * (1.0 - fade_ratio)
+                        + to_sample.unwrap_or(0.0) * fade_ratio;
+                    output_buffer[output_current_position] = convert_sample(mixed * gain);
+                    output_current_position += 1;
+                    transition.mixed_samples = transition.mixed_samples.saturating_add(1);
+
+                    let completed = transition.mixed_samples >= transition.duration_samples
+                        || from_sample.is_none();
+                    if completed {
+                        debug!(
+                            "AudioPlayer: Crossfade render complete mixed_samples={} duration_samples={} from_exhausted={}",
+                            transition.mixed_samples,
+                            transition.duration_samples,
+                            from_sample.is_none()
+                        );
+                        queue_cursor = to_cursor;
+                        input_current_position = transition.to_position;
+                        cleanup_position = input_current_position;
+                        break;
+                    }
+                }
+
+                if output_current_position < output_buffer.len() {
+                    if transition.mixed_samples == mixed_before {
+                        debug!(
+                            "AudioPlayer: Crossfade render deferred before mixing samples from_pos={} to_pos={} queue_start={} queue_end={}",
+                            transition.from_position,
+                            transition.to_position,
+                            queue_start,
+                            queue_end_position.load(Ordering::Relaxed)
+                        );
+                        deferred_crossfade_without_progress = true;
+                        active_crossfade = Some(transition);
+                    } else {
+                        debug!(
+                            "AudioPlayer: Crossfade render ended before output buffer filled mixed_samples={} duration_samples={}",
+                            transition.mixed_samples,
+                            transition.duration_samples
+                        );
+                        active_crossfade = None;
+                    }
+                } else {
+                    cleanup_position = transition.from_position.min(transition.to_position);
+                    current_track_position.store(transition.to_position, Ordering::Relaxed);
+                    active_crossfade = Some(transition);
+                }
+            }
+        }
 
         while output_current_position < output_buffer.len() {
             let Some((entry_index, entry_offset)) = queue_cursor else {
@@ -621,6 +918,64 @@ impl AudioPlayer {
                 }
                 break;
             };
+
+            if crossfade_enabled.load(Ordering::Relaxed)
+                && active_crossfade.is_none()
+                && output_sample_rate > 0
+                && output_channels > 0
+            {
+                let crossfade_samples = Self::crossfade_duration_samples(
+                    output_sample_rate,
+                    output_channels,
+                    crossfade_duration_seconds
+                        .load(Ordering::Relaxed)
+                        .clamp(1, 12),
+                );
+                let active_id = current_track_id.lock().unwrap().clone();
+                let mut early_finish_details: Option<(usize, bool, usize)> = None;
+                let should_emit_early_finish = {
+                    let indices = cached_track_indices.lock().unwrap();
+                    let queue_end = queue_end_position.load(Ordering::Relaxed);
+                    if let Some(current) = indices.get(&active_id) {
+                        let remaining = Self::estimate_remaining_samples_for_track(
+                            current,
+                            input_current_position,
+                            output_sample_rate,
+                            output_channels,
+                        );
+                        let has_next_cached = indices.iter().any(|(candidate_id, candidate)| {
+                            candidate_id != &active_id
+                                && candidate.start > input_current_position
+                                && candidate.start > current.start
+                                && queue_end > candidate.start.saturating_add(1)
+                        });
+                        early_finish_details = Some((remaining, has_next_cached, queue_end));
+                        remaining > 0 && remaining <= crossfade_samples && has_next_cached
+                    } else {
+                        false
+                    }
+                };
+                if should_emit_early_finish {
+                    let mut state = crossfade_state.lock().unwrap();
+                    if state.early_finished_track_id.as_deref() != Some(active_id.as_str()) {
+                        if let Some((remaining, has_next_cached, queue_end)) = early_finish_details
+                        {
+                            debug!(
+                                "AudioPlayer: Crossfade trigger track={} remaining_samples={} fade_samples={} has_next_cached={} queue_end={} current_pos={}",
+                                active_id,
+                                remaining,
+                                crossfade_samples,
+                                has_next_cached,
+                                queue_end,
+                                input_current_position
+                            );
+                        }
+                        state.early_finished_track_id = Some(active_id.clone());
+                        let _ = bus_sender
+                            .send(Message::Playback(PlaybackMessage::TrackFinished(active_id)));
+                    }
+                }
+            }
 
             match entry {
                 AudioQueueEntry::Samples(samples) => {
@@ -653,11 +1008,21 @@ impl AudioPlayer {
                     queue_cursor = Some((entry_index + 1, 0));
                 }
                 AudioQueueEntry::TrackFooter(id) => {
-                    let _ = bus_sender.send(Message::Playback(PlaybackMessage::TrackFinished(
-                        id.clone(),
-                    )));
+                    let suppress_finish = {
+                        let state = crossfade_state.lock().unwrap();
+                        state.early_finished_track_id.as_deref() == Some(id.as_str())
+                    };
+                    if !suppress_finish {
+                        let _ = bus_sender.send(Message::Playback(PlaybackMessage::TrackFinished(
+                            id.clone(),
+                        )));
+                    }
                     input_current_position = input_current_position.saturating_add(1);
                     is_playing.store(false, Ordering::Relaxed);
+                    let mut state = crossfade_state.lock().unwrap();
+                    if state.early_finished_track_id.as_deref() == Some(id.as_str()) {
+                        state.early_finished_track_id = None;
+                    }
                     for sample in &mut output_buffer[output_current_position..] {
                         *sample = silence_value;
                     }
@@ -666,10 +1031,25 @@ impl AudioPlayer {
             }
         }
 
+        if deferred_crossfade_without_progress {
+            if let Some(transition) = active_crossfade.as_mut() {
+                transition.from_position = input_current_position.max(queue_start);
+            }
+            cleanup_position = input_current_position;
+            current_track_position.store(input_current_position, Ordering::Relaxed);
+        }
+        if active_crossfade.is_some() {
+            let mut state = crossfade_state.lock().unwrap();
+            state.active = active_crossfade;
+        } else {
+            cleanup_position = input_current_position;
+            current_track_position.store(input_current_position, Ordering::Relaxed);
+        }
+
         let mut popped_any = false;
         while let Some(front) = sample_queue_unlocked.front() {
             let front_len = Self::queue_entry_len(front);
-            if queue_start.saturating_add(front_len) <= input_current_position {
+            if queue_start.saturating_add(front_len) <= cleanup_position {
                 sample_queue_unlocked.pop_front();
                 queue_start = queue_start.saturating_add(front_len);
                 popped_any = true;
@@ -677,7 +1057,6 @@ impl AudioPlayer {
                 break;
             }
         }
-        current_track_position.store(input_current_position, Ordering::Relaxed);
         if popped_any {
             queue_start_position.store(queue_start, Ordering::Relaxed);
         }
@@ -1024,6 +1403,11 @@ impl AudioPlayer {
         let current_track_position = self.current_track_position.clone();
         let volume = self.volume.clone();
         let dither_on_bitdepth_reduce = self.dither_on_bitdepth_reduce;
+        let crossfade_enabled = self.crossfade_enabled.clone();
+        let crossfade_duration_seconds = self.crossfade_duration_seconds.clone();
+        let crossfade_state = self.crossfade_state.clone();
+        let output_sample_rate = config.sample_rate.0 as usize;
+        let output_channels = config.channels as usize;
 
         let stream_result = match sample_format {
             cpal::SampleFormat::F32 => device.build_output_stream(
@@ -1039,6 +1423,11 @@ impl AudioPlayer {
                         &current_track_id,
                         &bus_sender_clone,
                         &current_track_position,
+                        &crossfade_enabled,
+                        &crossfade_duration_seconds,
+                        &crossfade_state,
+                        output_sample_rate,
+                        output_channels,
                         &volume,
                         |sample| sample.clamp(-1.0, 1.0),
                         0.0,
@@ -1062,6 +1451,11 @@ impl AudioPlayer {
                             &current_track_id,
                             &bus_sender_clone,
                             &current_track_position,
+                            &crossfade_enabled,
+                            &crossfade_duration_seconds,
+                            &crossfade_state,
+                            output_sample_rate,
+                            output_channels,
                             &volume,
                             |sample| {
                                 Self::quantize_i16(
@@ -1092,6 +1486,11 @@ impl AudioPlayer {
                             &current_track_id,
                             &bus_sender_clone,
                             &current_track_position,
+                            &crossfade_enabled,
+                            &crossfade_duration_seconds,
+                            &crossfade_state,
+                            output_sample_rate,
+                            output_channels,
                             &volume,
                             |sample| {
                                 Self::quantize_u16(
@@ -1286,6 +1685,11 @@ impl AudioPlayer {
                         self.is_playing.store(false, Ordering::Relaxed);
                         self.decode_bootstrap_pending
                             .store(false, Ordering::Relaxed);
+                        {
+                            let mut state = self.crossfade_state.lock().unwrap();
+                            state.active = None;
+                            state.early_finished_track_id = None;
+                        }
                         self.set_playback_session_active(false);
                         self.flush_staged_runtime_output_sample_rate_if_idle();
                         debug!("AudioPlayer: Playback stopped");
@@ -1295,6 +1699,15 @@ impl AudioPlayer {
                     }
                     Message::Playback(PlaybackMessage::PlayTrackById(id)) => {
                         self.pending_immediate_start_track_id = None;
+                        if self.is_playing.load(Ordering::Relaxed)
+                            && self.current_track_id.lock().unwrap().as_str() == id.as_str()
+                        {
+                            debug!(
+                                "AudioPlayer: Ignoring duplicate PlayTrackById for active track {}",
+                                id
+                            );
+                            continue;
+                        }
                         let queue_start = self.queue_start_position.load(Ordering::Relaxed);
                         let mut indices = self.cached_track_indices.lock().unwrap();
                         let track_info = indices.get(&id).cloned();
@@ -1306,12 +1719,103 @@ impl AudioPlayer {
                                     .send(Message::Audio(AudioMessage::TrackEvicted(id)));
                                 continue;
                             }
+                            let is_crossfade_enabled =
+                                self.crossfade_enabled.load(Ordering::Relaxed);
+                            let output_sample_rate =
+                                self.target_sample_rate.load(Ordering::Relaxed).max(1);
+                            let output_channels =
+                                self.target_channels.load(Ordering::Relaxed).max(1);
+                            let crossfade_duration_samples = Self::crossfade_duration_samples(
+                                output_sample_rate,
+                                output_channels,
+                                self.crossfade_duration_seconds
+                                    .load(Ordering::Relaxed)
+                                    .clamp(1, 12),
+                            );
+                            let existing_track_id = self.current_track_id.lock().unwrap().clone();
+                            let current_position =
+                                self.current_track_position.load(Ordering::Relaxed);
+                            let has_existing_track_index =
+                                indices.contains_key(existing_track_id.as_str());
+                            let is_currently_playing = self.is_playing.load(Ordering::Relaxed);
+                            let should_crossfade = is_crossfade_enabled
+                                && is_currently_playing
+                                && existing_track_id != id
+                                && crossfade_duration_samples > 0;
+                            debug!(
+                                "AudioPlayer: PlayTrackById transition old={} new={} crossfade_enabled={} is_playing={} should_crossfade={} has_existing_index={} current_position={} next_start={} fade_samples={}",
+                                existing_track_id,
+                                id,
+                                is_crossfade_enabled,
+                                is_currently_playing,
+                                should_crossfade,
+                                has_existing_track_index,
+                                current_position,
+                                info.start,
+                                crossfade_duration_samples
+                            );
+                            if should_crossfade {
+                                let from_position = current_position.max(queue_start);
+                                let mut state = self.crossfade_state.lock().unwrap();
+                                state.active = Some(ActiveCrossfade {
+                                    from_position,
+                                    to_position: info.start,
+                                    duration_samples: crossfade_duration_samples.max(1),
+                                    mixed_samples: 0,
+                                });
+                                state.early_finished_track_id = None;
+                                debug!(
+                                    "AudioPlayer: Crossfade armed old={} new={} from_pos={} to_pos={} duration_samples={}",
+                                    existing_track_id,
+                                    id,
+                                    from_position,
+                                    info.start,
+                                    crossfade_duration_samples.max(1)
+                                );
+                                *self.current_track_id.lock().unwrap() = id;
+                                *self.current_metadata.lock().unwrap() =
+                                    Some(info.technical_metadata.clone());
+                                self.current_track_position
+                                    .store(from_position, Ordering::Relaxed);
+                                self.current_track_offset_ms
+                                    .store(info.start_offset_ms as usize, Ordering::Relaxed);
+                                drop(state);
+                                drop(indices);
+                                self.is_playing.store(true, Ordering::Relaxed);
+                                self.set_playback_session_active(true);
+                                let _ = self.bus_sender.send(Message::Playback(
+                                    PlaybackMessage::TechnicalMetadataChanged(
+                                        info.technical_metadata,
+                                    ),
+                                ));
+                                let metadata_for_path =
+                                    self.current_metadata.lock().unwrap().clone();
+                                if let Some(metadata_for_path) = metadata_for_path.as_ref() {
+                                    self.emit_output_path_for_metadata(metadata_for_path);
+                                }
+                                continue;
+                            }
+                            if is_crossfade_enabled && existing_track_id != id {
+                                debug!(
+                                    "AudioPlayer: Crossfade fallback to hard switch old={} new={} (is_playing={} fade_samples={})",
+                                    existing_track_id,
+                                    id,
+                                    is_currently_playing,
+                                    crossfade_duration_samples
+                                );
+                            }
+                            {
+                                let mut state = self.crossfade_state.lock().unwrap();
+                                state.active = None;
+                                state.early_finished_track_id = None;
+                            }
                             *self.current_track_id.lock().unwrap() = id;
                             *self.current_metadata.lock().unwrap() =
                                 Some(info.technical_metadata.clone());
                             self.current_track_position
                                 .store(info.start, Ordering::Relaxed);
-                            self.current_track_offset_ms.store(0, Ordering::Relaxed);
+                            self.current_track_offset_ms
+                                .store(info.start_offset_ms as usize, Ordering::Relaxed);
                             drop(indices);
                             self.is_playing.store(true, Ordering::Relaxed);
                             self.set_playback_session_active(true);
@@ -1359,6 +1863,11 @@ impl AudioPlayer {
                         self.is_playing.store(false, Ordering::Relaxed);
                         self.decode_bootstrap_pending
                             .store(false, Ordering::Relaxed);
+                        {
+                            let mut state = self.crossfade_state.lock().unwrap();
+                            state.active = None;
+                            state.early_finished_track_id = None;
+                        }
                         self.sample_queue.lock().unwrap().clear();
                         self.cached_track_indices.lock().unwrap().clear();
                         self.queue_start_position.store(0, Ordering::Relaxed);
@@ -1369,7 +1878,13 @@ impl AudioPlayer {
                         self.flush_staged_runtime_output_sample_rate_if_idle();
                         debug!("AudioPlayer: Cache cleared");
                     }
-                    Message::Playback(PlaybackMessage::TrackFinished(_)) => {
+                    Message::Playback(PlaybackMessage::TrackFinished(id)) => {
+                        {
+                            let mut state = self.crossfade_state.lock().unwrap();
+                            if state.early_finished_track_id.as_deref() == Some(id.as_str()) {
+                                state.early_finished_track_id = None;
+                            }
+                        }
                         self.flush_staged_runtime_output_sample_rate_if_idle();
                     }
                     Message::Audio(AudioMessage::StopDecoding) => {
@@ -1415,6 +1930,7 @@ impl AudioPlayer {
                     Message::Config(ConfigMessage::ConfigChanged(changes)) => {
                         let mut latest_output = crate::protocol::OutputConfigDelta::default();
                         let mut latest_buffering = crate::protocol::BufferingConfigDelta::default();
+                        let mut latest_ui = crate::protocol::UiConfigDelta::default();
                         for change in changes {
                             match change {
                                 crate::protocol::ConfigDeltaEntry::Output(output) => {
@@ -1423,11 +1939,20 @@ impl AudioPlayer {
                                 crate::protocol::ConfigDeltaEntry::Buffering(buffering) => {
                                     latest_buffering.merge_from(buffering);
                                 }
+                                crate::protocol::ConfigDeltaEntry::Ui(ui) => {
+                                    latest_ui.merge_from(ui);
+                                }
                                 crate::protocol::ConfigDeltaEntry::Cast(_)
-                                | crate::protocol::ConfigDeltaEntry::Ui(_)
                                 | crate::protocol::ConfigDeltaEntry::Library(_)
                                 | crate::protocol::ConfigDeltaEntry::Integrations(_) => {}
                             }
+                        }
+                        if let Some(enabled) = latest_ui.crossfade_enabled {
+                            self.crossfade_enabled.store(enabled, Ordering::Relaxed);
+                        }
+                        if let Some(duration_seconds) = latest_ui.crossfade_duration_seconds {
+                            self.crossfade_duration_seconds
+                                .store(duration_seconds.clamp(1, 12) as usize, Ordering::Relaxed);
                         }
                         if !latest_buffering.is_empty() {
                             let low_watermark_ms = latest_buffering
@@ -1480,7 +2005,9 @@ impl AudioPlayer {
 
 #[cfg(test)]
 mod tests {
-    use super::{AudioPlayer, AudioQueueEntry, TrackHeader};
+    use super::{
+        ActiveCrossfade, AudioPlayer, AudioQueueEntry, CrossfadePlaybackState, TrackHeader,
+    };
     use crate::config::{BufferingConfig, Config, OutputConfig};
     use crate::protocol::{
         AudioPacket, Message, OutputConfigDelta, PlaybackMessage, TechnicalMetadata,
@@ -1541,6 +2068,24 @@ mod tests {
     }
 
     #[test]
+    fn test_effective_decode_buffer_thresholds_expand_for_crossfade_window() {
+        let (effective_low, effective_target) =
+            AudioPlayer::effective_decode_buffer_thresholds(10_000, 20_000, 44_100, 2, true, 12);
+        let expected_crossfade_window = AudioPlayer::crossfade_duration_samples(44_100, 2, 12);
+        let expected_guard = AudioPlayer::milliseconds_to_samples(1_000, 44_100, 2);
+        assert!(effective_low >= expected_crossfade_window.saturating_add(expected_guard));
+        assert!(effective_target >= effective_low.saturating_add(expected_guard));
+    }
+
+    #[test]
+    fn test_effective_decode_buffer_thresholds_keep_defaults_when_crossfade_disabled() {
+        let (effective_low, effective_target) =
+            AudioPlayer::effective_decode_buffer_thresholds(10_000, 20_000, 44_100, 2, false, 12);
+        assert_eq!(effective_low, 10_000);
+        assert_eq!(effective_target, 20_000);
+    }
+
+    #[test]
     fn test_output_signature_normalizes_empty_device_name() {
         let mut config = Config::default();
         config.output.output_device_name = "   ".to_string();
@@ -1581,6 +2126,8 @@ mod tests {
             bus_sender,
             OutputConfig::default(),
             BufferingConfig::default(),
+            false,
+            6,
         );
 
         player.set_playback_session_active(true);
@@ -1609,6 +2156,8 @@ mod tests {
             bus_sender,
             OutputConfig::default(),
             BufferingConfig::default(),
+            false,
+            6,
         );
 
         let initial_rate = player.target_sample_rate.load(Ordering::Relaxed) as u32;
@@ -1646,6 +2195,9 @@ mod tests {
         let cached_track_indices = Arc::new(Mutex::new(HashMap::new()));
         let current_track_id = Arc::new(Mutex::new("t1".to_string()));
         let current_track_position = Arc::new(AtomicUsize::new(0));
+        let crossfade_enabled = Arc::new(AtomicBool::new(false));
+        let crossfade_duration_seconds = Arc::new(AtomicUsize::new(6));
+        let crossfade_state = Arc::new(Mutex::new(CrossfadePlaybackState::default()));
         let volume = Arc::new(AtomicU32::new(1.0f32.to_bits()));
         let (bus_sender, mut bus_receiver) = broadcast::channel(32);
         let mut output = [0.0f32; 8];
@@ -1660,6 +2212,11 @@ mod tests {
             &current_track_id,
             &bus_sender,
             &current_track_position,
+            &crossfade_enabled,
+            &crossfade_duration_seconds,
+            &crossfade_state,
+            44_100,
+            2,
             &volume,
             |sample| sample,
             0.0f32,
@@ -1707,6 +2264,76 @@ mod tests {
     }
 
     #[test]
+    fn test_crossfade_waits_for_overlap_data_without_hard_switch() {
+        let is_playing = Arc::new(AtomicBool::new(true));
+        let sample_queue = Arc::new(Mutex::new(VecDeque::from(vec![
+            AudioQueueEntry::TrackHeader(TrackHeader {
+                id: "t1".to_string(),
+                start_offset_ms: 0,
+            }),
+            AudioQueueEntry::Samples(vec![0.8, 0.8, 0.8, 0.8]),
+            AudioQueueEntry::TrackFooter("t1".to_string()),
+            AudioQueueEntry::TrackHeader(TrackHeader {
+                id: "t2".to_string(),
+                start_offset_ms: 0,
+            }),
+            AudioQueueEntry::Samples(vec![0.2, 0.2]),
+        ])));
+        let queue_start_position = Arc::new(AtomicUsize::new(0));
+        let queue_end_position = Arc::new(AtomicUsize::new(9));
+        let cached_track_indices = Arc::new(Mutex::new(HashMap::new()));
+        let current_track_id = Arc::new(Mutex::new("t2".to_string()));
+        let current_track_position = Arc::new(AtomicUsize::new(1));
+        let crossfade_enabled = Arc::new(AtomicBool::new(true));
+        let crossfade_duration_seconds = Arc::new(AtomicUsize::new(6));
+        let crossfade_state = Arc::new(Mutex::new(CrossfadePlaybackState {
+            early_finished_track_id: None,
+            active: Some(ActiveCrossfade {
+                from_position: 1,
+                to_position: 999,
+                duration_samples: 1000,
+                mixed_samples: 0,
+            }),
+        }));
+        let volume = Arc::new(AtomicU32::new(1.0f32.to_bits()));
+        let (bus_sender, _bus_receiver) = broadcast::channel(32);
+        let mut output = [0.0f32; 4];
+
+        AudioPlayer::render_output_buffer(
+            &mut output,
+            &is_playing,
+            &sample_queue,
+            &queue_start_position,
+            &queue_end_position,
+            &cached_track_indices,
+            &current_track_id,
+            &bus_sender,
+            &current_track_position,
+            &crossfade_enabled,
+            &crossfade_duration_seconds,
+            &crossfade_state,
+            44_100,
+            2,
+            &volume,
+            |sample| sample,
+            0.0f32,
+        );
+
+        assert_eq!(output, [0.8, 0.8, 0.8, 0.8]);
+        assert_eq!(current_track_position.load(Ordering::Relaxed), 5);
+        let state = crossfade_state
+            .lock()
+            .expect("crossfade state lock poisoned");
+        let transition = state
+            .active
+            .as_ref()
+            .expect("crossfade transition should remain pending");
+        assert_eq!(transition.from_position, 5);
+        assert_eq!(transition.to_position, 999);
+        assert_eq!(transition.mixed_samples, 0);
+    }
+
+    #[test]
     fn test_play_immediately_waits_for_first_samples_before_starting() {
         let (bus_sender, bus_receiver) = broadcast::channel(32);
         let mut player = AudioPlayer::new(
@@ -1714,6 +2341,8 @@ mod tests {
             bus_sender,
             OutputConfig::default(),
             BufferingConfig::default(),
+            false,
+            6,
         );
         let metadata = TechnicalMetadata {
             format: "FLAC".to_string(),
@@ -1753,6 +2382,8 @@ mod tests {
             bus_sender,
             OutputConfig::default(),
             BufferingConfig::default(),
+            false,
+            6,
         );
         let metadata = TechnicalMetadata {
             format: "MP3".to_string(),
