@@ -534,9 +534,19 @@ pub struct LibraryEnrichmentPayload {
 #[derive(Debug, Clone)]
 pub enum MetadataMessage {
     OpenPropertiesForCurrentSelection,
+    SelectPropertiesTab {
+        tab_index: usize,
+    },
     EditPropertiesField {
         index: usize,
         value: String,
+    },
+    StagePropertiesImageOverwrite {
+        slot_index: usize,
+        source_path: PathBuf,
+    },
+    OpenPropertiesExternalImageLocation {
+        index: usize,
     },
     SaveProperties,
     CancelProperties,
@@ -548,7 +558,10 @@ pub enum MetadataMessage {
         request_id: u64,
         path: PathBuf,
         display_name: String,
-        fields: Vec<MetadataEditorField>,
+        metadata_fields: Vec<MetadataEditorField>,
+        media_info_fields: Vec<PropertiesMediaInfoField>,
+        embedded_image_slots: Vec<PropertiesEmbeddedImageSlot>,
+        external_images: Vec<PropertiesExternalImage>,
     },
     TrackPropertiesLoadFailed {
         request_id: u64,
@@ -558,7 +571,8 @@ pub enum MetadataMessage {
     SaveTrackProperties {
         request_id: u64,
         path: PathBuf,
-        fields: Vec<MetadataEditorField>,
+        metadata_fields: Vec<MetadataEditorField>,
+        image_overwrites: Vec<PropertiesImageOverwrite>,
     },
     TrackPropertiesSaved {
         request_id: u64,
@@ -989,6 +1003,50 @@ pub struct MetadataEditorField {
     pub value: String,
     /// Whether this field is part of the built-in common set.
     pub common: bool,
+}
+
+/// One read-only media info field shown in the Properties dialog.
+#[derive(Debug, Clone)]
+pub struct PropertiesMediaInfoField {
+    /// Stable field identifier.
+    pub id: String,
+    /// User-visible field label.
+    pub label: String,
+    /// Display value.
+    pub value: String,
+}
+
+/// One embedded-artwork slot shown in the Properties dialog.
+#[derive(Debug, Clone)]
+pub struct PropertiesEmbeddedImageSlot {
+    /// Picture type code based on ID3 APIC numbering.
+    pub picture_type_code: u8,
+    /// User-visible slot label.
+    pub label: String,
+    /// Cached local image path used for preview, when available.
+    pub image_path: Option<PathBuf>,
+    /// Supplemental read-only details.
+    pub details: String,
+    /// Whether this slot is part of the built-in common set.
+    pub common: bool,
+}
+
+/// One discovered external image candidate for the selected track.
+#[derive(Debug, Clone)]
+pub struct PropertiesExternalImage {
+    /// Base filename (for display).
+    pub file_name: String,
+    /// Full filesystem path.
+    pub path: PathBuf,
+}
+
+/// One staged embedded-artwork overwrite to apply on save.
+#[derive(Debug, Clone)]
+pub struct PropertiesImageOverwrite {
+    /// Target picture type code based on ID3 APIC numbering.
+    pub picture_type_code: u8,
+    /// Source image path selected by the user.
+    pub source_path: PathBuf,
 }
 
 /// Metadata summary used to refresh playlist/library views after save.

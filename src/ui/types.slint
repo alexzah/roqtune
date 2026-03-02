@@ -61,6 +61,26 @@ export struct MetadataEditorField {
     common: bool,
 }
 
+export struct PropertiesMediaInfoField {
+    id: string,
+    label: string,
+    value: string,
+}
+
+export struct PropertiesEmbeddedImageSlot {
+    picture_type_code: int,
+    label: string,
+    details: string,
+    preview: image,
+    has_preview: bool,
+    common: bool,
+}
+
+export struct PropertiesExternalImage {
+    file_name: string,
+    path: string,
+}
+
 export struct LayoutSplitterModel {
     id: string,
     axis: int,

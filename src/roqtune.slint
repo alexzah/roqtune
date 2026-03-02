@@ -7,6 +7,9 @@ import {
     LayoutSplitterModel,
     LibraryRowData,
     MetadataEditorField,
+    PropertiesEmbeddedImageSlot,
+    PropertiesExternalImage,
+    PropertiesMediaInfoField,
     TrackRowData
 } from "ui/types.slint";
 import { ColumnHeaderMenu, ConfirmationDialog, InfoDialog } from "ui/components/menus.slint";
@@ -477,7 +480,11 @@ export component AppWindow inherits Window {
     in-out property <bool> properties_busy: false;
     in-out property <string> properties_error_text: "";
     in-out property <string> properties_target_title: "";
+    in-out property <int> properties_active_tab_index: 0;
     in-out property <[MetadataEditorField]> properties_fields: [];
+    in-out property <[PropertiesMediaInfoField]> properties_media_info_fields: [];
+    in-out property <[PropertiesEmbeddedImageSlot]> properties_embedded_image_slots: [];
+    in-out property <[PropertiesExternalImage]> properties_external_images: [];
     in-out property <bool> properties_save_enabled: false;
     in-out property <[string]> settings_library_folders: [];
     in-out property <int> settings_library_selected_folder_index: -1;
@@ -5016,40 +5023,279 @@ export component AppWindow inherits Window {
                     overflow: elide;
                 }
 
-                Rectangle {
-                    height: 28px;
-                    border-radius: 4px;
-                    background: AppPalette.panel-bg-alt;
-                    HorizontalLayout {
-                        padding-left: 8px;
-                        padding-right: 10px;
-                        spacing: 8px;
-                        Text {
-                            width: 220px;
-                            text: "Field";
-                            color: AppPalette.text-primary;
-                            font-size: 12px;
-                            font-weight: 700;
-                            vertical-alignment: center;
-                            overflow: elide;
+                ModeTabs {
+                    labels: ["Metadata", "Media Info", "Images"];
+                    selected_index: root.properties_active_tab_index;
+                    selected(tab_index) => {
+                        root.properties_active_tab_index = tab_index;
+                        root.properties_select_tab(tab_index);
+                    }
+                }
+
+                if root.properties_active_tab_index == 0 : VerticalLayout {
+                    vertical-stretch: 1;
+                    spacing: 8px;
+
+                    Rectangle {
+                        height: 28px;
+                        border-radius: 4px;
+                        background: AppPalette.panel-bg-alt;
+                        HorizontalLayout {
+                            padding-left: 8px;
+                            padding-right: 10px;
+                            spacing: 8px;
+                            Text {
+                                width: 220px;
+                                text: "Field";
+                                color: AppPalette.text-primary;
+                                font-size: 12px;
+                                font-weight: 700;
+                                vertical-alignment: center;
+                                overflow: elide;
+                            }
+                            Text {
+                                text: "Value";
+                                color: AppPalette.text-primary;
+                                font-size: 12px;
+                                font-weight: 700;
+                                horizontal-stretch: 1;
+                                vertical-alignment: center;
+                                overflow: elide;
+                            }
                         }
-                        Text {
-                            text: "Value";
-                            color: AppPalette.text-primary;
-                            font-size: 12px;
-                            font-weight: 700;
-                            horizontal-stretch: 1;
-                            vertical-alignment: center;
-                            overflow: elide;
+                    }
+
+                    ScrollView {
+                        vertical-stretch: 1;
+                        VerticalLayout {
+                            spacing: 2px;
+                            for field[index] in root.properties_fields : Rectangle {
+                                height: 30px;
+                                border-radius: 3px;
+                                background: Math.mod(index, 2) == 0 ? transparent : AppPalette.panel-bg-alt.mix(AppPalette.panel-bg-elevated, 0.5);
+
+                                HorizontalLayout {
+                                    padding-left: 8px;
+                                    padding-right: 8px;
+                                    spacing: 8px;
+
+                                    Text {
+                                        width: 220px;
+                                        text: field.field_name;
+                                        color: field.common ? AppPalette.text-primary : AppPalette.text-secondary;
+                                        font-size: 12px;
+                                        vertical-alignment: center;
+                                        overflow: elide;
+                                    }
+
+                                    value-input-frame := Rectangle {
+                                        horizontal-stretch: 1;
+                                        height: 24px;
+                                        border-radius: 4px;
+                                        border-width: 1px;
+                                        border-color: value-input.has-focus ? AppPalette.focus-ring : AppPalette.border;
+                                        background: value-input.has-focus ? AppPalette.control-hover-bg : AppPalette.panel-bg;
+
+                                        TouchArea {
+                                            clicked => {
+                                                if (!root.properties_busy) {
+                                                    value-input.focus();
+                                                }
+                                            }
+                                        }
+
+                                        value-input := LineEdit {
+                                            x: 1px;
+                                            y: 1px;
+                                            width: max(0px, parent.width - 2px);
+                                            height: max(0px, parent.height - 2px);
+                                            text: field.value;
+                                            enabled: !root.properties_busy;
+                                            edited(text) => {
+                                                root.properties_field_edited(index, text);
+                                            }
+                                        }
+                                    }
+                                }
+                            }
                         }
                     }
                 }
 
-                ScrollView {
+                if root.properties_active_tab_index == 1 : VerticalLayout {
                     vertical-stretch: 1;
+                    spacing: 8px;
+
+                    Rectangle {
+                        height: 28px;
+                        border-radius: 4px;
+                        background: AppPalette.panel-bg-alt;
+                        HorizontalLayout {
+                            padding-left: 8px;
+                            padding-right: 10px;
+                            spacing: 8px;
+                            Text {
+                                width: 220px;
+                                text: "Field";
+                                color: AppPalette.text-primary;
+                                font-size: 12px;
+                                font-weight: 700;
+                                vertical-alignment: center;
+                                overflow: elide;
+                            }
+                            Text {
+                                text: "Value";
+                                color: AppPalette.text-primary;
+                                font-size: 12px;
+                                font-weight: 700;
+                                horizontal-stretch: 1;
+                                vertical-alignment: center;
+                                overflow: elide;
+                            }
+                        }
+                    }
+
+                    ScrollView {
+                        vertical-stretch: 1;
+                        VerticalLayout {
+                            spacing: 2px;
+                            for row[index] in root.properties_media_info_fields : Rectangle {
+                                height: 30px;
+                                border-radius: 3px;
+                                background: Math.mod(index, 2) == 0 ? transparent : AppPalette.panel-bg-alt.mix(AppPalette.panel-bg-elevated, 0.5);
+
+                                HorizontalLayout {
+                                    padding-left: 8px;
+                                    padding-right: 8px;
+                                    spacing: 8px;
+
+                                    Text {
+                                        width: 220px;
+                                        text: row.label;
+                                        color: AppPalette.text-primary;
+                                        font-size: 12px;
+                                        vertical-alignment: center;
+                                        overflow: elide;
+                                    }
+
+                                    value-frame := Rectangle {
+                                        horizontal-stretch: 1;
+                                        height: 24px;
+                                        border-radius: 4px;
+                                        border-width: 1px;
+                                        border-color: media-value-input.has-focus ? AppPalette.focus-ring : AppPalette.border;
+                                        background: AppPalette.panel-bg;
+
+                                        media-value-input := LineEdit {
+                                            x: 1px;
+                                            y: 1px;
+                                            width: max(0px, parent.width - 2px);
+                                            height: max(0px, parent.height - 2px);
+                                            text: row.value;
+                                            read-only: true;
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+
+                if root.properties_active_tab_index == 2 : ScrollView {
+                    vertical-stretch: 1;
+
                     VerticalLayout {
-                        spacing: 2px;
-                        for field[index] in root.properties_fields : Rectangle {
+                        spacing: 8px;
+
+                        Text {
+                            text: "Embedded Artwork";
+                            color: AppPalette.text-primary;
+                            font-size: 12px;
+                            font-weight: 700;
+                        }
+
+                        for slot[index] in root.properties_embedded_image_slots : Rectangle {
+                            height: 84px;
+                            border-radius: 4px;
+                            border-width: 1px;
+                            border-color: AppPalette.border;
+                            background: Math.mod(index, 2) == 0 ? AppPalette.panel-bg : AppPalette.panel-bg-alt;
+
+                            HorizontalLayout {
+                                padding: 8px;
+                                spacing: 8px;
+
+                                Rectangle {
+                                    width: 64px;
+                                    height: 64px;
+                                    border-width: 1px;
+                                    border-color: AppPalette.border;
+                                    border-radius: 3px;
+                                    background: AppPalette.panel-bg-elevated;
+
+                                    if slot.has_preview : Image {
+                                        width: parent.width;
+                                        height: parent.height;
+                                        source: slot.preview;
+                                        image-fit: contain;
+                                    }
+
+                                    if !slot.has_preview : Text {
+                                        text: "Empty";
+                                        color: AppPalette.text-muted;
+                                        font-size: 10px;
+                                        horizontal-alignment: center;
+                                        vertical-alignment: center;
+                                        width: parent.width;
+                                        height: parent.height;
+                                    }
+                                }
+
+                                VerticalLayout {
+                                    horizontal-stretch: 1;
+                                    spacing: 3px;
+                                    Text {
+                                        text: slot.label;
+                                        color: slot.common ? AppPalette.text-primary : AppPalette.text-secondary;
+                                        font-size: 12px;
+                                        font-weight: 700;
+                                        overflow: elide;
+                                    }
+                                    Text {
+                                        text: slot.details;
+                                        color: AppPalette.text-secondary;
+                                        font-size: 11px;
+                                        wrap: word-wrap;
+                                        overflow: elide;
+                                    }
+                                }
+
+                                Button {
+                                    text: "Replace...";
+                                    enabled: !root.properties_busy;
+                                    clicked => {
+                                        root.properties_replace_embedded_image(index);
+                                    }
+                                }
+                            }
+                        }
+
+                        Rectangle { height: 1px; background: AppPalette.separator; }
+
+                        Text {
+                            text: "External Images";
+                            color: AppPalette.text-primary;
+                            font-size: 12px;
+                            font-weight: 700;
+                        }
+
+                        if root.properties_external_images.length == 0 : Text {
+                            text: "No supported external images found.";
+                            color: AppPalette.text-muted;
+                            font-size: 11px;
+                        }
+
+                        for external[index] in root.properties_external_images : Rectangle {
                             height: 30px;
                             border-radius: 3px;
                             background: Math.mod(index, 2) == 0 ? transparent : AppPalette.panel-bg-alt.mix(AppPalette.panel-bg-elevated, 0.5);
@@ -5060,40 +5306,18 @@ export component AppWindow inherits Window {
                                 spacing: 8px;
 
                                 Text {
-                                    width: 220px;
-                                    text: field.field_name;
-                                    color: field.common ? AppPalette.text-primary : AppPalette.text-secondary;
+                                    horizontal-stretch: 1;
+                                    text: external.file_name;
+                                    color: AppPalette.text-primary;
                                     font-size: 12px;
                                     vertical-alignment: center;
                                     overflow: elide;
                                 }
 
-                                value-input-frame := Rectangle {
-                                    horizontal-stretch: 1;
-                                    height: 24px;
-                                    border-radius: 4px;
-                                    border-width: 1px;
-                                    border-color: value-input.has-focus ? AppPalette.focus-ring : AppPalette.border;
-                                    background: value-input.has-focus ? AppPalette.control-hover-bg : AppPalette.panel-bg;
-
-                                    TouchArea {
-                                        clicked => {
-                                            if (!root.properties_busy) {
-                                                value-input.focus();
-                                            }
-                                        }
-                                    }
-
-                                    value-input := LineEdit {
-                                        x: 1px;
-                                        y: 1px;
-                                        width: max(0px, parent.width - 2px);
-                                        height: max(0px, parent.height - 2px);
-                                        text: field.value;
-                                        enabled: !root.properties_busy;
-                                        edited(text) => {
-                                            root.properties_field_edited(index, text);
-                                        }
+                                Button {
+                                    text: "Open file location";
+                                    clicked => {
+                                        root.properties_open_external_image_location(index);
                                     }
                                 }
                             }
@@ -5121,7 +5345,7 @@ export component AppWindow inherits Window {
                     Button {
                         text: "Save";
                         primary: true;
-                        enabled: !root.properties_busy;
+                        enabled: !root.properties_busy && root.properties_save_enabled;
                         clicked => {
                             if (root.properties_save_enabled) {
                                 root.properties_save();
@@ -6920,7 +7144,10 @@ export component AppWindow inherits Window {
     callback library_confirm_remove_selection();
     callback library_cancel_remove_selection();
     callback open_properties_for_current_selection();
+    callback properties_select_tab(int);
     callback properties_field_edited(int, string);
+    callback properties_replace_embedded_image(int);
+    callback properties_open_external_image_location(int);
     callback properties_save();
     callback properties_cancel();
     callback library_add_folder();
