@@ -1077,6 +1077,8 @@ pub(crate) fn with_updated_layout(previous: &Config, layout: LayoutConfig) -> Co
             volume: previous.ui.volume,
             playback_order: previous.ui.playback_order,
             repeat_mode: previous.ui.repeat_mode,
+            crossfade_enabled: previous.ui.crossfade_enabled,
+            crossfade_duration_seconds: previous.ui.crossfade_duration_seconds,
         },
         library: previous.library.clone(),
         buffering: previous.buffering.clone(),

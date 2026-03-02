@@ -182,6 +182,12 @@ pub fn config_delta_entries(previous: &Config, next: &Config) -> Vec<ConfigDelta
     if previous.ui.repeat_mode != next.ui.repeat_mode {
         ui.repeat_mode = Some(next.ui.repeat_mode);
     }
+    if previous.ui.crossfade_enabled != next.ui.crossfade_enabled {
+        ui.crossfade_enabled = Some(next.ui.crossfade_enabled);
+    }
+    if previous.ui.crossfade_duration_seconds != next.ui.crossfade_duration_seconds {
+        ui.crossfade_duration_seconds = Some(next.ui.crossfade_duration_seconds);
+    }
     if !ui.is_empty() {
         deltas.push(ConfigDeltaEntry::Ui(ui));
     }
@@ -378,6 +384,25 @@ mod tests {
                         == Some(next.library.image_memory_cache_ttl_secs)
             )),
             "expected library delta with image_memory_cache_ttl_secs"
+        );
+    }
+
+    #[test]
+    fn test_config_delta_entries_include_crossfade_ui_fields() {
+        let previous = Config::default();
+        let mut next = previous.clone();
+        next.ui.crossfade_enabled = true;
+        next.ui.crossfade_duration_seconds = 9;
+
+        let deltas = config_delta_entries(&previous, &next);
+        assert!(
+            deltas.iter().any(|delta| matches!(
+                delta,
+                ConfigDeltaEntry::Ui(ui)
+                    if ui.crossfade_enabled == Some(true)
+                        && ui.crossfade_duration_seconds == Some(9)
+            )),
+            "expected ui delta with crossfade fields"
         );
     }
 }

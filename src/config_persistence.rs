@@ -239,6 +239,20 @@ fn write_config_to_document(document: &mut DocumentMut, previous: &Config, confi
             };
             set_table_value_preserving_decor(ui, "repeat_mode", value(repeat_mode));
         }
+        set_table_scalar_if_changed(
+            ui,
+            "crossfade_enabled",
+            previous.ui.crossfade_enabled,
+            config.ui.crossfade_enabled,
+            value,
+        );
+        set_table_scalar_if_changed(
+            ui,
+            "crossfade_duration_seconds",
+            i64::from(previous.ui.crossfade_duration_seconds),
+            i64::from(config.ui.crossfade_duration_seconds),
+            value,
+        );
     }
 
     {

@@ -77,6 +77,8 @@ impl UiConfigDelta {
             && self.volume.is_none()
             && self.playback_order.is_none()
             && self.repeat_mode.is_none()
+            && self.crossfade_enabled.is_none()
+            && self.crossfade_duration_seconds.is_none()
     }
 
     pub fn merge_from(&mut self, newer: Self) {
@@ -117,6 +119,12 @@ impl UiConfigDelta {
         }
         if newer.repeat_mode.is_some() {
             self.repeat_mode = newer.repeat_mode;
+        }
+        if newer.crossfade_enabled.is_some() {
+            self.crossfade_enabled = newer.crossfade_enabled;
+        }
+        if newer.crossfade_duration_seconds.is_some() {
+            self.crossfade_duration_seconds = newer.crossfade_duration_seconds;
         }
     }
 }

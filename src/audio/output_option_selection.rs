@@ -485,6 +485,8 @@ mod tests {
                 volume: 1.0,
                 playback_order: UiPlaybackOrder::Default,
                 repeat_mode: UiRepeatMode::Off,
+                crossfade_enabled: false,
+                crossfade_duration_seconds: 6,
             },
             library: LibraryConfig::default(),
             buffering: BufferingConfig::default(),
