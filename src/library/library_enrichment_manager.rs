@@ -19,7 +19,7 @@ use tokio::sync::broadcast::{
     Receiver, Sender,
 };
 
-use crate::db_manager::DbManager;
+use crate::db_manager::{DbManager, LibraryEnrichmentOverride};
 use crate::image_pipeline::{self, ManagedImageKind};
 use crate::protocol::{
     LibraryEnrichmentAttemptKind, LibraryEnrichmentEntity, LibraryEnrichmentErrorKind,
@@ -32,9 +32,11 @@ const WIKIPEDIA_REST_BASE_URL: &str = "https://en.wikipedia.org/w/rest.php/v1";
 const THEAUDIODB_BASE_URL: &str = "https://www.theaudiodb.com/api/v1/json/2";
 const WIKIPEDIA_SOURCE_NAME: &str = "Wikipedia";
 const THEAUDIODB_SOURCE_NAME: &str = "TheAudioDB";
+const MANUAL_OVERRIDE_SOURCE_NAME: &str = "Manual Override";
 const READY_METADATA_TTL_DAYS: u32 = 30;
 const CONCLUSIVE_NOT_FOUND_TTL: Duration = Duration::from_secs(7 * 24 * 60 * 60);
 const HARD_ERROR_TTL: Duration = Duration::from_secs(30 * 60);
+const MANUAL_OVERRIDE_TTL: Duration = Duration::from_secs(3650 * 24 * 60 * 60);
 const MAX_CANDIDATES: usize = 12;
 const MAX_SUMMARY_FETCHES: usize = 10;
 const MAX_BLURB_CHARS: usize = 360;
@@ -3349,6 +3351,186 @@ impl LibraryEnrichmentManager {
             }));
     }
 
+    fn override_has_blurb(
+        entity: &LibraryEnrichmentEntity,
+        override_row: Option<&LibraryEnrichmentOverride>,
+    ) -> bool {
+        match entity {
+            LibraryEnrichmentEntity::Artist { .. } | LibraryEnrichmentEntity::Album { .. } => {
+                override_row
+                    .and_then(|row| row.blurb.as_ref())
+                    .is_some_and(|blurb| !blurb.trim().is_empty())
+            }
+        }
+    }
+
+    fn override_has_image(
+        entity: &LibraryEnrichmentEntity,
+        override_row: Option<&LibraryEnrichmentOverride>,
+    ) -> bool {
+        matches!(entity, LibraryEnrichmentEntity::Artist { .. })
+            && override_row
+                .and_then(|row| row.image_path.as_ref())
+                .is_some()
+    }
+
+    fn override_satisfies_entity(
+        entity: &LibraryEnrichmentEntity,
+        override_row: Option<&LibraryEnrichmentOverride>,
+    ) -> bool {
+        match entity {
+            LibraryEnrichmentEntity::Album { .. } => Self::override_has_blurb(entity, override_row),
+            LibraryEnrichmentEntity::Artist { .. } => {
+                Self::override_has_blurb(entity, override_row)
+                    && Self::override_has_image(entity, override_row)
+            }
+        }
+    }
+
+    fn apply_override_to_payload(
+        entity: &LibraryEnrichmentEntity,
+        override_row: Option<&LibraryEnrichmentOverride>,
+        payload: &mut LibraryEnrichmentPayload,
+    ) {
+        let Some(override_row) = override_row else {
+            return;
+        };
+        let mut applied = false;
+        if let Some(blurb) = override_row.blurb.as_ref() {
+            payload.blurb = blurb.clone();
+            applied = true;
+        }
+        if matches!(entity, LibraryEnrichmentEntity::Artist { .. })
+            && override_row.image_path.is_some()
+        {
+            payload.image_path = override_row.image_path.clone();
+            applied = true;
+        }
+        if applied {
+            payload.status = LibraryEnrichmentStatus::Ready;
+            payload.error_kind = None;
+            payload.source_name = MANUAL_OVERRIDE_SOURCE_NAME.to_string();
+            payload.source_url = String::new();
+        }
+    }
+
+    fn payload_from_cache_and_override(
+        &self,
+        entity: &LibraryEnrichmentEntity,
+        attempt_kind: LibraryEnrichmentAttemptKind,
+        override_row: Option<&LibraryEnrichmentOverride>,
+    ) -> Result<LibraryEnrichmentPayload, rusqlite::Error> {
+        let now_unix_ms = Self::now_unix_ms();
+        let mut payload = if let Some(cached) = self
+            .db_manager
+            .get_library_enrichment_cache(entity, now_unix_ms)?
+        {
+            cached
+        } else {
+            LibraryEnrichmentPayload {
+                entity: entity.clone(),
+                status: LibraryEnrichmentStatus::Ready,
+                blurb: String::new(),
+                image_path: None,
+                source_name: MANUAL_OVERRIDE_SOURCE_NAME.to_string(),
+                source_url: String::new(),
+                error_kind: None,
+                attempt_kind,
+            }
+        };
+        payload.attempt_kind = attempt_kind;
+        Self::apply_override_to_payload(entity, override_row, &mut payload);
+        Ok(payload)
+    }
+
+    fn persist_and_emit_override_payload(
+        &mut self,
+        entity: &LibraryEnrichmentEntity,
+    ) -> Result<(), String> {
+        let override_row = self
+            .db_manager
+            .get_library_enrichment_override(entity)
+            .map_err(|error| format!("Failed reading enrichment override: {error}"))?;
+        let override_row = override_row
+            .ok_or_else(|| "No enrichment override is available for this entity.".to_string())?;
+        let payload = self
+            .payload_from_cache_and_override(
+                entity,
+                LibraryEnrichmentAttemptKind::Detail,
+                Some(&override_row),
+            )
+            .map_err(|error| format!("Failed composing override payload: {error}"))?;
+        let now_unix_ms = Self::now_unix_ms();
+        let expires_unix_ms = now_unix_ms.saturating_add(MANUAL_OVERRIDE_TTL.as_millis() as i64);
+        self.db_manager
+            .upsert_library_enrichment_cache(
+                &payload,
+                None,
+                now_unix_ms,
+                expires_unix_ms,
+                None,
+                true,
+            )
+            .map_err(|error| format!("Failed persisting override payload: {error}"))?;
+        self.emit_enrichment_result(payload);
+        Ok(())
+    }
+
+    fn emit_override_failed(&self, reason: impl Into<String>) {
+        let message = reason.into();
+        let _ = self
+            .bus_producer
+            .send(Message::Library(LibraryMessage::EnrichmentOverrideFailed(
+                message,
+            )));
+    }
+
+    fn set_enrichment_text_override(&mut self, entity: LibraryEnrichmentEntity, text: String) {
+        if text.trim().is_empty() {
+            self.emit_override_failed("Override text cannot be empty.");
+            return;
+        }
+        if let Err(error) =
+            self.db_manager
+                .upsert_library_enrichment_override(&entity, Some(text.as_str()), None)
+        {
+            self.emit_override_failed(format!("Failed saving text override: {error}"));
+            return;
+        }
+        if let Err(error) = self.persist_and_emit_override_payload(&entity) {
+            self.emit_override_failed(error);
+        }
+    }
+
+    fn set_artist_image_override(&mut self, artist: String, source_path: PathBuf) {
+        if !source_path.is_file() {
+            self.emit_override_failed(format!(
+                "Selected override image is not a file: {}",
+                source_path.display()
+            ));
+            return;
+        }
+        if !Self::file_looks_like_supported_image(source_path.as_path()) {
+            self.emit_override_failed(format!(
+                "Selected override image is not a supported image file: {}",
+                source_path.display()
+            ));
+            return;
+        }
+        let entity = LibraryEnrichmentEntity::Artist { artist };
+        if let Err(error) = self.db_manager.upsert_library_enrichment_override(
+            &entity,
+            None,
+            Some(source_path.as_path()),
+        ) {
+            self.emit_override_failed(format!("Failed saving image override: {error}"));
+            return;
+        }
+        if let Err(error) = self.persist_and_emit_override_payload(&entity) {
+            self.emit_override_failed(error);
+        }
+    }
+
     fn enqueue_enrichment_request(
         &mut self,
         entity: LibraryEnrichmentEntity,
@@ -3617,6 +3799,15 @@ impl LibraryEnrichmentManager {
             Message::Library(LibraryMessage::ReplaceEnrichmentBackgroundQueue { entities }) => {
                 self.replace_background_queue(entities);
             }
+            Message::Library(LibraryMessage::SetEnrichmentTextOverride { entity, text }) => {
+                self.set_enrichment_text_override(entity, text);
+            }
+            Message::Library(LibraryMessage::SetArtistImageOverride {
+                artist,
+                source_path,
+            }) => {
+                self.set_artist_image_override(artist, source_path);
+            }
             Message::Library(LibraryMessage::ClearEnrichmentCache) => {
                 self.clear_enrichment_cache();
             }
@@ -3647,6 +3838,17 @@ impl LibraryEnrichmentManager {
 
         let now_unix_ms = Self::now_unix_ms();
         self.prune_enrichment_cache();
+        let override_row = match self.db_manager.get_library_enrichment_override(&entity) {
+            Ok(row) => row,
+            Err(error) => {
+                warn!(
+                    "Failed to read enrichment override for {}: {}",
+                    Self::source_entity_label(&entity),
+                    error
+                );
+                None
+            }
+        };
         match self
             .db_manager
             .get_library_enrichment_cache(&entity, now_unix_ms)
@@ -3675,7 +3877,11 @@ impl LibraryEnrichmentManager {
                     // Continue into a fresh fetch below.
                 } else {
                     if let Some(path) = cached.image_path.as_ref() {
-                        if !path.exists() || !Self::file_looks_like_supported_image(path) {
+                        let image_override_present =
+                            Self::override_has_image(&entity, override_row.as_ref());
+                        if !image_override_present
+                            && (!path.exists() || !Self::file_looks_like_supported_image(path))
+                        {
                             if path.exists() {
                                 let _ = fs::remove_file(path);
                             }
@@ -3692,6 +3898,7 @@ impl LibraryEnrichmentManager {
                         }
                     }
                     cached.attempt_kind = attempt_kind;
+                    Self::apply_override_to_payload(&entity, override_row.as_ref(), &mut cached);
                     self.emit_enrichment_result(cached);
                     return;
                 }
@@ -3706,11 +3913,29 @@ impl LibraryEnrichmentManager {
             }
         }
 
+        if Self::override_satisfies_entity(&entity, override_row.as_ref()) {
+            match self.payload_from_cache_and_override(&entity, attempt_kind, override_row.as_ref())
+            {
+                Ok(payload) => {
+                    self.emit_enrichment_result(payload);
+                    return;
+                }
+                Err(error) => {
+                    warn!(
+                        "Failed to build override-only payload for {}: {}",
+                        Self::source_entity_label(&entity),
+                        error
+                    );
+                }
+            }
+        }
+
         self.in_flight_attempts.insert(entity.clone(), attempt_kind);
         let mut outcome = self.fetch_outcome_for_entity(&entity, attempt_kind);
         self.in_flight_attempts.remove(&entity);
 
         outcome.payload.attempt_kind = attempt_kind;
+        Self::apply_override_to_payload(&entity, override_row.as_ref(), &mut outcome.payload);
         if attempt_kind != LibraryEnrichmentAttemptKind::Detail
             && outcome.payload.status == LibraryEnrichmentStatus::Error
             && outcome.payload.error_kind == Some(LibraryEnrichmentErrorKind::RateLimited)
@@ -3781,12 +4006,17 @@ impl LibraryEnrichmentManager {
 #[cfg(test)]
 mod tests {
     use std::collections::HashSet;
+    use std::path::PathBuf;
 
     use super::{
         AudioDbAlbumCandidate, AudioDbArtistCandidate, EnrichmentSource, FetchOutcome,
         LibraryEnrichmentEntity, LibraryEnrichmentManager, TitleMatchTier, WikiSummary,
     };
-    use crate::protocol::{LibraryEnrichmentErrorKind, LibraryEnrichmentStatus};
+    use crate::db_manager::LibraryEnrichmentOverride;
+    use crate::protocol::{
+        LibraryEnrichmentAttemptKind, LibraryEnrichmentErrorKind, LibraryEnrichmentPayload,
+        LibraryEnrichmentStatus,
+    };
 
     fn sample_summary(title: &str, description: &str, extract: &str) -> WikiSummary {
         WikiSummary {
@@ -4141,6 +4371,96 @@ mod tests {
         assert!(parsed["artists"]
             .as_array()
             .is_some_and(|items| items.is_empty()));
+    }
+
+    #[test]
+    fn test_override_satisfies_entity_requires_expected_fields() {
+        let album = LibraryEnrichmentEntity::Album {
+            album_artist: "Sample Artist".to_string(),
+            album: "Sample Album".to_string(),
+        };
+        let artist = LibraryEnrichmentEntity::Artist {
+            artist: "Sample Artist".to_string(),
+        };
+        let blurb_only = LibraryEnrichmentOverride {
+            entity: artist.clone(),
+            blurb: Some("Manual bio".to_string()),
+            image_path: None,
+        };
+        let image_only = LibraryEnrichmentOverride {
+            entity: artist.clone(),
+            blurb: None,
+            image_path: Some(PathBuf::from("/tmp/sample-artist.jpg")),
+        };
+        let both_fields = LibraryEnrichmentOverride {
+            entity: artist.clone(),
+            blurb: Some("Manual bio".to_string()),
+            image_path: Some(PathBuf::from("/tmp/sample-artist.jpg")),
+        };
+        let blank_blurb = LibraryEnrichmentOverride {
+            entity: album.clone(),
+            blurb: Some("  ".to_string()),
+            image_path: None,
+        };
+
+        assert!(!LibraryEnrichmentManager::override_satisfies_entity(
+            &album,
+            Some(&blank_blurb)
+        ));
+        assert!(LibraryEnrichmentManager::override_satisfies_entity(
+            &album,
+            Some(&blurb_only)
+        ));
+        assert!(!LibraryEnrichmentManager::override_satisfies_entity(
+            &artist,
+            Some(&blurb_only)
+        ));
+        assert!(!LibraryEnrichmentManager::override_satisfies_entity(
+            &artist,
+            Some(&image_only)
+        ));
+        assert!(LibraryEnrichmentManager::override_satisfies_entity(
+            &artist,
+            Some(&both_fields)
+        ));
+    }
+
+    #[test]
+    fn test_apply_override_to_payload_manual_values_win_over_cached_values() {
+        let entity = LibraryEnrichmentEntity::Artist {
+            artist: "Sample Artist".to_string(),
+        };
+        let override_row = LibraryEnrichmentOverride {
+            entity: entity.clone(),
+            blurb: Some("Manual artist bio".to_string()),
+            image_path: Some(PathBuf::from("/tmp/manual-artist.jpg")),
+        };
+        let mut payload = LibraryEnrichmentPayload {
+            entity: entity.clone(),
+            status: LibraryEnrichmentStatus::Error,
+            blurb: "Fetched artist bio".to_string(),
+            image_path: Some(PathBuf::from("/tmp/fetched-artist.jpg")),
+            source_name: "Fetched Source".to_string(),
+            source_url: "https://example.com".to_string(),
+            error_kind: Some(LibraryEnrichmentErrorKind::Timeout),
+            attempt_kind: LibraryEnrichmentAttemptKind::Detail,
+        };
+
+        LibraryEnrichmentManager::apply_override_to_payload(
+            &entity,
+            Some(&override_row),
+            &mut payload,
+        );
+
+        assert_eq!(payload.blurb, "Manual artist bio");
+        assert_eq!(
+            payload.image_path,
+            Some(PathBuf::from("/tmp/manual-artist.jpg"))
+        );
+        assert_eq!(payload.source_name, "Manual Override");
+        assert!(payload.source_url.is_empty());
+        assert_eq!(payload.status, LibraryEnrichmentStatus::Ready);
+        assert!(payload.error_kind.is_none());
     }
 
     #[test]

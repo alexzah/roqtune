@@ -383,6 +383,23 @@ pub enum LibraryMessage {
     ReplaceEnrichmentBackgroundQueue {
         entities: Vec<LibraryEnrichmentEntity>,
     },
+    SetEnrichmentTextOverrideForDisplay {
+        field: LibraryEnrichmentOverrideField,
+        display_priority: i32,
+        text: String,
+    },
+    SetArtistImageOverrideForDisplay {
+        display_priority: i32,
+        source_path: PathBuf,
+    },
+    SetEnrichmentTextOverride {
+        entity: LibraryEnrichmentEntity,
+        text: String,
+    },
+    SetArtistImageOverride {
+        artist: String,
+        source_path: PathBuf,
+    },
     EnrichmentPrefetchTick,
     ClearEnrichmentCache,
     LibraryViewportChanged {
@@ -452,6 +469,7 @@ pub enum LibraryMessage {
         favorited: bool,
     },
     EnrichmentResult(LibraryEnrichmentPayload),
+    EnrichmentOverrideFailed(String),
     EnrichmentCacheCleared {
         cleared_rows: usize,
         deleted_images: usize,
@@ -486,6 +504,13 @@ pub enum LibraryEnrichmentEntity {
 pub enum LibraryEnrichmentPriority {
     Interactive,
     Prefetch,
+}
+
+/// Field identity for one editable library enrichment text payload.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+pub enum LibraryEnrichmentOverrideField {
+    AlbumDescription,
+    ArtistBio,
 }
 
 /// Classification of enrichment failures for retry/backoff behavior.

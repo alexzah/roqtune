@@ -508,6 +508,7 @@ export component TextPanel inherits Rectangle {
     in property <string> empty-state-text: "No track selected";
     callback tooltip_hover_changed(bool, string, int, int);
     callback metadata_link_activated(int, string, string, string, string);
+    out property <bool> hovered: tooltip-hover-area.has-hover;
     private property <bool> has-metadata: root.display-text.plain_text != "" || root.tooltip-text != "";
     private property <bool> compact: root.width < 220px || root.height < 120px;
     in property <color> text-primary: AppPalette.text-primary;
@@ -571,6 +572,7 @@ export component ImagePanel inherits Rectangle {
     in property <color> frame-inner-bg: AppPalette.panel-bg-alt;
     in property <color> placeholder-icon: AppPalette.text-muted;
     in property <color> placeholder-text: AppPalette.text-disabled;
+    out property <bool> hovered: hover-area.has-hover;
     private property <bool> compact: root.width < 180px || root.height < 140px;
     private property <bool> dense: root.width < 130px || root.height < 100px;
     private property <length> placeholder-padding: root.dense ? 8px : root.compact ? 12px : 24px;
@@ -637,5 +639,12 @@ export component ImagePanel inherits Rectangle {
                 Rectangle { vertical-stretch: 1; }
             }
         }
+    }
+
+    hover-area := TouchArea {
+        x: 0px;
+        y: 0px;
+        width: root.width;
+        height: root.height;
     }
 }

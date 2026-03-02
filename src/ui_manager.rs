@@ -5331,6 +5331,119 @@ impl UiManager {
         })
     }
 
+    fn viewer_track_context_for_priority_code(
+        &self,
+        display_priority_code: i32,
+    ) -> ViewerTrackContext {
+        let mode = Self::display_resolution_mode_from_priority_code(
+            display_priority_code,
+            self.display_target_priority,
+        );
+        let (display_path, display_metadata) = self
+            .resolve_active_collection_display_target_with_mode(
+                mode,
+                self.playing_track.path.as_ref(),
+                self.playing_track.metadata.as_ref(),
+            );
+        self.viewer_track_context_for_display_target(
+            display_path.as_ref(),
+            display_metadata.as_ref(),
+        )
+    }
+
+    fn viewer_track_context_for_override_priority(
+        &self,
+        display_priority_code: i32,
+    ) -> Option<ViewerTrackContext> {
+        match display_priority_code {
+            VIEWER_DISPLAY_PRIORITY_DEFAULT
+            | VIEWER_DISPLAY_PRIORITY_PREFER_SELECTION
+            | VIEWER_DISPLAY_PRIORITY_PREFER_NOW_PLAYING
+            | VIEWER_DISPLAY_PRIORITY_SELECTION_ONLY
+            | VIEWER_DISPLAY_PRIORITY_NOW_PLAYING_ONLY => {
+                Some(self.viewer_track_context_for_priority_code(display_priority_code))
+            }
+            _ => None,
+        }
+    }
+
+    fn detail_enrichment_entity_for_override_field(
+        &self,
+        field: protocol::LibraryEnrichmentOverrideField,
+    ) -> Option<protocol::LibraryEnrichmentEntity> {
+        let current_view = self.current_library_view();
+        let detail_entity = Self::detail_enrichment_entity_for_view(&current_view)?;
+        match (field, detail_entity) {
+            (
+                protocol::LibraryEnrichmentOverrideField::AlbumDescription,
+                entity @ protocol::LibraryEnrichmentEntity::Album { .. },
+            ) => Some(entity),
+            (
+                protocol::LibraryEnrichmentOverrideField::ArtistBio,
+                entity @ protocol::LibraryEnrichmentEntity::Artist { .. },
+            ) => Some(entity),
+            _ => None,
+        }
+    }
+
+    fn set_enrichment_text_override_for_display(
+        &mut self,
+        field: protocol::LibraryEnrichmentOverrideField,
+        display_priority: i32,
+        text: String,
+    ) {
+        let viewer_entity = self
+            .viewer_track_context_for_override_priority(display_priority)
+            .and_then(|context| match field {
+                protocol::LibraryEnrichmentOverrideField::AlbumDescription => {
+                    Self::viewer_album_entity_for_track_context(&context)
+                }
+                protocol::LibraryEnrichmentOverrideField::ArtistBio => {
+                    Self::viewer_artist_entity_for_track_context(&context)
+                }
+            });
+        let entity =
+            viewer_entity.or_else(|| self.detail_enrichment_entity_for_override_field(field));
+        let Some(entity) = entity else {
+            self.show_library_toast(
+                "No matching album or artist context was found for this override.",
+            );
+            return;
+        };
+        let _ = self.bus_sender.send(protocol::Message::Library(
+            protocol::LibraryMessage::SetEnrichmentTextOverride { entity, text },
+        ));
+    }
+
+    fn set_artist_image_override_for_display(
+        &mut self,
+        display_priority: i32,
+        source_path: PathBuf,
+    ) {
+        let viewer_artist = self
+            .viewer_track_context_for_override_priority(display_priority)
+            .and_then(|context| Self::viewer_artist_entity_for_track_context(&context))
+            .and_then(|entity| match entity {
+                protocol::LibraryEnrichmentEntity::Artist { artist } => Some(artist),
+                _ => None,
+            });
+        let current_view = self.current_library_view();
+        let detail_artist = match Self::detail_enrichment_entity_for_view(&current_view) {
+            Some(protocol::LibraryEnrichmentEntity::Artist { artist }) => Some(artist),
+            _ => None,
+        };
+        let Some(artist) = viewer_artist.or(detail_artist) else {
+            self.show_library_toast("No artist context is available to override the image.");
+            return;
+        };
+        let _ = self.bus_sender.send(protocol::Message::Library(
+            protocol::LibraryMessage::SetArtistImageOverride {
+                artist,
+                source_path,
+            },
+        ));
+    }
+
     fn viewer_metadata_from_artist_bio_payload(
         context: &ViewerTrackContext,
         payload: &protocol::LibraryEnrichmentPayload,
@@ -12140,6 +12253,26 @@ impl UiManager {
                             protocol::LibraryMessage::OpenFileLocation => {
                                 self.open_file_location();
                             }
+                            protocol::LibraryMessage::SetEnrichmentTextOverrideForDisplay {
+                                field,
+                                display_priority,
+                                text,
+                            } => {
+                                self.set_enrichment_text_override_for_display(
+                                    field,
+                                    display_priority,
+                                    text,
+                                );
+                            }
+                            protocol::LibraryMessage::SetArtistImageOverrideForDisplay {
+                                display_priority,
+                                source_path,
+                            } => {
+                                self.set_artist_image_override_for_display(
+                                    display_priority,
+                                    source_path,
+                                );
+                            }
                             protocol::LibraryMessage::EvaluateRemoveSelection { .. } => {}
                             protocol::LibraryMessage::ConfirmRemoveSelection => {
                                 self.confirm_library_remove_selection();
@@ -12377,6 +12510,9 @@ impl UiManager {
                                     self.sync_library_search_state_to_ui();
                                 }
                             }
+                            protocol::LibraryMessage::EnrichmentOverrideFailed(error_text) => {
+                                self.show_library_toast(error_text);
+                            }
                             protocol::LibraryMessage::EnrichmentCacheCleared {
                                 cleared_rows,
                                 deleted_images,
@@ -12522,6 +12658,8 @@ impl UiManager {
                             | protocol::LibraryMessage::ReplaceEnrichmentBackgroundQueue {
                                 ..
                             }
+                            | protocol::LibraryMessage::SetEnrichmentTextOverride { .. }
+                            | protocol::LibraryMessage::SetArtistImageOverride { .. }
                             | protocol::LibraryMessage::ClearEnrichmentCache
                             | protocol::LibraryMessage::AddSelectionToPlaylists { .. }
                             | protocol::LibraryMessage::PasteSelectionToActivePlaylist { .. }

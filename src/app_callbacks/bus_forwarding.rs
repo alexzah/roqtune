@@ -258,6 +258,38 @@ pub fn register_bus_forwarding_callbacks(ui: &AppWindow, context: BusForwardingC
     });
 
     let bus_sender_clone = bus_sender.clone();
+    ui.on_library_save_enrichment_text_override(move |field_kind, display_priority, text| {
+        let field = match field_kind {
+            1 => protocol::LibraryEnrichmentOverrideField::AlbumDescription,
+            2 => protocol::LibraryEnrichmentOverrideField::ArtistBio,
+            _ => return,
+        };
+        let _ = bus_sender_clone.send(Message::Library(
+            protocol::LibraryMessage::SetEnrichmentTextOverrideForDisplay {
+                field,
+                display_priority,
+                text: text.to_string(),
+            },
+        ));
+    });
+
+    let bus_sender_clone = bus_sender.clone();
+    ui.on_library_replace_artist_image_override(move |display_priority| {
+        let Some(path) = FileDialog::new()
+            .add_filter("Image Files", &["jpg", "jpeg", "png", "webp", "gif", "bmp"])
+            .pick_file()
+        else {
+            return;
+        };
+        let _ = bus_sender_clone.send(Message::Library(
+            protocol::LibraryMessage::SetArtistImageOverrideForDisplay {
+                display_priority,
+                source_path: path,
+            },
+        ));
+    });
+
+    let bus_sender_clone = bus_sender.clone();
     ui.on_remote_detach_confirm(move |playlist_id| {
         let _ = bus_sender_clone.send(Message::Playlist(
             PlaylistMessage::ConfirmDetachRemotePlaylist {

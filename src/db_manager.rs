@@ -77,6 +77,14 @@ pub struct FavoriteSyncQueueEntry {
     pub desired_favorited: bool,
 }
 
+/// Persisted field-level manual override for one enrichment entity.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LibraryEnrichmentOverride {
+    pub entity: LibraryEnrichmentEntity,
+    pub blurb: Option<String>,
+    pub image_path: Option<PathBuf>,
+}
+
 impl DbManager {
     const DB_FILE_NAME: &'static str = "roqtune.db";
     const LEGACY_DB_FILE_NAME: &'static str = "playlist.db";
@@ -202,6 +210,13 @@ impl DbManager {
             return fallback.to_string();
         }
         trimmed.to_ascii_lowercase()
+    }
+
+    fn now_unix_ms() -> i64 {
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|duration| duration.as_millis() as i64)
+            .unwrap_or(0)
     }
 
     fn favorite_kind_to_db(kind: FavoriteEntityKind) -> &'static str {
@@ -360,6 +375,17 @@ impl DbManager {
         )?;
         self.conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_library_enrichment_cache_expires ON library_enrichment_cache(expires_unix_ms)",
+            [],
+        )?;
+        self.conn.execute(
+            "CREATE TABLE IF NOT EXISTS library_enrichment_overrides (
+                entity_type TEXT NOT NULL,
+                entity_key TEXT NOT NULL,
+                blurb TEXT,
+                image_path TEXT,
+                updated_unix_ms INTEGER NOT NULL DEFAULT 0,
+                PRIMARY KEY(entity_type, entity_key)
+            )",
             [],
         )?;
         self.conn.execute(
@@ -1850,6 +1876,84 @@ impl DbManager {
         Ok(deleted_rows)
     }
 
+    /// Returns one persisted enrichment override row for the supplied entity.
+    pub fn get_library_enrichment_override(
+        &self,
+        entity: &LibraryEnrichmentEntity,
+    ) -> Result<Option<LibraryEnrichmentOverride>, rusqlite::Error> {
+        let (entity_type, entity_key) = Self::enrichment_entity_parts(entity);
+        let result = self
+            .conn
+            .query_row(
+                "SELECT blurb, image_path
+                 FROM library_enrichment_overrides
+                 WHERE entity_type = ?1 AND entity_key = ?2",
+                params![entity_type, entity_key],
+                |row| {
+                    let blurb: Option<String> = row.get(0)?;
+                    let image_path: Option<String> = row.get(1)?;
+                    Ok((blurb, image_path))
+                },
+            )
+            .optional()?;
+        let Some((blurb, image_path)) = result else {
+            return Ok(None);
+        };
+        Ok(Some(LibraryEnrichmentOverride {
+            entity: entity.clone(),
+            blurb: blurb.filter(|value| !value.trim().is_empty()),
+            image_path: image_path.map(PathBuf::from),
+        }))
+    }
+
+    /// Upserts one enrichment override row.
+    ///
+    /// `blurb` and `image_path` are patch-style fields: `None` keeps the existing value.
+    pub fn upsert_library_enrichment_override(
+        &self,
+        entity: &LibraryEnrichmentEntity,
+        blurb: Option<&str>,
+        image_path: Option<&Path>,
+    ) -> Result<LibraryEnrichmentOverride, rusqlite::Error> {
+        let existing = self.get_library_enrichment_override(entity)?;
+        let resolved_blurb = match blurb {
+            Some(value) => {
+                let trimmed = value.trim();
+                (!trimmed.is_empty()).then(|| value.to_string())
+            }
+            None => existing.as_ref().and_then(|row| row.blurb.clone()),
+        };
+        let resolved_image_path = match image_path {
+            Some(path) => Some(path.to_path_buf()),
+            None => existing.as_ref().and_then(|row| row.image_path.clone()),
+        };
+        let (entity_type, entity_key) = Self::enrichment_entity_parts(entity);
+        let updated_unix_ms = Self::now_unix_ms();
+        self.conn.execute(
+            "INSERT INTO library_enrichment_overrides (
+                entity_type, entity_key, blurb, image_path, updated_unix_ms
+            ) VALUES (?1, ?2, ?3, ?4, ?5)
+            ON CONFLICT(entity_type, entity_key) DO UPDATE SET
+                blurb = excluded.blurb,
+                image_path = excluded.image_path,
+                updated_unix_ms = excluded.updated_unix_ms",
+            params![
+                entity_type,
+                entity_key,
+                resolved_blurb,
+                resolved_image_path
+                    .as_ref()
+                    .map(|path| path.to_string_lossy().to_string()),
+                updated_unix_ms,
+            ],
+        )?;
+        Ok(LibraryEnrichmentOverride {
+            entity: entity.clone(),
+            blurb: resolved_blurb,
+            image_path: resolved_image_path,
+        })
+    }
+
     fn favorite_row_to_ref(row: &rusqlite::Row<'_>) -> Result<FavoriteEntityRef, rusqlite::Error> {
         let entity_type: String = row.get(0)?;
         let entity_key: String = row.get(1)?;
@@ -2179,6 +2283,7 @@ impl DbManager {
 #[cfg(test)]
 mod tests {
     use super::DbManager;
+    use crate::protocol::LibraryEnrichmentEntity;
     use rusqlite::Connection;
     use std::{fs, path::PathBuf};
     use uuid::Uuid;
@@ -2325,5 +2430,33 @@ mod tests {
         assert!(!legacy_shm_path.exists());
 
         fs::remove_dir_all(&temp_dir).expect("should clean up test temp directory");
+    }
+
+    #[test]
+    fn test_enrichment_override_upsert_preserves_other_field() {
+        let db = DbManager::new_in_memory().expect("in-memory db should initialize");
+        let artist_entity = LibraryEnrichmentEntity::Artist {
+            artist: "Sample Artist".to_string(),
+        };
+        let image_path = PathBuf::from("/tmp/sample-artist-override.jpg");
+
+        let first = db
+            .upsert_library_enrichment_override(&artist_entity, Some("Manual bio"), None)
+            .expect("text override upsert should succeed");
+        assert_eq!(first.blurb.as_deref(), Some("Manual bio"));
+        assert_eq!(first.image_path, None);
+
+        let second = db
+            .upsert_library_enrichment_override(&artist_entity, None, Some(image_path.as_path()))
+            .expect("image override upsert should succeed");
+        assert_eq!(second.blurb.as_deref(), Some("Manual bio"));
+        assert_eq!(second.image_path, Some(image_path.clone()));
+
+        let loaded = db
+            .get_library_enrichment_override(&artist_entity)
+            .expect("override read should succeed")
+            .expect("override should be persisted");
+        assert_eq!(loaded.blurb.as_deref(), Some("Manual bio"));
+        assert_eq!(loaded.image_path, Some(image_path));
     }
 }

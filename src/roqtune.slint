@@ -167,6 +167,10 @@ export component AppWindow inherits Window {
                 root.properties_cancel();
                 return accept;
             }
+            if (event.text == Key.Escape && root.show_enrichment_override_dialog) {
+                root.show_enrichment_override_dialog = false;
+                return accept;
+            }
             if (event.text == Key.Escape && root.show_subsonic_session_password_prompt) {
                 root.subsonic_session_password_cancel();
                 return accept;
@@ -487,6 +491,11 @@ export component AppWindow inherits Window {
     in-out property <[PropertiesExternalImage]> properties_external_images: [];
     in-out property <bool> properties_save_enabled: false;
     in-out property <bool> properties_track_is_local_file: false;
+    in-out property <bool> show_enrichment_override_dialog: false;
+    in-out property <int> enrichment_override_field_kind: 0; // 1 album description, 2 artist bio
+    in-out property <int> enrichment_override_display_priority: 0;
+    in-out property <string> enrichment_override_dialog_title: "";
+    in-out property <string> enrichment_override_draft_text: "";
     in-out property <[string]> settings_library_folders: [];
     in-out property <int> settings_library_selected_folder_index: -1;
     in-out property <bool> settings_library_online_metadata_enabled: false;
@@ -1190,7 +1199,7 @@ export component AppWindow inherits Window {
                 property <length> content-inset: panel.width_px < 180 || panel.height_px < 120
                     ? 4px
                     : 10px;
-                TextPanel {
+                viewer-text-panel := TextPanel {
                     x: parent.content-inset;
                     y: parent.content-inset;
                     width: max(0px, parent.width - parent.content-inset * 2);
@@ -1219,6 +1228,28 @@ export component AppWindow inherits Window {
                         );
                     }
                 }
+                if panel.metadata_source == 1 || panel.metadata_source == 2 : PlayerButton {
+                    width: 22px;
+                    height: 22px;
+                    x: parent.width - self.width - 4px;
+                    y: 4px;
+                    visible: viewer-text-panel.hovered;
+                    icon-source: AppIcons.pencil;
+                    icon-text: "";
+                    font-size: 12px;
+                    tooltip-text: panel.metadata_source == 1
+                        ? "Edit album description"
+                        : "Edit artist bio";
+                    clicked => {
+                        root.enrichment_override_field_kind = panel.metadata_source;
+                        root.enrichment_override_display_priority = panel.display_priority;
+                        root.enrichment_override_dialog_title = panel.metadata_source == 1
+                            ? "Edit Album Description"
+                            : "Edit Artist Bio";
+                        root.enrichment_override_draft_text = panel.display_text_full;
+                        root.show_enrichment_override_dialog = true;
+                    }
+                }
             }
 
             for panel in root.layout_album_art_viewer_panels : Rectangle {
@@ -1232,7 +1263,7 @@ export component AppWindow inherits Window {
                 property <length> content-inset: panel.width_px < 180 || panel.height_px < 120
                     ? 4px
                     : 10px;
-                ImagePanel {
+                viewer-image-panel := ImagePanel {
                     x: parent.content-inset;
                     y: parent.content-inset;
                     width: max(0px, parent.width - parent.content-inset * 2);
@@ -1246,6 +1277,20 @@ export component AppWindow inherits Window {
                     placeholder-text: AppPalette.text-disabled;
                     art-source: panel.art_source;
                     has-art: panel.has_art;
+                }
+                if panel.image_source == 1 : PlayerButton {
+                    width: 22px;
+                    height: 22px;
+                    x: parent.width - self.width - 4px;
+                    y: 4px;
+                    visible: viewer-image-panel.hovered;
+                    icon-source: AppIcons.pencil;
+                    icon-text: "";
+                    font-size: 12px;
+                    tooltip-text: "Replace artist image";
+                    clicked => {
+                        root.library_replace_artist_image_override(panel.display_priority);
+                    }
                 }
             }
 
@@ -2063,6 +2108,24 @@ export component AppWindow inherits Window {
                                     image-fit: contain;
                                     colorize: AppPalette.text-secondary;
                                 }
+                                detail-header-art-hover-ta := TouchArea {
+                                    width: parent.width;
+                                    height: parent.height;
+                                }
+                                if root.library_root_index == 1 : PlayerButton {
+                                    width: 22px;
+                                    height: 22px;
+                                    x: parent.width - self.width - 4px;
+                                    y: 4px;
+                                    visible: detail-header-art-hover-ta.has-hover;
+                                    icon-source: AppIcons.pencil;
+                                    icon-text: "";
+                                    font-size: 12px;
+                                    tooltip-text: "Replace artist image";
+                                    clicked => {
+                                        root.library_replace_artist_image_override(-1);
+                                    }
+                                }
                             }
                             Rectangle {
                                 horizontal-stretch: 1;
@@ -2091,16 +2154,53 @@ export component AppWindow inherits Window {
                                         overflow: elide;
                                         horizontal-alignment: left;
                                     }
-                                    Text {
-                                        text: root.library_detail_header_loading
-                                            ? "Loading internet metadata..."
-                                            : root.library_detail_header_blurb;
-                                        color: AppPalette.text-secondary;
-                                        font-size: 11px;
-                                        wrap: word-wrap;
-                                        max-height: 76px;
-                                        overflow: clip;
-                                        horizontal-alignment: left;
+                                    Rectangle {
+                                        height: 76px;
+                                        clip: true;
+                                        Text {
+                                            text: root.library_detail_header_loading
+                                                ? "Loading internet metadata..."
+                                                : root.library_detail_header_blurb;
+                                            width: max(
+                                                0px,
+                                                parent.width
+                                                    - ((root.library_root_index == 1 || root.library_root_index == 2)
+                                                        ? 26px
+                                                        : 0px)
+                                            );
+                                            color: AppPalette.text-secondary;
+                                            font-size: 11px;
+                                            wrap: word-wrap;
+                                            max-height: 76px;
+                                            overflow: clip;
+                                            horizontal-alignment: left;
+                                        }
+                                        detail-header-blurb-hover-ta := TouchArea {
+                                            width: parent.width;
+                                            height: parent.height;
+                                        }
+                                        if root.library_root_index == 1 || root.library_root_index == 2 : PlayerButton {
+                                            width: 22px;
+                                            height: 22px;
+                                            x: parent.width - self.width;
+                                            y: 0px;
+                                            visible: detail-header-blurb-hover-ta.has-hover;
+                                            icon-source: AppIcons.pencil;
+                                            icon-text: "";
+                                            font-size: 12px;
+                                            tooltip-text: root.library_root_index == 1
+                                                ? "Edit artist bio"
+                                                : "Edit album description";
+                                            clicked => {
+                                                root.enrichment_override_field_kind = root.library_root_index == 1 ? 2 : 1;
+                                                root.enrichment_override_display_priority = -1;
+                                                root.enrichment_override_dialog_title = root.library_root_index == 1
+                                                    ? "Edit Artist Bio"
+                                                    : "Edit Album Description";
+                                                root.enrichment_override_draft_text = root.library_detail_header_blurb;
+                                                root.show_enrichment_override_dialog = true;
+                                            }
+                                        }
                                     }
                                     if root.library_detail_header_source_visible : Rectangle {
                                         height: 18px;
@@ -5401,6 +5501,93 @@ export component AppWindow inherits Window {
         }
     }
 
+    if root.show_enrichment_override_dialog : Rectangle {
+        background: AppPalette.overlay-scrim;
+        z: 112;
+
+        TouchArea {
+            clicked => {
+                root.show_enrichment_override_dialog = false;
+            }
+        }
+
+        enrichment-override-panel := Rectangle {
+            z: 1;
+            width: min(root.width - 40px, 720px);
+            height: min(root.height - 40px, 460px);
+            x: (parent.width - self.width) / 2;
+            y: (parent.height - self.height) / 2;
+            border-radius: 6px;
+            background: AppPalette.panel-bg-elevated;
+            border-width: 1px;
+            border-color: AppPalette.border;
+
+            TouchArea {}
+
+            VerticalLayout {
+                padding: 16px;
+                spacing: 10px;
+
+                HorizontalLayout {
+                    Text {
+                        text: root.enrichment_override_dialog_title;
+                        color: AppPalette.text-primary;
+                        font-size: 16px;
+                        font-weight: 700;
+                    }
+                    Rectangle { horizontal-stretch: 1; }
+                }
+
+                Text {
+                    text: "Manual overrides always win over automatic enrichment updates.";
+                    color: AppPalette.text-secondary;
+                    font-size: 11px;
+                    wrap: word-wrap;
+                }
+
+                Rectangle {
+                    vertical-stretch: 1;
+                    border-radius: 4px;
+                    border-width: 1px;
+                    border-color: AppPalette.border;
+                    background: AppPalette.panel-bg;
+
+                    enrichment-override-text := TextEdit {
+                        x: 8px;
+                        y: 8px;
+                        width: max(0px, parent.width - 16px);
+                        height: max(0px, parent.height - 16px);
+                        text <=> root.enrichment_override_draft_text;
+                    }
+                }
+
+                HorizontalLayout {
+                    spacing: 10px;
+                    Rectangle { horizontal-stretch: 1; }
+                    Button {
+                        text: "Cancel";
+                        clicked => {
+                            root.show_enrichment_override_dialog = false;
+                        }
+                    }
+                    Button {
+                        text: "Save Override";
+                        primary: true;
+                        enabled: root.enrichment_override_draft_text != "";
+                        clicked => {
+                            root.library_save_enrichment_text_override(
+                                root.enrichment_override_field_kind,
+                                root.enrichment_override_display_priority,
+                                root.enrichment_override_draft_text
+                            );
+                            root.show_enrichment_override_dialog = false;
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     if root.show_settings_dialog : Rectangle {
         background: AppPalette.overlay-scrim;
         z: 100;
@@ -6953,6 +7140,7 @@ export component AppWindow inherits Window {
             && !root.show_library_context_menu
             && !root.show_playlist_track_context_menu
             && !root.show_properties_dialog
+            && !root.show_enrichment_override_dialog
             && !root.show_control_cluster_menu : Rectangle {
         z: 200;
         property <length> tooltip-max-width: min(360px, root.width - 16px);
@@ -7211,6 +7399,8 @@ export component AppWindow inherits Window {
     callback subsonic_session_password_submit(string);
     callback subsonic_session_password_cancel();
     callback clear_library_enrichment_cache();
+    callback library_save_enrichment_text_override(int, int, string);
+    callback library_replace_artist_image_override(int);
     callback library_viewport_changed(int, int);
     callback playlist_viewport_changed(int, int);
     callback handle_track_click(int, bool, bool);
