@@ -139,7 +139,10 @@ fn metadata_parse_options(
         .max_junk_bytes(max_junk_bytes)
 }
 
-fn read_tagged_file_for_metadata(path: &Path, read_cover_art: bool) -> Option<TaggedFile> {
+pub(crate) fn read_tagged_file_for_metadata(
+    path: &Path,
+    read_cover_art: bool,
+) -> Option<TaggedFile> {
     let primary_options = metadata_parse_options(read_cover_art, ParsingMode::BestAttempt, 1024);
     let relaxed_options = metadata_parse_options(read_cover_art, ParsingMode::Relaxed, 64 * 1024);
 

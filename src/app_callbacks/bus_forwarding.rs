@@ -4,6 +4,7 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 use log::{debug, warn};
+use rfd::FileDialog;
 use tokio::sync::broadcast;
 
 use crate::{
@@ -171,6 +172,16 @@ pub fn register_bus_forwarding_callbacks(ui: &AppWindow, context: BusForwardingC
     });
 
     let bus_sender_clone = bus_sender.clone();
+    ui.on_properties_select_tab(move |tab_index| {
+        if tab_index < 0 {
+            return;
+        }
+        let _ = bus_sender_clone.send(Message::Metadata(MetadataMessage::SelectPropertiesTab {
+            tab_index: tab_index as usize,
+        }));
+    });
+
+    let bus_sender_clone = bus_sender.clone();
     ui.on_properties_field_edited(move |index, value| {
         if index < 0 {
             return;
@@ -179,6 +190,49 @@ pub fn register_bus_forwarding_callbacks(ui: &AppWindow, context: BusForwardingC
             index: index as usize,
             value: value.to_string(),
         }));
+    });
+
+    let bus_sender_clone = bus_sender.clone();
+    ui.on_properties_replace_embedded_image(move |index| {
+        if index < 0 {
+            return;
+        }
+        let Some(path) = FileDialog::new()
+            .add_filter("Image Files", &["jpg", "jpeg", "png", "webp", "gif", "bmp"])
+            .pick_file()
+        else {
+            return;
+        };
+        let _ = bus_sender_clone.send(Message::Metadata(
+            MetadataMessage::StagePropertiesImageOverwrite {
+                slot_index: index as usize,
+                source_path: path,
+            },
+        ));
+    });
+
+    let bus_sender_clone = bus_sender.clone();
+    ui.on_properties_delete_embedded_image(move |index| {
+        if index < 0 {
+            return;
+        }
+        let _ = bus_sender_clone.send(Message::Metadata(
+            MetadataMessage::StagePropertiesImageDelete {
+                slot_index: index as usize,
+            },
+        ));
+    });
+
+    let bus_sender_clone = bus_sender.clone();
+    ui.on_properties_open_external_image_location(move |index| {
+        if index < 0 {
+            return;
+        }
+        let _ = bus_sender_clone.send(Message::Metadata(
+            MetadataMessage::OpenPropertiesExternalImageLocation {
+                index: index as usize,
+            },
+        ));
     });
 
     let bus_sender_clone = bus_sender.clone();

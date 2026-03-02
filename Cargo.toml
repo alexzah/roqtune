@@ -21,6 +21,7 @@ toml = "0.9.12" # For reading and writing toml files
 toml_edit = "0.25.0" # For comment-preserving config updates
 serde = "1.0.228"
 serde_json = "1.0.149"
+chrono = { version = "0.4.43", default-features = false, features = ["clock"] }
 rusqlite = { version = "0.38.0", features = ["bundled"] }
 governor = "0.10.4" # Rate limiting for UI updates
 souvlaki = "0.8.3" # Cross-platform media controls (MPRIS/SMTC/Now Playing)

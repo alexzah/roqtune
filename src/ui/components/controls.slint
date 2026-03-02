@@ -33,19 +33,26 @@ export component TooltipHoverArea inherits TouchArea {
 export component PlayerButton inherits Rectangle {
     width: 32px;
     height: 32px;
+    private property <brush> hover-bg: root.is-danger ? AppPalette.danger.mix(AppPalette.panel-bg, 0.82) : AppPalette.control-hover-bg;
+    private property <brush> pressed-bg: root.is-danger ? AppPalette.danger.mix(AppPalette.panel-bg, 0.72) : AppPalette.control-pressed-bg;
     background: touch-area.pressed
-        ? AppPalette.control-pressed-bg
+        ? root.pressed-bg
         : touch-area.has-hover
-            ? AppPalette.control-hover-bg
+            ? root.hover-bg
             : transparent;
     animate background { duration: 150ms; }
-    private property <brush> icon-color: root.is-primary ? AppPalette.accent : AppPalette.text-primary;
+    private property <brush> icon-color: root.is-danger
+        ? AppPalette.danger
+        : root.is-primary
+            ? AppPalette.accent
+            : AppPalette.text-primary;
     private property <bool> has-icon: root.icon-source.width > 0 && root.icon-source.height > 0;
     in property <string> icon-text;
     in property <image> icon-source;
     in property <string> tooltip-text: "";
     in property <bool> enabled: true;
     in property <bool> is-primary: false;
+    in property <bool> is-danger: false;
     in property <length> font-size: 16px;
     callback clicked;
     callback tooltip_hover_changed(bool, string, int, int);

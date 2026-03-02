@@ -44,9 +44,11 @@ This project contains third-party code with the following licenses.
 
 ### Tabler Icons
 - **Source**: https://tabler.io/icons
+- **Upstream Repository**: https://github.com/tabler/tabler-icons
 - **License**: MIT License
 - **Copyright**: Copyright (c) 2020-2026 Paweł Kuna
 - **Location**: `src/ui/icons/tabler/`
+- **Policy**: All icons in `src/ui/icons/tabler/` must be fetched from the official Tabler GitHub repository; do not create custom local SVG variants.
 
 ### OpenSubsonic Logo
 - **Source**: https://github.com/opensubsonic/open-subsonic-api/blob/main/assets/icons/logo.svg

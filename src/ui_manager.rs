@@ -33,8 +33,10 @@ use crate::{
     layout::PlaylistColumnWidthOverrideConfig,
     metadata_tags, protocol, text_template, AppWindow, LayoutAlbumArtViewerPanelModel,
     LayoutMetadataViewerPanelModel, LibraryRowData, MetadataEditorField as UiMetadataEditorField,
-    RichTextBlock as UiRichTextBlock, RichTextLine as UiRichTextLine, RichTextRun as UiRichTextRun,
-    TrackRowData,
+    PropertiesEmbeddedImageSlot as UiPropertiesEmbeddedImageSlot,
+    PropertiesExternalImage as UiPropertiesExternalImage,
+    PropertiesMediaInfoField as UiPropertiesMediaInfoField, RichTextBlock as UiRichTextBlock,
+    RichTextLine as UiRichTextLine, RichTextRun as UiRichTextRun, TrackRowData,
 };
 use governor::{Quota, RateLimiter};
 
@@ -238,8 +240,14 @@ pub struct UiManager {
     properties_pending_request_kind: Option<PropertiesRequestKind>,
     properties_target_path: Option<PathBuf>,
     properties_target_title: String,
+    properties_active_tab_index: i32,
     properties_original_fields: Vec<protocol::MetadataEditorField>,
     properties_fields: Vec<protocol::MetadataEditorField>,
+    properties_media_info_fields: Vec<protocol::PropertiesMediaInfoField>,
+    properties_embedded_image_slots: Vec<protocol::PropertiesEmbeddedImageSlot>,
+    properties_external_images: Vec<protocol::PropertiesExternalImage>,
+    properties_image_overwrites: Vec<protocol::PropertiesImageOverwrite>,
+    properties_image_deletes: Vec<protocol::PropertiesImageDelete>,
     properties_dialog_visible: bool,
     properties_busy: bool,
     properties_error_text: String,
@@ -411,6 +419,16 @@ enum PlaylistSortDirection {
 enum PropertiesRequestKind {
     Load,
     Save,
+}
+
+struct PropertiesLoadedPayload {
+    request_id: u64,
+    path: PathBuf,
+    display_name: String,
+    metadata_fields: Vec<protocol::MetadataEditorField>,
+    media_info_fields: Vec<protocol::PropertiesMediaInfoField>,
+    embedded_image_slots: Vec<protocol::PropertiesEmbeddedImageSlot>,
+    external_images: Vec<protocol::PropertiesExternalImage>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -660,6 +678,16 @@ impl PathImageCache {
         }
         self.lru.retain(|path| self.entries.contains_key(path));
         evicted
+    }
+
+    fn remove(&mut self, path: &Path) -> bool {
+        let removed = self.entries.remove(path);
+        if let Some((_, bytes, _)) = removed {
+            self.total_bytes = self.total_bytes.saturating_sub(bytes);
+            self.lru.retain(|candidate| candidate != path);
+            return true;
+        }
+        false
     }
 
     fn clear(&mut self) {
@@ -1045,6 +1073,15 @@ impl UiManager {
         });
     }
 
+    fn evict_cover_art_memory_cache_path(path: &Path) {
+        TRACK_ROW_COVER_ART_IMAGE_CACHE.with(|cache| {
+            cache.borrow_mut().remove(path);
+        });
+        TRACK_ROW_ARTIST_IMAGE_CACHE.with(|cache| {
+            cache.borrow_mut().remove(path);
+        });
+    }
+
     fn source_badge_for_track_path(path: &Path) -> String {
         if is_remote_track_path(path) {
             "opensubsonic".to_string()
@@ -1197,13 +1234,14 @@ impl UiManager {
             .unwrap_or(false)
     }
 
-    fn find_external_cover_art(track_path: &Path) -> Option<PathBuf> {
-        let parent = track_path.parent()?;
+    fn external_cover_art_candidates(track_path: &Path) -> Vec<PathBuf> {
+        let Some(parent) = track_path.parent() else {
+            return Vec::new();
+        };
         let names = ["cover", "front", "folder", "album", "art"];
         let extensions = ["jpg", "jpeg", "png", "webp"];
-
+        let mut found_files = Vec::new();
         if let Ok(entries) = std::fs::read_dir(parent) {
-            let mut found_files = Vec::new();
             for entry in entries.flatten() {
                 let path = entry.path();
                 if !path.is_file() {
@@ -1212,8 +1250,10 @@ impl UiManager {
                 let Some(file_stem) = path.file_stem().and_then(|s| s.to_str()) else {
                     continue;
                 };
-                let file_stem_lower = file_stem.to_lowercase();
-                if !names.iter().any(|&name| file_stem_lower == name) {
+                if !names
+                    .iter()
+                    .any(|candidate| file_stem.eq_ignore_ascii_case(candidate))
+                {
                     continue;
                 }
                 let Some(ext) = path.extension().and_then(|e| e.to_str()) else {
@@ -1226,13 +1266,15 @@ impl UiManager {
                     found_files.push(path);
                 }
             }
-            found_files.sort();
-            if let Some(found) = found_files.into_iter().next() {
-                return Some(found);
-            }
         }
+        found_files.sort();
+        found_files
+    }
 
-        None
+    fn find_external_cover_art(track_path: &Path) -> Option<PathBuf> {
+        Self::external_cover_art_candidates(track_path)
+            .into_iter()
+            .next()
     }
 
     fn embedded_art_cache_stem(track_path: &Path) -> Option<String> {
@@ -2000,8 +2042,14 @@ impl UiManager {
             properties_pending_request_kind: None,
             properties_target_path: None,
             properties_target_title: String::new(),
+            properties_active_tab_index: Self::properties_default_tab_index(),
             properties_original_fields: Vec::new(),
             properties_fields: Vec::new(),
+            properties_media_info_fields: Vec::new(),
+            properties_embedded_image_slots: Vec::new(),
+            properties_external_images: Vec::new(),
+            properties_image_overwrites: Vec::new(),
+            properties_image_deletes: Vec::new(),
             properties_dialog_visible: false,
             properties_busy: false,
             properties_error_text: String::new(),
@@ -5944,22 +5992,129 @@ impl UiManager {
             .collect()
     }
 
-    fn properties_has_changes(&self) -> bool {
-        if self.properties_fields.len() != self.properties_original_fields.len() {
+    fn to_ui_properties_media_info_fields(
+        fields: &[protocol::PropertiesMediaInfoField],
+    ) -> Vec<UiPropertiesMediaInfoField> {
+        fields
+            .iter()
+            .map(|field| UiPropertiesMediaInfoField {
+                id: field.id.as_str().into(),
+                label: field.label.as_str().into(),
+                value: field.value.as_str().into(),
+            })
+            .collect()
+    }
+
+    fn to_ui_properties_embedded_image_slots(
+        slots: &[protocol::PropertiesEmbeddedImageSlot],
+    ) -> Vec<UiPropertiesEmbeddedImageSlot> {
+        slots
+            .iter()
+            .map(|slot| {
+                let preview = slot.image_path.as_ref().and_then(|image_path| {
+                    Self::try_load_detail_cover_art_image_with_kind(
+                        image_path.as_path(),
+                        protocol::UiImageKind::CoverArt,
+                        192,
+                        192,
+                    )
+                    .or_else(|| {
+                        Self::try_load_cover_art_image_with_kind(
+                            image_path.as_path(),
+                            protocol::UiImageKind::CoverArt,
+                        )
+                    })
+                });
+                let has_preview = preview.is_some();
+                UiPropertiesEmbeddedImageSlot {
+                    picture_type_code: i32::from(slot.picture_type_code),
+                    label: slot.label.as_str().into(),
+                    details: slot.details.as_str().into(),
+                    preview: preview.unwrap_or_default(),
+                    has_preview,
+                    has_image: slot.has_image,
+                    common: slot.common,
+                }
+            })
+            .collect()
+    }
+
+    fn to_ui_properties_external_images(
+        items: &[protocol::PropertiesExternalImage],
+    ) -> Vec<UiPropertiesExternalImage> {
+        items
+            .iter()
+            .map(|item| {
+                let preview = Self::try_load_detail_cover_art_image_with_kind(
+                    item.path.as_path(),
+                    protocol::UiImageKind::CoverArt,
+                    192,
+                    192,
+                )
+                .or_else(|| {
+                    Self::try_load_cover_art_image_with_kind(
+                        item.path.as_path(),
+                        protocol::UiImageKind::CoverArt,
+                    )
+                });
+                let has_preview = preview.is_some();
+                UiPropertiesExternalImage {
+                    file_name: item.file_name.as_str().into(),
+                    label: item.label.as_str().into(),
+                    details: item.details.as_str().into(),
+                    path: item.path.to_string_lossy().as_ref().into(),
+                    preview: preview.unwrap_or_default(),
+                    has_preview,
+                }
+            })
+            .collect()
+    }
+
+    fn properties_default_tab_index() -> i32 {
+        0
+    }
+
+    fn properties_metadata_fields_changed(
+        current_fields: &[protocol::MetadataEditorField],
+        original_fields: &[protocol::MetadataEditorField],
+    ) -> bool {
+        if current_fields.len() != original_fields.len() {
             return true;
         }
-
-        self.properties_fields
+        current_fields
             .iter()
-            .zip(self.properties_original_fields.iter())
+            .zip(original_fields.iter())
             .any(|(left, right)| left.id != right.id || left.value != right.value)
+    }
+
+    fn properties_has_changes_from_parts(
+        current_fields: &[protocol::MetadataEditorField],
+        original_fields: &[protocol::MetadataEditorField],
+        image_overwrites: &[protocol::PropertiesImageOverwrite],
+        image_deletes: &[protocol::PropertiesImageDelete],
+    ) -> bool {
+        Self::properties_metadata_fields_changed(current_fields, original_fields)
+            || !image_overwrites.is_empty()
+            || !image_deletes.is_empty()
+    }
+
+    fn properties_external_image_index_valid(index: usize, len: usize) -> bool {
+        index < len
+    }
+
+    fn properties_has_changes(&self) -> bool {
+        Self::properties_has_changes_from_parts(
+            &self.properties_fields,
+            &self.properties_original_fields,
+            &self.properties_image_overwrites,
+            &self.properties_image_deletes,
+        )
     }
 
     fn properties_save_enabled(&self) -> bool {
         self.properties_dialog_visible
             && !self.properties_busy
             && self.properties_target_path.is_some()
-            && !self.properties_fields.is_empty()
             && self.properties_has_changes()
     }
 
@@ -5968,15 +6123,39 @@ impl UiManager {
         let busy = self.properties_busy;
         let error_text = self.properties_error_text.clone();
         let target_title = self.properties_target_title.clone();
-        let fields = Self::to_ui_metadata_fields(&self.properties_fields);
+        let active_tab_index = self.properties_active_tab_index;
+        let fields = self.properties_fields.clone();
+        let media_info_fields = self.properties_media_info_fields.clone();
+        let embedded_image_slots = self.properties_embedded_image_slots.clone();
+        let external_images = self.properties_external_images.clone();
         let save_enabled = self.properties_save_enabled();
+        let track_is_local_file = self
+            .properties_target_path
+            .as_ref()
+            .is_some_and(|path| path.is_file());
         let _ = self.ui.upgrade_in_event_loop(move |ui| {
+            let fields = Self::to_ui_metadata_fields(&fields);
+            let media_info_fields = Self::to_ui_properties_media_info_fields(&media_info_fields);
+            let embedded_image_slots =
+                Self::to_ui_properties_embedded_image_slots(&embedded_image_slots);
+            let external_images = Self::to_ui_properties_external_images(&external_images);
             ui.set_show_properties_dialog(visible);
             ui.set_properties_busy(busy);
             ui.set_properties_error_text(error_text.into());
             ui.set_properties_target_title(target_title.into());
+            ui.set_properties_active_tab_index(active_tab_index);
             ui.set_properties_fields(ModelRc::from(Rc::new(VecModel::from(fields))));
+            ui.set_properties_media_info_fields(ModelRc::from(Rc::new(VecModel::from(
+                media_info_fields,
+            ))));
+            ui.set_properties_embedded_image_slots(ModelRc::from(Rc::new(VecModel::from(
+                embedded_image_slots,
+            ))));
+            ui.set_properties_external_images(ModelRc::from(Rc::new(VecModel::from(
+                external_images,
+            ))));
             ui.set_properties_save_enabled(save_enabled);
+            ui.set_properties_track_is_local_file(track_is_local_file);
         });
     }
 
@@ -5994,8 +6173,14 @@ impl UiManager {
         self.properties_pending_request_kind = None;
         self.properties_target_path = None;
         self.properties_target_title.clear();
+        self.properties_active_tab_index = Self::properties_default_tab_index();
         self.properties_original_fields.clear();
         self.properties_fields.clear();
+        self.properties_media_info_fields.clear();
+        self.properties_embedded_image_slots.clear();
+        self.properties_external_images.clear();
+        self.properties_image_overwrites.clear();
+        self.properties_image_deletes.clear();
         self.properties_dialog_visible = false;
         self.properties_busy = false;
         self.properties_error_text.clear();
@@ -6008,8 +6193,14 @@ impl UiManager {
 
         self.properties_target_path = Some(path.clone());
         self.properties_target_title = _target_title;
+        self.properties_active_tab_index = Self::properties_default_tab_index();
         self.properties_original_fields.clear();
         self.properties_fields.clear();
+        self.properties_media_info_fields.clear();
+        self.properties_embedded_image_slots.clear();
+        self.properties_external_images.clear();
+        self.properties_image_overwrites.clear();
+        self.properties_image_deletes.clear();
         self.properties_error_text.clear();
         self.properties_dialog_visible = true;
         self.properties_busy = true;
@@ -6028,8 +6219,12 @@ impl UiManager {
         let Some((path, _)) = self.active_properties_target() else {
             return;
         };
+        self.open_specific_file_location(path.as_path());
+    }
+
+    fn open_specific_file_location(&self, path: &Path) {
         if Self::is_running_in_flatpak() {
-            let reveal_target = path.parent().unwrap_or(path.as_path());
+            let reveal_target = path.parent().unwrap_or(path);
             match Command::new("xdg-open").arg(reveal_target).spawn() {
                 Ok(_) => return,
                 Err(err) => {
@@ -6041,11 +6236,229 @@ impl UiManager {
                 }
             }
         }
-        showfile::show_path_in_file_manager(&path);
+        showfile::show_path_in_file_manager(path);
     }
 
     fn is_running_in_flatpak() -> bool {
         std::env::var_os("FLATPAK_ID").is_some() || Path::new("/.flatpak-info").exists()
+    }
+
+    fn select_properties_tab(&mut self, tab_index: usize) {
+        if self.properties_busy || !self.properties_dialog_visible {
+            return;
+        }
+        let next_tab_index = tab_index.min(2) as i32;
+        if self.properties_active_tab_index == next_tab_index {
+            return;
+        }
+        self.properties_active_tab_index = next_tab_index;
+        self.sync_properties_dialog_ui();
+    }
+
+    fn apply_staged_overwrite_to_slot(
+        slot: &mut protocol::PropertiesEmbeddedImageSlot,
+        source_path: &Path,
+    ) {
+        let source_name = source_path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or("selected image");
+        slot.image_path = Some(source_path.to_path_buf());
+        slot.has_image = true;
+        slot.details = format!("Staged replacement: {source_name}");
+    }
+
+    fn apply_staged_delete_to_slot(slot: &mut protocol::PropertiesEmbeddedImageSlot) {
+        slot.image_path = None;
+        slot.has_image = false;
+        slot.details = "Staged for deletion".to_string();
+    }
+
+    fn invalidate_cover_art_caches_for_track(&mut self, track_path: &Path) {
+        let mut cached_paths_to_evict: HashSet<PathBuf> = HashSet::new();
+
+        if let Some(candidates) = Self::embedded_art_cache_candidates(track_path) {
+            for candidate in candidates {
+                Self::clear_failed_cover_path(candidate.as_path());
+                Self::delete_cached_image_file_if_managed(candidate.as_path());
+                cached_paths_to_evict.insert(candidate);
+            }
+        }
+
+        let library_keys: Vec<PathBuf> = self
+            .library_cover_art_paths
+            .keys()
+            .filter(|path| Self::is_equivalent_track_path(path.as_path(), track_path))
+            .cloned()
+            .collect();
+        for key in library_keys {
+            if let Some(Some(cached_path)) = self.library_cover_art_paths.remove(&key) {
+                cached_paths_to_evict.insert(cached_path);
+            }
+        }
+
+        let matching_indices: Vec<usize> = self
+            .track_paths
+            .iter()
+            .enumerate()
+            .filter_map(|(index, candidate)| {
+                Self::is_equivalent_track_path(candidate.as_path(), track_path).then_some(index)
+            })
+            .collect();
+        for index in matching_indices {
+            if let Some(Some(cached_path)) = self.track_cover_art_paths.get(index).cloned() {
+                cached_paths_to_evict.insert(cached_path);
+            }
+            if let Some(slot) = self.track_cover_art_paths.get_mut(index) {
+                *slot = None;
+            }
+        }
+
+        self.track_cover_art_missing_tracks
+            .retain(|path| !Self::is_equivalent_track_path(path.as_path(), track_path));
+
+        if let Some(parent) = track_path.parent() {
+            self.folder_cover_art_paths.remove(parent);
+        }
+
+        if self
+            .last_cover_art_lookup_path
+            .as_ref()
+            .is_some_and(|path| Self::is_equivalent_track_path(path.as_path(), track_path))
+        {
+            self.last_cover_art_lookup_path = None;
+        }
+        if self
+            .pending_cover_art_lookup_track_path
+            .as_ref()
+            .is_some_and(|path| Self::is_equivalent_track_path(path.as_path(), track_path))
+        {
+            self.pending_cover_art_lookup_track_path = None;
+            self.pending_cover_art_lookup_request_id = 0;
+        }
+
+        for cached_path in cached_paths_to_evict {
+            Self::clear_failed_cover_path(cached_path.as_path());
+            Self::evict_cover_art_memory_cache_path(cached_path.as_path());
+            Self::delete_cached_image_file_if_managed(cached_path.as_path());
+        }
+    }
+
+    fn stage_properties_image_overwrite(&mut self, slot_index: usize, source_path: PathBuf) {
+        if self.properties_busy || !self.properties_dialog_visible {
+            return;
+        }
+        if !source_path.is_file() {
+            self.properties_error_text = format!(
+                "Selected image does not exist or is not a file: {}",
+                source_path.display()
+            );
+            self.sync_properties_edit_state_ui();
+            return;
+        }
+        let Some(path) = self.properties_target_path.as_ref() else {
+            return;
+        };
+        if !path.is_file() {
+            self.properties_error_text = format!(
+                "Track path is not a local file; image overwrite is unavailable: {}",
+                path.display()
+            );
+            self.sync_properties_edit_state_ui();
+            return;
+        }
+        let Some(slot) = self.properties_embedded_image_slots.get(slot_index) else {
+            return;
+        };
+        let picture_type_code = slot.picture_type_code;
+        let staged_source_path = source_path.clone();
+        if let Some(existing) = self
+            .properties_image_overwrites
+            .iter_mut()
+            .find(|overwrite| overwrite.picture_type_code == picture_type_code)
+        {
+            existing.source_path = source_path;
+        } else {
+            self.properties_image_overwrites
+                .push(protocol::PropertiesImageOverwrite {
+                    picture_type_code,
+                    source_path,
+                });
+            self.properties_image_overwrites
+                .sort_by_key(|overwrite| overwrite.picture_type_code);
+        }
+        self.properties_image_deletes
+            .retain(|delete| delete.picture_type_code != picture_type_code);
+        if let Some(slot) = self.properties_embedded_image_slots.get_mut(slot_index) {
+            Self::apply_staged_overwrite_to_slot(slot, staged_source_path.as_path());
+        }
+        self.properties_error_text.clear();
+        self.sync_properties_dialog_ui();
+    }
+
+    fn stage_properties_image_delete(&mut self, slot_index: usize) {
+        if self.properties_busy || !self.properties_dialog_visible {
+            return;
+        }
+        let Some(path) = self.properties_target_path.as_ref() else {
+            return;
+        };
+        if !path.is_file() {
+            self.properties_error_text = format!(
+                "Track path is not a local file; image delete is unavailable: {}",
+                path.display()
+            );
+            self.sync_properties_edit_state_ui();
+            return;
+        }
+        let Some(slot) = self.properties_embedded_image_slots.get(slot_index) else {
+            return;
+        };
+        if !slot.has_image {
+            return;
+        }
+        let picture_type_code = slot.picture_type_code;
+        self.properties_image_overwrites
+            .retain(|overwrite| overwrite.picture_type_code != picture_type_code);
+        if !self
+            .properties_image_deletes
+            .iter()
+            .any(|delete| delete.picture_type_code == picture_type_code)
+        {
+            self.properties_image_deletes
+                .push(protocol::PropertiesImageDelete { picture_type_code });
+            self.properties_image_deletes
+                .sort_by_key(|delete| delete.picture_type_code);
+        }
+        if let Some(slot) = self.properties_embedded_image_slots.get_mut(slot_index) {
+            Self::apply_staged_delete_to_slot(slot);
+        }
+        self.properties_error_text.clear();
+        self.sync_properties_dialog_ui();
+    }
+
+    fn open_properties_external_image_location(&mut self, index: usize) {
+        if !self.properties_dialog_visible {
+            return;
+        }
+        if !Self::properties_external_image_index_valid(
+            index,
+            self.properties_external_images.len(),
+        ) {
+            self.properties_error_text =
+                "Selected external image is no longer available.".to_string();
+            self.sync_properties_edit_state_ui();
+            return;
+        }
+        let Some(item) = self.properties_external_images.get(index) else {
+            self.properties_error_text =
+                "Selected external image is no longer available.".to_string();
+            self.sync_properties_edit_state_ui();
+            return;
+        };
+        self.open_specific_file_location(item.path.as_path());
+        self.properties_error_text.clear();
+        self.sync_properties_edit_state_ui();
     }
 
     fn edit_properties_field(&mut self, index: usize, value: String) {
@@ -6076,12 +6489,16 @@ impl UiManager {
         self.properties_pending_request_kind = Some(PropertiesRequestKind::Save);
         self.properties_busy = true;
         self.properties_error_text.clear();
-        let fields = self.properties_fields.clone();
+        let metadata_fields = self.properties_fields.clone();
+        let image_overwrites = self.properties_image_overwrites.clone();
+        let image_deletes = self.properties_image_deletes.clone();
         let _ = self.bus_sender.send(protocol::Message::Metadata(
             protocol::MetadataMessage::SaveTrackProperties {
                 request_id,
                 path,
-                fields,
+                metadata_fields,
+                image_overwrites,
+                image_deletes,
             },
         ));
         self.sync_properties_dialog_ui();
@@ -6108,13 +6525,16 @@ impl UiManager {
             && matches_target_path
     }
 
-    fn handle_properties_loaded(
-        &mut self,
-        request_id: u64,
-        path: PathBuf,
-        display_name: String,
-        fields: Vec<protocol::MetadataEditorField>,
-    ) {
+    fn handle_properties_loaded(&mut self, payload: PropertiesLoadedPayload) {
+        let PropertiesLoadedPayload {
+            request_id,
+            path,
+            display_name,
+            metadata_fields,
+            media_info_fields,
+            embedded_image_slots,
+            external_images,
+        } = payload;
         if !self.expected_properties_response(PropertiesRequestKind::Load, request_id, &path) {
             return;
         }
@@ -6124,8 +6544,13 @@ impl UiManager {
         self.properties_busy = false;
         self.properties_error_text.clear();
         self.properties_target_title = display_name;
-        self.properties_original_fields = fields.clone();
-        self.properties_fields = fields;
+        self.properties_original_fields = metadata_fields.clone();
+        self.properties_fields = metadata_fields;
+        self.properties_media_info_fields = media_info_fields;
+        self.properties_embedded_image_slots = embedded_image_slots;
+        self.properties_external_images = external_images;
+        self.properties_image_overwrites.clear();
+        self.properties_image_deletes.clear();
         self.sync_properties_dialog_ui();
     }
 
@@ -6286,6 +6711,7 @@ impl UiManager {
         self.properties_pending_request_id = None;
         self.properties_pending_request_kind = None;
         self.properties_busy = false;
+        self.invalidate_cover_art_caches_for_track(path.as_path());
 
         let playlist_changed = self.apply_summary_to_playlist_metadata(&path, &summary);
         let library_changed = self.apply_summary_to_library_entries(&path, &summary);
@@ -6306,6 +6732,11 @@ impl UiManager {
 
         self.refresh_playing_track_metadata();
         self.update_display_for_active_collection();
+        if self.collection_mode == COLLECTION_MODE_PLAYLIST {
+            self.refresh_visible_playlist_cover_art_rows();
+        } else if self.collection_mode == COLLECTION_MODE_LIBRARY {
+            self.refresh_visible_library_cover_art_rows();
+        }
         self.sync_app_window_title_to_ui();
 
         if let Some(warning) = db_sync_warning {
@@ -12100,8 +12531,27 @@ impl UiManager {
                             protocol::MetadataMessage::OpenPropertiesForCurrentSelection => {
                                 self.open_properties_for_current_selection();
                             }
+                            protocol::MetadataMessage::SelectPropertiesTab { tab_index } => {
+                                self.select_properties_tab(tab_index);
+                            }
                             protocol::MetadataMessage::EditPropertiesField { index, value } => {
                                 self.edit_properties_field(index, value);
+                            }
+                            protocol::MetadataMessage::StagePropertiesImageOverwrite {
+                                slot_index,
+                                source_path,
+                            } => {
+                                self.stage_properties_image_overwrite(slot_index, source_path);
+                            }
+                            protocol::MetadataMessage::StagePropertiesImageDelete {
+                                slot_index,
+                            } => {
+                                self.stage_properties_image_delete(slot_index);
+                            }
+                            protocol::MetadataMessage::OpenPropertiesExternalImageLocation {
+                                index,
+                            } => {
+                                self.open_properties_external_image_location(index);
                             }
                             protocol::MetadataMessage::SaveProperties => {
                                 self.save_properties();
@@ -12113,14 +12563,20 @@ impl UiManager {
                                 request_id,
                                 path,
                                 display_name,
-                                fields,
+                                metadata_fields,
+                                media_info_fields,
+                                embedded_image_slots,
+                                external_images,
                             } => {
-                                self.handle_properties_loaded(
+                                self.handle_properties_loaded(PropertiesLoadedPayload {
                                     request_id,
                                     path,
                                     display_name,
-                                    fields,
-                                );
+                                    metadata_fields,
+                                    media_info_fields,
+                                    embedded_image_slots,
+                                    external_images,
+                                });
                             }
                             protocol::MetadataMessage::TrackPropertiesLoadFailed {
                                 request_id,
@@ -13180,6 +13636,106 @@ mod tests {
         assert_eq!(title, "▶ Artist - demo-track.mp3 (roqtune)");
     }
 
+    fn make_properties_field(id: &str, value: &str) -> protocol::MetadataEditorField {
+        protocol::MetadataEditorField {
+            id: id.to_string(),
+            field_name: "Test".to_string(),
+            value: value.to_string(),
+            common: true,
+        }
+    }
+
+    #[test]
+    fn test_properties_has_changes_from_parts_includes_image_overwrites() {
+        let original = vec![make_properties_field("common:title", "Track")];
+        let current = original.clone();
+        let no_overwrites: Vec<protocol::PropertiesImageOverwrite> = Vec::new();
+        let no_deletes: Vec<protocol::PropertiesImageDelete> = Vec::new();
+        assert!(!UiManager::properties_has_changes_from_parts(
+            &current,
+            &original,
+            &no_overwrites,
+            &no_deletes
+        ));
+
+        let image_overwrites = vec![protocol::PropertiesImageOverwrite {
+            picture_type_code: 3,
+            source_path: PathBuf::from("/tmp/front.png"),
+        }];
+        assert!(UiManager::properties_has_changes_from_parts(
+            &current,
+            &original,
+            &image_overwrites,
+            &no_deletes
+        ));
+
+        let image_deletes = vec![protocol::PropertiesImageDelete {
+            picture_type_code: 3,
+        }];
+        assert!(UiManager::properties_has_changes_from_parts(
+            &current,
+            &original,
+            &no_overwrites,
+            &image_deletes
+        ));
+
+        let edited = vec![make_properties_field("common:title", "Updated")];
+        assert!(UiManager::properties_has_changes_from_parts(
+            &edited,
+            &original,
+            &no_overwrites,
+            &no_deletes
+        ));
+    }
+
+    #[test]
+    fn test_properties_default_tab_index_is_metadata() {
+        assert_eq!(UiManager::properties_default_tab_index(), 0);
+    }
+
+    #[test]
+    fn test_properties_external_image_index_validation_bounds() {
+        assert!(!UiManager::properties_external_image_index_valid(0, 0));
+        assert!(UiManager::properties_external_image_index_valid(0, 1));
+        assert!(UiManager::properties_external_image_index_valid(2, 3));
+        assert!(!UiManager::properties_external_image_index_valid(3, 3));
+    }
+
+    #[test]
+    fn test_apply_staged_overwrite_to_slot_updates_preview_and_flags() {
+        let mut slot = protocol::PropertiesEmbeddedImageSlot {
+            picture_type_code: 3,
+            label: "Front Cover".to_string(),
+            image_path: None,
+            has_image: false,
+            details: "No embedded image".to_string(),
+            common: true,
+        };
+        let source = PathBuf::from("/tmp/new-front.jpg");
+        UiManager::apply_staged_overwrite_to_slot(&mut slot, source.as_path());
+
+        assert_eq!(slot.image_path, Some(source));
+        assert!(slot.has_image);
+        assert_eq!(slot.details, "Staged replacement: new-front.jpg");
+    }
+
+    #[test]
+    fn test_apply_staged_delete_to_slot_marks_slot_empty() {
+        let mut slot = protocol::PropertiesEmbeddedImageSlot {
+            picture_type_code: 4,
+            label: "Back Cover".to_string(),
+            image_path: Some(PathBuf::from("/tmp/old-back.jpg")),
+            has_image: true,
+            details: "600x600 | JPEG".to_string(),
+            common: true,
+        };
+        UiManager::apply_staged_delete_to_slot(&mut slot);
+
+        assert_eq!(slot.image_path, None);
+        assert!(!slot.has_image);
+        assert_eq!(slot.details, "Staged for deletion");
+    }
+
     fn make_library_track_in_album(
         id: &str,
         title: &str,
@@ -13542,6 +14098,17 @@ mod tests {
         assert_eq!(evicted, 1);
         assert!(cache.entries.contains_key(&protected));
         assert!(!cache.entries.contains_key(&evictable));
+    }
+
+    #[test]
+    fn test_path_image_cache_remove_removes_entry_and_updates_lru() {
+        let mut cache = PathImageCache::default();
+        let path = PathBuf::from("/tmp/remove-me.png");
+        cache.insert(path.clone(), slint::Image::default(), 64, 1024);
+        assert!(cache.remove(path.as_path()));
+        assert!(!cache.entries.contains_key(&path));
+        assert!(!cache.lru.contains(&path));
+        assert_eq!(cache.total_bytes, 0);
     }
 
     #[test]
