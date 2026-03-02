@@ -3133,11 +3133,33 @@ impl LibraryEnrichmentManager {
     }
 
     fn image_cache_dir() -> Option<PathBuf> {
-        let cache_dir = image_pipeline::artist_originals_dir()?;
-        if !cache_dir.exists() {
-            fs::create_dir_all(&cache_dir).ok()?;
+        let fallback = std::env::temp_dir()
+            .join("roqtune")
+            .join("library_enrichment")
+            .join("images");
+        let mut candidates = Vec::new();
+        if let Some(primary) = image_pipeline::artist_originals_dir() {
+            candidates.push(primary);
         }
-        Some(cache_dir)
+        if !candidates.iter().any(|path| path == &fallback) {
+            candidates.push(fallback);
+        }
+        for cache_dir in candidates {
+            if !cache_dir.exists() && fs::create_dir_all(&cache_dir).is_err() {
+                continue;
+            }
+            let probe_path = cache_dir.join(".roqtune-write-probe");
+            let probe = fs::OpenOptions::new()
+                .create(true)
+                .write(true)
+                .truncate(true)
+                .open(&probe_path);
+            if probe.is_ok() {
+                let _ = fs::remove_file(&probe_path);
+                return Some(cache_dir);
+            }
+        }
+        None
     }
 
     fn detect_image_extension(bytes: &[u8]) -> Option<&'static str> {
@@ -3182,6 +3204,82 @@ impl LibraryEnrichmentManager {
             return false;
         }
         Self::detect_image_extension(&header[..read]).is_some()
+    }
+
+    fn cache_artist_image_override(
+        entity: &LibraryEnrichmentEntity,
+        source_path: &Path,
+    ) -> Result<PathBuf, String> {
+        let bytes = fs::read(source_path).map_err(|error| {
+            format!(
+                "Selected override image could not be read: {} ({error})",
+                source_path.display()
+            )
+        })?;
+        if bytes.is_empty() {
+            return Err(format!(
+                "Selected override image is empty: {}",
+                source_path.display()
+            ));
+        }
+        let extension = Self::detect_image_extension(&bytes).ok_or_else(|| {
+            format!(
+                "Selected override image is not a supported image file: {}",
+                source_path.display()
+            )
+        })?;
+        let cache_dir = Self::image_cache_dir().ok_or_else(|| {
+            "Selected override image could not be cached: no writable cache directory.".to_string()
+        })?;
+        let metadata = fs::metadata(source_path).ok();
+        let source_size = metadata.as_ref().map(|value| value.len()).unwrap_or(0);
+        let modified_unix_ms = metadata
+            .and_then(|value| value.modified().ok())
+            .and_then(|value| value.duration_since(UNIX_EPOCH).ok())
+            .map(|value| value.as_millis())
+            .unwrap_or(0);
+        let entity_slug: String = Self::source_entity_label(entity)
+            .chars()
+            .map(|value| {
+                if value.is_ascii_alphanumeric() {
+                    value
+                } else {
+                    '_'
+                }
+            })
+            .collect();
+
+        // Keep a managed copy independent from the source location so overrides survive moves/deletes.
+        for attempt in 0u8..8u8 {
+            let unique_nanos = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .map(|value| value.as_nanos())
+                .unwrap_or(0);
+            let file_name = format!(
+                "manual-override-{}-{}-{}-{}-{}.{extension}",
+                entity_slug, source_size, modified_unix_ms, unique_nanos, attempt
+            );
+            let target_path = cache_dir.join(file_name);
+            if target_path.exists() {
+                continue;
+            }
+            let temp_path = target_path.with_extension(format!("{extension}.tmp"));
+            fs::write(&temp_path, &bytes).map_err(|error| {
+                format!(
+                    "Selected override image could not be cached: {} ({error})",
+                    source_path.display()
+                )
+            })?;
+            if fs::rename(&temp_path, &target_path).is_ok() {
+                return Ok(target_path);
+            }
+            let _ = fs::remove_file(&temp_path);
+        }
+
+        Err(format!(
+            "Selected override image could not be cached: {}",
+            source_path.display()
+        ))
     }
 
     fn download_artist_image(
@@ -3518,10 +3616,17 @@ impl LibraryEnrichmentManager {
             return;
         }
         let entity = LibraryEnrichmentEntity::Artist { artist };
+        let cached_path = match Self::cache_artist_image_override(&entity, source_path.as_path()) {
+            Ok(path) => path,
+            Err(error) => {
+                self.emit_override_failed(error);
+                return;
+            }
+        };
         if let Err(error) = self.db_manager.upsert_library_enrichment_override(
             &entity,
             None,
-            Some(source_path.as_path()),
+            Some(cached_path.as_path()),
         ) {
             self.emit_override_failed(format!("Failed saving image override: {error}"));
             return;
@@ -4006,7 +4111,10 @@ impl LibraryEnrichmentManager {
 #[cfg(test)]
 mod tests {
     use std::collections::HashSet;
+    use std::io::Cursor;
     use std::path::PathBuf;
+    use std::time::{SystemTime, UNIX_EPOCH};
+    use std::{fs, process};
 
     use super::{
         AudioDbAlbumCandidate, AudioDbArtistCandidate, EnrichmentSource, FetchOutcome,
@@ -4017,6 +4125,7 @@ mod tests {
         LibraryEnrichmentAttemptKind, LibraryEnrichmentErrorKind, LibraryEnrichmentPayload,
         LibraryEnrichmentStatus,
     };
+    use image::{DynamicImage, ImageBuffer, ImageFormat, Rgba};
 
     fn sample_summary(title: &str, description: &str, extract: &str) -> WikiSummary {
         WikiSummary {
@@ -4341,6 +4450,60 @@ mod tests {
             LibraryEnrichmentManager::detect_image_extension(&jpg),
             Some("jpg")
         );
+    }
+
+    #[test]
+    fn test_cache_artist_image_override_copies_image_into_managed_cache() {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system time should be after unix epoch")
+            .as_nanos();
+        let temp_dir = std::env::temp_dir().join(format!(
+            "roqtune-artist-override-test-{unique}-{}",
+            process::id()
+        ));
+        fs::create_dir_all(&temp_dir).expect("temporary test directory should be created");
+        let source_path = temp_dir.join("override.png");
+
+        let source_image =
+            DynamicImage::ImageRgba8(ImageBuffer::from_pixel(4, 4, Rgba([16, 64, 180, 255])));
+        let mut encoded = Cursor::new(Vec::<u8>::new());
+        source_image
+            .write_to(&mut encoded, ImageFormat::Png)
+            .expect("png encoding should succeed");
+        fs::write(&source_path, encoded.into_inner()).expect("source image should be written");
+
+        let entity = LibraryEnrichmentEntity::Artist {
+            artist: "Sample Artist".to_string(),
+        };
+        let cached_path =
+            LibraryEnrichmentManager::cache_artist_image_override(&entity, source_path.as_path())
+                .expect("override image should be cached");
+
+        assert_ne!(cached_path, source_path);
+        assert!(cached_path.exists());
+        let primary_cache_root = crate::image_pipeline::artist_originals_dir();
+        let fallback_cache_root = std::env::temp_dir()
+            .join("roqtune")
+            .join("library_enrichment")
+            .join("images");
+        let in_primary = primary_cache_root
+            .as_ref()
+            .is_some_and(|path| cached_path.starts_with(path));
+        assert!(
+            in_primary || cached_path.starts_with(&fallback_cache_root),
+            "cached path should be in primary or fallback cache directory: {}",
+            cached_path.display()
+        );
+
+        fs::remove_file(&source_path).expect("source image should be removable");
+        assert!(
+            cached_path.exists(),
+            "cached override image should remain after deleting source file"
+        );
+
+        let _ = fs::remove_file(&cached_path);
+        let _ = fs::remove_dir_all(&temp_dir);
     }
 
     #[test]

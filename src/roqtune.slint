@@ -2156,11 +2156,13 @@ export component AppWindow inherits Window {
                                     }
                                     Rectangle {
                                         height: 76px;
+                                        horizontal-stretch: 1;
                                         clip: true;
                                         Text {
                                             text: root.library_detail_header_loading
                                                 ? "Loading internet metadata..."
                                                 : root.library_detail_header_blurb;
+                                            x: 0px;
                                             width: max(
                                                 0px,
                                                 parent.width
