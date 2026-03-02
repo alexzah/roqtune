@@ -4,6 +4,7 @@
 //! decode worker thread that performs file decode, optional seek, resampling,
 //! and packet emission.
 
+use crate::audio::technical_metadata;
 use crate::config::{BufferingConfig, OutputConfig, ResamplerQuality};
 use crate::integration_uri::{parse_opensubsonic_track_uri, OpenSubsonicTrackLocator};
 use crate::protocol::{
@@ -18,7 +19,7 @@ use rubato::{
 use std::cmp::min;
 use std::collections::{HashMap, VecDeque};
 use std::io::{Cursor, ErrorKind, Read};
-use std::path::PathBuf;
+use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::thread;
@@ -1297,7 +1298,8 @@ Check Settings -> OpenSubsonic status and re-save credentials if needed.",
             }
         }
 
-        let technical_metadata = self.build_technical_metadata(&input_track.path, &codec_params);
+        let technical_metadata =
+            self.build_technical_metadata(input_track.path.as_path(), &codec_params);
         debug!(
             "DecodeWorker: Track ready id={} sr={} channels={} play_immediately={}",
             input_track.id, source_sample_rate, source_channels, input_track.play_immediately
@@ -1330,11 +1332,11 @@ Check Settings -> OpenSubsonic status and re-save credentials if needed.",
 
     fn build_technical_metadata(
         &self,
-        path: &PathBuf,
+        path: &Path,
         codec_params: &CodecParameters,
     ) -> protocol::TechnicalMetadata {
         let sample_rate = codec_params.sample_rate.unwrap_or(44100);
-        let format_name = parse_opensubsonic_track_uri(path.as_path())
+        let format_name = parse_opensubsonic_track_uri(path)
             .and_then(|locator| locator.format_hint.map(|hint| hint.to_ascii_uppercase()))
             .or_else(|| {
                 path.extension()
@@ -1343,19 +1345,18 @@ Check Settings -> OpenSubsonic status and re-save credentials if needed.",
             })
             .unwrap_or_else(|| "AUDIO".to_string());
 
-        let duration_ms = {
-            let lofty_duration_ms = duration_ms_from_lofty_properties(path);
-            if lofty_duration_ms > 0 {
-                lofty_duration_ms
-            } else {
-                duration_ms_from_codec_params(codec_params, sample_rate)
-            }
-        };
+        let library_properties = technical_metadata::read_library_audio_properties(path);
+        let duration_ms = library_properties
+            .as_ref()
+            .map(|properties| properties.duration_ms)
+            .filter(|value| *value > 0)
+            .unwrap_or_else(|| duration_ms_from_codec_params(codec_params, sample_rate));
 
-        let bitrate_kbps = audio_data_size_bytes(path)
-            .and_then(|audio_data_size| implied_bitrate_kbps(audio_data_size, duration_ms))
-            .map(|value| value.round() as u32)
-            .unwrap_or(0);
+        let bitrate_kbps = technical_metadata::estimate_bitrate_kbps(
+            path,
+            duration_ms,
+            library_properties.as_ref(),
+        );
 
         protocol::TechnicalMetadata {
             format: format_name,
@@ -1388,63 +1389,6 @@ fn duration_ms_from_codec_params(codec_params: &CodecParameters, sample_rate: u3
     } else {
         0
     }
-}
-
-fn duration_ms_from_lofty_properties(path: &PathBuf) -> u64 {
-    use lofty::file::AudioFile;
-
-    lofty::read_from_path(path)
-        .ok()
-        .map(|tagged| tagged.properties().duration().as_millis() as u64)
-        .filter(|value| *value > 0)
-        .unwrap_or(0)
-}
-
-fn implied_bitrate_kbps(audio_data_size_bytes: u64, duration_ms: u64) -> Option<f64> {
-    if audio_data_size_bytes == 0 || duration_ms == 0 {
-        return None;
-    }
-    let duration_seconds = duration_ms as f64 / 1000.0;
-    if duration_seconds <= f64::EPSILON {
-        return None;
-    }
-    Some(((audio_data_size_bytes as f64 * 8.0) / duration_seconds) / 1000.0)
-}
-
-fn audio_data_size_bytes(path: &PathBuf) -> Option<u64> {
-    let file_size = std::fs::metadata(path).ok()?.len();
-    let metadata_size = get_metadata_size(path);
-    let audio_data_size = file_size.saturating_sub(metadata_size);
-    (audio_data_size > 0).then_some(audio_data_size)
-}
-
-fn get_metadata_size(path: &PathBuf) -> u64 {
-    let mut total_size = 0;
-    if let Ok(mut file) = std::fs::File::open(path) {
-        let file_size = file.metadata().map(|m| m.len()).unwrap_or(0);
-        if file_size == 0 {
-            return 0;
-        }
-
-        let mut header = [0u8; 10];
-        use std::io::{Read, Seek, SeekFrom};
-        if file.read_exact(&mut header).is_ok() && &header[0..3] == b"ID3" {
-            let size = ((header[6] as u32 & 0x7F) << 21)
-                | ((header[7] as u32 & 0x7F) << 14)
-                | ((header[8] as u32 & 0x7F) << 7)
-                | (header[9] as u32 & 0x7F);
-            total_size += (size + 10) as u64;
-        }
-
-        if file_size > 128 {
-            let _ = file.seek(SeekFrom::End(-128));
-            let mut id3v1 = [0u8; 3];
-            if file.read_exact(&mut id3v1).is_ok() && &id3v1 == b"TAG" {
-                total_size += 128;
-            }
-        }
-    }
-    total_size
 }
 
 /// Bus-facing decoder orchestrator that manages decode generations.

@@ -21,6 +21,7 @@ use mdns_sd::{ServiceDaemon, ServiceEvent};
 use serde_json::Value;
 use tokio::sync::broadcast::{Receiver, Sender};
 
+use crate::audio::technical_metadata;
 use crate::integration_keyring::get_opensubsonic_password;
 use crate::integration_uri::{parse_opensubsonic_track_uri, OpenSubsonicTrackLocator};
 use crate::metadata_tags;
@@ -1178,7 +1179,6 @@ fn extract_embedded_cover_art_to_cache(track_path: &Path) -> Option<(PathBuf, St
 }
 
 fn probe_track_technical_metadata(path: &Path) -> Option<TechnicalMetadata> {
-    use lofty::file::AudioFile;
     use symphonia::core::formats::FormatOptions;
     use symphonia::core::io::MediaSourceStream;
     use symphonia::core::meta::MetadataOptions;
@@ -1235,23 +1235,14 @@ fn probe_track_technical_metadata(path: &Path) -> Option<TechnicalMetadata> {
         }
     }
 
-    let duration_ms = lofty::read_from_path(path)
-        .ok()
-        .map(|tagged| tagged.properties().duration().as_millis() as u64)
+    let library_properties = technical_metadata::read_library_audio_properties(path);
+    let duration_ms = library_properties
+        .as_ref()
+        .map(|properties| properties.duration_ms)
         .filter(|value| *value > 0)
         .unwrap_or(codec_duration_ms);
-
-    let bitrate_kbps = if duration_ms > 0 {
-        std::fs::metadata(path)
-            .ok()
-            .map(|meta| {
-                let bits_per_second = (meta.len() as f64 * 8.0) / (duration_ms as f64 / 1000.0);
-                (bits_per_second / 1000.0).round() as u32
-            })
-            .unwrap_or(0)
-    } else {
-        0
-    };
+    let bitrate_kbps =
+        technical_metadata::estimate_bitrate_kbps(path, duration_ms, library_properties.as_ref());
 
     Some(TechnicalMetadata {
         format: format_name,
