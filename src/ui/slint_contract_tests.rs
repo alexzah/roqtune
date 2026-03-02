@@ -253,7 +253,7 @@ mod tests {
             "Column header menu should use compact switch controls with consistent label sizing"
         );
         assert!(
-            menu_ui.contains("source: AppIcons.close;")
+            menu_ui.contains("source: AppIcons.trash;")
                 && menu_ui.contains("colorize: delete-column-ta.has-hover")
                 && menu_ui.contains("? AppPalette.danger")
                 && menu_ui.contains(": AppPalette.danger.mix(AppPalette.text-muted, 0.4);"),
