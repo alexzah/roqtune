@@ -5861,10 +5861,14 @@ impl UiManager {
     }
 
     fn playlist_properties_target(&self) -> Option<(PathBuf, String)> {
-        if self.selected_indices.len() != 1 {
+        let normalized_selection = Self::normalize_source_selection_indices(
+            &self.selected_indices,
+            self.track_paths.len(),
+        );
+        if normalized_selection.len() != 1 {
             return None;
         }
-        let index = *self.selected_indices.first()?;
+        let index = *normalized_selection.first()?;
         let path = self.track_paths.get(index)?.clone();
         let title = self
             .track_metadata
@@ -5881,10 +5885,14 @@ impl UiManager {
     }
 
     fn library_properties_target(&self) -> Option<(PathBuf, String)> {
-        if self.library_selected_indices.len() != 1 {
+        let normalized_selection = Self::normalize_source_selection_indices(
+            &self.library_selected_indices,
+            self.library_entries.len(),
+        );
+        if normalized_selection.len() != 1 {
             return None;
         }
-        let source_index = *self.library_selected_indices.first()?;
+        let source_index = *normalized_selection.first()?;
         let track = match self.library_entries.get(source_index)? {
             LibraryEntry::Track(track) => track,
             _ => return None,
@@ -6576,6 +6584,17 @@ impl UiManager {
             }
         }
         selected_indices.last().copied()
+    }
+
+    fn normalize_source_selection_indices(
+        selected_indices: &[usize],
+        source_len: usize,
+    ) -> Vec<usize> {
+        let mut normalized = selected_indices.to_vec();
+        normalized.sort_unstable();
+        normalized.dedup();
+        normalized.retain(|&index| index < source_len);
+        normalized
     }
 
     fn selection_lead_source_index(&self, anchor_source_index: Option<usize>) -> Option<usize> {
@@ -12693,8 +12712,10 @@ impl UiManager {
                                 self.last_progress_at = None;
                             }
                             let previous_active_playing_index = self.active_playing_index;
-                            let selected_indices_clone = selected_indices.clone();
-                            self.selected_indices = selected_indices_clone.clone();
+                            self.selected_indices = Self::normalize_source_selection_indices(
+                                &selected_indices,
+                                self.track_paths.len(),
+                            );
                             let is_playing_active_playlist =
                                 playing_playlist_id.as_ref() == Some(&self.active_playlist_id);
                             self.active_playing_index = Self::resolve_active_playing_source_index(
@@ -12758,8 +12779,10 @@ impl UiManager {
                                 "SelectionChanged: setting selected_indices to {:?}",
                                 indices
                             );
-                            let indices_clone = indices.clone();
-                            self.selected_indices = indices_clone.clone();
+                            self.selected_indices = Self::normalize_source_selection_indices(
+                                &indices,
+                                self.track_paths.len(),
+                            );
                             let next_anchor_source_index = Self::resolve_shift_anchor_source_index(
                                 &self.selected_indices,
                                 self.selection_anchor_source_index(),
@@ -12779,6 +12802,7 @@ impl UiManager {
                             // temporarily owns metadata/cover-art display until playback changes.
                             self.update_display_for_active_collection();
                             self.sync_playlist_selection_to_ui();
+                            self.sync_properties_action_state();
                         }
                         protocol::Message::Playlist(protocol::PlaylistMessage::OnPointerDown {
                             index,
@@ -13792,6 +13816,18 @@ mod tests {
         let selected: Vec<usize> = Vec::new();
         let anchor = UiManager::resolve_shift_anchor_source_index(&selected, Some(4));
         assert_eq!(anchor, None);
+    }
+
+    #[test]
+    fn test_normalize_source_selection_indices_dedups_and_sorts() {
+        let normalized = UiManager::normalize_source_selection_indices(&[3, 1, 3, 2, 1], 10);
+        assert_eq!(normalized, vec![1, 2, 3]);
+    }
+
+    #[test]
+    fn test_normalize_source_selection_indices_drops_out_of_bounds() {
+        let normalized = UiManager::normalize_source_selection_indices(&[4, 1, 9, 0], 3);
+        assert_eq!(normalized, vec![0, 1]);
     }
 
     #[test]
