@@ -6022,9 +6022,26 @@ impl UiManager {
     ) -> Vec<UiPropertiesExternalImage> {
         items
             .iter()
-            .map(|item| UiPropertiesExternalImage {
-                file_name: item.file_name.as_str().into(),
-                path: item.path.to_string_lossy().as_ref().into(),
+            .map(|item| {
+                let preview = Self::try_load_detail_cover_art_image_with_kind(
+                    item.path.as_path(),
+                    protocol::UiImageKind::CoverArt,
+                    192,
+                    192,
+                )
+                .or_else(|| {
+                    Self::try_load_cover_art_image_with_kind(
+                        item.path.as_path(),
+                        protocol::UiImageKind::CoverArt,
+                    )
+                });
+                let has_preview = preview.is_some();
+                UiPropertiesExternalImage {
+                    file_name: item.file_name.as_str().into(),
+                    path: item.path.to_string_lossy().as_ref().into(),
+                    preview: preview.unwrap_or_default(),
+                    has_preview,
+                }
             })
             .collect()
     }
