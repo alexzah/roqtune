@@ -16,7 +16,6 @@ import { PlaylistRow, TrackRow } from "ui/components/playlist.slint";
 import { ModeTabs } from "ui/components/tabs.slint";
 import { LibraryRow } from "ui/components/library.slint";
 import { SettingsDropdownControl } from "ui/components/settings.slint";
-import { StatusBar } from "ui/components/status.slint";
 import { AppIcons } from "ui/icons.slint";
 import { AppPalette } from "ui/theme_palette.slint";
 export { AppPalette } from "ui/theme_palette.slint";
@@ -360,7 +359,8 @@ export component AppWindow inherits Window {
         "Track (Default)",
         "Album Description",
         "Artist Bio",
-        "Custom Text"
+        "Custom Text",
+        "Status Bar"
     ];
     property <[string]> viewer_panel_image_source_options: [
         "Album Art (Default)",
@@ -384,12 +384,29 @@ export component AppWindow inherits Window {
         + "Syntax: {field} or {field1;field2;field3}\n"
         + "Fallback chains return the first non-empty field.\n"
         + "Supported fields: title, artist, album, album_artist, date, year, genre,\n"
-        + "track_number, file_name, path, favorite, playing.\n"
+        + "track_number, file_name, path, favorite, playing,\n"
+        + "selection_summary,\n"
+        + "source_provider, format, bit_depth,\n"
+        + "sample_rate_hz, channels, bitrate_kbps,\n"
+        + "duration_ms, cast_state, playback_mode,\n"
+        + "output_format, output_bit_depth,\n"
+        + "output_sample_rate_hz, output_channels,\n"
+        + "output_bitrate_kbps,\n"
+        + "resampled, resample_from_hz,\n"
+        + "resample_to_hz, channel_transform,\n"
+        + "channel_from_channels, channel_to_channels,\n"
+        + "dithered.\n"
         + "Unknown/invalid placeholders are rendered literally.\n\n"
+        + "Conditionals\n"
+        + "[if=field] ... [/if] renders content when field resolves non-empty.\n"
+        + "[if=field1;field2] uses fallback-chain truthiness.\n"
+        + "Optional [else] is supported inside [if].\n\n"
         + "Style tags\n"
         + "[b] [/b] bold\n"
         + "[i] [/i] italic\n"
         + "[u] [/u] underline\n"
+        + "[halign=left|center|right] [/halign] horizontal run alignment\n"
+        + "[valign=top|center|bottom] [/valign] vertical block alignment\n"
         + "[font=Family Name] [/font] font family\n"
         + "[color=name] [/color] palette color key (for example accent, text_muted)\n"
         + "[color=#rrggbb] [/color] hex color\n"
@@ -509,6 +526,7 @@ export component AppWindow inherits Window {
     property <int> panel_preset_text_track_details: 101;
     property <int> panel_preset_text_album_description: 102;
     property <int> panel_preset_text_artist_bio: 103;
+    property <int> panel_preset_text_status_bar: 104;
     property <int> panel_preset_image_album_art: 111;
     property <int> panel_preset_image_artist_image: 112;
     in-out property <[string]> layout_panel_options: [];
@@ -531,8 +549,7 @@ export component AppWindow inherits Window {
         "Collection Panel",
         "Track List",
         "Text Panel",
-        "Image Panel",
-        "Status Bar"
+        "Image Panel"
     ];
     property <[int]> layout_panel_submenu_codes: [
         root.panel_kind_button_cluster,
@@ -541,8 +558,7 @@ export component AppWindow inherits Window {
         root.panel_kind_playlist_switcher,
         root.panel_kind_track_list,
         root.panel_kind_metadata_viewer,
-        root.panel_kind_album_art_viewer,
-        root.panel_kind_status_bar
+        root.panel_kind_album_art_viewer
     ];
     property <[string]> layout_replace_preset_labels: [
         "Button Cluster",
@@ -553,6 +569,7 @@ export component AppWindow inherits Window {
         "Track Details",
         "Album Description",
         "Artist Bio",
+        "Status Bar",
         "Image Panel",
         "Album Art",
         "Artist Image"
@@ -566,6 +583,7 @@ export component AppWindow inherits Window {
         root.panel_preset_text_track_details,
         root.panel_preset_text_album_description,
         root.panel_preset_text_artist_bio,
+        root.panel_preset_text_status_bar,
         -5,
         root.panel_preset_image_album_art,
         root.panel_preset_image_artist_image
@@ -2513,18 +2531,6 @@ export component AppWindow inherits Window {
 
             }
 
-            for leaf-id[i] in root.layout_leaf_ids : StatusBar {
-                x: root.layout-region-x(i);
-                y: root.layout-region-y(i);
-                width: root.layout-region-width(i);
-                height: root.layout-region-height(i);
-                visible: root.layout-region-is-visible(i)
-                    && root.layout-region-panel-kind(i) == root.panel_kind_status_bar;
-                status-text: root.status-text;
-                technical-info: root.technical-info;
-                selection-summary: root.status-selection-summary;
-            }
-
             for leaf-id[i] in root.layout_leaf_ids : Rectangle {
                 property <int> panel-kind: root.layout-region-panel-kind(i);
                 x: root.layout-region-x(i);
@@ -3447,7 +3453,10 @@ export component AppWindow inherits Window {
         y: root.viewer_panel_settings_y;
         width: 360px;
         height: root.viewer_panel_settings_target_panel_kind == root.panel_kind_metadata_viewer
-            ? (root.viewer_panel_settings_metadata_source_index == 3 ? 304px : 126px)
+            ? ((root.viewer_panel_settings_metadata_source_index == 3
+                    || root.viewer_panel_settings_metadata_source_index == 4)
+                ? 304px
+                : 126px)
             : 126px;
         border-radius: 6px;
         background: AppPalette.panel-bg-elevated;
@@ -3545,7 +3554,8 @@ export component AppWindow inherits Window {
             }
 
             if root.viewer_panel_settings_target_panel_kind == root.panel_kind_metadata_viewer
-                    && root.viewer_panel_settings_metadata_source_index == 3 : VerticalLayout {
+                    && (root.viewer_panel_settings_metadata_source_index == 3
+                        || root.viewer_panel_settings_metadata_source_index == 4) : VerticalLayout {
                 spacing: 6px;
                 Rectangle {
                     height: 24px;
@@ -3554,7 +3564,9 @@ export component AppWindow inherits Window {
                         spacing: 8px;
                         Text {
                             horizontal-stretch: 1;
-                            text: "Custom Text Format";
+                            text: root.viewer_panel_settings_metadata_source_index == 4
+                                ? "Status Template Format"
+                                : "Custom Text Format";
                             color: AppPalette.text-primary;
                             font-size: 12px;
                             vertical-alignment: center;

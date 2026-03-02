@@ -322,4 +322,21 @@ mod tests {
             "Layout editor should render splitter models"
         );
     }
+
+    #[test]
+    fn test_layout_panel_menu_excludes_status_bar_and_presets_include_status_bar() {
+        let slint_ui = include_str!("../roqtune.slint");
+        assert!(
+            !slint_ui.contains(
+                "property <[string]> layout_panel_submenu_labels: [\n        \"Button Cluster\",\n        \"Volume Slider\",\n        \"Seek Bar\",\n        \"Collection Panel\",\n        \"Track List\",\n        \"Text Panel\",\n        \"Image Panel\",\n        \"Status Bar\""
+            ),
+            "Layout panel submenu should not expose Status Bar as a direct panel type"
+        );
+        assert!(
+            slint_ui.contains("property <int> panel_preset_text_status_bar: 104;")
+                && slint_ui.contains("\"Status Bar\"")
+                && slint_ui.contains("root.panel_preset_text_status_bar"),
+            "Layout presets should include the Status Bar text-panel preset"
+        );
+    }
 }

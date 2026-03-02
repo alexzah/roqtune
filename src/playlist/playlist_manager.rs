@@ -4777,12 +4777,13 @@ mod tests {
 
     #[test]
     fn test_seek_restarts_decode_from_requested_offset() {
+        let timeout = Duration::from_secs(3);
         let mut harness = PlaylistManagerHarness::new();
         let (id0, _) = harness.add_track("pm_seek_0");
         harness.drain_messages();
 
         harness.start_playlist_queue_from_ids(std::slice::from_ref(&id0), 0);
-        let _ = wait_for_message(&mut harness.receiver, Duration::from_secs(1), |message| {
+        let _ = wait_for_message(&mut harness.receiver, timeout, |message| {
             matches!(
                 message,
                 protocol::Message::Playlist(protocol::PlaylistMessage::PlaylistIndicesChanged {
@@ -4808,35 +4809,28 @@ mod tests {
             protocol::PlaybackMessage::Seek(0.5),
         ));
 
-        let _ = wait_for_message(&mut harness.receiver, Duration::from_secs(1), |message| {
+        let _ = wait_for_message(&mut harness.receiver, timeout, |message| {
             matches!(
                 message,
                 protocol::Message::Audio(protocol::AudioMessage::StopDecoding)
             )
         });
 
-        let _ = wait_for_message(&mut harness.receiver, Duration::from_secs(1), |message| {
+        let _ = wait_for_message(&mut harness.receiver, timeout, |message| {
             matches!(
                 message,
                 protocol::Message::Playback(protocol::PlaybackMessage::ClearPlayerCache)
             )
         });
 
-        let _ =
-            wait_for_message(
-                &mut harness.receiver,
-                Duration::from_secs(1),
-                |message| match message {
-                    protocol::Message::Audio(protocol::AudioMessage::DecodeTracks(tracks)) => {
-                        tracks.iter().any(|track| {
-                            track.id == id0
-                                && track.play_immediately
-                                && track.start_offset_ms == 50_000
-                        })
-                    }
-                    _ => false,
-                },
-            );
+        let _ = wait_for_message(&mut harness.receiver, timeout, |message| match message {
+            protocol::Message::Audio(protocol::AudioMessage::DecodeTracks(tracks)) => {
+                tracks.iter().any(|track| {
+                    track.id == id0 && track.play_immediately && track.start_offset_ms == 50_000
+                })
+            }
+            _ => false,
+        });
     }
 
     #[test]

@@ -6,12 +6,57 @@ use crate::protocol;
 
 const DEFAULT_FONT_SIZE_PX: u32 = 13;
 
-pub(crate) const DEFAULT_METADATA_PANEL_TEMPLATE: &str =
-    "[size=title][b][color=text_primary]{title;file_name}[/color][/b][/size]\\n[size=body][color=text_secondary]{artist;album_artist}[/color][/size]\\n[size=body][color=text_muted]{album}[/color][/size]\\n[size=caption][color=text_muted]{date;year} • {genre}[/color][/size]";
+pub(crate) const DEFAULT_TRACK_PANEL_TEMPLATE: &str =
+    "[size=title][b][color=text_primary][if=title;file_name]{title;file_name}[else]Unknown[/if][/color][/b][/size][if=artist;album_artist]\\n[size=body][color=text_secondary]{artist;album_artist}[/color][/size][/if][if=album]\\n[size=body][color=text_muted]{album}[/color][/size][/if][if=date;year;genre]\\n[size=caption][color=text_muted][if=date;year]{date;year}[/if][if=genre][if=date;year] • [/if]{genre}[/if][/color][/size][/if]";
+pub(crate) const DEFAULT_ALBUM_DESCRIPTION_PANEL_TEMPLATE: &str =
+    "[size=title][b][color=text_primary][if=title]{title}[else]Album Description[/if][/color][/b][/size][if=artist]\\n[size=body][color=text_secondary]{artist}[/color][/size][/if][if=genre]\\n[size=caption][color=text_muted]{genre}[/color][/size][/if]";
+pub(crate) const DEFAULT_ARTIST_BIO_PANEL_TEMPLATE: &str =
+    "[size=title][b][color=text_primary][if=title]{title}[else]Artist Bio[/if][/color][/b][/size][if=artist]\\n[size=body][color=text_secondary]{artist}[/color][/size][/if][if=genre]\\n[size=caption][color=text_muted]{genre}[/color][/size][/if]";
+pub(crate) const DEFAULT_METADATA_PANEL_TEMPLATE: &str = DEFAULT_TRACK_PANEL_TEMPLATE;
+pub(crate) const DEFAULT_STATUS_PANEL_TEMPLATE: &str =
+    "[valign=center][halign=left][size=12][color=text_secondary][if=path]Now Playing: [if=artist]{artist} - [/if][if=title]{title}[else]Unknown[/if][if=selection_summary] | {selection_summary}[/if][else]{selection_summary}[/if][/color][/size][/halign][halign=right][size=11][color=text_muted][if=format]Source: [if=source_provider]{source_provider} | [/if]{format}[if=bit_depth] ({bit_depth} bit[/if][if=sample_rate_hz], {sample_rate_hz}[/if][if=channels], {channels}ch[/if][if=bitrate_kbps], {bitrate_kbps}kbps[/if][if=bit_depth])[/if][else][if=cast_state]Source: Unknown[/if][/if][if=cast_state] | {cast_state}[/if][if=playback_mode] | [if=output_format]{playback_mode}: {output_format}[if=output_bit_depth] ({output_bit_depth} bit[/if][if=output_sample_rate_hz], {output_sample_rate_hz}[/if][if=output_channels], {output_channels}ch[/if][if=output_bitrate_kbps], {output_bitrate_kbps}kbps[/if][if=output_bit_depth])[/if][else]{playback_mode}[/if][/if][if=resampled] | Resample: {resample_from_hz} -> {resample_to_hz}[/if][if=channel_transform][if=resampled] / [/if][if=resampled][else] | [/if]{channel_transform}: {channel_from_channels}ch -> {channel_to_channels}ch[/if][if=dithered][if=resampled;channel_transform] / [/if][if=resampled;channel_transform][else] | [/if]Dither[/if][/color][/size][/halign][/valign]";
 pub(crate) const PLAYING_SYMBOL_PLAYING: &str = "▶️";
 pub(crate) const PLAYING_SYMBOL_PAUSED: &str = "⏸️";
 pub(crate) const FAVORITE_SYMBOL_ON: &str = "❤️";
 pub(crate) const FAVORITE_SYMBOL_OFF: &str = "♥";
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub(crate) enum HorizontalAlign {
+    #[default]
+    Left,
+    Center,
+    Right,
+}
+
+impl HorizontalAlign {
+    fn from_name(name: &str) -> Option<Self> {
+        match normalize_name(name).as_str() {
+            "left" | "start" => Some(Self::Left),
+            "center" | "middle" => Some(Self::Center),
+            "right" | "end" => Some(Self::Right),
+            _ => None,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub(crate) enum VerticalAlign {
+    Top,
+    #[default]
+    Center,
+    Bottom,
+}
+
+impl VerticalAlign {
+    fn from_name(name: &str) -> Option<Self> {
+        match normalize_name(name).as_str() {
+            "top" => Some(Self::Top),
+            "center" | "middle" => Some(Self::Center),
+            "bottom" => Some(Self::Bottom),
+            _ => None,
+        }
+    }
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum PaletteColor {
@@ -91,6 +136,7 @@ pub(crate) struct RichTextRun {
     pub bold: bool,
     pub italic: bool,
     pub underline: bool,
+    pub horizontal_align: HorizontalAlign,
     pub font_size_px: u32,
     pub font_family: String,
     pub color: Option<RunColor>,
@@ -106,6 +152,7 @@ pub(crate) struct RichTextLine {
 pub(crate) struct RenderedText {
     pub plain_text: String,
     pub lines: Vec<RichTextLine>,
+    pub vertical_align: VerticalAlign,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -207,6 +254,54 @@ pub(crate) struct TemplateContext<'a> {
     pub path: Option<&'a str>,
     pub playing: Option<&'a str>,
     pub favorite: Option<&'a str>,
+    pub selection_summary: &'a str,
+    pub technical_source_provider: &'a str,
+    pub technical_format: &'a str,
+    pub technical_bit_depth: &'a str,
+    pub technical_sample_rate_hz: &'a str,
+    pub technical_channels: &'a str,
+    pub technical_bitrate_kbps: &'a str,
+    pub technical_duration_ms: &'a str,
+    pub technical_cast_state: &'a str,
+    pub technical_playback_mode: &'a str,
+    pub technical_output_format: &'a str,
+    pub technical_output_bit_depth: &'a str,
+    pub technical_output_sample_rate_hz: &'a str,
+    pub technical_output_channels: &'a str,
+    pub technical_output_bitrate_kbps: &'a str,
+    pub technical_resampled: &'a str,
+    pub technical_resample_from_hz: &'a str,
+    pub technical_resample_to_hz: &'a str,
+    pub technical_channel_transform: &'a str,
+    pub technical_channel_from_channels: &'a str,
+    pub technical_channel_to_channels: &'a str,
+    pub technical_dithered: &'a str,
+}
+
+#[derive(Clone, Copy, Debug, Default)]
+pub(crate) struct StatusTemplateFields<'a> {
+    pub selection_summary: &'a str,
+    pub technical_source_provider: &'a str,
+    pub technical_format: &'a str,
+    pub technical_bit_depth: &'a str,
+    pub technical_sample_rate_hz: &'a str,
+    pub technical_channels: &'a str,
+    pub technical_bitrate_kbps: &'a str,
+    pub technical_duration_ms: &'a str,
+    pub technical_cast_state: &'a str,
+    pub technical_playback_mode: &'a str,
+    pub technical_output_format: &'a str,
+    pub technical_output_bit_depth: &'a str,
+    pub technical_output_sample_rate_hz: &'a str,
+    pub technical_output_channels: &'a str,
+    pub technical_output_bitrate_kbps: &'a str,
+    pub technical_resampled: &'a str,
+    pub technical_resample_from_hz: &'a str,
+    pub technical_resample_to_hz: &'a str,
+    pub technical_channel_transform: &'a str,
+    pub technical_channel_from_channels: &'a str,
+    pub technical_channel_to_channels: &'a str,
+    pub technical_dithered: &'a str,
 }
 
 impl<'a> TemplateContext<'a> {
@@ -239,6 +334,28 @@ impl<'a> TemplateContext<'a> {
             path: path_text,
             playing: None,
             favorite: None,
+            selection_summary: "",
+            technical_source_provider: "",
+            technical_format: "",
+            technical_bit_depth: "",
+            technical_sample_rate_hz: "",
+            technical_channels: "",
+            technical_bitrate_kbps: "",
+            technical_duration_ms: "",
+            technical_cast_state: "",
+            technical_playback_mode: "",
+            technical_output_format: "",
+            technical_output_bit_depth: "",
+            technical_output_sample_rate_hz: "",
+            technical_output_channels: "",
+            technical_output_bitrate_kbps: "",
+            technical_resampled: "",
+            technical_resample_from_hz: "",
+            technical_resample_to_hz: "",
+            technical_channel_transform: "",
+            technical_channel_from_channels: "",
+            technical_channel_to_channels: "",
+            technical_dithered: "",
         }
     }
 
@@ -249,6 +366,32 @@ impl<'a> TemplateContext<'a> {
     ) -> Self {
         self.playing = playing;
         self.favorite = favorite;
+        self
+    }
+
+    pub(crate) fn with_status_fields(mut self, fields: StatusTemplateFields<'a>) -> Self {
+        self.selection_summary = fields.selection_summary;
+        self.technical_source_provider = fields.technical_source_provider;
+        self.technical_format = fields.technical_format;
+        self.technical_bit_depth = fields.technical_bit_depth;
+        self.technical_sample_rate_hz = fields.technical_sample_rate_hz;
+        self.technical_channels = fields.technical_channels;
+        self.technical_bitrate_kbps = fields.technical_bitrate_kbps;
+        self.technical_duration_ms = fields.technical_duration_ms;
+        self.technical_cast_state = fields.technical_cast_state;
+        self.technical_playback_mode = fields.technical_playback_mode;
+        self.technical_output_format = fields.technical_output_format;
+        self.technical_output_bit_depth = fields.technical_output_bit_depth;
+        self.technical_output_sample_rate_hz = fields.technical_output_sample_rate_hz;
+        self.technical_output_channels = fields.technical_output_channels;
+        self.technical_output_bitrate_kbps = fields.technical_output_bitrate_kbps;
+        self.technical_resampled = fields.technical_resampled;
+        self.technical_resample_from_hz = fields.technical_resample_from_hz;
+        self.technical_resample_to_hz = fields.technical_resample_to_hz;
+        self.technical_channel_transform = fields.technical_channel_transform;
+        self.technical_channel_from_channels = fields.technical_channel_from_channels;
+        self.technical_channel_to_channels = fields.technical_channel_to_channels;
+        self.technical_dithered = fields.technical_dithered;
         self
     }
 
@@ -277,6 +420,46 @@ impl<'a> TemplateContext<'a> {
                 Some(self.file_name.unwrap_or_default().to_string())
             }
             "path" => Some(self.path.unwrap_or_default().to_string()),
+            "selection_summary" | "selectionsummary" => Some(self.selection_summary.to_string()),
+            "source_provider" | "sourceprovider" => {
+                Some(self.technical_source_provider.to_string())
+            }
+            "format" => Some(self.technical_format.to_string()),
+            "bit_depth" | "bitdepth" => Some(self.technical_bit_depth.to_string()),
+            "sample_rate_hz" | "sampleratehz" => Some(self.technical_sample_rate_hz.to_string()),
+            "channels" => Some(self.technical_channels.to_string()),
+            "bitrate_kbps" | "bitratekbps" => Some(self.technical_bitrate_kbps.to_string()),
+            "duration_ms" | "durationms" => Some(self.technical_duration_ms.to_string()),
+            "cast_state" | "caststate" => Some(self.technical_cast_state.to_string()),
+            "playback_mode" | "playbackmode" => Some(self.technical_playback_mode.to_string()),
+            "output_format" | "outputformat" => Some(self.technical_output_format.to_string()),
+            "output_bit_depth" | "outputbitdepth" => {
+                Some(self.technical_output_bit_depth.to_string())
+            }
+            "output_sample_rate_hz" | "outputsampleratehz" => {
+                Some(self.technical_output_sample_rate_hz.to_string())
+            }
+            "output_channels" | "outputchannels" => {
+                Some(self.technical_output_channels.to_string())
+            }
+            "output_bitrate_kbps" | "outputbitratekbps" => {
+                Some(self.technical_output_bitrate_kbps.to_string())
+            }
+            "resampled" => Some(self.technical_resampled.to_string()),
+            "resample_from_hz" | "resamplefromhz" => {
+                Some(self.technical_resample_from_hz.to_string())
+            }
+            "resample_to_hz" | "resampletohz" => Some(self.technical_resample_to_hz.to_string()),
+            "channel_transform" | "channeltransform" => {
+                Some(self.technical_channel_transform.to_string())
+            }
+            "channel_from_channels" | "channelfromchannels" => {
+                Some(self.technical_channel_from_channels.to_string())
+            }
+            "channel_to_channels" | "channeltochannels" => {
+                Some(self.technical_channel_to_channels.to_string())
+            }
+            "dithered" => Some(self.technical_dithered.to_string()),
             "album_art" | "disc" | "disc_number" | "duration" => Some(String::new()),
             _ => None,
         }
@@ -326,6 +509,9 @@ enum TemplateSegment {
     Text(String),
     Placeholder { raw: String, fallbacks: Vec<String> },
     NewLine,
+    IfOpen { fallbacks: Vec<String> },
+    IfElse { literal: String },
+    IfClose { literal: String },
     OpenStyle(StyleTag),
     CloseStyle { kind: StyleKind, literal: String },
 }
@@ -335,6 +521,8 @@ enum StyleKind {
     Bold,
     Italic,
     Underline,
+    HorizontalAlign,
+    VerticalAlign,
     Size,
     Font,
     Color,
@@ -345,6 +533,8 @@ enum StyleTag {
     Bold,
     Italic,
     Underline,
+    HorizontalAlign(HorizontalAlign),
+    VerticalAlign(VerticalAlign),
     Size(FontSizeSpec),
     Font(String),
     Color(RunColor),
@@ -355,9 +545,32 @@ struct StyleState {
     bold: bool,
     italic: bool,
     underline: bool,
+    horizontal_align: HorizontalAlign,
     font_size_px: u32,
     font_family: String,
     color: Option<RunColor>,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+struct ConditionFrame {
+    parent_active: bool,
+    condition_true: bool,
+    else_seen: bool,
+}
+
+impl ConditionFrame {
+    fn active(self) -> bool {
+        let branch_true = if self.else_seen {
+            !self.condition_true
+        } else {
+            self.condition_true
+        };
+        self.parent_active && branch_true
+    }
+}
+
+fn conditions_active(stack: &[ConditionFrame]) -> bool {
+    stack.iter().copied().all(ConditionFrame::active)
 }
 
 pub(crate) fn parse_template(source: &str) -> ParsedTemplate {
@@ -397,23 +610,13 @@ pub(crate) fn parse_template(source: &str) -> ParsedTemplate {
                         segments.push(TemplateSegment::Text(format!("{{{content}}}")));
                         continue;
                     }
-                    let mut fallbacks = Vec::new();
-                    let mut invalid = false;
-                    for part in content.split(';') {
-                        let key = part.trim();
-                        if key.is_empty() {
-                            invalid = true;
-                            break;
-                        }
-                        fallbacks.push(key.to_string());
-                    }
-                    if invalid || fallbacks.is_empty() {
-                        segments.push(TemplateSegment::Text(format!("{{{content}}}")));
-                    } else {
+                    if let Some(fallbacks) = parse_fallback_chain(&content) {
                         segments.push(TemplateSegment::Placeholder {
                             raw: content,
                             fallbacks,
                         });
+                    } else {
+                        segments.push(TemplateSegment::Text(format!("{{{content}}}")));
                     }
                 } else {
                     text_buffer.push('{');
@@ -425,6 +628,15 @@ pub(crate) fn parse_template(source: &str) -> ParsedTemplate {
                     match parse_tag_segment(&content) {
                         Some(ParsedTag::NewLine) => {
                             segments.push(TemplateSegment::NewLine);
+                        }
+                        Some(ParsedTag::OpenIf { fallbacks }) => {
+                            segments.push(TemplateSegment::IfOpen { fallbacks });
+                        }
+                        Some(ParsedTag::Else { literal }) => {
+                            segments.push(TemplateSegment::IfElse { literal });
+                        }
+                        Some(ParsedTag::CloseIf { literal }) => {
+                            segments.push(TemplateSegment::IfClose { literal });
                         }
                         Some(ParsedTag::Open(style)) => {
                             if let StyleTag::Size(size_spec) = style {
@@ -473,10 +685,60 @@ pub(crate) fn render(
     let mut lines = vec![RichTextLine { runs: Vec::new() }];
     let mut plain_text = String::new();
     let mut style_stack: Vec<StyleTag> = Vec::new();
+    let mut condition_stack: Vec<ConditionFrame> = Vec::new();
+    let mut vertical_align = VerticalAlign::Center;
 
     for segment in &parsed.segments {
         match segment {
+            TemplateSegment::IfOpen { fallbacks } => {
+                let parent_active = conditions_active(&condition_stack);
+                let condition_true = resolve_placeholder(context, fallbacks)
+                    .map(|resolved| !resolved.value.trim().is_empty())
+                    .unwrap_or(false);
+                condition_stack.push(ConditionFrame {
+                    parent_active,
+                    condition_true,
+                    else_seen: false,
+                });
+            }
+            TemplateSegment::IfElse { literal } => {
+                let mut duplicate_else = false;
+                if let Some(frame) = condition_stack.last_mut() {
+                    if frame.else_seen {
+                        duplicate_else = true;
+                    } else {
+                        frame.else_seen = true;
+                    }
+                } else {
+                    duplicate_else = true;
+                }
+                if duplicate_else && conditions_active(&condition_stack) {
+                    append_text(
+                        &mut lines,
+                        &mut plain_text,
+                        literal,
+                        &style_stack,
+                        render_options,
+                        None,
+                    );
+                }
+            }
+            TemplateSegment::IfClose { literal } => {
+                if condition_stack.pop().is_none() && conditions_active(&condition_stack) {
+                    append_text(
+                        &mut lines,
+                        &mut plain_text,
+                        literal,
+                        &style_stack,
+                        render_options,
+                        None,
+                    );
+                }
+            }
             TemplateSegment::Text(text) => {
+                if !conditions_active(&condition_stack) {
+                    continue;
+                }
                 append_text(
                     &mut lines,
                     &mut plain_text,
@@ -487,6 +749,9 @@ pub(crate) fn render(
                 );
             }
             TemplateSegment::Placeholder { raw, fallbacks } => {
+                if !conditions_active(&condition_stack) {
+                    continue;
+                }
                 if let Some(resolved) = resolve_placeholder(context, fallbacks) {
                     let link_payload =
                         context.link_payload_for_key_value(&resolved.selected_key, &resolved.value);
@@ -510,13 +775,25 @@ pub(crate) fn render(
                 }
             }
             TemplateSegment::NewLine => {
+                if !conditions_active(&condition_stack) {
+                    continue;
+                }
                 plain_text.push('\n');
                 lines.push(RichTextLine { runs: Vec::new() });
             }
             TemplateSegment::OpenStyle(style) => {
+                if !conditions_active(&condition_stack) {
+                    continue;
+                }
+                if let StyleTag::VerticalAlign(next_align) = style {
+                    vertical_align = *next_align;
+                }
                 style_stack.push(style.clone());
             }
             TemplateSegment::CloseStyle { kind, literal } => {
+                if !conditions_active(&condition_stack) {
+                    continue;
+                }
                 if style_stack.last().map(style_kind) == Some(*kind) {
                     style_stack.pop();
                 } else {
@@ -533,7 +810,11 @@ pub(crate) fn render(
         }
     }
 
-    RenderedText { plain_text, lines }
+    RenderedText {
+        plain_text,
+        lines,
+        vertical_align,
+    }
 }
 
 pub(crate) fn render_template(source: &str, context: &TemplateContext<'_>) -> RenderedText {
@@ -614,6 +895,7 @@ fn append_text(
             bold: state.bold,
             italic: state.italic,
             underline: state.underline,
+            horizontal_align: state.horizontal_align,
             font_size_px: state.font_size_px,
             font_family: state.font_family.clone(),
             color: state.color.clone(),
@@ -624,6 +906,7 @@ fn append_text(
                 if previous.bold == run.bold
                     && previous.italic == run.italic
                     && previous.underline == run.underline
+                    && previous.horizontal_align == run.horizontal_align
                     && previous.font_size_px == run.font_size_px
                     && previous.font_family == run.font_family
                     && previous.color == run.color
@@ -640,6 +923,7 @@ fn append_text(
 
 fn style_state(style_stack: &[StyleTag], render_options: RenderOptions) -> StyleState {
     let mut state = StyleState {
+        horizontal_align: HorizontalAlign::Left,
         font_size_px: render_options.base_font_size_px.max(1),
         ..StyleState::default()
     };
@@ -648,6 +932,8 @@ fn style_state(style_stack: &[StyleTag], render_options: RenderOptions) -> Style
             StyleTag::Bold => state.bold = true,
             StyleTag::Italic => state.italic = true,
             StyleTag::Underline => state.underline = true,
+            StyleTag::HorizontalAlign(align) => state.horizontal_align = *align,
+            StyleTag::VerticalAlign(_) => {}
             StyleTag::Size(size_spec) => state.font_size_px = size_spec.resolve_px(render_options),
             StyleTag::Font(font) => state.font_family = font.clone(),
             StyleTag::Color(color) => state.color = Some(color.clone()),
@@ -661,6 +947,8 @@ fn style_kind(style: &StyleTag) -> StyleKind {
         StyleTag::Bold => StyleKind::Bold,
         StyleTag::Italic => StyleKind::Italic,
         StyleTag::Underline => StyleKind::Underline,
+        StyleTag::HorizontalAlign(_) => StyleKind::HorizontalAlign,
+        StyleTag::VerticalAlign(_) => StyleKind::VerticalAlign,
         StyleTag::Size(_) => StyleKind::Size,
         StyleTag::Font(_) => StyleKind::Font,
         StyleTag::Color(_) => StyleKind::Color,
@@ -702,6 +990,9 @@ fn read_until(
 
 enum ParsedTag {
     NewLine,
+    OpenIf { fallbacks: Vec<String> },
+    Else { literal: String },
+    CloseIf { literal: String },
     Open(StyleTag),
     Close { kind: StyleKind, literal: String },
 }
@@ -715,6 +1006,9 @@ fn parse_tag_segment(content: &str) -> Option<ParsedTag> {
     if let Some(rest) = trimmed.strip_prefix('/') {
         let name = normalize_name(rest);
         return match name.as_str() {
+            "if" => Some(ParsedTag::CloseIf {
+                literal: format!("[/{rest}]"),
+            }),
             "b" => Some(ParsedTag::Close {
                 kind: StyleKind::Bold,
                 literal: format!("[/{rest}]"),
@@ -725,6 +1019,14 @@ fn parse_tag_segment(content: &str) -> Option<ParsedTag> {
             }),
             "u" => Some(ParsedTag::Close {
                 kind: StyleKind::Underline,
+                literal: format!("[/{rest}]"),
+            }),
+            "halign" => Some(ParsedTag::Close {
+                kind: StyleKind::HorizontalAlign,
+                literal: format!("[/{rest}]"),
+            }),
+            "valign" => Some(ParsedTag::Close {
+                kind: StyleKind::VerticalAlign,
                 literal: format!("[/{rest}]"),
             }),
             "size" => Some(ParsedTag::Close {
@@ -750,19 +1052,43 @@ fn parse_tag_segment(content: &str) -> Option<ParsedTag> {
             return None;
         }
         return match name.as_str() {
+            "if" => parse_fallback_chain(value).map(|fallbacks| ParsedTag::OpenIf { fallbacks }),
             "size" => parse_size_spec(value).map(|size| ParsedTag::Open(StyleTag::Size(size))),
             "font" => Some(ParsedTag::Open(StyleTag::Font(value.to_string()))),
             "color" => parse_color(value).map(|color| ParsedTag::Open(StyleTag::Color(color))),
+            "halign" => parse_horizontal_align(value)
+                .map(|align| ParsedTag::Open(StyleTag::HorizontalAlign(align))),
+            "valign" => parse_vertical_align(value)
+                .map(|align| ParsedTag::Open(StyleTag::VerticalAlign(align))),
             _ => None,
         };
     }
 
     let name = normalize_name(trimmed);
     match name.as_str() {
+        "else" => Some(ParsedTag::Else {
+            literal: format!("[{trimmed}]"),
+        }),
         "b" => Some(ParsedTag::Open(StyleTag::Bold)),
         "i" => Some(ParsedTag::Open(StyleTag::Italic)),
         "u" => Some(ParsedTag::Open(StyleTag::Underline)),
         _ => None,
+    }
+}
+
+fn parse_fallback_chain(value: &str) -> Option<Vec<String>> {
+    let mut fallbacks = Vec::new();
+    for part in value.split(';') {
+        let key = part.trim();
+        if key.is_empty() {
+            return None;
+        }
+        fallbacks.push(key.to_string());
+    }
+    if fallbacks.is_empty() {
+        None
+    } else {
+        Some(fallbacks)
     }
 }
 
@@ -783,6 +1109,14 @@ fn parse_color(value: &str) -> Option<RunColor> {
         });
     }
     PaletteColor::from_name(value).map(RunColor::Palette)
+}
+
+fn parse_horizontal_align(value: &str) -> Option<HorizontalAlign> {
+    HorizontalAlign::from_name(value)
+}
+
+fn parse_vertical_align(value: &str) -> Option<VerticalAlign> {
+    VerticalAlign::from_name(value)
 }
 
 fn parse_hex_color(value: &str) -> Option<(u8, u8, u8, u8)> {
@@ -828,8 +1162,10 @@ fn parse_hex_color(value: &str) -> Option<(u8, u8, u8, u8)> {
 #[cfg(test)]
 mod tests {
     use super::{
-        render_template, render_template_with_options, template_metrics, PaletteColor,
-        RenderOptions, RunColor, TemplateContext,
+        render_template, render_template_with_options, template_metrics, HorizontalAlign,
+        PaletteColor, RenderOptions, RunColor, StatusTemplateFields, TemplateContext,
+        VerticalAlign, DEFAULT_ALBUM_DESCRIPTION_PANEL_TEMPLATE, DEFAULT_ARTIST_BIO_PANEL_TEMPLATE,
+        DEFAULT_STATUS_PANEL_TEMPLATE, DEFAULT_TRACK_PANEL_TEMPLATE,
     };
 
     fn context<'a>(title: &'a str) -> TemplateContext<'a> {
@@ -846,6 +1182,28 @@ mod tests {
             path: Some("/music/track.flac"),
             playing: None,
             favorite: None,
+            selection_summary: "",
+            technical_source_provider: "",
+            technical_format: "",
+            technical_bit_depth: "",
+            technical_sample_rate_hz: "",
+            technical_channels: "",
+            technical_bitrate_kbps: "",
+            technical_duration_ms: "",
+            technical_cast_state: "",
+            technical_playback_mode: "",
+            technical_output_format: "",
+            technical_output_bit_depth: "",
+            technical_output_sample_rate_hz: "",
+            technical_output_channels: "",
+            technical_output_bitrate_kbps: "",
+            technical_resampled: "",
+            technical_resample_from_hz: "",
+            technical_resample_to_hz: "",
+            technical_channel_transform: "",
+            technical_channel_from_channels: "",
+            technical_channel_to_channels: "",
+            technical_dithered: "",
         }
     }
 
@@ -894,6 +1252,202 @@ mod tests {
         assert_eq!(
             rendered.lines[0].runs[2].color,
             Some(RunColor::Palette(PaletteColor::Accent))
+        );
+    }
+
+    #[test]
+    fn test_alignment_tags_are_applied() {
+        let rendered = render_template(
+            "[valign=bottom][halign=right]{title}[/halign]",
+            &context("Song"),
+        );
+        assert_eq!(rendered.vertical_align, VerticalAlign::Bottom);
+        assert_eq!(
+            rendered.lines[0].runs[0].horizontal_align,
+            HorizontalAlign::Right
+        );
+    }
+
+    #[test]
+    fn test_last_valign_open_tag_wins_for_block() {
+        let rendered = render_template(
+            "[valign=top]{title}[/valign][valign=center]{artist}",
+            &context("Song"),
+        );
+        assert_eq!(rendered.vertical_align, VerticalAlign::Center);
+    }
+
+    #[test]
+    fn test_status_placeholders_render_from_context() {
+        let rendered = render_template(
+            "{selection_summary}|{source_provider}|{format}|{bit_depth}|{sample_rate_hz}|{channels}|{bitrate_kbps}|{playback_mode}",
+            &context("Song").with_status_fields(StatusTemplateFields {
+                selection_summary: "2 tracks selected",
+                technical_source_provider: "opensubsonic",
+                technical_format: "FLAC",
+                technical_bit_depth: "24",
+                technical_sample_rate_hz: "96000",
+                technical_channels: "2",
+                technical_bitrate_kbps: "320",
+                technical_playback_mode: "direct",
+                ..StatusTemplateFields::default()
+            }),
+        );
+        assert_eq!(
+            rendered.plain_text,
+            "2 tracks selected|opensubsonic|FLAC|24|96000|2|320|direct"
+        );
+    }
+
+    #[test]
+    fn test_if_condition_renders_true_branch() {
+        let rendered = render_template("[if=title]{title}[else]No track[/if]", &context("Song"));
+        assert_eq!(rendered.plain_text, "Song");
+    }
+
+    #[test]
+    fn test_if_condition_renders_else_branch_when_false() {
+        let rendered = render_template(
+            "[if=title]{title}[else]No track[/if]",
+            &TemplateContext {
+                title: "",
+                ..context("Song")
+            },
+        );
+        assert_eq!(rendered.plain_text, "No track");
+    }
+
+    #[test]
+    fn test_if_condition_supports_fallback_chains() {
+        let rendered = render_template(
+            "[if=artist;album_artist]{artist;album_artist}[else]Unknown artist[/if]",
+            &TemplateContext {
+                artist: "",
+                album_artist: "Fallback Artist",
+                ..context("Song")
+            },
+        );
+        assert_eq!(rendered.plain_text, "Fallback Artist");
+    }
+
+    #[test]
+    fn test_if_condition_renders_else_branch_with_empty_true_branch() {
+        let rendered = render_template(
+            "[if=output_format][else]{playback_mode}[/if]",
+            &context("Song").with_status_fields(StatusTemplateFields {
+                technical_playback_mode: "Direct play",
+                technical_output_format: "",
+                ..StatusTemplateFields::default()
+            }),
+        );
+        assert_eq!(rendered.plain_text, "Direct play");
+    }
+
+    #[test]
+    fn test_default_status_template_renders_direct_play_segment() {
+        let rendered = render_template(
+            DEFAULT_STATUS_PANEL_TEMPLATE,
+            &context("Song").with_status_fields(StatusTemplateFields {
+                technical_format: "FLAC",
+                technical_bit_depth: "24",
+                technical_sample_rate_hz: "192kHz",
+                technical_channels: "2",
+                technical_bitrate_kbps: "5501",
+                technical_playback_mode: "Direct play",
+                ..StatusTemplateFields::default()
+            }),
+        );
+        assert!(rendered
+            .plain_text
+            .contains("Source: FLAC (24 bit, 192kHz, 2ch, 5501kbps)"));
+        assert!(rendered.plain_text.contains(" | Direct play"));
+    }
+
+    #[test]
+    fn test_default_status_template_renders_transform_segments() {
+        let rendered = render_template(
+            DEFAULT_STATUS_PANEL_TEMPLATE,
+            &context("Song").with_status_fields(StatusTemplateFields {
+                technical_format: "FLAC",
+                technical_bit_depth: "24",
+                technical_sample_rate_hz: "96kHz",
+                technical_channels: "2",
+                technical_bitrate_kbps: "2800",
+                technical_resampled: "true",
+                technical_resample_from_hz: "96kHz",
+                technical_resample_to_hz: "48kHz",
+                technical_channel_transform: "Downmix",
+                technical_channel_from_channels: "2",
+                technical_channel_to_channels: "2",
+                ..StatusTemplateFields::default()
+            }),
+        );
+        assert!(rendered.plain_text.contains(" | Resample: 96kHz -> 48kHz"));
+        assert!(rendered.plain_text.contains(" / Downmix: 2ch -> 2ch"));
+    }
+
+    #[test]
+    fn test_default_track_template_omits_empty_optional_lines() {
+        let rendered = render_template(
+            DEFAULT_TRACK_PANEL_TEMPLATE,
+            &TemplateContext {
+                title: "",
+                artist: "",
+                album: "",
+                album_artist: "",
+                date: "",
+                year: "",
+                genre: "",
+                file_name: None,
+                ..context("Song")
+            },
+        );
+        assert_eq!(rendered.plain_text, "Unknown");
+        assert_eq!(rendered.lines.len(), 1);
+    }
+
+    #[test]
+    fn test_default_source_templates_omit_empty_optional_lines() {
+        let album_rendered = render_template(
+            DEFAULT_ALBUM_DESCRIPTION_PANEL_TEMPLATE,
+            &TemplateContext {
+                title: "",
+                artist: "",
+                genre: "",
+                ..context("Song")
+            },
+        );
+        assert_eq!(album_rendered.plain_text, "Album Description");
+        assert_eq!(album_rendered.lines.len(), 1);
+
+        let artist_rendered = render_template(
+            DEFAULT_ARTIST_BIO_PANEL_TEMPLATE,
+            &TemplateContext {
+                title: "",
+                artist: "",
+                genre: "",
+                ..context("Song")
+            },
+        );
+        assert_eq!(artist_rendered.plain_text, "Artist Bio");
+        assert_eq!(artist_rendered.lines.len(), 1);
+    }
+
+    #[test]
+    fn test_if_else_and_close_tags_render_literal_when_malformed() {
+        let rendered = render_template("[if=]{title} [else]x[/if]", &context("Song"));
+        assert_eq!(rendered.plain_text, "[if=]Song [else]x[/if]");
+    }
+
+    #[test]
+    fn test_malformed_alignment_tags_render_as_literal_text() {
+        let rendered = render_template(
+            "[halign=diagonal]x[/halign] [valign=middle-ish]y[/valign]",
+            &context("Song"),
+        );
+        assert_eq!(
+            rendered.plain_text,
+            "[halign=diagonal]x[/halign] [valign=middle-ish]y[/valign]"
         );
     }
 

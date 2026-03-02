@@ -17,9 +17,9 @@ Project-specific instructions for AI agents and contributors working in this rep
 
 ## 4. Validation Commands
 Run these before handing work back:
-- `cargo fmt`
-- `cargo clippy -- -D warnings`
-- `cargo test`
+- `cargo fmt --all --check`
+- `cargo clippy --all-targets --locked -- -D warnings`
+- `cargo test --locked`
 
 If any cannot be run, state that explicitly and why.
 

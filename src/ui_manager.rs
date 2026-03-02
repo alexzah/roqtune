@@ -258,6 +258,67 @@ struct TrackMetadata {
     track_number: String,
 }
 
+#[derive(Clone, Default)]
+struct TechnicalInfoTemplateFields {
+    technical_info: String,
+    technical_source: String,
+    technical_cast_status: String,
+    technical_playback_path: String,
+    technical_source_provider: String,
+    technical_format: String,
+    technical_bit_depth: String,
+    technical_sample_rate_hz: String,
+    technical_channels: String,
+    technical_bitrate_kbps: String,
+    technical_duration_ms: String,
+    technical_cast_state: String,
+    technical_playback_mode: String,
+    technical_output_format: String,
+    technical_output_bit_depth: String,
+    technical_output_sample_rate_hz: String,
+    technical_output_channels: String,
+    technical_output_bitrate_kbps: String,
+    technical_resampled: String,
+    technical_resample_from_hz: String,
+    technical_resample_to_hz: String,
+    technical_channel_transform: String,
+    technical_channel_from_channels: String,
+    technical_channel_to_channels: String,
+    technical_dithered: String,
+}
+
+impl TechnicalInfoTemplateFields {
+    fn status_template_fields<'a>(
+        &'a self,
+        selection_summary: &'a str,
+    ) -> text_template::StatusTemplateFields<'a> {
+        text_template::StatusTemplateFields {
+            selection_summary,
+            technical_source_provider: &self.technical_source_provider,
+            technical_format: &self.technical_format,
+            technical_bit_depth: &self.technical_bit_depth,
+            technical_sample_rate_hz: &self.technical_sample_rate_hz,
+            technical_channels: &self.technical_channels,
+            technical_bitrate_kbps: &self.technical_bitrate_kbps,
+            technical_duration_ms: &self.technical_duration_ms,
+            technical_cast_state: &self.technical_cast_state,
+            technical_playback_mode: &self.technical_playback_mode,
+            technical_output_format: &self.technical_output_format,
+            technical_output_bit_depth: &self.technical_output_bit_depth,
+            technical_output_sample_rate_hz: &self.technical_output_sample_rate_hz,
+            technical_output_channels: &self.technical_output_channels,
+            technical_output_bitrate_kbps: &self.technical_output_bitrate_kbps,
+            technical_resampled: &self.technical_resampled,
+            technical_resample_from_hz: &self.technical_resample_from_hz,
+            technical_resample_to_hz: &self.technical_resample_to_hz,
+            technical_channel_transform: &self.technical_channel_transform,
+            technical_channel_from_channels: &self.technical_channel_from_channels,
+            technical_channel_to_channels: &self.technical_channel_to_channels,
+            technical_dithered: &self.technical_dithered,
+        }
+    }
+}
+
 #[derive(Clone, Debug)]
 struct RenderedColumnValue {
     plain_text: String,
@@ -464,6 +525,7 @@ const VIEWER_METADATA_SOURCE_TRACK: i32 = 0;
 const VIEWER_METADATA_SOURCE_ALBUM_DESCRIPTION: i32 = 1;
 const VIEWER_METADATA_SOURCE_ARTIST_BIO: i32 = 2;
 const VIEWER_METADATA_SOURCE_CUSTOM_TEXT: i32 = 3;
+const VIEWER_METADATA_SOURCE_STATUS_BAR: i32 = 4;
 const VIEWER_IMAGE_SOURCE_ALBUM_ART: i32 = 0;
 const VIEWER_IMAGE_SOURCE_ARTIST_IMAGE: i32 = 1;
 const TEXT_PANEL_COMPACT_WIDTH_THRESHOLD_PX: i32 = 220;
@@ -2036,6 +2098,13 @@ impl UiManager {
             .and_then(|path| is_remote_track_path(path.as_path()).then_some("OpenSubsonic"))
     }
 
+    fn current_track_source_provider(&self) -> Option<&'static str> {
+        self.playing_track
+            .path
+            .as_ref()
+            .and_then(|path| is_remote_track_path(path.as_path()).then_some("OpenSubsonic"))
+    }
+
     fn render_local_transform_text(&self) -> String {
         let Some(path_info) = self.current_output_path_info.as_ref() else {
             return "Direct play".to_string();
@@ -2068,16 +2137,85 @@ impl UiManager {
         }
     }
 
-    fn render_technical_info_text(&self) -> String {
+    fn render_technical_info_fields(&self) -> TechnicalInfoTemplateFields {
         if self.current_technical_metadata.is_none()
             && !self.cast_connected
             && !self.cast_connecting
         {
-            return String::new();
+            return TechnicalInfoTemplateFields::default();
         }
 
-        let mut sections = Vec::new();
-        let source_section = if let Some(meta) = self.current_technical_metadata.as_ref() {
+        let mut fields = TechnicalInfoTemplateFields::default();
+        if let Some(source_provider) = self.current_track_source_provider() {
+            fields.technical_source_provider = source_provider.to_string();
+        }
+
+        if let Some(meta) = self.current_technical_metadata.as_ref() {
+            fields.technical_format = meta.format.clone();
+            fields.technical_bit_depth = meta.bits_per_sample.to_string();
+            fields.technical_sample_rate_hz = Self::format_rate_hz_text(meta.sample_rate_hz);
+            fields.technical_channels = meta.channel_count.to_string();
+            fields.technical_bitrate_kbps = meta.bitrate_kbps.to_string();
+            fields.technical_duration_ms = meta.duration_ms.to_string();
+        }
+
+        if self.cast_connected {
+            fields.technical_cast_state = "Casting".to_string();
+            match self.cast_playback_path_kind {
+                Some(protocol::CastPlaybackPathKind::Direct) => {
+                    fields.technical_playback_mode = "Direct play".to_string();
+                }
+                Some(protocol::CastPlaybackPathKind::TranscodeWavPcm) => {
+                    fields.technical_playback_mode = "Transcode".to_string();
+                    if let Some(meta) = self.cast_transcode_output_metadata.as_ref() {
+                        fields.technical_output_format = meta.format.clone();
+                        fields.technical_output_bit_depth = meta.bits_per_sample.to_string();
+                        fields.technical_output_sample_rate_hz =
+                            Self::format_rate_hz_text(meta.sample_rate_hz);
+                        fields.technical_output_channels = meta.channel_count.to_string();
+                        fields.technical_output_bitrate_kbps = meta.bitrate_kbps.to_string();
+                    } else {
+                        fields.technical_output_format = "WAV".to_string();
+                    }
+                }
+                None => {}
+            }
+        } else if self.cast_connecting {
+            fields.technical_cast_state = "Casting: Connecting...".to_string();
+        } else if self.current_technical_metadata.is_some() {
+            if let Some(path_info) = self.current_output_path_info.as_ref() {
+                let local_processed = path_info.resampled
+                    || path_info.channel_transform.is_some()
+                    || path_info.dithered;
+                if !local_processed {
+                    fields.technical_playback_mode = "Direct play".to_string();
+                }
+                if path_info.resampled {
+                    fields.technical_resampled = "true".to_string();
+                    fields.technical_resample_from_hz =
+                        Self::format_rate_hz_text(path_info.source_sample_rate_hz);
+                    fields.technical_resample_to_hz =
+                        Self::format_rate_hz_text(path_info.output_stream.sample_rate_hz);
+                }
+                if let Some(channel_transform) = path_info.channel_transform {
+                    fields.technical_channel_transform = match channel_transform {
+                        protocol::ChannelTransformKind::Downmix => "Downmix".to_string(),
+                        protocol::ChannelTransformKind::ChannelMap => "Channel map".to_string(),
+                    };
+                    fields.technical_channel_from_channels =
+                        path_info.source_channel_count.to_string();
+                    fields.technical_channel_to_channels =
+                        path_info.output_stream.channel_count.to_string();
+                }
+                if path_info.dithered {
+                    fields.technical_dithered = "true".to_string();
+                }
+            } else {
+                fields.technical_playback_mode = "Direct play".to_string();
+            }
+        }
+
+        fields.technical_source = if let Some(meta) = self.current_technical_metadata.as_ref() {
             let source_label = self.current_track_source_label();
             let source_format_text = Self::format_technical_metadata_text(meta);
             if let Some(source_label) = source_label {
@@ -2090,40 +2228,46 @@ impl UiManager {
         } else {
             String::new()
         };
-        if !source_section.is_empty() {
-            sections.push(source_section);
-        }
-
-        if self.cast_connected {
-            sections.push("Casting".to_string());
-            let cast_transform = match self.cast_playback_path_kind {
-                Some(protocol::CastPlaybackPathKind::Direct) => Some("Direct play".to_string()),
+        fields.technical_cast_status = if self.cast_connected {
+            "Casting".to_string()
+        } else if self.cast_connecting {
+            "Casting: Connecting...".to_string()
+        } else {
+            String::new()
+        };
+        fields.technical_playback_path = if self.cast_connected {
+            match self.cast_playback_path_kind {
+                Some(protocol::CastPlaybackPathKind::Direct) => "Direct play".to_string(),
                 Some(protocol::CastPlaybackPathKind::TranscodeWavPcm) => {
                     if let Some(meta) = self.cast_transcode_output_metadata.as_ref() {
-                        Some(format!(
-                            "Transcode: {}",
-                            Self::format_technical_metadata_text(meta)
-                        ))
+                        format!("Transcode: {}", Self::format_technical_metadata_text(meta))
                     } else {
-                        Some("Transcode: WAV".to_string())
+                        "Transcode: WAV".to_string()
                     }
                 }
-                None => None,
-            };
-            if let Some(cast_transform) = cast_transform {
-                sections.push(cast_transform);
+                None => String::new(),
             }
         } else if self.cast_connecting {
-            sections.push("Casting: Connecting...".to_string());
+            String::new()
+        } else if self.current_technical_metadata.is_some() {
+            self.render_local_transform_text()
         } else {
-            sections.push(self.render_local_transform_text());
-        }
+            String::new()
+        };
+        fields.technical_info = [
+            fields.technical_source.as_str(),
+            fields.technical_cast_status.as_str(),
+            fields.technical_playback_path.as_str(),
+        ]
+        .into_iter()
+        .filter(|section| !section.trim().is_empty())
+        .collect::<Vec<_>>()
+        .join(" | ");
+        fields
+    }
 
-        sections
-            .into_iter()
-            .filter(|section| !section.trim().is_empty())
-            .collect::<Vec<_>>()
-            .join(" | ")
+    fn render_technical_info_text(&self) -> String {
+        self.render_technical_info_fields().technical_info
     }
 
     fn refresh_technical_info_ui(&self) {
@@ -2582,6 +2726,7 @@ impl UiManager {
         text_template::RenderedText {
             plain_text: String::new(),
             lines: vec![text_template::RichTextLine { runs: Vec::new() }],
+            vertical_align: text_template::VerticalAlign::Center,
         }
     }
 
@@ -2596,6 +2741,7 @@ impl UiManager {
         text_template::RenderedText {
             plain_text,
             lines: vec![text_template::RichTextLine { runs }],
+            vertical_align: text_template::VerticalAlign::Center,
         }
     }
 
@@ -2656,6 +2802,7 @@ impl UiManager {
             bold: false,
             italic: false,
             underline: false,
+            horizontal_align: text_template::HorizontalAlign::Left,
             font_size_px: font_size_px.max(1),
             font_family: String::new(),
             color: None,
@@ -2794,12 +2941,14 @@ impl UiManager {
                                 bold: false,
                                 italic: false,
                                 underline: false,
+                                horizontal_align: text_template::HorizontalAlign::Left,
                                 font_size_px: 13,
                                 font_family: String::new(),
                                 color: None,
                                 link: None,
                             }],
                         }],
+                        vertical_align: text_template::VerticalAlign::Center,
                     };
                 }
                 break;
@@ -2808,6 +2957,11 @@ impl UiManager {
     }
 
     fn to_ui_rich_text_run(run: &text_template::RichTextRun) -> UiRichTextRun {
+        let horizontal_align = match run.horizontal_align {
+            text_template::HorizontalAlign::Left => 0,
+            text_template::HorizontalAlign::Center => 1,
+            text_template::HorizontalAlign::Right => 2,
+        };
         let (color_mode, palette_color, color_rgba) = match run.color.as_ref() {
             Some(text_template::RunColor::Palette(color)) => {
                 (1, color.code(), slint::Color::from_argb_u8(255, 0, 0, 0))
@@ -2847,6 +3001,7 @@ impl UiManager {
             bold: run.bold,
             italic: run.italic,
             underline: run.underline,
+            horizontal_align,
             font_size_px: run.font_size_px.min(i32::MAX as u32) as i32,
             font_family: run.font_family.as_str().into(),
             color_mode,
@@ -2861,6 +3016,11 @@ impl UiManager {
     }
 
     fn to_ui_rich_text_block(rendered: &text_template::RenderedText) -> UiRichTextBlock {
+        let vertical_align = match rendered.vertical_align {
+            text_template::VerticalAlign::Top => 0,
+            text_template::VerticalAlign::Center => 1,
+            text_template::VerticalAlign::Bottom => 2,
+        };
         let mut lines: Vec<UiRichTextLine> = rendered
             .lines
             .iter()
@@ -2880,6 +3040,7 @@ impl UiManager {
         UiRichTextBlock {
             plain_text: rendered.plain_text.as_str().into(),
             lines: ModelRc::from(Rc::new(VecModel::from(lines))),
+            vertical_align,
         }
     }
 
@@ -4272,6 +4433,7 @@ impl UiManager {
             VIEWER_METADATA_SOURCE_ALBUM_DESCRIPTION => 1,
             VIEWER_METADATA_SOURCE_ARTIST_BIO => 2,
             VIEWER_METADATA_SOURCE_CUSTOM_TEXT => 3,
+            VIEWER_METADATA_SOURCE_STATUS_BAR => 4,
             VIEWER_METADATA_SOURCE_TRACK => 0,
             _ => 0,
         }
@@ -4399,6 +4561,7 @@ impl UiManager {
         existing.bold == next.bold
             && existing.italic == next.italic
             && existing.underline == next.underline
+            && existing.horizontal_align == next.horizontal_align
             && existing.font_size_px == next.font_size_px
             && existing.font_family == next.font_family
             && existing.color == next.color
@@ -4650,6 +4813,7 @@ impl UiManager {
         text_template::RenderedText {
             plain_text: Self::rendered_plain_text_for_lines(&wrapped_lines),
             lines: wrapped_lines,
+            vertical_align: rendered.vertical_align,
         }
     }
 
@@ -4725,30 +4889,86 @@ impl UiManager {
             .unwrap_or(fallback_font_size_px.max(1));
         let ellipsis_width_px =
             Self::text_panel_estimated_text_width_px(TEXT_PANEL_ELLIPSIS, ellipsis_font_size_px);
+        let has_left_aligned = line
+            .runs
+            .iter()
+            .any(|run| run.horizontal_align == text_template::HorizontalAlign::Left);
+        let has_center_aligned = line
+            .runs
+            .iter()
+            .any(|run| run.horizontal_align == text_template::HorizontalAlign::Center);
+        let has_right_aligned = line
+            .runs
+            .iter()
+            .any(|run| run.horizontal_align == text_template::HorizontalAlign::Right);
         loop {
             let line_width_px = Self::text_panel_estimated_line_width_px(line);
             if line_width_px.saturating_add(ellipsis_width_px) <= max_width_px {
                 break;
             }
-            let mut remove_run = false;
-            if let Some(last_run) = line.runs.last_mut() {
-                if let Some((last_char_byte_index, _)) = last_run.text.char_indices().next_back() {
-                    last_run.text.truncate(last_char_byte_index);
-                }
-                if last_run.text.is_empty() {
-                    remove_run = true;
-                }
-            } else {
-                break;
+            let mut removed = false;
+            if has_left_aligned {
+                removed = Self::text_panel_trim_last_char_for_alignment(
+                    line,
+                    text_template::HorizontalAlign::Left,
+                );
             }
-            if remove_run {
-                line.runs.pop();
+            if !removed && has_center_aligned {
+                removed = Self::text_panel_trim_last_char_for_alignment(
+                    line,
+                    text_template::HorizontalAlign::Center,
+                );
+            }
+            if !removed && has_right_aligned {
+                removed = Self::text_panel_trim_last_char_for_alignment(
+                    line,
+                    text_template::HorizontalAlign::Right,
+                );
+            }
+            if !removed {
+                removed = Self::text_panel_trim_last_char_from_line(line);
+            }
+            if !removed {
+                break;
             }
             if line.runs.is_empty() {
                 break;
             }
         }
 
+        if has_left_aligned {
+            if let Some(target_run) = line
+                .runs
+                .iter_mut()
+                .rev()
+                .find(|run| run.horizontal_align == text_template::HorizontalAlign::Left)
+            {
+                target_run.text.push('…');
+                return;
+            }
+        }
+        if has_center_aligned {
+            if let Some(target_run) = line
+                .runs
+                .iter_mut()
+                .rev()
+                .find(|run| run.horizontal_align == text_template::HorizontalAlign::Center)
+            {
+                target_run.text.push('…');
+                return;
+            }
+        }
+        if has_right_aligned {
+            if let Some(target_run) = line
+                .runs
+                .iter_mut()
+                .rev()
+                .find(|run| run.horizontal_align == text_template::HorizontalAlign::Right)
+            {
+                target_run.text.push('…');
+                return;
+            }
+        }
         if let Some(last_run) = line.runs.last_mut() {
             last_run.text.push('…');
         } else {
@@ -4757,12 +4977,53 @@ impl UiManager {
                 bold: false,
                 italic: false,
                 underline: false,
+                horizontal_align: text_template::HorizontalAlign::Left,
                 font_size_px: fallback_font_size_px.max(1),
                 font_family: String::new(),
                 color: None,
                 link: None,
             });
         }
+    }
+
+    fn text_panel_trim_last_char_from_line(line: &mut text_template::RichTextLine) -> bool {
+        if let Some(last_run) = line.runs.last_mut() {
+            if let Some((last_char_byte_index, _)) = last_run.text.char_indices().next_back() {
+                last_run.text.truncate(last_char_byte_index);
+            }
+            if last_run.text.is_empty() {
+                line.runs.pop();
+            }
+            return true;
+        }
+        false
+    }
+
+    fn text_panel_trim_last_char_for_alignment(
+        line: &mut text_template::RichTextLine,
+        alignment: text_template::HorizontalAlign,
+    ) -> bool {
+        if let Some(run_index) = line
+            .runs
+            .iter()
+            .rposition(|run| run.horizontal_align == alignment)
+        {
+            let mut should_remove_run = false;
+            {
+                let run = &mut line.runs[run_index];
+                if let Some((last_char_byte_index, _)) = run.text.char_indices().next_back() {
+                    run.text.truncate(last_char_byte_index);
+                }
+                if run.text.is_empty() {
+                    should_remove_run = true;
+                }
+            }
+            if should_remove_run {
+                line.runs.remove(run_index);
+            }
+            return true;
+        }
+        false
     }
 
     fn text_panel_elide_overflowing_lines(
@@ -5140,6 +5401,8 @@ impl UiManager {
         playback_active: bool,
         display_is_playing_by_priority: Vec<bool>,
         display_is_favorited_by_priority: Vec<bool>,
+        selection_summary_text: String,
+        technical_fields: TechnicalInfoTemplateFields,
     ) {
         let _ = self.ui.upgrade_in_event_loop(move |ui| {
             let metadata_model = ui.get_layout_metadata_viewer_panels();
@@ -5158,6 +5421,8 @@ impl UiManager {
                     let metadata_source_index =
                         UiManager::viewer_panel_metadata_source_index(row_data.metadata_source);
                     row_data.metadata_source = metadata_source_index as i32;
+                    let is_status_source =
+                        metadata_source_index == VIEWER_METADATA_SOURCE_STATUS_BAR as usize;
                     let metadata = match metadata_source_index {
                         1 => album_description_by_priority
                             .get(priority_index)
@@ -5185,18 +5450,21 @@ impl UiManager {
                             track_number: String::new(),
                         });
 
-                    let fitted_text = if let Some(metadata) = metadata {
-                        template_metadata.title = metadata.title.clone();
-                        template_metadata.artist = metadata.artist.clone();
-                        template_metadata.album = metadata.album.clone();
-                        template_metadata.album_artist = metadata.album_artist.clone();
-                        template_metadata.date = metadata.date.clone();
-                        template_metadata.year = if metadata.date.len() >= 4 {
-                            metadata.date[0..4].to_string()
-                        } else {
-                            String::new()
-                        };
-                        template_metadata.genre = metadata.genre.clone();
+                    let should_render_template = metadata.is_some() || is_status_source;
+                    let fitted_text = if should_render_template {
+                        if let Some(metadata) = metadata {
+                            template_metadata.title = metadata.title.clone();
+                            template_metadata.artist = metadata.artist.clone();
+                            template_metadata.album = metadata.album.clone();
+                            template_metadata.album_artist = metadata.album_artist.clone();
+                            template_metadata.date = metadata.date.clone();
+                            template_metadata.year = if metadata.date.len() >= 4 {
+                                metadata.date[0..4].to_string()
+                            } else {
+                                String::new()
+                            };
+                            template_metadata.genre = metadata.genre.clone();
+                        }
                         if template_metadata.album_artist.is_empty() {
                             template_metadata.album_artist = template_metadata.artist.clone();
                         }
@@ -5205,12 +5473,27 @@ impl UiManager {
                         {
                             let custom = row_data.metadata_text_format.to_string();
                             if custom.trim().is_empty() {
-                                text_template::DEFAULT_METADATA_PANEL_TEMPLATE.to_string()
+                                text_template::DEFAULT_TRACK_PANEL_TEMPLATE.to_string()
                             } else {
                                 custom
                             }
+                        } else if is_status_source {
+                            let custom = row_data.metadata_text_format.to_string();
+                            if custom.trim().is_empty() {
+                                text_template::DEFAULT_STATUS_PANEL_TEMPLATE.to_string()
+                            } else {
+                                custom
+                            }
+                        } else if metadata_source_index
+                            == VIEWER_METADATA_SOURCE_ALBUM_DESCRIPTION as usize
+                        {
+                            text_template::DEFAULT_ALBUM_DESCRIPTION_PANEL_TEMPLATE.to_string()
+                        } else if metadata_source_index
+                            == VIEWER_METADATA_SOURCE_ARTIST_BIO as usize
+                        {
+                            text_template::DEFAULT_ARTIST_BIO_PANEL_TEMPLATE.to_string()
                         } else {
-                            text_template::DEFAULT_METADATA_PANEL_TEMPLATE.to_string()
+                            text_template::DEFAULT_TRACK_PANEL_TEMPLATE.to_string()
                         };
                         let display_path = display_paths_by_priority
                             .get(priority_index)
@@ -5246,7 +5529,10 @@ impl UiManager {
                             &template_metadata.track_number,
                             display_path,
                         )
-                        .with_indicator_symbols(Some(playing_indicator), Some(favorite_indicator));
+                        .with_indicator_symbols(Some(playing_indicator), Some(favorite_indicator))
+                        .with_status_fields(
+                            technical_fields.status_template_fields(&selection_summary_text),
+                        );
                         let content_inset_px = Self::text_panel_content_inset_px(
                             row_data.width_px,
                             row_data.height_px,
@@ -5381,6 +5667,13 @@ impl UiManager {
             Vec::with_capacity(display_paths_by_priority.len());
         let mut display_is_favorited_by_priority =
             Vec::with_capacity(display_paths_by_priority.len());
+        let selected_track_count = if self.collection_mode == COLLECTION_MODE_LIBRARY {
+            self.library_selected_indices.len()
+        } else {
+            self.selected_indices.len()
+        };
+        let selection_summary_text = Self::status_selection_summary_text(selected_track_count);
+        let technical_fields = self.render_technical_info_fields();
         for display_path in &display_paths_by_priority {
             let is_playing_track = match (display_path.as_ref(), playing_track_path) {
                 (Some(display_path), Some(playing_path)) => display_path == playing_path,
@@ -5469,6 +5762,8 @@ impl UiManager {
             self.playback_active,
             display_is_playing_by_priority,
             display_is_favorited_by_priority,
+            selection_summary_text,
+            technical_fields,
         );
     }
 
@@ -11246,6 +11541,7 @@ impl UiManager {
         self.sync_library_ui();
         self.sync_cast_state_to_ui();
         self.refresh_technical_info_ui();
+        self.update_display_for_active_collection();
         self.sync_library_add_to_playlist_ui();
         self.sync_library_root_counts_to_ui();
         self.sync_now_playing_favorite_state_to_ui();
@@ -12202,12 +12498,14 @@ impl UiManager {
                             debug!("UiManager: Technical metadata changed: {:?}", meta);
                             self.current_technical_metadata = Some(meta);
                             self.refresh_technical_info_ui();
+                            self.update_display_for_active_collection();
                         }
                         protocol::Message::Playback(
                             protocol::PlaybackMessage::OutputPathChanged(path_info),
                         ) => {
                             self.current_output_path_info = Some(path_info);
                             self.refresh_technical_info_ui();
+                            self.update_display_for_active_collection();
                         }
                         protocol::Message::Cast(protocol::CastMessage::DevicesUpdated(devices)) => {
                             self.cast_device_ids =
@@ -12251,6 +12549,7 @@ impl UiManager {
                             }
                             self.sync_cast_state_to_ui();
                             self.refresh_technical_info_ui();
+                            self.update_display_for_active_collection();
                         }
                         protocol::Message::Cast(protocol::CastMessage::PlaybackPathChanged {
                             kind,
@@ -12260,6 +12559,7 @@ impl UiManager {
                             self.cast_playback_path_kind = Some(kind);
                             self.cast_transcode_output_metadata = transcode_output_metadata;
                             self.refresh_technical_info_ui();
+                            self.update_display_for_active_collection();
                         }
                         protocol::Message::Cast(protocol::CastMessage::PlaybackError {
                             track_id,
@@ -12862,6 +13162,7 @@ mod tests {
                     bold: false,
                     italic: false,
                     underline: false,
+                    horizontal_align: text_template::HorizontalAlign::Left,
                     font_size_px: *size,
                     font_family: String::new(),
                     color: None,
@@ -12869,7 +13170,11 @@ mod tests {
                 }],
             })
             .collect();
-        text_template::RenderedText { plain_text, lines }
+        text_template::RenderedText {
+            plain_text,
+            lines,
+            vertical_align: text_template::VerticalAlign::Center,
+        }
     }
 
     fn test_template_context<'a>() -> text_template::TemplateContext<'a> {
@@ -12886,6 +13191,28 @@ mod tests {
             path: Some("/music/example.mp3"),
             playing: None,
             favorite: None,
+            selection_summary: "",
+            technical_source_provider: "",
+            technical_format: "",
+            technical_bit_depth: "",
+            technical_sample_rate_hz: "",
+            technical_channels: "",
+            technical_bitrate_kbps: "",
+            technical_duration_ms: "",
+            technical_cast_state: "",
+            technical_playback_mode: "",
+            technical_output_format: "",
+            technical_output_bit_depth: "",
+            technical_output_sample_rate_hz: "",
+            technical_output_channels: "",
+            technical_output_bitrate_kbps: "",
+            technical_resampled: "",
+            technical_resample_from_hz: "",
+            technical_resample_to_hz: "",
+            technical_channel_transform: "",
+            technical_channel_from_channels: "",
+            technical_channel_to_channels: "",
+            technical_dithered: "",
         }
     }
 
@@ -12960,12 +13287,14 @@ mod tests {
                     bold: false,
                     italic: false,
                     underline: false,
+                    horizontal_align: text_template::HorizontalAlign::Left,
                     font_size_px: 13,
                     font_family: String::new(),
                     color: None,
                     link: None,
                 }],
             }],
+            vertical_align: text_template::VerticalAlign::Center,
         };
         let wrapped = UiManager::text_panel_wrap_rendered_text_for_width(&rendered, 80);
         assert!(wrapped.lines.len() > 1);
@@ -12980,6 +13309,36 @@ mod tests {
             .filter(|ch| !ch.is_whitespace())
             .collect();
         assert_eq!(wrapped_compact, source_compact);
+    }
+
+    #[test]
+    fn test_text_panel_wrap_rendered_text_for_width_preserves_alignment_metadata() {
+        let rendered = text_template::RenderedText {
+            plain_text: "alignment metadata should survive wrapping".to_string(),
+            lines: vec![text_template::RichTextLine {
+                runs: vec![text_template::RichTextRun {
+                    text: "alignment metadata should survive wrapping".to_string(),
+                    bold: false,
+                    italic: false,
+                    underline: false,
+                    horizontal_align: text_template::HorizontalAlign::Right,
+                    font_size_px: 13,
+                    font_family: String::new(),
+                    color: None,
+                    link: None,
+                }],
+            }],
+            vertical_align: text_template::VerticalAlign::Bottom,
+        };
+
+        let wrapped = UiManager::text_panel_wrap_rendered_text_for_width(&rendered, 90);
+        assert!(wrapped.lines.len() > 1);
+        assert_eq!(wrapped.vertical_align, text_template::VerticalAlign::Bottom);
+        assert!(wrapped
+            .lines
+            .iter()
+            .flat_map(|line| line.runs.iter())
+            .all(|run| run.horizontal_align == text_template::HorizontalAlign::Right));
     }
 
     #[test]
@@ -13030,6 +13389,23 @@ mod tests {
     }
 
     #[test]
+    fn test_fit_text_panel_rendered_text_preserves_right_aligned_status_segment_when_eliding() {
+        let fitted = UiManager::fit_text_panel_rendered_text(
+            "[halign=left]{title}[/halign][halign=right] | {playback_mode}[/halign]",
+            &text_template::TemplateContext {
+                title: "A very long now playing title that should be truncated first",
+                ..test_template_context().with_status_fields(text_template::StatusTemplateFields {
+                    technical_playback_mode: "Direct play",
+                    ..text_template::StatusTemplateFields::default()
+                })
+            },
+            180,
+            18,
+        );
+        assert!(fitted.rendered.plain_text.contains("Direct play"));
+    }
+
+    #[test]
     fn test_text_panel_line_exceeds_width_ignores_small_estimation_overflow() {
         let line = text_template::RichTextLine {
             runs: vec![text_template::RichTextRun {
@@ -13037,6 +13413,7 @@ mod tests {
                 bold: false,
                 italic: false,
                 underline: false,
+                horizontal_align: text_template::HorizontalAlign::Left,
                 font_size_px: 13,
                 font_family: String::new(),
                 color: None,
@@ -13849,6 +14226,7 @@ mod tests {
                     bold: false,
                     italic: false,
                     underline: false,
+                    horizontal_align: text_template::HorizontalAlign::Left,
                     font_size_px: 12,
                     font_family: String::new(),
                     color: None,
@@ -13861,6 +14239,7 @@ mod tests {
                     }),
                 }],
             }],
+            vertical_align: text_template::VerticalAlign::Center,
         };
 
         UiManager::enrich_metadata_links_for_rendered_text(

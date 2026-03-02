@@ -131,6 +131,61 @@ pub(crate) fn flash_read_only_view_indicator(ui_handle: slint::Weak<AppWindow>) 
     });
 }
 
+fn collect_leaf_ids_for_panel(
+    node: &layout::LayoutNode,
+    panel: layout::LayoutPanelKind,
+    out: &mut HashSet<String>,
+) {
+    match node {
+        layout::LayoutNode::Leaf {
+            id,
+            panel: leaf_panel,
+        } => {
+            if *leaf_panel == panel {
+                out.insert(id.clone());
+            }
+        }
+        layout::LayoutNode::Split { first, second, .. } => {
+            collect_leaf_ids_for_panel(first, panel, out);
+            collect_leaf_ids_for_panel(second, panel, out);
+        }
+        layout::LayoutNode::Empty => {}
+    }
+}
+
+fn legacy_status_bar_leaf_ids(root: &layout::LayoutNode) -> HashSet<String> {
+    let mut ids = HashSet::new();
+    collect_leaf_ids_for_panel(root, layout::LayoutPanelKind::StatusBar, &mut ids);
+    ids
+}
+
+fn migrate_legacy_status_bar_instances(
+    instances: &mut [layout::MetadataViewerPanelInstanceConfig],
+    migrated_leaf_ids: &HashSet<String>,
+) {
+    for instance in instances
+        .iter_mut()
+        .filter(|instance| migrated_leaf_ids.contains(&instance.leaf_id))
+    {
+        if instance.metadata_source == layout::ViewerPanelMetadataSource::StatusBar {
+            if instance.metadata_text_format.trim().is_empty() {
+                instance.metadata_text_format =
+                    text_template::DEFAULT_STATUS_PANEL_TEMPLATE.to_string();
+            }
+            continue;
+        }
+
+        instance.display_priority = layout::ViewerPanelDisplayPriority::NowPlayingOnly;
+        instance.metadata_source = layout::ViewerPanelMetadataSource::StatusBar;
+        if instance.metadata_text_format.trim().is_empty()
+            || instance.metadata_text_format == text_template::DEFAULT_METADATA_PANEL_TEMPLATE
+        {
+            instance.metadata_text_format =
+                text_template::DEFAULT_STATUS_PANEL_TEMPLATE.to_string();
+        }
+    }
+}
+
 /// Spawns a background debouncer that emits only the latest queued query after inactivity.
 pub(crate) fn spawn_debounced_query_dispatcher(
     debounce_delay: Duration,
@@ -295,6 +350,7 @@ fn add_library_folders_to_config_and_scan(
 /// Sanitizes loaded config values and normalizes derived fields into safe runtime ranges.
 pub(crate) fn sanitize_config(config: Config) -> Config {
     let sanitized_playlist_columns = sanitize_playlist_columns(&config.ui.playlist_columns);
+    let migrated_status_bar_leaf_ids = legacy_status_bar_leaf_ids(&config.ui.layout.root);
     let output_device_name = if config.output.output_device_auto {
         "default".to_string()
     } else {
@@ -318,9 +374,13 @@ pub(crate) fn sanitize_config(config: Config) -> Config {
         &sanitized_layout,
         &sanitized_layout.collection_panel_instances,
     );
-    let sanitized_metadata_viewer_panel_instances = sanitize_metadata_viewer_panel_instances(
+    let mut sanitized_metadata_viewer_panel_instances = sanitize_metadata_viewer_panel_instances(
         &sanitized_layout,
         &sanitized_layout.metadata_viewer_panel_instances,
+    );
+    migrate_legacy_status_bar_instances(
+        &mut sanitized_metadata_viewer_panel_instances,
+        &migrated_status_bar_leaf_ids,
     );
     let sanitized_album_art_viewer_panel_instances = sanitize_album_art_viewer_panel_instances(
         &sanitized_layout,
@@ -780,4 +840,47 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     initialize_logging();
     install_panic_hook();
     app_runtime::AppRuntime::build()?.run()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::sanitize_config;
+    use crate::{config::Config, layout::LayoutPanelKind};
+
+    #[test]
+    fn sanitize_config_migrates_legacy_status_bar_leaf_to_status_text_panel_instance() {
+        let mut config = Config::default();
+        config.ui.layout.root = crate::layout::LayoutNode::Leaf {
+            id: "legacy-status".to_string(),
+            panel: LayoutPanelKind::StatusBar,
+        };
+        config.ui.layout.metadata_viewer_panel_instances.clear();
+
+        let sanitized = sanitize_config(config);
+        match sanitized.ui.layout.root {
+            crate::layout::LayoutNode::Leaf { panel, .. } => {
+                assert_eq!(panel, LayoutPanelKind::MetadataViewer)
+            }
+            _ => panic!("expected leaf root after sanitize"),
+        }
+        let instance = sanitized
+            .ui
+            .layout
+            .metadata_viewer_panel_instances
+            .iter()
+            .find(|instance| instance.leaf_id == "legacy-status")
+            .expect("migrated status leaf should have metadata-viewer instance");
+        assert_eq!(
+            instance.display_priority,
+            crate::layout::ViewerPanelDisplayPriority::NowPlayingOnly
+        );
+        assert_eq!(
+            instance.metadata_source,
+            crate::layout::ViewerPanelMetadataSource::StatusBar
+        );
+        assert_eq!(
+            instance.metadata_text_format,
+            crate::text_template::DEFAULT_STATUS_PANEL_TEMPLATE
+        );
+    }
 }
