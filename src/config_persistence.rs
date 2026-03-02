@@ -253,6 +253,13 @@ fn write_config_to_document(document: &mut DocumentMut, previous: &Config, confi
             i64::from(config.ui.crossfade_duration_seconds),
             value,
         );
+        set_table_scalar_if_changed(
+            ui,
+            "use_replaygain",
+            previous.ui.use_replaygain,
+            config.ui.use_replaygain,
+            value,
+        );
     }
 
     {

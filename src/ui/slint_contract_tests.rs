@@ -160,7 +160,7 @@ mod tests {
         );
         assert!(
             slint_ui.contains(
-                "callback apply_settings(int, int, int, int, string, string, string, string, bool, bool, bool, int, int, bool, bool, bool, bool, float, string, [string]);"
+                "callback apply_settings(int, int, int, int, string, string, string, string, bool, bool, bool, int, int, bool, bool, bool, bool, float, bool, string, [string]);"
             ),
             "Apply settings callback should include color scheme selection and custom color values"
         );
@@ -175,9 +175,14 @@ mod tests {
             slint_ui.contains("in-out property <bool> settings_crossfade_enabled: false;")
                 && slint_ui
                     .contains("in-out property <float> settings_crossfade_duration_seconds: 6;")
+                && slint_ui.contains("in-out property <bool> settings_use_replaygain: false;")
                 && slint_ui.contains("text: \"Crossfade\"")
                 && slint_ui.contains("text: \"Crossfade Duration\""),
             "Audio tab should expose crossfade enable and duration controls"
+        );
+        assert!(
+            slint_ui.contains("text: \"Use ReplayGain metadata to adjust volume\""),
+            "Audio tab should expose ReplayGain toggle"
         );
     }
 

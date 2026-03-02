@@ -76,6 +76,9 @@ crossfade_enabled = false
 # Crossfade duration in seconds (1..12).
 crossfade_duration_seconds = 6
 
+# Apply ReplayGain track/album loudness metadata during local playback.
+use_replaygain = false
+
 [library]
 # Folders recursively scanned into Library mode.
 # Leave empty if you only use playlists.

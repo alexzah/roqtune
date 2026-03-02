@@ -172,6 +172,7 @@ pub fn spawn_background_services(config: BackgroundServicesConfig) {
 
     let player_initial_crossfade_enabled = initial_ui_config.crossfade_enabled;
     let player_initial_crossfade_duration_seconds = initial_ui_config.crossfade_duration_seconds;
+    let decoder_initial_use_replaygain = initial_ui_config.use_replaygain;
     let ui_manager_bus_sender = bus_sender.clone();
     thread::spawn(move || {
         let run_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
@@ -203,6 +204,7 @@ pub fn spawn_background_services(config: BackgroundServicesConfig) {
             decoder_bus_sender,
             decoder_initial_output_config,
             decoder_initial_buffering_config,
+            decoder_initial_use_replaygain,
         );
         audio_decoder.run();
     });

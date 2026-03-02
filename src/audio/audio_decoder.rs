@@ -7,6 +7,7 @@
 use crate::audio::technical_metadata;
 use crate::config::{BufferingConfig, OutputConfig, ResamplerQuality};
 use crate::integration_uri::{parse_opensubsonic_track_uri, OpenSubsonicTrackLocator};
+use crate::metadata::metadata_tags::{self, ReplayGainMetadata};
 use crate::protocol::{
     self, AudioMessage, AudioPacket, ConfigMessage, IntegrationMessage, Message, PlaybackMessage,
     PlaylistMessage, TrackIdentifier,
@@ -39,6 +40,7 @@ const OPENSUBSONIC_API_VERSION: &str = "1.16.1";
 const OPENSUBSONIC_CLIENT_ID: &str = "roqtune";
 const MAX_CONSECUTIVE_FRAME_DECODE_ERRORS: u32 = 1_000;
 const MAX_CONSECUTIVE_PACKET_READ_ERRORS: u32 = 10_000;
+const REPLAY_GAIN_MULTIPLIER_MAX: f32 = 8.0;
 
 /// Work items consumed by the decode worker thread.
 #[derive(Debug, Clone)]
@@ -74,6 +76,7 @@ enum DecodeWorkItem {
 /// Decoder state for the track currently being produced.
 struct ActiveDecodeTrack {
     track_identifier: TrackIdentifier,
+    replay_gain_metadata: Option<ReplayGainMetadata>,
     source_track_id: u32,
     codec_params: CodecParameters,
     format_reader: Box<dyn FormatReader>,
@@ -103,6 +106,7 @@ struct DecodeWorker {
     resampler_quality: ResamplerQuality,
     dither_on_bitdepth_reduce: bool,
     downmix_higher_channel_tracks: bool,
+    replay_gain_enabled: bool,
     decoder_request_chunk_ms: u32,
     decode_generation: u64,
     opensubsonic_passwords: HashMap<String, String>,
@@ -116,6 +120,7 @@ impl DecodeWorker {
         decode_request_inflight: Arc<AtomicBool>,
         initial_output_config: OutputConfig,
         initial_buffering_config: BufferingConfig,
+        initial_replay_gain_enabled: bool,
     ) -> Self {
         let mut worker = Self {
             bus_sender,
@@ -134,6 +139,7 @@ impl DecodeWorker {
             resampler_quality: ResamplerQuality::High,
             dither_on_bitdepth_reduce: true,
             downmix_higher_channel_tracks: true,
+            replay_gain_enabled: initial_replay_gain_enabled,
             decoder_request_chunk_ms: BufferingConfig::default().decoder_request_chunk_ms,
             decode_generation: 0,
             opensubsonic_passwords: HashMap::new(),
@@ -381,6 +387,12 @@ Check Settings -> OpenSubsonic status and re-save credentials if needed.",
         }
     }
 
+    fn apply_ui_config_delta(&mut self, ui: &protocol::UiConfigDelta) {
+        if let Some(use_replaygain) = ui.use_replaygain {
+            self.replay_gain_enabled = use_replaygain;
+        }
+    }
+
     fn handle_work_item(&mut self, item: DecodeWorkItem) {
         match item {
             DecodeWorkItem::Stop { generation } => {
@@ -443,8 +455,10 @@ Check Settings -> OpenSubsonic status and re-save credentials if needed.",
                         protocol::ConfigDeltaEntry::Buffering(buffering) => {
                             self.apply_buffering_config_delta(&buffering);
                         }
+                        protocol::ConfigDeltaEntry::Ui(ui) => {
+                            self.apply_ui_config_delta(&ui);
+                        }
                         protocol::ConfigDeltaEntry::Cast(_)
-                        | protocol::ConfigDeltaEntry::Ui(_)
                         | protocol::ConfigDeltaEntry::Library(_)
                         | protocol::ConfigDeltaEntry::Integrations(_) => {}
                     }
@@ -666,6 +680,59 @@ Check Settings -> OpenSubsonic status and re-save credentials if needed.",
         samples.min(usize::MAX as u128) as usize
     }
 
+    fn replay_gain_value_for_preference(
+        preference: protocol::ReplayGainPreference,
+        metadata: &ReplayGainMetadata,
+    ) -> Option<(f32, Option<f32>)> {
+        match preference {
+            protocol::ReplayGainPreference::AlbumPreferred => metadata
+                .album_gain_db
+                .map(|gain_db| (gain_db, metadata.album_peak))
+                .or_else(|| {
+                    metadata
+                        .track_gain_db
+                        .map(|gain_db| (gain_db, metadata.track_peak))
+                }),
+            protocol::ReplayGainPreference::Track => metadata
+                .track_gain_db
+                .map(|gain_db| (gain_db, metadata.track_peak)),
+        }
+    }
+
+    fn replay_gain_multiplier_for(
+        &self,
+        preference: protocol::ReplayGainPreference,
+        metadata: Option<&ReplayGainMetadata>,
+    ) -> f32 {
+        if !self.replay_gain_enabled {
+            return 1.0;
+        }
+
+        let Some(metadata) = metadata else {
+            return 1.0;
+        };
+        let Some((gain_db, peak)) = Self::replay_gain_value_for_preference(preference, metadata)
+        else {
+            return 1.0;
+        };
+
+        let mut multiplier = 10.0f32.powf(gain_db / 20.0);
+        if !multiplier.is_finite() {
+            return 1.0;
+        }
+
+        if let Some(peak) = peak {
+            if peak.is_finite() && peak > 0.0 {
+                multiplier = multiplier.min(1.0 / peak);
+            }
+        }
+
+        if !multiplier.is_finite() {
+            return 1.0;
+        }
+        multiplier.clamp(0.0, REPLAY_GAIN_MULTIPLIER_MAX)
+    }
+
     fn decode_requested_samples(&mut self, requested_samples: usize) {
         if requested_samples == 0 {
             return;
@@ -702,12 +769,29 @@ Check Settings -> OpenSubsonic status and re-save credentials if needed.",
                 break;
             }
 
-            let resampled_samples = self.resample_next_frame(source_sample_rate, input_exhausted);
+            let mut resampled_samples =
+                self.resample_next_frame(source_sample_rate, input_exhausted);
             if resampled_samples.is_empty() {
                 if self.finish_active_track_if_complete() {
                     continue;
                 }
                 break;
+            }
+
+            let replay_gain_multiplier = self
+                .active_track
+                .as_ref()
+                .map(|active| {
+                    self.replay_gain_multiplier_for(
+                        active.track_identifier.replay_gain_preference,
+                        active.replay_gain_metadata.as_ref(),
+                    )
+                })
+                .unwrap_or(1.0);
+            if replay_gain_multiplier != 1.0 {
+                for sample in &mut resampled_samples {
+                    *sample *= replay_gain_multiplier;
+                }
             }
 
             emitted_samples += resampled_samples.len();
@@ -1191,6 +1275,16 @@ Check Settings -> OpenSubsonic status and re-save credentials if needed.",
         ));
     }
 
+    fn read_replay_gain_metadata_for_track(
+        &self,
+        track: &TrackIdentifier,
+    ) -> Option<ReplayGainMetadata> {
+        if parse_opensubsonic_track_uri(track.path.as_path()).is_some() {
+            return None;
+        }
+        metadata_tags::read_replay_gain_metadata(track.path.as_path())
+    }
+
     fn open_track(&mut self, input_track: TrackIdentifier) -> Option<ActiveDecodeTrack> {
         let mut hint = Hint::new();
         let media_source = match self.open_media_source_stream(&input_track, &mut hint) {
@@ -1298,6 +1392,7 @@ Check Settings -> OpenSubsonic status and re-save credentials if needed.",
             }
         }
 
+        let replay_gain_metadata = self.read_replay_gain_metadata_for_track(&input_track);
         let technical_metadata =
             self.build_technical_metadata(input_track.path.as_path(), &codec_params);
         debug!(
@@ -1318,6 +1413,7 @@ Check Settings -> OpenSubsonic status and re-save credentials if needed.",
 
         Some(ActiveDecodeTrack {
             track_identifier: input_track,
+            replay_gain_metadata,
             source_track_id,
             codec_params,
             format_reader,
@@ -1415,6 +1511,7 @@ impl AudioDecoder {
         bus_sender: Sender<Message>,
         initial_output_config: OutputConfig,
         initial_buffering_config: BufferingConfig,
+        initial_use_replaygain: bool,
     ) -> Self {
         let (worker_sender, worker_receiver) = mpsc::channel(128);
         let mut audio_decoder = Self {
@@ -1432,6 +1529,7 @@ impl AudioDecoder {
             worker_receiver,
             initial_output_config,
             initial_buffering_config,
+            initial_use_replaygain,
         );
         audio_decoder
     }
@@ -1682,6 +1780,7 @@ impl AudioDecoder {
         worker_receiver: MpscReceiver<DecodeWorkItem>,
         initial_output_config: OutputConfig,
         initial_buffering_config: BufferingConfig,
+        initial_use_replaygain: bool,
     ) {
         let bus_sender = self.bus_sender.clone();
         let decode_request_inflight = self.decode_request_inflight.clone();
@@ -1692,6 +1791,7 @@ impl AudioDecoder {
                 decode_request_inflight,
                 initial_output_config,
                 initial_buffering_config,
+                initial_use_replaygain,
             );
             worker.run();
         });
@@ -1703,6 +1803,7 @@ mod tests {
     use super::{AudioDecoder, DecodeWorkItem, DecodeWorker};
     use crate::config::{BufferingConfig, OutputConfig};
     use crate::integration_uri::OpenSubsonicTrackLocator;
+    use crate::metadata::metadata_tags::ReplayGainMetadata;
     use crate::protocol::{self, BufferingConfigDelta, OutputConfigDelta, TrackIdentifier};
     use std::path::PathBuf;
     use std::sync::atomic::{AtomicBool, Ordering};
@@ -1744,9 +1845,31 @@ mod tests {
         TrackIdentifier {
             id: id.to_string(),
             path: PathBuf::from(format!("/tmp/{}.flac", id)),
+            replay_gain_preference: protocol::ReplayGainPreference::Track,
             play_immediately,
             start_offset_ms: 0,
         }
+    }
+
+    fn make_worker(replay_gain_enabled: bool) -> DecodeWorker {
+        let (bus_sender, _) = broadcast::channel(8);
+        let (_worker_tx, worker_rx) = mpsc::channel(8);
+        DecodeWorker::new(
+            bus_sender,
+            worker_rx,
+            Arc::new(AtomicBool::new(false)),
+            OutputConfig::default(),
+            BufferingConfig::default(),
+            replay_gain_enabled,
+        )
+    }
+
+    fn assert_f32_approx_eq(actual: f32, expected: f32) {
+        let delta = (actual - expected).abs();
+        assert!(
+            delta < 1e-4,
+            "expected {expected}, got {actual}, abs-diff={delta}"
+        );
     }
 
     #[test]
@@ -1755,12 +1878,14 @@ mod tests {
             TrackIdentifier {
                 id: "a".to_string(),
                 path: PathBuf::from("/tmp/a.flac"),
+                replay_gain_preference: protocol::ReplayGainPreference::Track,
                 play_immediately: false,
                 start_offset_ms: 0,
             },
             TrackIdentifier {
                 id: "b".to_string(),
                 path: PathBuf::from("/tmp/b.flac"),
+                replay_gain_preference: protocol::ReplayGainPreference::Track,
                 play_immediately: true,
                 start_offset_ms: 0,
             },
@@ -1773,10 +1898,114 @@ mod tests {
         let tracks = vec![TrackIdentifier {
             id: "a".to_string(),
             path: PathBuf::from("/tmp/a.flac"),
+            replay_gain_preference: protocol::ReplayGainPreference::Track,
             play_immediately: false,
             start_offset_ms: 0,
         }];
         assert!(!DecodeWorker::should_bootstrap_decode(&tracks));
+    }
+
+    #[test]
+    fn test_replay_gain_multiplier_disabled_returns_unity() {
+        let worker = make_worker(false);
+        let metadata = ReplayGainMetadata {
+            track_gain_db: Some(-6.0),
+            ..ReplayGainMetadata::default()
+        };
+        let multiplier = worker
+            .replay_gain_multiplier_for(protocol::ReplayGainPreference::Track, Some(&metadata));
+        assert_eq!(multiplier, 1.0);
+    }
+
+    #[test]
+    fn test_replay_gain_multiplier_track_mode_uses_track_gain() {
+        let worker = make_worker(true);
+        let metadata = ReplayGainMetadata {
+            track_gain_db: Some(-6.0),
+            ..ReplayGainMetadata::default()
+        };
+        let multiplier = worker
+            .replay_gain_multiplier_for(protocol::ReplayGainPreference::Track, Some(&metadata));
+        assert_f32_approx_eq(multiplier, 10.0f32.powf(-6.0 / 20.0));
+    }
+
+    #[test]
+    fn test_replay_gain_multiplier_album_preferred_uses_album_gain_when_present() {
+        let worker = make_worker(true);
+        let metadata = ReplayGainMetadata {
+            track_gain_db: Some(-6.0),
+            album_gain_db: Some(-3.0),
+            ..ReplayGainMetadata::default()
+        };
+        let multiplier = worker.replay_gain_multiplier_for(
+            protocol::ReplayGainPreference::AlbumPreferred,
+            Some(&metadata),
+        );
+        assert_f32_approx_eq(multiplier, 10.0f32.powf(-3.0 / 20.0));
+    }
+
+    #[test]
+    fn test_replay_gain_multiplier_album_preferred_falls_back_to_track_gain() {
+        let worker = make_worker(true);
+        let metadata = ReplayGainMetadata {
+            track_gain_db: Some(-4.0),
+            album_gain_db: None,
+            ..ReplayGainMetadata::default()
+        };
+        let multiplier = worker.replay_gain_multiplier_for(
+            protocol::ReplayGainPreference::AlbumPreferred,
+            Some(&metadata),
+        );
+        assert_f32_approx_eq(multiplier, 10.0f32.powf(-4.0 / 20.0));
+    }
+
+    #[test]
+    fn test_replay_gain_peak_limiter_caps_positive_boost() {
+        let worker = make_worker(true);
+        let metadata = ReplayGainMetadata {
+            track_gain_db: Some(6.0),
+            track_peak: Some(1.5),
+            ..ReplayGainMetadata::default()
+        };
+        let multiplier = worker
+            .replay_gain_multiplier_for(protocol::ReplayGainPreference::Track, Some(&metadata));
+        assert_f32_approx_eq(multiplier, 1.0 / 1.5);
+    }
+
+    #[test]
+    fn test_replay_gain_invalid_values_fall_back_to_unity() {
+        let worker = make_worker(true);
+        let metadata = ReplayGainMetadata {
+            track_gain_db: Some(f32::NAN),
+            track_peak: Some(f32::INFINITY),
+            ..ReplayGainMetadata::default()
+        };
+        let multiplier = worker
+            .replay_gain_multiplier_for(protocol::ReplayGainPreference::Track, Some(&metadata));
+        assert_eq!(multiplier, 1.0);
+    }
+
+    #[test]
+    fn test_replay_gain_ui_delta_updates_worker_state() {
+        let mut worker = make_worker(false);
+        let metadata = ReplayGainMetadata {
+            track_gain_db: Some(-6.0),
+            ..ReplayGainMetadata::default()
+        };
+        let baseline = worker
+            .replay_gain_multiplier_for(protocol::ReplayGainPreference::Track, Some(&metadata));
+        assert_eq!(baseline, 1.0);
+
+        worker.handle_work_item(DecodeWorkItem::ConfigChanged(vec![
+            protocol::ConfigDeltaEntry::Ui(protocol::UiConfigDelta {
+                use_replaygain: Some(true),
+                ..protocol::UiConfigDelta::default()
+            }),
+        ]));
+
+        let updated = worker
+            .replay_gain_multiplier_for(protocol::ReplayGainPreference::Track, Some(&metadata));
+        assert_f32_approx_eq(updated, 10.0f32.powf(-6.0 / 20.0));
     }
 
     #[test]
@@ -1789,6 +2018,7 @@ mod tests {
             Arc::new(AtomicBool::new(false)),
             OutputConfig::default(),
             BufferingConfig::default(),
+            false,
         );
 
         worker.handle_work_item(DecodeWorkItem::DecodeTracks {
@@ -1813,6 +2043,7 @@ mod tests {
             Arc::new(AtomicBool::new(false)),
             OutputConfig::default(),
             BufferingConfig::default(),
+            false,
         );
 
         worker.handle_work_item(DecodeWorkItem::DecodeTracks {
@@ -1839,6 +2070,7 @@ mod tests {
             Arc::new(AtomicBool::new(false)),
             OutputConfig::default(),
             BufferingConfig::default(),
+            false,
         );
 
         worker.handle_work_item(DecodeWorkItem::DecodeTracks {
@@ -1869,6 +2101,7 @@ mod tests {
             Arc::new(AtomicBool::new(false)),
             OutputConfig::default(),
             BufferingConfig::default(),
+            false,
         );
 
         worker.handle_work_item(DecodeWorkItem::DecodeTracks {
@@ -2041,6 +2274,7 @@ mod tests {
             inflight.clone(),
             OutputConfig::default(),
             BufferingConfig::default(),
+            false,
         );
         worker.decode_generation = 2;
 
@@ -2066,6 +2300,7 @@ mod tests {
             Arc::new(AtomicBool::new(false)),
             OutputConfig::default(),
             BufferingConfig::default(),
+            false,
         );
         worker.downmix_higher_channel_tracks = true;
         let transformed = worker.transform_channels(&samples, 6, 2);
@@ -2086,6 +2321,7 @@ mod tests {
             Arc::new(AtomicBool::new(false)),
             OutputConfig::default(),
             BufferingConfig::default(),
+            false,
         );
         worker.downmix_higher_channel_tracks = false;
         let transformed = worker.transform_channels(&samples, 6, 2);

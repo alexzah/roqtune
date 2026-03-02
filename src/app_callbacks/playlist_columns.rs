@@ -277,6 +277,7 @@ pub(crate) fn register_playlist_column_callbacks(ui: &AppWindow, shared_state: &
                 show_layout_edit_intro: previous_config.ui.show_layout_edit_intro,
                 show_tooltips: previous_config.ui.show_tooltips,
                 auto_scroll_to_playing_track: previous_config.ui.auto_scroll_to_playing_track,
+                use_replaygain: previous_config.ui.use_replaygain,
                 legacy_dark_mode: previous_config.ui.legacy_dark_mode,
                 playlist_album_art_column_min_width_px: previous_config
                     .ui
@@ -355,6 +356,7 @@ pub(crate) fn register_playlist_column_callbacks(ui: &AppWindow, shared_state: &
                 show_layout_edit_intro: previous_config.ui.show_layout_edit_intro,
                 show_tooltips: previous_config.ui.show_tooltips,
                 auto_scroll_to_playing_track: previous_config.ui.auto_scroll_to_playing_track,
+                use_replaygain: previous_config.ui.use_replaygain,
                 legacy_dark_mode: previous_config.ui.legacy_dark_mode,
                 playlist_album_art_column_min_width_px: previous_config
                     .ui
@@ -435,6 +437,7 @@ pub(crate) fn register_playlist_column_callbacks(ui: &AppWindow, shared_state: &
                 show_layout_edit_intro: previous_config.ui.show_layout_edit_intro,
                 show_tooltips: previous_config.ui.show_tooltips,
                 auto_scroll_to_playing_track: previous_config.ui.auto_scroll_to_playing_track,
+                use_replaygain: previous_config.ui.use_replaygain,
                 legacy_dark_mode: previous_config.ui.legacy_dark_mode,
                 playlist_album_art_column_min_width_px: previous_config
                     .ui
@@ -509,6 +512,7 @@ pub(crate) fn register_playlist_column_callbacks(ui: &AppWindow, shared_state: &
                 show_layout_edit_intro: previous_config.ui.show_layout_edit_intro,
                 show_tooltips: previous_config.ui.show_tooltips,
                 auto_scroll_to_playing_track: previous_config.ui.auto_scroll_to_playing_track,
+                use_replaygain: previous_config.ui.use_replaygain,
                 legacy_dark_mode: previous_config.ui.legacy_dark_mode,
                 playlist_album_art_column_min_width_px: previous_config
                     .ui

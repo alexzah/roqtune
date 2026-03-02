@@ -389,6 +389,7 @@ pub(crate) fn register_settings_ui_callbacks(ui: &AppWindow, shared_state: &AppS
               cast_allow_transcode_fallback,
               crossfade_enabled,
               crossfade_duration_seconds,
+              use_replaygain,
               color_scheme_id,
               custom_color_values| {
             let previous_config = {
@@ -519,6 +520,7 @@ pub(crate) fn register_settings_ui_callbacks(ui: &AppWindow, shared_state: &AppS
                     crossfade_duration_seconds: crossfade_duration_seconds
                         .round()
                         .clamp(1.0, 12.0) as u32,
+                    use_replaygain,
                 },
                 library: previous_config.library.clone(),
                 buffering: previous_config.buffering.clone(),

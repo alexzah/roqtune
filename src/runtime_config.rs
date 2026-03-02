@@ -188,6 +188,9 @@ pub fn config_delta_entries(previous: &Config, next: &Config) -> Vec<ConfigDelta
     if previous.ui.crossfade_duration_seconds != next.ui.crossfade_duration_seconds {
         ui.crossfade_duration_seconds = Some(next.ui.crossfade_duration_seconds);
     }
+    if previous.ui.use_replaygain != next.ui.use_replaygain {
+        ui.use_replaygain = Some(next.ui.use_replaygain);
+    }
     if !ui.is_empty() {
         deltas.push(ConfigDeltaEntry::Ui(ui));
     }
@@ -403,6 +406,22 @@ mod tests {
                         && ui.crossfade_duration_seconds == Some(9)
             )),
             "expected ui delta with crossfade fields"
+        );
+    }
+
+    #[test]
+    fn test_config_delta_entries_include_use_replaygain_ui_field() {
+        let previous = Config::default();
+        let mut next = previous.clone();
+        next.ui.use_replaygain = true;
+
+        let deltas = config_delta_entries(&previous, &next);
+        assert!(
+            deltas.iter().any(|delta| matches!(
+                delta,
+                ConfigDeltaEntry::Ui(ui) if ui.use_replaygain == Some(true)
+            )),
+            "expected ui delta with use_replaygain field"
         );
     }
 }

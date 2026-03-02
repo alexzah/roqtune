@@ -107,6 +107,8 @@ pub struct UiConfig {
     pub crossfade_enabled: bool,
     #[serde(default = "default_crossfade_duration_seconds")]
     pub crossfade_duration_seconds: u32,
+    #[serde(default)]
+    pub use_replaygain: bool,
 }
 
 /// Persisted playback-order preference for startup restore.
@@ -261,6 +263,7 @@ impl Default for UiConfig {
             repeat_mode: UiRepeatMode::Off,
             crossfade_enabled: false,
             crossfade_duration_seconds: default_crossfade_duration_seconds(),
+            use_replaygain: false,
         }
     }
 }
@@ -481,6 +484,7 @@ mod tests {
         assert_eq!(config.ui.repeat_mode, UiRepeatMode::Off);
         assert!(!config.ui.crossfade_enabled);
         assert_eq!(config.ui.crossfade_duration_seconds, 6);
+        assert!(!config.ui.use_replaygain);
         assert!(config.library.folders.is_empty());
         assert!(!config.library.online_metadata_enabled);
         assert!(config.library.online_metadata_prompt_pending);
@@ -538,6 +542,7 @@ decoder_request_chunk_ms = 1500
         assert_eq!(parsed.ui.repeat_mode, UiRepeatMode::Off);
         assert!(!parsed.ui.crossfade_enabled);
         assert_eq!(parsed.ui.crossfade_duration_seconds, 6);
+        assert!(!parsed.ui.use_replaygain);
         assert!(parsed.library.folders.is_empty());
         assert!(!parsed.library.online_metadata_enabled);
         assert!(parsed.library.online_metadata_prompt_pending);
@@ -611,6 +616,7 @@ decoder_request_chunk_ms = 1500
         assert!(config_text.contains("repeat_mode"));
         assert!(config_text.contains("crossfade_enabled"));
         assert!(config_text.contains("crossfade_duration_seconds"));
+        assert!(config_text.contains("use_replaygain"));
         assert!(config_text.contains("allow_transcode_fallback"));
     }
 
@@ -692,6 +698,7 @@ decoder_request_chunk_ms = 1500
             parsed.ui.crossfade_duration_seconds,
             defaults.ui.crossfade_duration_seconds
         );
+        assert_eq!(parsed.ui.use_replaygain, defaults.ui.use_replaygain);
         assert_eq!(parsed.library.folders, defaults.library.folders);
         assert_eq!(
             parsed.library.online_metadata_enabled,

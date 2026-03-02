@@ -39,6 +39,7 @@ pub struct PlaylistManager {
     active_playlist_id: String,
     playback_playlist: Playlist,
     playback_queue_source: Option<protocol::PlaybackQueueSource>,
+    playback_replay_gain_preference: protocol::ReplayGainPreference,
     playback_route: protocol::PlaybackRoute,
     playback_order: protocol::PlaybackOrder,
     repeat_mode: protocol::RepeatMode,
@@ -89,6 +90,7 @@ impl PlaylistManager {
             active_playlist_id: String::new(),
             playback_playlist: playlist,
             playback_queue_source: None,
+            playback_replay_gain_preference: protocol::ReplayGainPreference::Track,
             playback_route: protocol::PlaybackRoute::Local,
             playback_order: protocol::PlaybackOrder::Default,
             repeat_mode: protocol::RepeatMode::Off,
@@ -653,6 +655,7 @@ impl PlaylistManager {
                 if playlist_id == local_playlist_id
         ) {
             self.playback_queue_source = None;
+            self.playback_replay_gain_preference = protocol::ReplayGainPreference::Track;
         }
 
         if self.active_playlist_id == local_playlist_id {
@@ -668,25 +671,32 @@ impl PlaylistManager {
     }
 
     fn start_playback_queue(&mut self, request: protocol::PlaybackQueueRequest) {
-        if request.tracks.is_empty() {
+        let protocol::PlaybackQueueRequest {
+            source,
+            replay_gain_preference,
+            tracks,
+            start_index,
+        } = request;
+        if tracks.is_empty() {
             return;
         }
 
         let mut playback_playlist = Playlist::new();
         playback_playlist.set_playback_order(self.playback_order);
         playback_playlist.set_repeat_mode(self.repeat_mode);
-        for track in request.tracks {
+        for track in tracks {
             playback_playlist.add_track(Track {
                 path: track.path,
                 id: track.id,
             });
         }
 
-        let clamped_start = request.start_index.min(playback_playlist.num_tracks() - 1);
+        let clamped_start = start_index.min(playback_playlist.num_tracks() - 1);
         playback_playlist.set_selected_indices(vec![clamped_start]);
         playback_playlist.force_re_randomize_shuffle();
         self.playback_playlist = playback_playlist;
-        self.playback_queue_source = Some(request.source);
+        self.playback_queue_source = Some(source);
+        self.playback_replay_gain_preference = replay_gain_preference;
         self.play_playback_track(clamped_start, true, false);
     }
 
@@ -831,6 +841,7 @@ impl PlaylistManager {
             protocol::AudioMessage::DecodeTracks(vec![TrackIdentifier {
                 id: track.id.clone(),
                 path: track.path,
+                replay_gain_preference: self.playback_replay_gain_preference,
                 play_immediately: true,
                 start_offset_ms: resume_offset_ms,
             }]),
@@ -1188,6 +1199,7 @@ impl PlaylistManager {
                     if playlist_id == &stale_playlist.id
             ) {
                 self.playback_queue_source = None;
+                self.playback_replay_gain_preference = protocol::ReplayGainPreference::Track;
             }
         }
         if let Ok(mut playlists) = self.db_manager.get_all_playlists() {
@@ -1854,6 +1866,8 @@ impl PlaylistManager {
                         self.playback_playlist.set_playing(false);
                         self.playback_playlist.set_playing_track_index(None);
                         self.playback_queue_source = None;
+                        self.playback_replay_gain_preference =
+                            protocol::ReplayGainPreference::Track;
                         if self.playback_route == protocol::PlaybackRoute::Cast {
                             let _ = self
                                 .bus_producer
@@ -2447,6 +2461,8 @@ impl PlaylistManager {
                                     if playlist_id == &id
                             ) {
                                 self.playback_queue_source = None;
+                                self.playback_replay_gain_preference =
+                                    protocol::ReplayGainPreference::Track;
                             }
 
                             let playlists = self.db_manager.get_all_playlists().unwrap_or_default();
@@ -2820,6 +2836,7 @@ impl PlaylistManager {
                                 let mut decode_tracks = vec![TrackIdentifier {
                                     id: track_id.clone(),
                                     path: track_path,
+                                    replay_gain_preference: self.playback_replay_gain_preference,
                                     play_immediately: true,
                                     start_offset_ms: target_ms,
                                 }];
@@ -2840,6 +2857,8 @@ impl PlaylistManager {
                                     decode_tracks.push(TrackIdentifier {
                                         id: next_track.id.clone(),
                                         path: next_track.path.clone(),
+                                        replay_gain_preference: self
+                                            .playback_replay_gain_preference,
                                         play_immediately: false,
                                         start_offset_ms: 0,
                                     });
@@ -2974,6 +2993,7 @@ impl PlaylistManager {
                 track_paths.push(TrackIdentifier {
                     id: track_id.clone(),
                     path: track.path.clone(),
+                    replay_gain_preference: self.playback_replay_gain_preference,
                     play_immediately: play_immediately && current_index == first_index,
                     start_offset_ms: 0,
                 });
@@ -3217,6 +3237,7 @@ mod tests {
             self.send(protocol::Message::Playback(
                 protocol::PlaybackMessage::StartQueue(protocol::PlaybackQueueRequest {
                     source,
+                    replay_gain_preference: protocol::ReplayGainPreference::Track,
                     tracks,
                     start_index,
                 }),

@@ -31,6 +31,15 @@ pub struct CommonTrackMetadata {
     pub track_number: String,
 }
 
+/// Optional ReplayGain profile parsed from local metadata tags.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct ReplayGainMetadata {
+    pub track_gain_db: Option<f32>,
+    pub track_peak: Option<f32>,
+    pub album_gain_db: Option<f32>,
+    pub album_peak: Option<f32>,
+}
+
 fn first_non_empty_value<F>(primary_tag: Option<&Tag>, tags: &[Tag], mut extractor: F) -> String
 where
     F: FnMut(&Tag) -> Option<String>,
@@ -54,6 +63,53 @@ where
     }
 
     String::new()
+}
+
+fn first_parsed_value<T, F>(primary_tag: Option<&Tag>, tags: &[Tag], mut extractor: F) -> Option<T>
+where
+    F: FnMut(&Tag) -> Option<T>,
+{
+    if let Some(tag) = primary_tag {
+        if let Some(value) = extractor(tag) {
+            return Some(value);
+        }
+    }
+
+    for tag in tags {
+        if let Some(value) = extractor(tag) {
+            return Some(value);
+        }
+    }
+
+    None
+}
+
+fn parse_replay_gain_db(raw: &str) -> Option<f32> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+
+    let normalized = trimmed.to_ascii_lowercase();
+    let numeric = normalized
+        .strip_suffix("db")
+        .map(str::trim)
+        .unwrap_or(normalized.as_str());
+    let parsed = numeric.parse::<f32>().ok()?;
+    if parsed.is_finite() {
+        Some(parsed)
+    } else {
+        None
+    }
+}
+
+fn parse_replay_peak(raw: &str) -> Option<f32> {
+    let parsed = raw.trim().parse::<f32>().ok()?;
+    if parsed.is_finite() && parsed > 0.0 {
+        Some(parsed)
+    } else {
+        None
+    }
 }
 
 fn derive_year_from_date(date: &str) -> String {
@@ -228,6 +284,45 @@ fn read_embedded_cover_art_with_lofty(path: &Path) -> Option<Vec<u8>> {
     }
 
     None
+}
+
+fn read_replay_gain_metadata_with_lofty(path: &Path) -> Option<ReplayGainMetadata> {
+    let tagged_file = read_tagged_file_for_metadata(path, false)?;
+    let primary_tag = tagged_file.primary_tag();
+    let tags = tagged_file.tags();
+
+    let track_gain_db = first_parsed_value(primary_tag, tags, |tag| {
+        tag.get_string(ItemKey::ReplayGainTrackGain)
+            .and_then(parse_replay_gain_db)
+    });
+    let track_peak = first_parsed_value(primary_tag, tags, |tag| {
+        tag.get_string(ItemKey::ReplayGainTrackPeak)
+            .and_then(parse_replay_peak)
+    });
+    let album_gain_db = first_parsed_value(primary_tag, tags, |tag| {
+        tag.get_string(ItemKey::ReplayGainAlbumGain)
+            .and_then(parse_replay_gain_db)
+    });
+    let album_peak = first_parsed_value(primary_tag, tags, |tag| {
+        tag.get_string(ItemKey::ReplayGainAlbumPeak)
+            .and_then(parse_replay_peak)
+    });
+
+    let metadata = ReplayGainMetadata {
+        track_gain_db,
+        track_peak,
+        album_gain_db,
+        album_peak,
+    };
+    if metadata.track_gain_db.is_none()
+        && metadata.track_peak.is_none()
+        && metadata.album_gain_db.is_none()
+        && metadata.album_peak.is_none()
+    {
+        None
+    } else {
+        Some(metadata)
+    }
 }
 
 fn open_symphonia_probe(path: &Path) -> Option<symphonia::core::probe::ProbeResult> {
@@ -434,10 +529,16 @@ pub fn read_embedded_cover_art(path: &Path) -> Option<Vec<u8>> {
     symphonia_cover
 }
 
+/// Reads ReplayGain values from local metadata tags, when present.
+pub fn read_replay_gain_metadata(path: &Path) -> Option<ReplayGainMetadata> {
+    read_replay_gain_metadata_with_lofty(path)
+}
+
 #[cfg(test)]
 mod tests {
-    use super::derive_year_from_date;
-    use super::read_common_track_metadata;
+    use super::{
+        derive_year_from_date, parse_replay_gain_db, parse_replay_peak, read_common_track_metadata,
+    };
     use std::fs;
     use std::path::PathBuf;
     use std::time::{SystemTime, UNIX_EPOCH};
@@ -498,5 +599,28 @@ mod tests {
         );
 
         fs::remove_file(path).expect("fixture should be removable");
+    }
+
+    #[test]
+    fn test_parse_replay_gain_db_accepts_db_suffix_and_plain_number() {
+        assert_eq!(parse_replay_gain_db("-7.23 dB"), Some(-7.23));
+        assert_eq!(parse_replay_gain_db("-7.23"), Some(-7.23));
+        assert_eq!(parse_replay_gain_db("+3.1DB"), Some(3.1));
+    }
+
+    #[test]
+    fn test_parse_replay_gain_db_rejects_invalid_or_non_finite_values() {
+        assert_eq!(parse_replay_gain_db(""), None);
+        assert_eq!(parse_replay_gain_db("abc"), None);
+        assert_eq!(parse_replay_gain_db("NaN dB"), None);
+        assert_eq!(parse_replay_gain_db("inf"), None);
+    }
+
+    #[test]
+    fn test_parse_replay_peak_accepts_positive_finite_values_only() {
+        assert_eq!(parse_replay_peak("1.234"), Some(1.234));
+        assert_eq!(parse_replay_peak("0"), None);
+        assert_eq!(parse_replay_peak("-1.0"), None);
+        assert_eq!(parse_replay_peak("NaN"), None);
     }
 }

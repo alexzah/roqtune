@@ -474,6 +474,7 @@ mod tests {
             ui: UiConfig {
                 show_tooltips: true,
                 auto_scroll_to_playing_track: true,
+                use_replaygain: false,
                 legacy_dark_mode: None,
                 show_layout_edit_intro: true,
                 playlist_album_art_column_min_width_px: 16,

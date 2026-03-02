@@ -10381,6 +10381,7 @@ impl UiManager {
             source: protocol::PlaybackQueueSource::Playlist {
                 playlist_id: self.active_playlist_id.clone(),
             },
+            replay_gain_preference: protocol::ReplayGainPreference::Track,
             tracks,
             start_index,
         })
@@ -10523,8 +10524,17 @@ impl UiManager {
         }
 
         let start_index = explicit_start_index.or(selected_start_index).unwrap_or(0);
+        let replay_gain_preference = if matches!(
+            self.current_library_view(),
+            LibraryViewState::AlbumDetail { .. }
+        ) {
+            protocol::ReplayGainPreference::AlbumPreferred
+        } else {
+            protocol::ReplayGainPreference::Track
+        };
         Some(protocol::PlaybackQueueRequest {
             source: protocol::PlaybackQueueSource::Library,
+            replay_gain_preference,
             tracks,
             start_index,
         })

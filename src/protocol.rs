@@ -613,6 +613,13 @@ pub enum PlaybackQueueSource {
     Library,
 }
 
+/// ReplayGain selection strategy for a playback queue.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReplayGainPreference {
+    Track,
+    AlbumPreferred,
+}
+
 /// Active playback route selection.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PlaybackRoute {
@@ -624,6 +631,7 @@ pub enum PlaybackRoute {
 #[derive(Debug, Clone)]
 pub struct PlaybackQueueRequest {
     pub source: PlaybackQueueSource,
+    pub replay_gain_preference: ReplayGainPreference,
     pub tracks: Vec<RestoredTrack>,
     pub start_index: usize,
 }
@@ -826,6 +834,8 @@ pub struct TrackIdentifier {
     pub id: String,
     /// File path on disk.
     pub path: PathBuf,
+    /// ReplayGain strategy inherited from the queue that requested this track.
+    pub replay_gain_preference: ReplayGainPreference,
     /// Whether playback should start immediately after header arrives.
     pub play_immediately: bool,
     /// Decode start position in milliseconds.
@@ -1032,6 +1042,7 @@ pub struct UiConfigDelta {
     pub show_layout_edit_intro: Option<bool>,
     pub show_tooltips: Option<bool>,
     pub auto_scroll_to_playing_track: Option<bool>,
+    pub use_replaygain: Option<bool>,
     pub playlist_album_art_column_min_width_px: Option<u32>,
     pub playlist_album_art_column_max_width_px: Option<u32>,
     pub layout: Option<LayoutConfig>,
