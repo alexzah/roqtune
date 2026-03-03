@@ -3130,6 +3130,7 @@ mod tests {
     use super::*;
     use crate::config::Config;
     use std::path::PathBuf;
+    use std::sync::OnceLock;
     use std::thread;
     use std::time::{Duration, Instant};
     use tokio::sync::broadcast::{self, error::TryRecvError, Receiver, Sender};
@@ -3138,6 +3139,33 @@ mod tests {
         bus_sender: Sender<protocol::Message>,
         receiver: Receiver<protocol::Message>,
         active_playlist_id: String,
+    }
+
+    fn test_timeout_scale_factor() -> u32 {
+        static FACTOR: OnceLock<u32> = OnceLock::new();
+        *FACTOR.get_or_init(|| {
+            if let Ok(raw_factor) = std::env::var("ROQTUNE_TEST_TIMEOUT_FACTOR") {
+                raw_factor
+                    .parse::<u32>()
+                    .ok()
+                    .filter(|factor| (1..=16).contains(factor))
+                    .unwrap_or(1)
+            } else if std::env::var("CI").is_ok() {
+                4
+            } else {
+                1
+            }
+        })
+    }
+
+    fn scaled_test_timeout(timeout: Duration) -> Duration {
+        timeout
+            .checked_mul(test_timeout_scale_factor())
+            .unwrap_or(Duration::from_secs(30))
+    }
+
+    fn wait_poll_interval() -> Duration {
+        Duration::from_millis(5)
     }
 
     impl PlaylistManagerHarness {
@@ -3285,10 +3313,16 @@ mod tests {
     where
         F: FnMut(&protocol::Message) -> bool,
     {
+        let effective_timeout = scaled_test_timeout(timeout);
         let start = Instant::now();
         loop {
-            if start.elapsed() > timeout {
-                panic!("timed out waiting for expected message");
+            if start.elapsed() > effective_timeout {
+                panic!(
+                    "timed out waiting for expected message after {:?} (base {:?}, factor {})",
+                    effective_timeout,
+                    timeout,
+                    test_timeout_scale_factor()
+                );
             }
             match receiver.try_recv() {
                 Ok(message) => {
@@ -3296,7 +3330,7 @@ mod tests {
                         return message;
                     }
                 }
-                Err(TryRecvError::Empty) => thread::sleep(Duration::from_millis(5)),
+                Err(TryRecvError::Empty) => thread::sleep(wait_poll_interval()),
                 Err(TryRecvError::Lagged(_)) => continue,
                 Err(TryRecvError::Closed) => panic!("bus closed while waiting for message"),
             }
@@ -3310,9 +3344,10 @@ mod tests {
     ) where
         F: FnMut(&protocol::Message) -> bool,
     {
+        let effective_timeout = scaled_test_timeout(timeout);
         let start = Instant::now();
         loop {
-            if start.elapsed() > timeout {
+            if start.elapsed() > effective_timeout {
                 return;
             }
             match receiver.try_recv() {
@@ -3321,7 +3356,7 @@ mod tests {
                         panic!("received unexpected message: {:?}", message);
                     }
                 }
-                Err(TryRecvError::Empty) => thread::sleep(Duration::from_millis(5)),
+                Err(TryRecvError::Empty) => thread::sleep(wait_poll_interval()),
                 Err(TryRecvError::Lagged(_)) => continue,
                 Err(TryRecvError::Closed) => return,
             }
@@ -3408,7 +3443,13 @@ mod tests {
                     if indices == &vec![1, 2]
             )
         });
-        thread::sleep(Duration::from_millis(20));
+        let _ = wait_for_message(&mut harness.receiver, Duration::from_secs(1), |message| {
+            matches!(
+                message,
+                protocol::Message::Playlist(protocol::PlaylistMessage::SelectionChanged(indices))
+                    if indices == &vec![1, 2]
+            )
+        });
         harness.drain_messages();
 
         let pasted_paths = vec![
@@ -3488,7 +3529,7 @@ mod tests {
         ));
 
         let start = Instant::now();
-        let timeout = Duration::from_secs(1);
+        let timeout = scaled_test_timeout(Duration::from_secs(1));
         let mut saw_playlists = false;
         let mut saw_active = false;
         let mut saw_tracks = false;
@@ -3510,7 +3551,7 @@ mod tests {
                     saw_tracks = true;
                 }
                 Ok(_) => {}
-                Err(TryRecvError::Empty) => thread::sleep(Duration::from_millis(5)),
+                Err(TryRecvError::Empty) => thread::sleep(wait_poll_interval()),
                 Err(TryRecvError::Lagged(_)) => continue,
                 Err(TryRecvError::Closed) => break,
             }
@@ -3934,8 +3975,9 @@ mod tests {
         harness.send(protocol::Message::Playback(protocol::PlaybackMessage::Play));
 
         let start = Instant::now();
+        let timeout = scaled_test_timeout(Duration::from_secs(1));
         loop {
-            if start.elapsed() > Duration::from_secs(1) {
+            if start.elapsed() > timeout {
                 panic!("timed out waiting for resumed playback message");
             }
             match harness.receiver.try_recv() {
@@ -3953,7 +3995,7 @@ mod tests {
                     },
                 )) => break,
                 Ok(_) => {}
-                Err(TryRecvError::Empty) => thread::sleep(Duration::from_millis(5)),
+                Err(TryRecvError::Empty) => thread::sleep(wait_poll_interval()),
                 Err(TryRecvError::Lagged(_)) => continue,
                 Err(TryRecvError::Closed) => {
                     panic!("bus closed while waiting for resumed playback message")
@@ -4007,8 +4049,9 @@ mod tests {
         harness.send(protocol::Message::Playback(protocol::PlaybackMessage::Play));
 
         let start = Instant::now();
+        let timeout = scaled_test_timeout(Duration::from_secs(1));
         loop {
-            if start.elapsed() > Duration::from_secs(1) {
+            if start.elapsed() > timeout {
                 panic!("timed out waiting for library-queue resume message");
             }
             match harness.receiver.try_recv() {
@@ -4026,7 +4069,7 @@ mod tests {
                     },
                 )) => break,
                 Ok(_) => {}
-                Err(TryRecvError::Empty) => thread::sleep(Duration::from_millis(5)),
+                Err(TryRecvError::Empty) => thread::sleep(wait_poll_interval()),
                 Err(TryRecvError::Lagged(_)) => continue,
                 Err(TryRecvError::Closed) => {
                     panic!("bus closed while waiting for library-queue resume message")
