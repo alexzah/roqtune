@@ -293,6 +293,7 @@ struct TechnicalInfoTemplateFields {
     technical_channel_from_channels: String,
     technical_channel_to_channels: String,
     technical_dithered: String,
+    technical_replay_gain_adjustment: String,
 }
 
 impl TechnicalInfoTemplateFields {
@@ -323,6 +324,7 @@ impl TechnicalInfoTemplateFields {
             technical_channel_from_channels: &self.technical_channel_from_channels,
             technical_channel_to_channels: &self.technical_channel_to_channels,
             technical_dithered: &self.technical_dithered,
+            technical_replay_gain_adjustment: &self.technical_replay_gain_adjustment,
         }
     }
 }
@@ -2139,6 +2141,20 @@ impl UiManager {
         )
     }
 
+    fn format_replay_gain_adjustment(
+        kind: Option<protocol::ReplayGainAdjustmentKind>,
+        adjustment_db: f32,
+    ) -> Option<String> {
+        if !adjustment_db.is_finite() || adjustment_db.abs() < 0.05 {
+            return None;
+        }
+        let source = match kind.unwrap_or(protocol::ReplayGainAdjustmentKind::Track) {
+            protocol::ReplayGainAdjustmentKind::Track => "Track",
+            protocol::ReplayGainAdjustmentKind::Album => "Album",
+        };
+        Some(format!("{source}: {:+.1}dB", adjustment_db))
+    }
+
     fn current_track_source_label(&self) -> Option<&'static str> {
         self.playing_track
             .path
@@ -2205,6 +2221,11 @@ impl UiManager {
             fields.technical_channels = meta.channel_count.to_string();
             fields.technical_bitrate_kbps = meta.bitrate_kbps.to_string();
             fields.technical_duration_ms = meta.duration_ms.to_string();
+            if let Some(text) = meta.replay_gain_adjustment_db.and_then(|value| {
+                Self::format_replay_gain_adjustment(meta.replay_gain_adjustment_kind, value)
+            }) {
+                fields.technical_replay_gain_adjustment = text;
+            }
         }
 
         if self.cast_connected {
@@ -2302,10 +2323,16 @@ impl UiManager {
         } else {
             String::new()
         };
+        let replay_gain_segment = if fields.technical_replay_gain_adjustment.is_empty() {
+            String::new()
+        } else {
+            format!("ReplayGain {}", fields.technical_replay_gain_adjustment)
+        };
         fields.technical_info = [
             fields.technical_source.as_str(),
             fields.technical_cast_status.as_str(),
             fields.technical_playback_path.as_str(),
+            replay_gain_segment.as_str(),
         ]
         .into_iter()
         .filter(|section| !section.trim().is_empty())
@@ -13982,6 +14009,7 @@ mod tests {
             technical_channel_from_channels: "",
             technical_channel_to_channels: "",
             technical_dithered: "",
+            technical_replay_gain_adjustment: "",
         }
     }
 

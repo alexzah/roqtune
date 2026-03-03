@@ -1251,6 +1251,8 @@ fn probe_track_technical_metadata(path: &Path) -> Option<TechnicalMetadata> {
         channel_count,
         duration_ms,
         bits_per_sample,
+        replay_gain_adjustment_kind: None,
+        replay_gain_adjustment_db: None,
     })
 }
 
@@ -1267,6 +1269,8 @@ fn transcode_wav_output_from_source(source: &TechnicalMetadata) -> TechnicalMeta
         channel_count,
         duration_ms: source.duration_ms,
         bits_per_sample,
+        replay_gain_adjustment_kind: None,
+        replay_gain_adjustment_db: None,
     }
 }
 
@@ -1291,6 +1295,8 @@ fn fallback_source_technical_metadata(
         channel_count: 2,
         duration_ms: duration_ms.unwrap_or(0),
         bits_per_sample: 16,
+        replay_gain_adjustment_kind: None,
+        replay_gain_adjustment_db: None,
     }
 }
 

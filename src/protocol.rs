@@ -663,6 +663,13 @@ pub enum ReplayGainPreference {
     AlbumPreferred,
 }
 
+/// ReplayGain tag source used for the active gain adjustment.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReplayGainAdjustmentKind {
+    Track,
+    Album,
+}
+
 /// Active playback route selection.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PlaybackRoute {
@@ -814,6 +821,11 @@ pub struct TechnicalMetadata {
     pub duration_ms: u64,
     /// Source bit depth (e.g., 16, 24, 32).
     pub bits_per_sample: u16,
+    /// ReplayGain tag source used for the applied adjustment.
+    pub replay_gain_adjustment_kind: Option<ReplayGainAdjustmentKind>,
+    /// Effective ReplayGain adjustment applied by the decoder, in dB.
+    /// `None` means no active ReplayGain adjustment.
+    pub replay_gain_adjustment_db: Option<f32>,
 }
 
 /// Concrete output stream sample type selected by the audio backend.

@@ -683,19 +683,33 @@ Check Settings -> OpenSubsonic status and re-save credentials if needed.",
     fn replay_gain_value_for_preference(
         preference: protocol::ReplayGainPreference,
         metadata: &ReplayGainMetadata,
-    ) -> Option<(f32, Option<f32>)> {
+    ) -> Option<(f32, Option<f32>, protocol::ReplayGainAdjustmentKind)> {
         match preference {
             protocol::ReplayGainPreference::AlbumPreferred => metadata
                 .album_gain_db
-                .map(|gain_db| (gain_db, metadata.album_peak))
+                .map(|gain_db| {
+                    (
+                        gain_db,
+                        metadata.album_peak,
+                        protocol::ReplayGainAdjustmentKind::Album,
+                    )
+                })
                 .or_else(|| {
-                    metadata
-                        .track_gain_db
-                        .map(|gain_db| (gain_db, metadata.track_peak))
+                    metadata.track_gain_db.map(|gain_db| {
+                        (
+                            gain_db,
+                            metadata.track_peak,
+                            protocol::ReplayGainAdjustmentKind::Track,
+                        )
+                    })
                 }),
-            protocol::ReplayGainPreference::Track => metadata
-                .track_gain_db
-                .map(|gain_db| (gain_db, metadata.track_peak)),
+            protocol::ReplayGainPreference::Track => metadata.track_gain_db.map(|gain_db| {
+                (
+                    gain_db,
+                    metadata.track_peak,
+                    protocol::ReplayGainAdjustmentKind::Track,
+                )
+            }),
         }
     }
 
@@ -711,26 +725,49 @@ Check Settings -> OpenSubsonic status and re-save credentials if needed.",
         let Some(metadata) = metadata else {
             return 1.0;
         };
-        let Some((gain_db, peak)) = Self::replay_gain_value_for_preference(preference, metadata)
+        let Some((gain_db, peak, _kind)) =
+            Self::replay_gain_value_for_preference(preference, metadata)
         else {
             return 1.0;
         };
+        Self::replay_gain_multiplier_from_gain_peak(gain_db, peak)
+    }
 
+    fn replay_gain_multiplier_from_gain_peak(gain_db: f32, peak: Option<f32>) -> f32 {
         let mut multiplier = 10.0f32.powf(gain_db / 20.0);
         if !multiplier.is_finite() {
             return 1.0;
         }
-
         if let Some(peak) = peak {
             if peak.is_finite() && peak > 0.0 {
                 multiplier = multiplier.min(1.0 / peak);
             }
         }
-
         if !multiplier.is_finite() {
             return 1.0;
         }
         multiplier.clamp(0.0, REPLAY_GAIN_MULTIPLIER_MAX)
+    }
+
+    fn replay_gain_adjustment_for(
+        &self,
+        preference: protocol::ReplayGainPreference,
+        metadata: Option<&ReplayGainMetadata>,
+    ) -> Option<(protocol::ReplayGainAdjustmentKind, f32)> {
+        if !self.replay_gain_enabled {
+            return None;
+        }
+        let metadata = metadata?;
+        let (gain_db, peak, kind) = Self::replay_gain_value_for_preference(preference, metadata)?;
+        let multiplier = Self::replay_gain_multiplier_from_gain_peak(gain_db, peak);
+        if !(multiplier.is_finite() && multiplier > 0.0) {
+            return None;
+        }
+        let adjustment_db = 20.0 * multiplier.log10();
+        if !adjustment_db.is_finite() || adjustment_db.abs() < 0.05 {
+            return None;
+        }
+        Some((kind, adjustment_db))
     }
 
     fn decode_requested_samples(&mut self, requested_samples: usize) {
@@ -1393,8 +1430,15 @@ Check Settings -> OpenSubsonic status and re-save credentials if needed.",
         }
 
         let replay_gain_metadata = self.read_replay_gain_metadata_for_track(&input_track);
-        let technical_metadata =
+        let mut technical_metadata =
             self.build_technical_metadata(input_track.path.as_path(), &codec_params);
+        if let Some((kind, adjustment_db)) = self.replay_gain_adjustment_for(
+            input_track.replay_gain_preference,
+            replay_gain_metadata.as_ref(),
+        ) {
+            technical_metadata.replay_gain_adjustment_kind = Some(kind);
+            technical_metadata.replay_gain_adjustment_db = Some(adjustment_db);
+        }
         debug!(
             "DecodeWorker: Track ready id={} sr={} channels={} play_immediately={}",
             input_track.id, source_sample_rate, source_channels, input_track.play_immediately
@@ -1464,6 +1508,8 @@ Check Settings -> OpenSubsonic status and re-save credentials if needed.",
                 .unwrap_or(2),
             duration_ms,
             bits_per_sample: codec_params.bits_per_sample.unwrap_or(16) as u16,
+            replay_gain_adjustment_kind: None,
+            replay_gain_adjustment_db: None,
         }
     }
 }

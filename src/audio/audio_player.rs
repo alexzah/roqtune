@@ -2351,6 +2351,8 @@ mod tests {
             channel_count: 2,
             duration_ms: 100_000,
             bits_per_sample: 16,
+            replay_gain_adjustment_kind: None,
+            replay_gain_adjustment_db: None,
         };
 
         player.load_samples(AudioPacket::TrackHeader {
@@ -2392,6 +2394,8 @@ mod tests {
             channel_count: 2,
             duration_ms: 25_000,
             bits_per_sample: 16,
+            replay_gain_adjustment_kind: None,
+            replay_gain_adjustment_db: None,
         };
 
         player.load_samples(AudioPacket::TrackHeader {

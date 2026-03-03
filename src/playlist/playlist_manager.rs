@@ -4886,6 +4886,8 @@ mod tests {
                 channel_count: 2,
                 duration_ms: 120_000,
                 bits_per_sample: 16,
+                replay_gain_adjustment_kind: None,
+                replay_gain_adjustment_db: None,
             }),
         ));
         harness.send(protocol::Message::Playback(
@@ -4945,6 +4947,8 @@ mod tests {
                 channel_count: 2,
                 duration_ms: 100_000,
                 bits_per_sample: 16,
+                replay_gain_adjustment_kind: None,
+                replay_gain_adjustment_db: None,
             }),
         ));
         harness.send(protocol::Message::Playback(
@@ -5310,6 +5314,8 @@ mod tests {
             channel_count: 2,
             duration_ms: 123_000,
             bits_per_sample: 16,
+            replay_gain_adjustment_kind: None,
+            replay_gain_adjustment_db: None,
         });
 
         assert_no_message(&mut receiver, Duration::from_millis(250), |message| {
@@ -5347,6 +5353,8 @@ mod tests {
             channel_count: 2,
             duration_ms: 123_000,
             bits_per_sample: 16,
+            replay_gain_adjustment_kind: None,
+            replay_gain_adjustment_db: None,
         });
 
         let message = wait_for_message(&mut receiver, Duration::from_secs(1), |message| {

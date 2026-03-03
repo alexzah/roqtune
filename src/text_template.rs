@@ -14,7 +14,7 @@ pub(crate) const DEFAULT_ARTIST_BIO_PANEL_TEMPLATE: &str =
     "[size=title][b][color=text_primary][if=title]{title}[else]Artist Bio[/if][/color][/b][/size][if=artist]\\n[size=body][color=text_secondary]{artist}[/color][/size][/if][if=genre]\\n[size=caption][color=text_muted]{genre}[/color][/size][/if]";
 pub(crate) const DEFAULT_METADATA_PANEL_TEMPLATE: &str = DEFAULT_TRACK_PANEL_TEMPLATE;
 pub(crate) const DEFAULT_STATUS_PANEL_TEMPLATE: &str =
-    "[valign=center][halign=left][size=12][color=text_secondary][if=path]Now Playing: [if=artist]{artist} - [/if][if=title]{title}[else]Unknown[/if][if=selection_summary] | {selection_summary}[/if][else]{selection_summary}[/if][/color][/size][/halign][halign=right][size=11][color=text_muted][if=format]Source: [if=source_provider]{source_provider} | [/if]{format}[if=bit_depth] ({bit_depth} bit[/if][if=sample_rate_hz], {sample_rate_hz}[/if][if=channels], {channels}ch[/if][if=bitrate_kbps], {bitrate_kbps}kbps[/if][if=bit_depth])[/if][else][if=cast_state]Source: Unknown[/if][/if][if=cast_state] | {cast_state}[/if][if=playback_mode] | [if=output_format]{playback_mode}: {output_format}[if=output_bit_depth] ({output_bit_depth} bit[/if][if=output_sample_rate_hz], {output_sample_rate_hz}[/if][if=output_channels], {output_channels}ch[/if][if=output_bitrate_kbps], {output_bitrate_kbps}kbps[/if][if=output_bit_depth])[/if][else]{playback_mode}[/if][/if][if=resampled] | Resample: {resample_from_hz} -> {resample_to_hz}[/if][if=channel_transform][if=resampled] / [/if][if=resampled][else] | [/if]{channel_transform}: {channel_from_channels}ch -> {channel_to_channels}ch[/if][if=dithered][if=resampled;channel_transform] / [/if][if=resampled;channel_transform][else] | [/if]Dither[/if][/color][/size][/halign][/valign]";
+    "[valign=center][halign=left][size=12][color=text_secondary][if=path]Now Playing: [if=artist]{artist} - [/if][if=title]{title}[else]Unknown[/if][if=selection_summary] | {selection_summary}[/if][else]{selection_summary}[/if][/color][/size][/halign][halign=right][size=11][color=text_muted][if=format]Source: [if=source_provider]{source_provider} | [/if]{format}[if=bit_depth] ({bit_depth} bit[/if][if=sample_rate_hz], {sample_rate_hz}[/if][if=channels], {channels}ch[/if][if=bitrate_kbps], {bitrate_kbps}kbps[/if][if=bit_depth])[/if][else][if=cast_state]Source: Unknown[/if][/if][if=cast_state] | {cast_state}[/if][if=playback_mode] | [if=output_format]{playback_mode}: {output_format}[if=output_bit_depth] ({output_bit_depth} bit[/if][if=output_sample_rate_hz], {output_sample_rate_hz}[/if][if=output_channels], {output_channels}ch[/if][if=output_bitrate_kbps], {output_bitrate_kbps}kbps[/if][if=output_bit_depth])[/if][else]{playback_mode}[/if][/if][if=resampled] | Resample: {resample_from_hz} -> {resample_to_hz}[/if][if=channel_transform][if=resampled] / [/if][if=resampled][else] | [/if]{channel_transform}: {channel_from_channels}ch -> {channel_to_channels}ch[/if][if=dithered][if=resampled;channel_transform] / [/if][if=resampled;channel_transform][else] | [/if]Dither[/if][if=replay_gain_adjustment] | ReplayGain {replay_gain_adjustment}[/if][/color][/size][/halign][/valign]";
 pub(crate) const PLAYING_SYMBOL_PLAYING: &str = "▶️";
 pub(crate) const PLAYING_SYMBOL_PAUSED: &str = "⏸️";
 pub(crate) const FAVORITE_SYMBOL_ON: &str = "❤️";
@@ -276,6 +276,7 @@ pub(crate) struct TemplateContext<'a> {
     pub technical_channel_from_channels: &'a str,
     pub technical_channel_to_channels: &'a str,
     pub technical_dithered: &'a str,
+    pub technical_replay_gain_adjustment: &'a str,
 }
 
 #[derive(Clone, Copy, Debug, Default)]
@@ -302,6 +303,7 @@ pub(crate) struct StatusTemplateFields<'a> {
     pub technical_channel_from_channels: &'a str,
     pub technical_channel_to_channels: &'a str,
     pub technical_dithered: &'a str,
+    pub technical_replay_gain_adjustment: &'a str,
 }
 
 impl<'a> TemplateContext<'a> {
@@ -356,6 +358,7 @@ impl<'a> TemplateContext<'a> {
             technical_channel_from_channels: "",
             technical_channel_to_channels: "",
             technical_dithered: "",
+            technical_replay_gain_adjustment: "",
         }
     }
 
@@ -392,6 +395,7 @@ impl<'a> TemplateContext<'a> {
         self.technical_channel_from_channels = fields.technical_channel_from_channels;
         self.technical_channel_to_channels = fields.technical_channel_to_channels;
         self.technical_dithered = fields.technical_dithered;
+        self.technical_replay_gain_adjustment = fields.technical_replay_gain_adjustment;
         self
     }
 
@@ -460,6 +464,9 @@ impl<'a> TemplateContext<'a> {
                 Some(self.technical_channel_to_channels.to_string())
             }
             "dithered" => Some(self.technical_dithered.to_string()),
+            "replay_gain_adjustment" | "replaygainadjustment" => {
+                Some(self.technical_replay_gain_adjustment.to_string())
+            }
             "album_art" | "disc" | "disc_number" | "duration" => Some(String::new()),
             _ => None,
         }
@@ -1204,6 +1211,7 @@ mod tests {
             technical_channel_from_channels: "",
             technical_channel_to_channels: "",
             technical_dithered: "",
+            technical_replay_gain_adjustment: "",
         }
     }
 
@@ -1280,7 +1288,7 @@ mod tests {
     #[test]
     fn test_status_placeholders_render_from_context() {
         let rendered = render_template(
-            "{selection_summary}|{source_provider}|{format}|{bit_depth}|{sample_rate_hz}|{channels}|{bitrate_kbps}|{playback_mode}",
+            "{selection_summary}|{source_provider}|{format}|{bit_depth}|{sample_rate_hz}|{channels}|{bitrate_kbps}|{playback_mode}|{replay_gain_adjustment}",
             &context("Song").with_status_fields(StatusTemplateFields {
                 selection_summary: "2 tracks selected",
                 technical_source_provider: "opensubsonic",
@@ -1290,12 +1298,13 @@ mod tests {
                 technical_channels: "2",
                 technical_bitrate_kbps: "320",
                 technical_playback_mode: "direct",
+                technical_replay_gain_adjustment: "Track: -9.2dB",
                 ..StatusTemplateFields::default()
             }),
         );
         assert_eq!(
             rendered.plain_text,
-            "2 tracks selected|opensubsonic|FLAC|24|96000|2|320|direct"
+            "2 tracks selected|opensubsonic|FLAC|24|96000|2|320|direct|Track: -9.2dB"
         );
     }
 
@@ -1384,6 +1393,23 @@ mod tests {
         );
         assert!(rendered.plain_text.contains(" | Resample: 96kHz -> 48kHz"));
         assert!(rendered.plain_text.contains(" / Downmix: 2ch -> 2ch"));
+    }
+
+    #[test]
+    fn test_default_status_template_renders_replay_gain_segment() {
+        let rendered = render_template(
+            DEFAULT_STATUS_PANEL_TEMPLATE,
+            &context("Song").with_status_fields(StatusTemplateFields {
+                technical_format: "MP3",
+                technical_bit_depth: "16",
+                technical_sample_rate_hz: "44.1kHz",
+                technical_channels: "2",
+                technical_bitrate_kbps: "320",
+                technical_replay_gain_adjustment: "Track: -9.2dB",
+                ..StatusTemplateFields::default()
+            }),
+        );
+        assert!(rendered.plain_text.contains(" | ReplayGain Track: -9.2dB"));
     }
 
     #[test]
