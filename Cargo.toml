@@ -5,6 +5,7 @@ edition = "2021"
 build = "build.rs"
 
 [dependencies]
+roqtune-core = { path = "crates/roqtune-core" }
 rfd = "0.17.2"   # For file dialogs
 log = "0.4.29" # logs
 colog = "1.4.0" # logs
@@ -54,3 +55,23 @@ version = "1.20.0"
 features = [
     "v4",
 ]
+
+[workspace]
+members = [
+    ".",
+    "crates/roqtune-core",
+]
+default-members = [
+    "crates/roqtune-core",
+]
+
+[profile.dev]
+debug = 1
+incremental = true
+codegen-units = 256
+opt-level = 0
+lto = false
+
+[profile.test]
+debug = 1
+incremental = true

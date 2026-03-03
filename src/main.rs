@@ -10,33 +10,19 @@ mod app_callbacks;
 mod app_config_coordinator;
 mod app_context;
 mod app_runtime;
-mod audio;
-mod backends;
-mod cast;
-mod config;
-mod config_persistence;
-mod db_manager;
-mod image_pipeline;
-mod integration;
-mod layout;
-mod library;
-mod media_controls_manager;
-mod media_file_discovery;
-mod metadata;
-#[path = "playlist/playlist.rs"]
-mod playlist;
-#[path = "playlist/playlist_manager.rs"]
-mod playlist_manager;
-mod protocol;
-mod protocol_utils;
 mod runtime;
-mod runtime_config;
-mod text_template;
 mod theme;
 mod ui;
 mod ui_manager;
 
-pub(crate) use audio::{audio_decoder, audio_player, audio_probe, output_option_selection};
+pub use roqtune_core::{
+    audio, backends, cast, config, config_persistence, db_manager, image_pipeline, integration,
+    layout, library, media_controls_manager, media_file_discovery, metadata, playlist,
+    playlist_manager, protocol, protocol_utils, runtime_config, text_template,
+    OutputSettingsOptions,
+};
+
+pub(crate) use audio::{audio_decoder, audio_player, output_option_selection};
 pub(crate) use cast::cast_manager;
 pub(crate) use integration::{
     integration_keyring, integration_manager, integration_uri, opensubsonic_controller,
@@ -211,31 +197,6 @@ pub(crate) fn spawn_debounced_query_dispatcher(
         }
     });
     tx
-}
-
-/// Detected and filtered output-setting choices presented in the settings dialog.
-#[derive(Debug, Clone)]
-pub(crate) struct OutputSettingsOptions {
-    /// Enumerated output device names shown to the user.
-    pub(crate) device_names: Vec<String>,
-    /// Auto-selected output device name.
-    pub(crate) auto_device_name: String,
-    /// Supported channel-count options.
-    pub(crate) channel_values: Vec<u16>,
-    /// Supported sample-rate options.
-    pub(crate) sample_rate_values: Vec<u32>,
-    /// Supported bit-depth options.
-    pub(crate) bits_per_sample_values: Vec<u16>,
-    /// Sample rates verified by probing the selected device.
-    pub(crate) verified_sample_rate_values: Vec<u32>,
-    /// Human-readable summary of verified sample rates.
-    pub(crate) verified_sample_rates_summary: String,
-    /// Auto-selected channel-count value.
-    pub(crate) auto_channel_value: u16,
-    /// Auto-selected sample-rate value.
-    pub(crate) auto_sample_rate_value: u32,
-    /// Auto-selected bit-depth value.
-    pub(crate) auto_bits_per_sample_value: u16,
 }
 
 pub(crate) fn resolve_effective_runtime_config(

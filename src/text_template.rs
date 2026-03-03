@@ -6,22 +6,22 @@ use crate::protocol;
 
 const DEFAULT_FONT_SIZE_PX: u32 = 13;
 
-pub(crate) const DEFAULT_TRACK_PANEL_TEMPLATE: &str =
+pub const DEFAULT_TRACK_PANEL_TEMPLATE: &str =
     "[size=title][b][color=text_primary][if=title;file_name]{title;file_name}[else]Unknown[/if][/color][/b][/size][if=artist;album_artist]\\n[size=body][color=text_secondary]{artist;album_artist}[/color][/size][/if][if=album]\\n[size=body][color=text_muted]{album}[/color][/size][/if][if=date;year;genre]\\n[size=caption][color=text_muted][if=date;year]{date;year}[/if][if=genre][if=date;year] • [/if]{genre}[/if][/color][/size][/if]";
-pub(crate) const DEFAULT_ALBUM_DESCRIPTION_PANEL_TEMPLATE: &str =
+pub const DEFAULT_ALBUM_DESCRIPTION_PANEL_TEMPLATE: &str =
     "[size=title][b][color=text_primary][if=title]{title}[else]Album Description[/if][/color][/b][/size][if=artist]\\n[size=body][color=text_secondary]{artist}[/color][/size][/if][if=genre]\\n[size=caption][color=text_muted]{genre}[/color][/size][/if]";
-pub(crate) const DEFAULT_ARTIST_BIO_PANEL_TEMPLATE: &str =
+pub const DEFAULT_ARTIST_BIO_PANEL_TEMPLATE: &str =
     "[size=title][b][color=text_primary][if=title]{title}[else]Artist Bio[/if][/color][/b][/size][if=artist]\\n[size=body][color=text_secondary]{artist}[/color][/size][/if][if=genre]\\n[size=caption][color=text_muted]{genre}[/color][/size][/if]";
-pub(crate) const DEFAULT_METADATA_PANEL_TEMPLATE: &str = DEFAULT_TRACK_PANEL_TEMPLATE;
-pub(crate) const DEFAULT_STATUS_PANEL_TEMPLATE: &str =
+pub const DEFAULT_METADATA_PANEL_TEMPLATE: &str = DEFAULT_TRACK_PANEL_TEMPLATE;
+pub const DEFAULT_STATUS_PANEL_TEMPLATE: &str =
     "[valign=center][halign=left][size=12][color=text_secondary][if=path]Now Playing: [if=artist]{artist} - [/if][if=title]{title}[else]Unknown[/if][if=selection_summary] | {selection_summary}[/if][else]{selection_summary}[/if][/color][/size][/halign][halign=right][size=11][color=text_muted][if=format]Source: [if=source_provider]{source_provider} | [/if]{format}[if=bit_depth] ({bit_depth} bit[/if][if=sample_rate_hz], {sample_rate_hz}[/if][if=channels], {channels}ch[/if][if=bitrate_kbps], {bitrate_kbps}kbps[/if][if=bit_depth])[/if][else][if=cast_state]Source: Unknown[/if][/if][if=cast_state] | {cast_state}[/if][if=playback_mode] | [if=output_format]{playback_mode}: {output_format}[if=output_bit_depth] ({output_bit_depth} bit[/if][if=output_sample_rate_hz], {output_sample_rate_hz}[/if][if=output_channels], {output_channels}ch[/if][if=output_bitrate_kbps], {output_bitrate_kbps}kbps[/if][if=output_bit_depth])[/if][else]{playback_mode}[/if][/if][if=resampled] | Resample: {resample_from_hz} -> {resample_to_hz}[/if][if=channel_transform][if=resampled] / [/if][if=resampled][else] | [/if]{channel_transform}: {channel_from_channels}ch -> {channel_to_channels}ch[/if][if=dithered][if=resampled;channel_transform] / [/if][if=resampled;channel_transform][else] | [/if]Dither[/if][if=replay_gain_adjustment] | ReplayGain {replay_gain_adjustment}[/if][/color][/size][/halign][/valign]";
-pub(crate) const PLAYING_SYMBOL_PLAYING: &str = "▶️";
-pub(crate) const PLAYING_SYMBOL_PAUSED: &str = "⏸️";
-pub(crate) const FAVORITE_SYMBOL_ON: &str = "❤️";
-pub(crate) const FAVORITE_SYMBOL_OFF: &str = "♥";
+pub const PLAYING_SYMBOL_PLAYING: &str = "▶️";
+pub const PLAYING_SYMBOL_PAUSED: &str = "⏸️";
+pub const FAVORITE_SYMBOL_ON: &str = "❤️";
+pub const FAVORITE_SYMBOL_OFF: &str = "♥";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
-pub(crate) enum HorizontalAlign {
+pub enum HorizontalAlign {
     #[default]
     Left,
     Center,
@@ -40,7 +40,7 @@ impl HorizontalAlign {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
-pub(crate) enum VerticalAlign {
+pub enum VerticalAlign {
     Top,
     #[default]
     Center,
@@ -59,7 +59,7 @@ impl VerticalAlign {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum PaletteColor {
+pub enum PaletteColor {
     Accent,
     AccentOn,
     Warning,
@@ -79,7 +79,7 @@ pub(crate) enum PaletteColor {
 }
 
 impl PaletteColor {
-    pub(crate) fn code(self) -> i32 {
+    pub fn code(self) -> i32 {
         match self {
             Self::Accent => 1,
             Self::AccentOn => 2,
@@ -125,13 +125,13 @@ impl PaletteColor {
 }
 
 #[derive(Clone, Debug, PartialEq)]
-pub(crate) enum RunColor {
+pub enum RunColor {
     Palette(PaletteColor),
     Rgba { r: u8, g: u8, b: u8, a: f32 },
 }
 
 #[derive(Clone, Debug, PartialEq)]
-pub(crate) struct RichTextRun {
+pub struct RichTextRun {
     pub text: String,
     pub bold: bool,
     pub italic: bool,
@@ -144,25 +144,25 @@ pub(crate) struct RichTextRun {
 }
 
 #[derive(Clone, Debug, PartialEq)]
-pub(crate) struct RichTextLine {
+pub struct RichTextLine {
     pub runs: Vec<RichTextRun>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
-pub(crate) struct RenderedText {
+pub struct RenderedText {
     pub plain_text: String,
     pub lines: Vec<RichTextLine>,
     pub vertical_align: VerticalAlign,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) struct TemplateMetrics {
+pub struct TemplateMetrics {
     pub explicit_line_count: u32,
     pub max_font_size_px: u32,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) struct RenderOptions {
+pub struct RenderOptions {
     pub base_font_size_px: u32,
 }
 
@@ -241,7 +241,7 @@ impl FontSizeSpec {
 }
 
 #[derive(Clone, Debug)]
-pub(crate) struct TemplateContext<'a> {
+pub struct TemplateContext<'a> {
     pub title: &'a str,
     pub artist: &'a str,
     pub album: &'a str,
@@ -280,7 +280,7 @@ pub(crate) struct TemplateContext<'a> {
 }
 
 #[derive(Clone, Copy, Debug, Default)]
-pub(crate) struct StatusTemplateFields<'a> {
+pub struct StatusTemplateFields<'a> {
     pub selection_summary: &'a str,
     pub technical_source_provider: &'a str,
     pub technical_format: &'a str,
@@ -308,7 +308,7 @@ pub(crate) struct StatusTemplateFields<'a> {
 
 impl<'a> TemplateContext<'a> {
     #[allow(clippy::too_many_arguments)]
-    pub(crate) fn from_path_metadata(
+    pub fn from_path_metadata(
         title: &'a str,
         artist: &'a str,
         album: &'a str,
@@ -362,7 +362,7 @@ impl<'a> TemplateContext<'a> {
         }
     }
 
-    pub(crate) fn with_indicator_symbols(
+    pub fn with_indicator_symbols(
         mut self,
         playing: Option<&'a str>,
         favorite: Option<&'a str>,
@@ -372,7 +372,7 @@ impl<'a> TemplateContext<'a> {
         self
     }
 
-    pub(crate) fn with_status_fields(mut self, fields: StatusTemplateFields<'a>) -> Self {
+    pub fn with_status_fields(mut self, fields: StatusTemplateFields<'a>) -> Self {
         self.selection_summary = fields.selection_summary;
         self.technical_source_provider = fields.technical_source_provider;
         self.technical_format = fields.technical_format;
@@ -506,7 +506,7 @@ impl<'a> TemplateContext<'a> {
 }
 
 #[derive(Clone, Debug)]
-pub(crate) struct ParsedTemplate {
+pub struct ParsedTemplate {
     segments: Vec<TemplateSegment>,
     metrics: TemplateMetrics,
 }
@@ -580,7 +580,7 @@ fn conditions_active(stack: &[ConditionFrame]) -> bool {
     stack.iter().copied().all(ConditionFrame::active)
 }
 
-pub(crate) fn parse_template(source: &str) -> ParsedTemplate {
+pub fn parse_template(source: &str) -> ParsedTemplate {
     let mut segments = Vec::new();
     let mut text_buffer = String::new();
     let mut chars = source.chars().peekable();
@@ -684,7 +684,7 @@ pub(crate) fn parse_template(source: &str) -> ParsedTemplate {
     }
 }
 
-pub(crate) fn render(
+pub fn render(
     parsed: &ParsedTemplate,
     context: &TemplateContext<'_>,
     render_options: RenderOptions,
@@ -824,12 +824,12 @@ pub(crate) fn render(
     }
 }
 
-pub(crate) fn render_template(source: &str, context: &TemplateContext<'_>) -> RenderedText {
+pub fn render_template(source: &str, context: &TemplateContext<'_>) -> RenderedText {
     let parsed = parse_template(source);
     render(&parsed, context, RenderOptions::default())
 }
 
-pub(crate) fn render_template_with_options(
+pub fn render_template_with_options(
     source: &str,
     context: &TemplateContext<'_>,
     render_options: RenderOptions,
@@ -838,7 +838,7 @@ pub(crate) fn render_template_with_options(
     render(&parsed, context, render_options)
 }
 
-pub(crate) fn template_metrics(source: &str) -> TemplateMetrics {
+pub fn template_metrics(source: &str) -> TemplateMetrics {
     parse_template(source).metrics
 }
 
