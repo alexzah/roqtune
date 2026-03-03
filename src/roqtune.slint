@@ -4781,6 +4781,7 @@ export component AppWindow inherits Window {
                 overflow: elide;
             }
             Rectangle {
+                width: parent.width;
                 height: 8px;
                 border-radius: 4px;
                 background: AppPalette.panel-bg-alt;
@@ -4788,6 +4789,8 @@ export component AppWindow inherits Window {
                     property <int> effective-total: max(1, root.replaygain_scan_progress_total);
                     property <int> effective-processed:
                         min(root.replaygain_scan_progress_processed, self.effective-total);
+                    x: 0px;
+                    y: 0px;
                     width: parent.width * self.effective-processed / self.effective-total;
                     height: parent.height;
                     border-radius: 4px;
