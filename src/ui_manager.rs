@@ -6228,6 +6228,26 @@ impl UiManager {
             .any(|(left, right)| left.id != right.id || left.value != right.value)
     }
 
+    fn properties_changed_metadata_fields(
+        current_fields: &[protocol::MetadataEditorField],
+        original_fields: &[protocol::MetadataEditorField],
+    ) -> Vec<protocol::MetadataEditorField> {
+        if current_fields.len() != original_fields.len() {
+            return current_fields.to_vec();
+        }
+        current_fields
+            .iter()
+            .zip(original_fields.iter())
+            .filter_map(|(current, original)| {
+                if current.id != original.id || current.value != original.value {
+                    Some(current.clone())
+                } else {
+                    None
+                }
+            })
+            .collect()
+    }
+
     fn properties_has_changes_from_parts(
         current_fields: &[protocol::MetadataEditorField],
         original_fields: &[protocol::MetadataEditorField],
@@ -6630,7 +6650,10 @@ impl UiManager {
         self.properties_pending_request_kind = Some(PropertiesRequestKind::Save);
         self.properties_busy = true;
         self.properties_error_text.clear();
-        let metadata_fields = self.properties_fields.clone();
+        let metadata_fields = Self::properties_changed_metadata_fields(
+            &self.properties_fields,
+            &self.properties_original_fields,
+        );
         let image_overwrites = self.properties_image_overwrites.clone();
         let image_deletes = self.properties_image_deletes.clone();
         let _ = self.bus_sender.send(protocol::Message::Metadata(
@@ -13873,6 +13896,30 @@ mod tests {
             &no_overwrites,
             &no_deletes
         ));
+    }
+
+    #[test]
+    fn test_properties_changed_metadata_fields_returns_only_edited_rows() {
+        let original = vec![
+            make_properties_field("common:title", "Track"),
+            make_properties_field("common:artist", "Artist"),
+        ];
+        let current = vec![
+            make_properties_field("common:title", "Track"),
+            make_properties_field("common:artist", "Updated Artist"),
+        ];
+        let changed = UiManager::properties_changed_metadata_fields(&current, &original);
+        assert_eq!(changed.len(), 1);
+        assert_eq!(changed[0].id, "common:artist");
+        assert_eq!(changed[0].value, "Updated Artist");
+    }
+
+    #[test]
+    fn test_properties_changed_metadata_fields_empty_when_only_images_change() {
+        let original = vec![make_properties_field("common:title", "Track")];
+        let current = original.clone();
+        let changed = UiManager::properties_changed_metadata_fields(&current, &original);
+        assert!(changed.is_empty());
     }
 
     #[test]

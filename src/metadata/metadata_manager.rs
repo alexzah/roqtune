@@ -3,20 +3,33 @@
 //! This manager serves track Properties payloads and persists edited metadata
 //! values back to audio files, then synchronizes library index rows when present.
 
+use std::borrow::Cow;
 use std::collections::{HashMap, HashSet};
-use std::io::Cursor;
+use std::fs::OpenOptions;
+use std::io::{Cursor, Seek};
 use std::path::{Path, PathBuf};
 
 use chrono::{DateTime, Local};
 use log::{debug, warn};
 use tokio::sync::broadcast::{Receiver, Sender};
 
+use lofty::aac::AacFile;
+use lofty::ape::ApeFile;
+use lofty::config::ParseOptions;
 use lofty::config::WriteOptions;
-use lofty::file::{AudioFile, TaggedFileExt};
+use lofty::file::{AudioFile, FileType, TaggedFileExt};
+use lofty::flac::FlacFile;
+use lofty::id3::v2::{Frame, FrameId, Id3v2Tag, TextInformationFrame};
+use lofty::iff::wav::WavFile;
+use lofty::mp4::Mp4File;
+use lofty::mpeg::MpegFile;
+use lofty::ogg::{OpusFile, VorbisFile};
 use lofty::picture::{Picture, PictureInformation, PictureType};
 use lofty::prelude::Accessor;
 use lofty::read_from_path;
-use lofty::tag::{ItemKey, Tag};
+use lofty::tag::{ItemKey, MergeTag, SplitTag, Tag, TagType};
+use lofty::wavpack::WavPackFile;
+use lofty::TextEncoding;
 
 use crate::db_manager::DbManager;
 use crate::image_pipeline::{self, ManagedImageKind};
@@ -198,7 +211,7 @@ impl MetadataManager {
         }
     }
 
-    fn common_item_key(field_id: &str, tag: &Tag) -> Option<ItemKey> {
+    fn common_item_key_for_tag_type(field_id: &str, tag_type: TagType) -> Option<ItemKey> {
         match field_id {
             "common:title" => Some(ItemKey::TrackTitle),
             "common:artist" => Some(ItemKey::TrackArtist),
@@ -214,7 +227,7 @@ impl MetadataManager {
             "common:composer" => Some(ItemKey::Composer),
             "common:comment" => Some(ItemKey::Comment),
             "common:bpm" => {
-                if ItemKey::Bpm.map_key(tag.tag_type()).is_some() {
+                if ItemKey::Bpm.map_key(tag_type).is_some() {
                     Some(ItemKey::Bpm)
                 } else {
                     Some(ItemKey::IntegerBpm)
@@ -225,6 +238,10 @@ impl MetadataManager {
             "common:copyright" => Some(ItemKey::CopyrightMessage),
             _ => None,
         }
+    }
+
+    fn common_item_key(field_id: &str, tag: &Tag) -> Option<ItemKey> {
+        Self::common_item_key_for_tag_type(field_id, tag.tag_type())
     }
 
     fn common_item_keys(tag: &Tag) -> HashSet<ItemKey> {
@@ -931,6 +948,230 @@ impl MetadataManager {
         }
     }
 
+    fn collect_editable_field_values(tag: &Tag) -> HashMap<String, String> {
+        let mut values: HashMap<String, String> = COMMON_FIELD_SPECS
+            .iter()
+            .map(|(id, _)| ((*id).to_string(), Self::get_common_value(Some(tag), id)))
+            .collect();
+
+        let common_keys = Self::common_item_keys(tag);
+        let mut seen_keys = HashSet::new();
+        for item in tag.items() {
+            let key = item.key();
+            if common_keys.contains(&key) || !seen_keys.insert(key) {
+                continue;
+            }
+            let technical = Self::key_technical_name(tag, key);
+            let value = Self::collect_extra_field_values(tag, key);
+            if value.trim().is_empty() {
+                continue;
+            }
+            values.insert(format!("key:{technical}"), value);
+        }
+
+        values
+    }
+
+    fn apply_metadata_fields_to_tag(tag: &mut Tag, metadata_fields: &[MetadataEditorField]) {
+        let current_field_values = Self::collect_editable_field_values(tag);
+        let common_keys = Self::common_item_keys(tag);
+
+        for (field_id, _) in COMMON_FIELD_SPECS {
+            let Some(field) = metadata_fields.iter().find(|field| field.id == field_id) else {
+                continue;
+            };
+            if current_field_values.get(field_id) == Some(&field.value) {
+                continue;
+            }
+            Self::apply_common_field(tag, field_id, &field.value);
+        }
+
+        for field in metadata_fields {
+            if field.common || !field.id.starts_with("key:") {
+                continue;
+            }
+            if current_field_values.get(&field.id) == Some(&field.value) {
+                continue;
+            }
+            let technical_name = &field.id["key:".len()..];
+            let Some(item_key) = ItemKey::from_key(tag.tag_type(), technical_name) else {
+                continue;
+            };
+            if common_keys.contains(&item_key) {
+                continue;
+            }
+            if field.value.trim().is_empty() {
+                tag.remove_key(item_key);
+            } else {
+                tag.insert_text(item_key, field.value.trim().to_string());
+            }
+        }
+    }
+
+    fn id3v2_frame_id(frame_id: &str) -> FrameId<'static> {
+        FrameId::Valid(Cow::Owned(frame_id.to_string()))
+    }
+
+    fn set_id3v2_item_text(tag: &mut Id3v2Tag, item_key: ItemKey, value: &str) {
+        let Some(mapped_key) = item_key.map_key(TagType::Id3v2) else {
+            return;
+        };
+        if mapped_key.len() == 4 && mapped_key.starts_with('T') {
+            tag.insert(Frame::Text(TextInformationFrame::new(
+                FrameId::Valid(Cow::Owned(mapped_key.to_string())),
+                TextEncoding::UTF8,
+                value.to_string(),
+            )));
+        } else if mapped_key.len() != 4 {
+            tag.insert_user_text(mapped_key.to_string(), value.to_string());
+        }
+    }
+
+    fn remove_id3v2_item(tag: &mut Id3v2Tag, item_key: ItemKey) {
+        let Some(mapped_key) = item_key.map_key(TagType::Id3v2) else {
+            return;
+        };
+        if mapped_key.len() == 4 && mapped_key.starts_with('T') {
+            let frame_id = Self::id3v2_frame_id(mapped_key);
+            let _ = tag.remove(&frame_id);
+        } else if mapped_key.len() != 4 {
+            let _ = tag.remove_user_text(mapped_key);
+        }
+    }
+
+    fn apply_common_field_id3v2(tag: &mut Id3v2Tag, field_id: &str, value: &str) {
+        let trimmed = value.trim();
+        let is_empty = trimmed.is_empty();
+        match field_id {
+            "common:title" => {
+                if is_empty {
+                    tag.remove_title();
+                } else {
+                    tag.set_title(trimmed.to_string());
+                }
+            }
+            "common:artist" => {
+                if is_empty {
+                    tag.remove_artist();
+                } else {
+                    tag.set_artist(trimmed.to_string());
+                }
+            }
+            "common:album" => {
+                if is_empty {
+                    tag.remove_album();
+                } else {
+                    tag.set_album(trimmed.to_string());
+                }
+            }
+            "common:comment" => {
+                if is_empty {
+                    tag.remove_comment();
+                } else {
+                    tag.set_comment(trimmed.to_string());
+                }
+            }
+            _ => {
+                let Some(item_key) = Self::common_item_key_for_tag_type(field_id, TagType::Id3v2)
+                else {
+                    return;
+                };
+                if field_id == "common:bpm" {
+                    Self::remove_id3v2_item(tag, ItemKey::Bpm);
+                    Self::remove_id3v2_item(tag, ItemKey::IntegerBpm);
+                } else if field_id == "common:year" {
+                    Self::remove_id3v2_item(tag, ItemKey::Year);
+                } else if field_id == "common:date" {
+                    Self::remove_id3v2_item(tag, ItemKey::RecordingDate);
+                } else {
+                    Self::remove_id3v2_item(tag, item_key);
+                }
+                if !is_empty {
+                    Self::set_id3v2_item_text(tag, item_key, trimmed);
+                }
+            }
+        }
+    }
+
+    fn apply_metadata_fields_to_id3v2(tag: &mut Id3v2Tag, metadata_fields: &[MetadataEditorField]) {
+        let generic_tag = Tag::from(tag.clone());
+        let current_field_values = Self::collect_editable_field_values(&generic_tag);
+        let common_keys: HashSet<ItemKey> = COMMON_FIELD_SPECS
+            .iter()
+            .filter_map(|(id, _)| Self::common_item_key_for_tag_type(id, TagType::Id3v2))
+            .collect();
+
+        for (field_id, _) in COMMON_FIELD_SPECS {
+            let Some(field) = metadata_fields.iter().find(|field| field.id == field_id) else {
+                continue;
+            };
+            if current_field_values.get(field_id) == Some(&field.value) {
+                continue;
+            }
+            Self::apply_common_field_id3v2(tag, field_id, &field.value);
+        }
+
+        for field in metadata_fields {
+            if field.common || !field.id.starts_with("key:") {
+                continue;
+            }
+            if current_field_values.get(&field.id) == Some(&field.value) {
+                continue;
+            }
+            let technical_name = &field.id["key:".len()..];
+            let Some(item_key) = ItemKey::from_key(TagType::Id3v2, technical_name) else {
+                continue;
+            };
+            if common_keys.contains(&item_key) {
+                continue;
+            }
+            if field.value.trim().is_empty() {
+                Self::remove_id3v2_item(tag, item_key);
+            } else {
+                Self::set_id3v2_item_text(tag, item_key, field.value.trim());
+            }
+        }
+    }
+
+    fn apply_image_edits_to_tag(
+        tag: &mut Tag,
+        prepared_image_overwrites: &[(u8, Picture)],
+        prepared_image_deletes: &[u8],
+    ) {
+        for picture_type_code in prepared_image_deletes {
+            let picture_type = PictureType::from_u8(*picture_type_code);
+            tag.remove_picture_type(picture_type);
+        }
+
+        for (picture_type_code, picture) in prepared_image_overwrites {
+            let picture_type = PictureType::from_u8(*picture_type_code);
+            tag.remove_picture_type(picture_type);
+            tag.push_picture(picture.clone());
+        }
+
+        tag.remove_empty();
+    }
+
+    fn apply_properties_edits_to_split_tag<T>(
+        source_tag: T,
+        metadata_fields: &[MetadataEditorField],
+        prepared_image_overwrites: &[(u8, Picture)],
+        prepared_image_deletes: &[u8],
+    ) -> T
+    where
+        T: SplitTag,
+        T::Remainder: MergeTag<Merged = T>,
+    {
+        let (remainder, mut generic_tag) = source_tag.split_tag();
+        Self::apply_metadata_fields_to_tag(&mut generic_tag, metadata_fields);
+        Self::apply_image_edits_to_tag(
+            &mut generic_tag,
+            prepared_image_overwrites,
+            prepared_image_deletes,
+        );
+        remainder.merge_tag(generic_tag)
+    }
+
     fn prepare_image_overwrites(
         image_overwrites: &[PropertiesImageOverwrite],
     ) -> Result<Vec<(u8, Picture)>, String> {
@@ -991,6 +1232,15 @@ impl MetadataManager {
         }
         let prepared_image_overwrites = Self::prepare_image_overwrites(image_overwrites)?;
         let prepared_image_deletes = Self::prepare_image_deletes(image_deletes);
+        if Self::save_track_properties_lossless(
+            path,
+            metadata_fields,
+            &prepared_image_overwrites,
+            &prepared_image_deletes,
+        )? {
+            return self.finalize_saved_track_properties(path);
+        }
+
         let mut tagged_file =
             read_from_path(path).map_err(|error| format!("Failed to read tags: {error}"))?;
         let tag_type = tagged_file.primary_tag_type();
@@ -1001,52 +1251,393 @@ impl MetadataManager {
         let tag = tagged_file
             .tag_mut(tag_type)
             .ok_or_else(|| format!("No writable tag available for {:?}", tag_type))?;
-
-        let common_keys = Self::common_item_keys(tag);
-
-        for (field_id, _) in COMMON_FIELD_SPECS {
-            let value = metadata_fields
-                .iter()
-                .find(|field| field.id == field_id)
-                .map(|field| field.value.as_str())
-                .unwrap_or("");
-            Self::apply_common_field(tag, field_id, value);
-        }
-
-        for field in metadata_fields {
-            if field.common || !field.id.starts_with("key:") {
-                continue;
-            }
-            let technical_name = &field.id["key:".len()..];
-            let Some(item_key) = ItemKey::from_key(tag.tag_type(), technical_name) else {
-                continue;
-            };
-            if common_keys.contains(&item_key) {
-                continue;
-            }
-            if field.value.trim().is_empty() {
-                tag.remove_key(item_key);
-            } else {
-                tag.insert_text(item_key, field.value.trim().to_string());
-            }
-        }
-
-        for picture_type_code in prepared_image_deletes {
-            let picture_type = PictureType::from_u8(picture_type_code);
-            tag.remove_picture_type(picture_type);
-        }
-
-        for (picture_type_code, picture) in prepared_image_overwrites {
-            let picture_type = PictureType::from_u8(picture_type_code);
-            tag.remove_picture_type(picture_type);
-            tag.push_picture(picture);
-        }
-
-        tag.remove_empty();
+        Self::apply_metadata_fields_to_tag(tag, metadata_fields);
+        Self::apply_image_edits_to_tag(tag, &prepared_image_overwrites, &prepared_image_deletes);
         tagged_file
             .save_to_path(path, WriteOptions::default())
             .map_err(|error| format!("Failed to write tags: {error}"))?;
+        self.finalize_saved_track_properties(path)
+    }
 
+    fn save_track_properties_lossless(
+        path: &Path,
+        metadata_fields: &[MetadataEditorField],
+        prepared_image_overwrites: &[(u8, Picture)],
+        prepared_image_deletes: &[u8],
+    ) -> Result<bool, String> {
+        let Some(file_type) = FileType::from_path(path) else {
+            return Ok(false);
+        };
+
+        match file_type {
+            FileType::Mpeg => {
+                Self::save_lossless_id3v2_properties_for_mpeg(
+                    path,
+                    metadata_fields,
+                    prepared_image_overwrites,
+                    prepared_image_deletes,
+                )?;
+                Ok(true)
+            }
+            FileType::Aac => {
+                Self::save_lossless_id3v2_properties_for_aac(
+                    path,
+                    metadata_fields,
+                    prepared_image_overwrites,
+                    prepared_image_deletes,
+                )?;
+                Ok(true)
+            }
+            FileType::Wav => {
+                Self::save_lossless_id3v2_properties_for_wav(
+                    path,
+                    metadata_fields,
+                    prepared_image_overwrites,
+                    prepared_image_deletes,
+                )?;
+                Ok(true)
+            }
+            FileType::Flac => {
+                Self::save_lossless_vorbis_properties_for_flac(
+                    path,
+                    metadata_fields,
+                    prepared_image_overwrites,
+                    prepared_image_deletes,
+                )?;
+                Ok(true)
+            }
+            FileType::Vorbis => {
+                Self::save_lossless_vorbis_properties_for_ogg_vorbis(
+                    path,
+                    metadata_fields,
+                    prepared_image_overwrites,
+                    prepared_image_deletes,
+                )?;
+                Ok(true)
+            }
+            FileType::Opus => {
+                Self::save_lossless_vorbis_properties_for_opus(
+                    path,
+                    metadata_fields,
+                    prepared_image_overwrites,
+                    prepared_image_deletes,
+                )?;
+                Ok(true)
+            }
+            FileType::Mp4 => {
+                Self::save_lossless_ilst_properties_for_mp4(
+                    path,
+                    metadata_fields,
+                    prepared_image_overwrites,
+                    prepared_image_deletes,
+                )?;
+                Ok(true)
+            }
+            FileType::Ape => {
+                Self::save_lossless_ape_properties_for_ape_file(
+                    path,
+                    metadata_fields,
+                    prepared_image_overwrites,
+                    prepared_image_deletes,
+                )?;
+                Ok(true)
+            }
+            FileType::WavPack => {
+                Self::save_lossless_ape_properties_for_wavpack(
+                    path,
+                    metadata_fields,
+                    prepared_image_overwrites,
+                    prepared_image_deletes,
+                )?;
+                Ok(true)
+            }
+            _ => Ok(false),
+        }
+    }
+
+    fn save_lossless_id3v2_properties_for_mpeg(
+        path: &Path,
+        metadata_fields: &[MetadataEditorField],
+        prepared_image_overwrites: &[(u8, Picture)],
+        prepared_image_deletes: &[u8],
+    ) -> Result<(), String> {
+        let mut file = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(path)
+            .map_err(|error| format!("Failed to open MPEG for tag update: {error}"))?;
+        let mut mpeg_file = MpegFile::read_from(&mut file, ParseOptions::new())
+            .map_err(|error| format!("Failed to parse MPEG tags: {error}"))?;
+        let mut id3v2 = mpeg_file
+            .id3v2_mut()
+            .map(std::mem::take)
+            .unwrap_or_default();
+        Self::apply_metadata_fields_to_id3v2(&mut id3v2, metadata_fields);
+        for picture_type_code in prepared_image_deletes {
+            id3v2.remove_picture_type(PictureType::from_u8(*picture_type_code));
+        }
+        for (picture_type_code, picture) in prepared_image_overwrites {
+            let picture_type = PictureType::from_u8(*picture_type_code);
+            id3v2.remove_picture_type(picture_type);
+            id3v2.insert_picture(picture.clone());
+        }
+        mpeg_file.set_id3v2(id3v2);
+        file.rewind()
+            .map_err(|error| format!("Failed to rewind MPEG before write: {error}"))?;
+        mpeg_file
+            .save_to(&mut file, WriteOptions::default())
+            .map_err(|error| format!("Failed to write MPEG tags: {error}"))?;
+        Ok(())
+    }
+
+    fn save_lossless_id3v2_properties_for_aac(
+        path: &Path,
+        metadata_fields: &[MetadataEditorField],
+        prepared_image_overwrites: &[(u8, Picture)],
+        prepared_image_deletes: &[u8],
+    ) -> Result<(), String> {
+        let mut file = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(path)
+            .map_err(|error| format!("Failed to open AAC for tag update: {error}"))?;
+        let mut aac_file = AacFile::read_from(&mut file, ParseOptions::new())
+            .map_err(|error| format!("Failed to parse AAC tags: {error}"))?;
+        let mut id3v2 = aac_file.id3v2_mut().map(std::mem::take).unwrap_or_default();
+        Self::apply_metadata_fields_to_id3v2(&mut id3v2, metadata_fields);
+        for picture_type_code in prepared_image_deletes {
+            id3v2.remove_picture_type(PictureType::from_u8(*picture_type_code));
+        }
+        for (picture_type_code, picture) in prepared_image_overwrites {
+            let picture_type = PictureType::from_u8(*picture_type_code);
+            id3v2.remove_picture_type(picture_type);
+            id3v2.insert_picture(picture.clone());
+        }
+        aac_file.set_id3v2(id3v2);
+        file.rewind()
+            .map_err(|error| format!("Failed to rewind AAC before write: {error}"))?;
+        aac_file
+            .save_to(&mut file, WriteOptions::default())
+            .map_err(|error| format!("Failed to write AAC tags: {error}"))?;
+        Ok(())
+    }
+
+    fn save_lossless_id3v2_properties_for_wav(
+        path: &Path,
+        metadata_fields: &[MetadataEditorField],
+        prepared_image_overwrites: &[(u8, Picture)],
+        prepared_image_deletes: &[u8],
+    ) -> Result<(), String> {
+        let mut file = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(path)
+            .map_err(|error| format!("Failed to open WAV for tag update: {error}"))?;
+        let mut wav_file = WavFile::read_from(&mut file, ParseOptions::new())
+            .map_err(|error| format!("Failed to parse WAV tags: {error}"))?;
+        let mut id3v2 = wav_file.id3v2_mut().map(std::mem::take).unwrap_or_default();
+        Self::apply_metadata_fields_to_id3v2(&mut id3v2, metadata_fields);
+        for picture_type_code in prepared_image_deletes {
+            id3v2.remove_picture_type(PictureType::from_u8(*picture_type_code));
+        }
+        for (picture_type_code, picture) in prepared_image_overwrites {
+            let picture_type = PictureType::from_u8(*picture_type_code);
+            id3v2.remove_picture_type(picture_type);
+            id3v2.insert_picture(picture.clone());
+        }
+        wav_file.set_id3v2(id3v2);
+        file.rewind()
+            .map_err(|error| format!("Failed to rewind WAV before write: {error}"))?;
+        wav_file
+            .save_to(&mut file, WriteOptions::default())
+            .map_err(|error| format!("Failed to write WAV tags: {error}"))?;
+        Ok(())
+    }
+
+    fn save_lossless_vorbis_properties_for_flac(
+        path: &Path,
+        metadata_fields: &[MetadataEditorField],
+        prepared_image_overwrites: &[(u8, Picture)],
+        prepared_image_deletes: &[u8],
+    ) -> Result<(), String> {
+        let mut file = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(path)
+            .map_err(|error| format!("Failed to open FLAC for tag update: {error}"))?;
+        let mut flac_file = FlacFile::read_from(&mut file, ParseOptions::new())
+            .map_err(|error| format!("Failed to parse FLAC tags: {error}"))?;
+        let source_tag = flac_file
+            .vorbis_comments_mut()
+            .map(std::mem::take)
+            .unwrap_or_default();
+        let updated_tag = Self::apply_properties_edits_to_split_tag(
+            source_tag,
+            metadata_fields,
+            prepared_image_overwrites,
+            prepared_image_deletes,
+        );
+        flac_file.set_vorbis_comments(updated_tag);
+        file.rewind()
+            .map_err(|error| format!("Failed to rewind FLAC before write: {error}"))?;
+        flac_file
+            .save_to(&mut file, WriteOptions::default())
+            .map_err(|error| format!("Failed to write FLAC tags: {error}"))?;
+        Ok(())
+    }
+
+    fn save_lossless_vorbis_properties_for_ogg_vorbis(
+        path: &Path,
+        metadata_fields: &[MetadataEditorField],
+        prepared_image_overwrites: &[(u8, Picture)],
+        prepared_image_deletes: &[u8],
+    ) -> Result<(), String> {
+        let mut file = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(path)
+            .map_err(|error| format!("Failed to open OGG Vorbis for tag update: {error}"))?;
+        let mut vorbis_file = VorbisFile::read_from(&mut file, ParseOptions::new())
+            .map_err(|error| format!("Failed to parse OGG Vorbis tags: {error}"))?;
+        let source_tag = std::mem::take(vorbis_file.vorbis_comments_mut());
+        let updated_tag = Self::apply_properties_edits_to_split_tag(
+            source_tag,
+            metadata_fields,
+            prepared_image_overwrites,
+            prepared_image_deletes,
+        );
+        *vorbis_file.vorbis_comments_mut() = updated_tag;
+        file.rewind()
+            .map_err(|error| format!("Failed to rewind OGG Vorbis before write: {error}"))?;
+        vorbis_file
+            .save_to(&mut file, WriteOptions::default())
+            .map_err(|error| format!("Failed to write OGG Vorbis tags: {error}"))?;
+        Ok(())
+    }
+
+    fn save_lossless_vorbis_properties_for_opus(
+        path: &Path,
+        metadata_fields: &[MetadataEditorField],
+        prepared_image_overwrites: &[(u8, Picture)],
+        prepared_image_deletes: &[u8],
+    ) -> Result<(), String> {
+        let mut file = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(path)
+            .map_err(|error| format!("Failed to open Opus for tag update: {error}"))?;
+        let mut opus_file = OpusFile::read_from(&mut file, ParseOptions::new())
+            .map_err(|error| format!("Failed to parse Opus tags: {error}"))?;
+        let source_tag = std::mem::take(opus_file.vorbis_comments_mut());
+        let updated_tag = Self::apply_properties_edits_to_split_tag(
+            source_tag,
+            metadata_fields,
+            prepared_image_overwrites,
+            prepared_image_deletes,
+        );
+        *opus_file.vorbis_comments_mut() = updated_tag;
+        file.rewind()
+            .map_err(|error| format!("Failed to rewind Opus before write: {error}"))?;
+        opus_file
+            .save_to(&mut file, WriteOptions::default())
+            .map_err(|error| format!("Failed to write Opus tags: {error}"))?;
+        Ok(())
+    }
+
+    fn save_lossless_ilst_properties_for_mp4(
+        path: &Path,
+        metadata_fields: &[MetadataEditorField],
+        prepared_image_overwrites: &[(u8, Picture)],
+        prepared_image_deletes: &[u8],
+    ) -> Result<(), String> {
+        let mut file = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(path)
+            .map_err(|error| format!("Failed to open MP4 for tag update: {error}"))?;
+        let mut mp4_file = Mp4File::read_from(&mut file, ParseOptions::new())
+            .map_err(|error| format!("Failed to parse MP4 tags: {error}"))?;
+        let source_tag = mp4_file.ilst_mut().map(std::mem::take).unwrap_or_default();
+        let updated_tag = Self::apply_properties_edits_to_split_tag(
+            source_tag,
+            metadata_fields,
+            prepared_image_overwrites,
+            prepared_image_deletes,
+        );
+        mp4_file.set_ilst(updated_tag);
+        file.rewind()
+            .map_err(|error| format!("Failed to rewind MP4 before write: {error}"))?;
+        mp4_file
+            .save_to(&mut file, WriteOptions::default())
+            .map_err(|error| format!("Failed to write MP4 tags: {error}"))?;
+        Ok(())
+    }
+
+    fn save_lossless_ape_properties_for_ape_file(
+        path: &Path,
+        metadata_fields: &[MetadataEditorField],
+        prepared_image_overwrites: &[(u8, Picture)],
+        prepared_image_deletes: &[u8],
+    ) -> Result<(), String> {
+        let mut file = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(path)
+            .map_err(|error| format!("Failed to open APE for tag update: {error}"))?;
+        let mut ape_file = ApeFile::read_from(&mut file, ParseOptions::new())
+            .map_err(|error| format!("Failed to parse APE tags: {error}"))?;
+        let source_tag = ape_file.ape_mut().map(std::mem::take).unwrap_or_default();
+        let updated_tag = Self::apply_properties_edits_to_split_tag(
+            source_tag,
+            metadata_fields,
+            prepared_image_overwrites,
+            prepared_image_deletes,
+        );
+        ape_file.set_ape(updated_tag);
+        file.rewind()
+            .map_err(|error| format!("Failed to rewind APE before write: {error}"))?;
+        ape_file
+            .save_to(&mut file, WriteOptions::default())
+            .map_err(|error| format!("Failed to write APE tags: {error}"))?;
+        Ok(())
+    }
+
+    fn save_lossless_ape_properties_for_wavpack(
+        path: &Path,
+        metadata_fields: &[MetadataEditorField],
+        prepared_image_overwrites: &[(u8, Picture)],
+        prepared_image_deletes: &[u8],
+    ) -> Result<(), String> {
+        let mut file = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(path)
+            .map_err(|error| format!("Failed to open WavPack for tag update: {error}"))?;
+        let mut wavpack_file = WavPackFile::read_from(&mut file, ParseOptions::new())
+            .map_err(|error| format!("Failed to parse WavPack tags: {error}"))?;
+        let source_tag = wavpack_file
+            .ape_mut()
+            .map(std::mem::take)
+            .unwrap_or_default();
+        let updated_tag = Self::apply_properties_edits_to_split_tag(
+            source_tag,
+            metadata_fields,
+            prepared_image_overwrites,
+            prepared_image_deletes,
+        );
+        wavpack_file.set_ape(updated_tag);
+        file.rewind()
+            .map_err(|error| format!("Failed to rewind WavPack before write: {error}"))?;
+        wavpack_file
+            .save_to(&mut file, WriteOptions::default())
+            .map_err(|error| format!("Failed to write WavPack tags: {error}"))?;
+        Ok(())
+    }
+
+    fn finalize_saved_track_properties(
+        &self,
+        path: &Path,
+    ) -> Result<(TrackMetadataSummary, Option<String>), String> {
         let refreshed =
             read_from_path(path).map_err(|error| format!("Failed to refresh tags: {error}"))?;
         let refreshed_tag = refreshed.primary_tag().or_else(|| refreshed.first_tag());
@@ -1172,11 +1763,26 @@ impl MetadataManager {
 #[cfg(test)]
 mod tests {
     use super::MetadataManager;
-    use crate::protocol::{PropertiesImageDelete, PropertiesImageOverwrite};
+    use crate::protocol::{MetadataEditorField, PropertiesImageDelete, PropertiesImageOverwrite};
+    use lofty::aac::AacFile;
+    use lofty::ape::ApeItem;
+    use lofty::config::{ParseOptions, WriteOptions};
+    use lofty::file::{AudioFile, TaggedFileExt};
+    use lofty::flac::FlacFile;
+    use lofty::id3::v1::Id3v1Tag;
+    use lofty::iff::wav::WavFile;
+    use lofty::mp4::{Atom, AtomData, AtomIdent, Mp4File};
+    use lofty::mpeg::MpegFile;
+    use lofty::ogg::{OpusFile, VorbisFile};
     use lofty::picture::{Picture, PictureType};
-    use lofty::tag::{Tag, TagType};
+    use lofty::prelude::{Accessor, TagExt};
+    use lofty::read_from_path;
+    use lofty::tag::{ItemKey, ItemValue, Tag, TagType};
+    use lofty::wavpack::WavPackFile;
+    use std::borrow::Cow;
     use std::fs;
-    use std::io::Cursor;
+    use std::fs::OpenOptions;
+    use std::io::{Cursor, Seek};
     use std::path::{Path, PathBuf};
 
     fn tiny_png_bytes() -> &'static [u8] {
@@ -1205,6 +1811,394 @@ mod tests {
         let mut picture = Picture::from_reader(&mut cursor).expect("failed to parse sample image");
         picture.set_pic_type(pic_type);
         picture
+    }
+
+    fn metadata_fixture_path(file_name: &str) -> PathBuf {
+        Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures/metadata_preservation")
+            .join(file_name)
+    }
+
+    fn copy_metadata_fixture(file_name: &str) -> (PathBuf, PathBuf) {
+        let dir = make_temp_dir("metadata-preservation-fixture");
+        let source_path = metadata_fixture_path(file_name);
+        let target_path = dir.join(file_name);
+        fs::copy(&source_path, &target_path).expect("failed to copy metadata fixture");
+        (dir, target_path)
+    }
+
+    fn metadata_title_field(value: &str) -> Vec<MetadataEditorField> {
+        vec![MetadataEditorField {
+            id: "common:title".to_string(),
+            field_name: "Title".to_string(),
+            value: value.to_string(),
+            common: true,
+        }]
+    }
+
+    fn staged_picture_overwrite() -> Vec<(u8, Picture)> {
+        vec![(3, make_picture(PictureType::CoverFront))]
+    }
+
+    fn read_track_title(path: &Path) -> Option<String> {
+        let tagged_file = read_from_path(path).ok()?;
+        tagged_file
+            .primary_tag()?
+            .title()
+            .map(|value| value.to_string())
+    }
+
+    fn seed_id3v2_user_text(path: &Path, key: &str, value: &str) {
+        let extension = path
+            .extension()
+            .and_then(|ext| ext.to_str())
+            .unwrap_or_default()
+            .to_ascii_lowercase();
+        let mut file = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(path)
+            .expect("failed to open id3v2 fixture");
+
+        match extension.as_str() {
+            "mp3" => {
+                let mut mpeg_file =
+                    MpegFile::read_from(&mut file, ParseOptions::new()).expect("read mp3 failed");
+                let mut id3v2 = mpeg_file
+                    .id3v2_mut()
+                    .map(std::mem::take)
+                    .unwrap_or_default();
+                let _ = id3v2.insert_user_text(key.to_string(), value.to_string());
+                mpeg_file.set_id3v2(id3v2);
+                file.rewind().expect("rewind mp3 failed");
+                mpeg_file
+                    .save_to(&mut file, WriteOptions::default())
+                    .expect("write mp3 failed");
+            }
+            "aac" => {
+                let mut aac_file =
+                    AacFile::read_from(&mut file, ParseOptions::new()).expect("read aac failed");
+                let mut id3v2 = aac_file.id3v2_mut().map(std::mem::take).unwrap_or_default();
+                let _ = id3v2.insert_user_text(key.to_string(), value.to_string());
+                aac_file.set_id3v2(id3v2);
+                file.rewind().expect("rewind aac failed");
+                aac_file
+                    .save_to(&mut file, WriteOptions::default())
+                    .expect("write aac failed");
+            }
+            "wav" => {
+                let mut wav_file =
+                    WavFile::read_from(&mut file, ParseOptions::new()).expect("read wav failed");
+                let mut id3v2 = wav_file.id3v2_mut().map(std::mem::take).unwrap_or_default();
+                let _ = id3v2.insert_user_text(key.to_string(), value.to_string());
+                wav_file.set_id3v2(id3v2);
+                file.rewind().expect("rewind wav failed");
+                wav_file
+                    .save_to(&mut file, WriteOptions::default())
+                    .expect("write wav failed");
+            }
+            other => panic!("unsupported id3v2 fixture extension: {other}"),
+        }
+    }
+
+    fn seed_id3v2_user_text_fields(path: &Path, fields: &[(&str, &str)]) {
+        for (key, value) in fields {
+            seed_id3v2_user_text(path, key, value);
+        }
+    }
+
+    fn read_id3v2_user_text(path: &Path, key: &str) -> Option<String> {
+        let extension = path
+            .extension()
+            .and_then(|ext| ext.to_str())
+            .unwrap_or_default()
+            .to_ascii_lowercase();
+        let mut file = OpenOptions::new().read(true).open(path).ok()?;
+        match extension.as_str() {
+            "mp3" => {
+                let mpeg_file = MpegFile::read_from(&mut file, ParseOptions::new()).ok()?;
+                mpeg_file.id3v2()?.get_user_text(key).map(str::to_string)
+            }
+            "aac" => {
+                let aac_file = AacFile::read_from(&mut file, ParseOptions::new()).ok()?;
+                aac_file.id3v2()?.get_user_text(key).map(str::to_string)
+            }
+            "wav" => {
+                let wav_file = WavFile::read_from(&mut file, ParseOptions::new()).ok()?;
+                wav_file.id3v2()?.get_user_text(key).map(str::to_string)
+            }
+            _ => None,
+        }
+    }
+
+    fn seed_mpeg_ape_text_fields(path: &Path, fields: &[(&str, &str)]) {
+        let mut file = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(path)
+            .expect("failed to open mpeg ape fixture");
+        let mut mpeg_file =
+            MpegFile::read_from(&mut file, ParseOptions::new()).expect("read mpeg failed");
+        let mut ape = mpeg_file.ape_mut().map(std::mem::take).unwrap_or_default();
+        for (key, value) in fields {
+            ape.insert(
+                ApeItem::new((*key).to_string(), ItemValue::Text((*value).to_string()))
+                    .expect("invalid ape item"),
+            );
+        }
+        mpeg_file.set_ape(ape);
+        file.rewind().expect("rewind mpeg ape failed");
+        mpeg_file
+            .save_to(&mut file, WriteOptions::default())
+            .expect("write mpeg ape failed");
+    }
+
+    fn read_mpeg_ape_text(path: &Path, key: &str) -> Option<String> {
+        let mut file = OpenOptions::new().read(true).open(path).ok()?;
+        let mpeg_file = MpegFile::read_from(&mut file, ParseOptions::new()).ok()?;
+        let ape = mpeg_file.ape()?;
+        let item = ape.get(key)?;
+        match item.value() {
+            ItemValue::Text(value) => Some(value.clone()),
+            _ => None,
+        }
+    }
+
+    fn seed_mpeg_id3v1_only(path: &Path) {
+        let _ = TagType::Id3v2.remove_from_path(path);
+        let _ = TagType::Ape.remove_from_path(path);
+
+        let mut tag = Id3v1Tag::new();
+        tag.set_title("Legacy ID3v1 Title".to_string());
+        tag.set_artist("Legacy ID3v1 Artist".to_string());
+        tag.set_album("Legacy ID3v1 Album".to_string());
+        tag.set_comment("Legacy ID3v1 Comment".to_string());
+        tag.save_to_path(path, WriteOptions::default())
+            .expect("write id3v1 failed");
+    }
+
+    fn read_mpeg_id3v1_snapshot(path: &Path) -> Option<(String, String, String, String)> {
+        let mut file = OpenOptions::new().read(true).open(path).ok()?;
+        let mpeg_file = MpegFile::read_from(&mut file, ParseOptions::new()).ok()?;
+        let tag = mpeg_file.id3v1()?;
+        Some((
+            tag.title()
+                .map(|value| value.to_string())
+                .unwrap_or_default(),
+            tag.artist()
+                .map(|value| value.to_string())
+                .unwrap_or_default(),
+            tag.album()
+                .map(|value| value.to_string())
+                .unwrap_or_default(),
+            tag.comment()
+                .map(|value| value.to_string())
+                .unwrap_or_default(),
+        ))
+    }
+
+    fn seed_wavpack_ape_text_fields(path: &Path, fields: &[(&str, &str)]) {
+        let mut file = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(path)
+            .expect("failed to open wavpack ape fixture");
+        let mut wavpack_file =
+            WavPackFile::read_from(&mut file, ParseOptions::new()).expect("read wavpack failed");
+        let mut ape = wavpack_file
+            .ape_mut()
+            .map(std::mem::take)
+            .unwrap_or_default();
+        for (key, value) in fields {
+            ape.insert(
+                ApeItem::new((*key).to_string(), ItemValue::Text((*value).to_string()))
+                    .expect("invalid wavpack ape item"),
+            );
+        }
+        wavpack_file.set_ape(ape);
+        file.rewind().expect("rewind wavpack ape failed");
+        wavpack_file
+            .save_to(&mut file, WriteOptions::default())
+            .expect("write wavpack ape failed");
+    }
+
+    fn read_wavpack_ape_text(path: &Path, key: &str) -> Option<String> {
+        let mut file = OpenOptions::new().read(true).open(path).ok()?;
+        let wavpack_file = WavPackFile::read_from(&mut file, ParseOptions::new()).ok()?;
+        let ape = wavpack_file.ape()?;
+        let item = ape.get(key)?;
+        match item.value() {
+            ItemValue::Text(value) => Some(value.clone()),
+            _ => None,
+        }
+    }
+
+    fn seed_wavpack_id3v1_only(path: &Path) {
+        let _ = TagType::Ape.remove_from_path(path);
+        let _ = TagType::Id3v2.remove_from_path(path);
+
+        let mut tag = Id3v1Tag::new();
+        tag.set_title("Legacy WavPack ID3v1 Title".to_string());
+        tag.set_artist("Legacy WavPack ID3v1 Artist".to_string());
+        tag.set_album("Legacy WavPack ID3v1 Album".to_string());
+        tag.set_comment("Legacy WavPack ID3v1 Comment".to_string());
+        tag.save_to_path(path, WriteOptions::default())
+            .expect("write wavpack id3v1 failed");
+    }
+
+    fn read_wavpack_id3v1_snapshot(path: &Path) -> Option<(String, String, String, String)> {
+        let mut file = OpenOptions::new().read(true).open(path).ok()?;
+        let wavpack_file = WavPackFile::read_from(&mut file, ParseOptions::new()).ok()?;
+        let tag = wavpack_file.id3v1()?;
+        Some((
+            tag.title()
+                .map(|value| value.to_string())
+                .unwrap_or_default(),
+            tag.artist()
+                .map(|value| value.to_string())
+                .unwrap_or_default(),
+            tag.album()
+                .map(|value| value.to_string())
+                .unwrap_or_default(),
+            tag.comment()
+                .map(|value| value.to_string())
+                .unwrap_or_default(),
+        ))
+    }
+
+    fn seed_vorbis_comment(path: &Path, key: &str, value: &str) {
+        let extension = path
+            .extension()
+            .and_then(|ext| ext.to_str())
+            .unwrap_or_default()
+            .to_ascii_lowercase();
+        let mut file = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(path)
+            .expect("failed to open vorbis fixture");
+        match extension.as_str() {
+            "flac" => {
+                let mut flac_file =
+                    FlacFile::read_from(&mut file, ParseOptions::new()).expect("read flac failed");
+                let mut vorbis = flac_file
+                    .vorbis_comments_mut()
+                    .map(std::mem::take)
+                    .unwrap_or_default();
+                vorbis.push(key.to_string(), value.to_string());
+                flac_file.set_vorbis_comments(vorbis);
+                file.rewind().expect("rewind flac failed");
+                flac_file
+                    .save_to(&mut file, WriteOptions::default())
+                    .expect("write flac failed");
+            }
+            "ogg" => {
+                let mut vorbis_file = VorbisFile::read_from(&mut file, ParseOptions::new())
+                    .expect("read ogg vorbis failed");
+                vorbis_file
+                    .vorbis_comments_mut()
+                    .push(key.to_string(), value.to_string());
+                file.rewind().expect("rewind ogg failed");
+                vorbis_file
+                    .save_to(&mut file, WriteOptions::default())
+                    .expect("write ogg vorbis failed");
+            }
+            "opus" => {
+                let mut opus_file =
+                    OpusFile::read_from(&mut file, ParseOptions::new()).expect("read opus failed");
+                opus_file
+                    .vorbis_comments_mut()
+                    .push(key.to_string(), value.to_string());
+                file.rewind().expect("rewind opus failed");
+                opus_file
+                    .save_to(&mut file, WriteOptions::default())
+                    .expect("write opus failed");
+            }
+            other => panic!("unsupported vorbis fixture extension: {other}"),
+        }
+    }
+
+    fn seed_vorbis_comment_fields(path: &Path, fields: &[(&str, &str)]) {
+        for (key, value) in fields {
+            seed_vorbis_comment(path, key, value);
+        }
+    }
+
+    fn read_vorbis_comment(path: &Path, key: &str) -> Option<String> {
+        let extension = path
+            .extension()
+            .and_then(|ext| ext.to_str())
+            .unwrap_or_default()
+            .to_ascii_lowercase();
+        let mut file = OpenOptions::new().read(true).open(path).ok()?;
+        match extension.as_str() {
+            "flac" => {
+                let flac_file = FlacFile::read_from(&mut file, ParseOptions::new()).ok()?;
+                flac_file
+                    .vorbis_comments()
+                    .and_then(|tag| tag.get(key))
+                    .map(str::to_string)
+            }
+            "ogg" => {
+                let vorbis_file = VorbisFile::read_from(&mut file, ParseOptions::new()).ok()?;
+                vorbis_file.vorbis_comments().get(key).map(str::to_string)
+            }
+            "opus" => {
+                let opus_file = OpusFile::read_from(&mut file, ParseOptions::new()).ok()?;
+                opus_file.vorbis_comments().get(key).map(str::to_string)
+            }
+            _ => None,
+        }
+    }
+
+    fn mp4_sentinel_ident(name: &'static str) -> AtomIdent<'static> {
+        AtomIdent::Freeform {
+            mean: Cow::Borrowed("com.roqtune"),
+            name: Cow::Borrowed(name),
+        }
+    }
+
+    fn seed_mp4_freeform(path: &Path, name: &'static str, value: &str) {
+        let mut file = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(path)
+            .expect("failed to open mp4 fixture");
+        let mut mp4_file =
+            Mp4File::read_from(&mut file, ParseOptions::new()).expect("read mp4 failed");
+        let mut ilst = mp4_file.ilst_mut().map(std::mem::take).unwrap_or_default();
+        ilst.insert(Atom::new(
+            mp4_sentinel_ident(name),
+            AtomData::UTF8(value.to_string()),
+        ));
+        mp4_file.set_ilst(ilst);
+        file.rewind().expect("rewind mp4 failed");
+        mp4_file
+            .save_to(&mut file, WriteOptions::default())
+            .expect("write mp4 failed");
+    }
+
+    fn seed_mp4_freeform_fields(path: &Path, fields: &[(&'static str, &str)]) {
+        for (name, value) in fields {
+            seed_mp4_freeform(path, name, value);
+        }
+    }
+
+    fn read_mp4_freeform(path: &Path, name: &'static str) -> Option<String> {
+        let mut file = OpenOptions::new().read(true).open(path).ok()?;
+        let mp4_file = Mp4File::read_from(&mut file, ParseOptions::new()).ok()?;
+        let ilst = mp4_file.ilst()?;
+        let ident = mp4_sentinel_ident(name);
+        let atom = ilst.get(&ident)?;
+        for data in atom.data() {
+            match data {
+                AtomData::UTF8(value) | AtomData::UTF16(value) => {
+                    return Some(value.clone());
+                }
+                _ => {}
+            }
+        }
+        None
     }
 
     #[test]
@@ -1411,6 +2405,494 @@ mod tests {
         assert!(slots
             .iter()
             .any(|slot| slot.picture_type_code == 0 && slot.details != "No embedded image"));
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_collect_editable_field_values_includes_replaygain_keys() {
+        let mut tag = Tag::new(TagType::Id3v2);
+        tag.insert_text(ItemKey::TrackTitle, "ReplayGain Fixture".to_string());
+        tag.insert_text(ItemKey::ReplayGainTrackGain, "-9.20 dB".to_string());
+        tag.insert_text(ItemKey::ReplayGainTrackPeak, "0.987654".to_string());
+        tag.insert_text(ItemKey::ReplayGainAlbumGain, "-8.10 dB".to_string());
+        tag.insert_text(ItemKey::ReplayGainAlbumPeak, "0.998877".to_string());
+        assert_eq!(
+            MetadataManager::collect_editable_field_values(&tag)
+                .get("key:REPLAYGAIN_TRACK_GAIN")
+                .map(String::as_str),
+            Some("-9.20 dB")
+        );
+        assert_eq!(
+            MetadataManager::collect_editable_field_values(&tag)
+                .get("key:REPLAYGAIN_ALBUM_GAIN")
+                .map(String::as_str),
+            Some("-8.10 dB")
+        );
+    }
+
+    #[test]
+    fn test_lossless_id3v2_save_preserves_user_text_for_supported_formats() {
+        const ID3_SENTINEL_KEY: &str = "ROQTUNE_LOSSLESS_SENTINEL";
+        const ID3_SENTINEL_VALUE: &str = "keep-id3";
+
+        for fixture_name in ["base.mp3", "base.aac", "base.wav"] {
+            let (dir, fixture_path) = copy_metadata_fixture(fixture_name);
+            seed_id3v2_user_text(&fixture_path, ID3_SENTINEL_KEY, ID3_SENTINEL_VALUE);
+
+            let prepared_image_overwrites = staged_picture_overwrite();
+            let metadata_fields = metadata_title_field("Lossless ID3v2 Title");
+            let handled = MetadataManager::save_track_properties_lossless(
+                &fixture_path,
+                &metadata_fields,
+                &prepared_image_overwrites,
+                &[],
+            )
+            .expect("lossless id3v2 save failed");
+            assert!(handled);
+
+            assert_eq!(
+                read_id3v2_user_text(&fixture_path, ID3_SENTINEL_KEY).as_deref(),
+                Some(ID3_SENTINEL_VALUE)
+            );
+            assert_eq!(
+                read_track_title(&fixture_path).as_deref(),
+                Some("Lossless ID3v2 Title")
+            );
+
+            let _ = fs::remove_dir_all(&dir);
+        }
+    }
+
+    #[test]
+    fn test_lossless_vorbis_save_preserves_unmapped_comment_for_supported_formats() {
+        const VORBIS_SENTINEL_KEY: &str = "ROQTUNE_LOSSLESS_SENTINEL";
+        const VORBIS_SENTINEL_VALUE: &str = "keep-vorbis";
+
+        for fixture_name in ["base.flac", "base.ogg", "base.opus"] {
+            let (dir, fixture_path) = copy_metadata_fixture(fixture_name);
+            seed_vorbis_comment(&fixture_path, VORBIS_SENTINEL_KEY, VORBIS_SENTINEL_VALUE);
+
+            let prepared_image_overwrites = staged_picture_overwrite();
+            let metadata_fields = metadata_title_field("Lossless Vorbis Title");
+            let handled = MetadataManager::save_track_properties_lossless(
+                &fixture_path,
+                &metadata_fields,
+                &prepared_image_overwrites,
+                &[],
+            )
+            .expect("lossless vorbis save failed");
+            assert!(handled);
+
+            assert_eq!(
+                read_vorbis_comment(&fixture_path, VORBIS_SENTINEL_KEY).as_deref(),
+                Some(VORBIS_SENTINEL_VALUE)
+            );
+            assert_eq!(
+                read_track_title(&fixture_path).as_deref(),
+                Some("Lossless Vorbis Title")
+            );
+
+            let _ = fs::remove_dir_all(&dir);
+        }
+    }
+
+    #[test]
+    fn test_lossless_mp4_save_preserves_freeform_atom_for_supported_formats() {
+        const MP4_SENTINEL_NAME: &str = "LOSSLESS_SENTINEL";
+        const MP4_SENTINEL_VALUE: &str = "keep-mp4";
+
+        for fixture_name in ["base.m4a", "base.mp4"] {
+            let (dir, fixture_path) = copy_metadata_fixture(fixture_name);
+            seed_mp4_freeform(&fixture_path, MP4_SENTINEL_NAME, MP4_SENTINEL_VALUE);
+
+            let prepared_image_overwrites = staged_picture_overwrite();
+            let metadata_fields = metadata_title_field("Lossless MP4 Title");
+            let handled = MetadataManager::save_track_properties_lossless(
+                &fixture_path,
+                &metadata_fields,
+                &prepared_image_overwrites,
+                &[],
+            )
+            .expect("lossless mp4 save failed");
+            assert!(handled);
+
+            assert_eq!(
+                read_mp4_freeform(&fixture_path, MP4_SENTINEL_NAME).as_deref(),
+                Some(MP4_SENTINEL_VALUE)
+            );
+            assert_eq!(
+                read_track_title(&fixture_path).as_deref(),
+                Some("Lossless MP4 Title")
+            );
+
+            let _ = fs::remove_dir_all(&dir);
+        }
+    }
+
+    #[test]
+    fn test_lossless_artwork_edit_preserves_dense_id3v2_user_text_metadata() {
+        const DENSE_ID3_FIELDS: &[(&str, &str)] = &[
+            ("REPLAYGAIN_TRACK_GAIN", "-9.20 dB"),
+            ("REPLAYGAIN_TRACK_PEAK", "0.987654"),
+            ("REPLAYGAIN_ALBUM_GAIN", "-8.10 dB"),
+            ("REPLAYGAIN_ALBUM_PEAK", "0.998877"),
+            ("REPLAYGAIN_REFERENCE_LOUDNESS", "89.0 dB"),
+            ("ROQTUNE_CUSTOM_FIELD_ALPHA", "alpha"),
+            ("ROQTUNE_CUSTOM_FIELD_BETA", "beta=1"),
+            ("roqtune_custom_field_lower", "lower"),
+        ];
+
+        for fixture_name in ["base.mp3", "base.aac", "base.wav"] {
+            let (dir, fixture_path) = copy_metadata_fixture(fixture_name);
+            seed_id3v2_user_text_fields(&fixture_path, DENSE_ID3_FIELDS);
+
+            let prepared_image_overwrites = staged_picture_overwrite();
+            let handled = MetadataManager::save_track_properties_lossless(
+                &fixture_path,
+                &[],
+                &prepared_image_overwrites,
+                &[],
+            )
+            .expect("lossless id3v2 image-only save failed");
+            assert!(handled);
+
+            for (key, expected_value) in DENSE_ID3_FIELDS {
+                assert_eq!(
+                    read_id3v2_user_text(&fixture_path, key).as_deref(),
+                    Some(*expected_value),
+                    "fixture={fixture_name} key={key}"
+                );
+            }
+
+            let metadata_fields = metadata_title_field("Dense ID3v2 Title");
+            let handled = MetadataManager::save_track_properties_lossless(
+                &fixture_path,
+                &metadata_fields,
+                &[],
+                &[],
+            )
+            .expect("lossless id3v2 metadata save failed");
+            assert!(handled);
+            assert_eq!(
+                read_track_title(&fixture_path).as_deref(),
+                Some("Dense ID3v2 Title")
+            );
+            for (key, expected_value) in DENSE_ID3_FIELDS {
+                assert_eq!(
+                    read_id3v2_user_text(&fixture_path, key).as_deref(),
+                    Some(*expected_value),
+                    "fixture={fixture_name} key={key}"
+                );
+            }
+
+            let _ = fs::remove_dir_all(&dir);
+        }
+    }
+
+    #[test]
+    fn test_lossless_artwork_edit_preserves_dense_vorbis_comment_metadata() {
+        const DENSE_VORBIS_FIELDS: &[(&str, &str)] = &[
+            ("REPLAYGAIN_TRACK_GAIN", "-9.20 dB"),
+            ("REPLAYGAIN_TRACK_PEAK", "0.987654"),
+            ("REPLAYGAIN_ALBUM_GAIN", "-8.10 dB"),
+            ("REPLAYGAIN_ALBUM_PEAK", "0.998877"),
+            ("REPLAYGAIN_REFERENCE_LOUDNESS", "89.0 dB"),
+            ("R128_TRACK_GAIN", "-289"),
+            ("ROQTUNE_CUSTOM_FIELD_ALPHA", "alpha"),
+            ("ROQTUNE_CUSTOM_FIELD_BETA", "beta=1"),
+            ("roqtune_custom_field_lower", "lower"),
+        ];
+
+        for fixture_name in ["base.flac", "base.ogg", "base.opus"] {
+            let (dir, fixture_path) = copy_metadata_fixture(fixture_name);
+            seed_vorbis_comment_fields(&fixture_path, DENSE_VORBIS_FIELDS);
+
+            let prepared_image_overwrites = staged_picture_overwrite();
+            let handled = MetadataManager::save_track_properties_lossless(
+                &fixture_path,
+                &[],
+                &prepared_image_overwrites,
+                &[],
+            )
+            .expect("lossless vorbis image-only save failed");
+            assert!(handled);
+
+            for (key, expected_value) in DENSE_VORBIS_FIELDS {
+                assert_eq!(
+                    read_vorbis_comment(&fixture_path, key).as_deref(),
+                    Some(*expected_value),
+                    "fixture={fixture_name} key={key}"
+                );
+            }
+
+            let metadata_fields = metadata_title_field("Dense Vorbis Title");
+            let handled = MetadataManager::save_track_properties_lossless(
+                &fixture_path,
+                &metadata_fields,
+                &[],
+                &[],
+            )
+            .expect("lossless vorbis metadata save failed");
+            assert!(handled);
+            assert_eq!(
+                read_track_title(&fixture_path).as_deref(),
+                Some("Dense Vorbis Title")
+            );
+            for (key, expected_value) in DENSE_VORBIS_FIELDS {
+                assert_eq!(
+                    read_vorbis_comment(&fixture_path, key).as_deref(),
+                    Some(*expected_value),
+                    "fixture={fixture_name} key={key}"
+                );
+            }
+
+            let _ = fs::remove_dir_all(&dir);
+        }
+    }
+
+    #[test]
+    fn test_lossless_artwork_edit_preserves_dense_mp4_freeform_metadata() {
+        const DENSE_MP4_FIELDS: &[(&str, &str)] = &[
+            ("replaygain_track_gain", "-9.20 dB"),
+            ("replaygain_track_peak", "0.987654"),
+            ("replaygain_album_gain", "-8.10 dB"),
+            ("replaygain_album_peak", "0.998877"),
+            ("replaygain_reference_loudness", "89.0 dB"),
+            ("roqtune_custom_field_alpha", "alpha"),
+            ("roqtune_custom_field_beta", "beta=1"),
+            ("roqtune_custom_field_lower", "lower"),
+        ];
+
+        for fixture_name in ["base.m4a", "base.mp4"] {
+            let (dir, fixture_path) = copy_metadata_fixture(fixture_name);
+            seed_mp4_freeform_fields(&fixture_path, DENSE_MP4_FIELDS);
+
+            let prepared_image_overwrites = staged_picture_overwrite();
+            let handled = MetadataManager::save_track_properties_lossless(
+                &fixture_path,
+                &[],
+                &prepared_image_overwrites,
+                &[],
+            )
+            .expect("lossless mp4 image-only save failed");
+            assert!(handled);
+
+            for (name, expected_value) in DENSE_MP4_FIELDS {
+                assert_eq!(
+                    read_mp4_freeform(&fixture_path, name).as_deref(),
+                    Some(*expected_value),
+                    "fixture={fixture_name} name={name}"
+                );
+            }
+
+            let metadata_fields = metadata_title_field("Dense MP4 Title");
+            let handled = MetadataManager::save_track_properties_lossless(
+                &fixture_path,
+                &metadata_fields,
+                &[],
+                &[],
+            )
+            .expect("lossless mp4 metadata save failed");
+            assert!(handled);
+            assert_eq!(
+                read_track_title(&fixture_path).as_deref(),
+                Some("Dense MP4 Title")
+            );
+            for (name, expected_value) in DENSE_MP4_FIELDS {
+                assert_eq!(
+                    read_mp4_freeform(&fixture_path, name).as_deref(),
+                    Some(*expected_value),
+                    "fixture={fixture_name} name={name}"
+                );
+            }
+
+            let _ = fs::remove_dir_all(&dir);
+        }
+    }
+
+    #[test]
+    fn test_lossless_mpeg_edit_preserves_dense_ape_metadata() {
+        const DENSE_APE_FIELDS: &[(&str, &str)] = &[
+            ("REPLAYGAIN_TRACK_GAIN", "-9.20 dB"),
+            ("REPLAYGAIN_TRACK_PEAK", "0.987654"),
+            ("REPLAYGAIN_ALBUM_GAIN", "-8.10 dB"),
+            ("REPLAYGAIN_ALBUM_PEAK", "0.998877"),
+            ("REPLAYGAIN_REFERENCE_LOUDNESS", "89.0 dB"),
+            ("ROQTUNE_CUSTOM_FIELD_ALPHA", "alpha"),
+            ("ROQTUNE_CUSTOM_FIELD_BETA", "beta=1"),
+            ("roqtune_custom_field_lower", "lower"),
+        ];
+
+        let (dir, fixture_path) = copy_metadata_fixture("base.mp3");
+        seed_mpeg_ape_text_fields(&fixture_path, DENSE_APE_FIELDS);
+
+        let prepared_image_overwrites = staged_picture_overwrite();
+        let handled = MetadataManager::save_track_properties_lossless(
+            &fixture_path,
+            &[],
+            &prepared_image_overwrites,
+            &[],
+        )
+        .expect("lossless mpeg image-only save failed");
+        assert!(handled);
+
+        for (key, expected_value) in DENSE_APE_FIELDS {
+            assert_eq!(
+                read_mpeg_ape_text(&fixture_path, key).as_deref(),
+                Some(*expected_value),
+                "key={key}"
+            );
+        }
+
+        let metadata_fields = metadata_title_field("Dense MPEG Legacy Title");
+        let handled = MetadataManager::save_track_properties_lossless(
+            &fixture_path,
+            &metadata_fields,
+            &[],
+            &[],
+        )
+        .expect("lossless mpeg metadata save failed");
+        assert!(handled);
+        assert_eq!(
+            read_track_title(&fixture_path).as_deref(),
+            Some("Dense MPEG Legacy Title")
+        );
+        for (key, expected_value) in DENSE_APE_FIELDS {
+            assert_eq!(
+                read_mpeg_ape_text(&fixture_path, key).as_deref(),
+                Some(*expected_value),
+                "key={key}"
+            );
+        }
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_lossless_mpeg_edit_preserves_id3v1_only_metadata() {
+        let (dir, fixture_path) = copy_metadata_fixture("base.mp3");
+        seed_mpeg_id3v1_only(&fixture_path);
+        let before = read_mpeg_id3v1_snapshot(&fixture_path).expect("missing id3v1 before save");
+
+        let prepared_image_overwrites = staged_picture_overwrite();
+        let handled = MetadataManager::save_track_properties_lossless(
+            &fixture_path,
+            &[],
+            &prepared_image_overwrites,
+            &[],
+        )
+        .expect("lossless mpeg image-only save failed");
+        assert!(handled);
+        let after_image =
+            read_mpeg_id3v1_snapshot(&fixture_path).expect("missing id3v1 after image save");
+        assert_eq!(after_image, before);
+
+        let metadata_fields = metadata_title_field("ID3v2 New Title");
+        let handled = MetadataManager::save_track_properties_lossless(
+            &fixture_path,
+            &metadata_fields,
+            &[],
+            &[],
+        )
+        .expect("lossless mpeg metadata save failed");
+        assert!(handled);
+        let after_metadata =
+            read_mpeg_id3v1_snapshot(&fixture_path).expect("missing id3v1 after metadata save");
+        assert_eq!(after_metadata, before);
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_lossless_wavpack_edit_preserves_dense_ape_metadata() {
+        const DENSE_APE_FIELDS: &[(&str, &str)] = &[
+            ("REPLAYGAIN_TRACK_GAIN", "-9.20 dB"),
+            ("REPLAYGAIN_TRACK_PEAK", "0.987654"),
+            ("REPLAYGAIN_ALBUM_GAIN", "-8.10 dB"),
+            ("REPLAYGAIN_ALBUM_PEAK", "0.998877"),
+            ("REPLAYGAIN_REFERENCE_LOUDNESS", "89.0 dB"),
+            ("ROQTUNE_CUSTOM_FIELD_ALPHA", "alpha"),
+            ("ROQTUNE_CUSTOM_FIELD_BETA", "beta=1"),
+            ("roqtune_custom_field_lower", "lower"),
+        ];
+
+        let (dir, fixture_path) = copy_metadata_fixture("base.wv");
+        seed_wavpack_ape_text_fields(&fixture_path, DENSE_APE_FIELDS);
+
+        let prepared_image_overwrites = staged_picture_overwrite();
+        let handled = MetadataManager::save_track_properties_lossless(
+            &fixture_path,
+            &[],
+            &prepared_image_overwrites,
+            &[],
+        )
+        .expect("lossless wavpack image-only save failed");
+        assert!(handled);
+
+        for (key, expected_value) in DENSE_APE_FIELDS {
+            assert_eq!(
+                read_wavpack_ape_text(&fixture_path, key).as_deref(),
+                Some(*expected_value),
+                "key={key}"
+            );
+        }
+
+        let metadata_fields = metadata_title_field("Dense WavPack Legacy Title");
+        let handled = MetadataManager::save_track_properties_lossless(
+            &fixture_path,
+            &metadata_fields,
+            &[],
+            &[],
+        )
+        .expect("lossless wavpack metadata save failed");
+        assert!(handled);
+        assert_eq!(
+            read_track_title(&fixture_path).as_deref(),
+            Some("Dense WavPack Legacy Title")
+        );
+        for (key, expected_value) in DENSE_APE_FIELDS {
+            assert_eq!(
+                read_wavpack_ape_text(&fixture_path, key).as_deref(),
+                Some(*expected_value),
+                "key={key}"
+            );
+        }
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_lossless_wavpack_edit_preserves_id3v1_only_metadata() {
+        let (dir, fixture_path) = copy_metadata_fixture("base.wv");
+        seed_wavpack_id3v1_only(&fixture_path);
+        let before = read_wavpack_id3v1_snapshot(&fixture_path).expect("missing id3v1 before save");
+
+        let prepared_image_overwrites = staged_picture_overwrite();
+        let handled = MetadataManager::save_track_properties_lossless(
+            &fixture_path,
+            &[],
+            &prepared_image_overwrites,
+            &[],
+        )
+        .expect("lossless wavpack image-only save failed");
+        assert!(handled);
+        let after_image =
+            read_wavpack_id3v1_snapshot(&fixture_path).expect("missing id3v1 after image save");
+        assert_eq!(after_image, before);
+
+        let metadata_fields = metadata_title_field("WavPack New Title");
+        let handled = MetadataManager::save_track_properties_lossless(
+            &fixture_path,
+            &metadata_fields,
+            &[],
+            &[],
+        )
+        .expect("lossless wavpack metadata save failed");
+        assert!(handled);
+        let after_metadata =
+            read_wavpack_id3v1_snapshot(&fixture_path).expect("missing id3v1 after metadata save");
+        assert_eq!(after_metadata, before);
 
         let _ = fs::remove_dir_all(&dir);
     }
