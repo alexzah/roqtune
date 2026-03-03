@@ -38,6 +38,12 @@ struct LibraryTrackMetadata {
     track_number: String,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+struct ReplayGainAlbumIdentity {
+    album: String,
+    album_artist: String,
+}
+
 /// Coordinates library index scans and query responses.
 pub struct LibraryManager {
     bus_consumer: Receiver<Message>,
@@ -125,6 +131,45 @@ impl LibraryManager {
             .take_while(|ch| ch.is_ascii_digit())
             .collect();
         digits.parse::<i32>().unwrap_or(0)
+    }
+
+    fn is_equivalent_track_path(candidate: &Path, target: &Path) -> bool {
+        if candidate == target {
+            return true;
+        }
+        // Keep parity with metadata hyperlink path matching behavior in UiManager.
+        if candidate.is_absolute() != target.is_absolute() {
+            if candidate.is_absolute() {
+                return candidate.ends_with(target);
+            }
+            return target.ends_with(candidate);
+        }
+        false
+    }
+
+    fn replaygain_album_identity_from_fields(
+        album: &str,
+        album_artist: &str,
+        artist: &str,
+        fallback_path: &Path,
+    ) -> ReplayGainAlbumIdentity {
+        let album_value = album.trim().to_string();
+        let artist_fallback = if album_artist.trim().is_empty() {
+            artist.trim()
+        } else {
+            album_artist.trim()
+        };
+        let album_artist_value = artist_fallback.to_string();
+        if album_value.is_empty() && album_artist_value.is_empty() {
+            return ReplayGainAlbumIdentity {
+                album: format!("path:{}", fallback_path.to_string_lossy()),
+                album_artist: String::new(),
+            };
+        }
+        ReplayGainAlbumIdentity {
+            album: album_value,
+            album_artist: album_artist_value,
+        }
     }
 
     fn playlist_track_from_path(&self, path: &Path) -> protocol::LibraryTrack {
@@ -1750,6 +1795,130 @@ impl LibraryManager {
             .collect::<Vec<_>>())
     }
 
+    fn build_replaygain_scan_payload(
+        &self,
+        paths: Vec<PathBuf>,
+    ) -> Result<
+        (
+            Vec<protocol::ReplayGainScanTarget>,
+            Vec<protocol::ReplayGainAlbumReference>,
+        ),
+        String,
+    > {
+        let effective_tracks = self.effective_library_tracks()?;
+        let local_tracks: Vec<protocol::LibraryTrack> = effective_tracks
+            .into_iter()
+            .filter(|track| track.path.is_file())
+            .collect();
+        let mut canonical_track_index_by_path: HashMap<PathBuf, usize> = HashMap::new();
+        for (index, track) in local_tracks.iter().enumerate() {
+            if let Ok(canonical_path) = std::fs::canonicalize(track.path.as_path()) {
+                canonical_track_index_by_path
+                    .entry(canonical_path)
+                    .or_insert(index);
+            }
+        }
+
+        let mut targets = Vec::new();
+        let mut selected_paths_by_album: HashMap<ReplayGainAlbumIdentity, Vec<PathBuf>> =
+            HashMap::new();
+        for path in paths {
+            if !path.is_file() {
+                continue;
+            }
+            let resolved_track = local_tracks
+                .iter()
+                .find(|track| Self::is_equivalent_track_path(track.path.as_path(), path.as_path()))
+                .or_else(|| {
+                    std::fs::canonicalize(path.as_path())
+                        .ok()
+                        .and_then(|canonical_path| {
+                            canonical_track_index_by_path
+                                .get(&canonical_path)
+                                .and_then(|index| local_tracks.get(*index))
+                        })
+                });
+
+            let album_identity = if let Some(track) = resolved_track {
+                Self::replaygain_album_identity_from_fields(
+                    &track.album,
+                    &track.album_artist,
+                    &track.artist,
+                    track.path.as_path(),
+                )
+            } else if let Some(metadata) = metadata_tags::read_common_track_metadata(path.as_path())
+            {
+                Self::replaygain_album_identity_from_fields(
+                    &metadata.album,
+                    &metadata.album_artist,
+                    &metadata.artist,
+                    path.as_path(),
+                )
+            } else {
+                Self::replaygain_album_identity_from_fields("", "", "", path.as_path())
+            };
+
+            selected_paths_by_album
+                .entry(album_identity.clone())
+                .or_default()
+                .push(path.clone());
+            targets.push(protocol::ReplayGainScanTarget {
+                path,
+                album: album_identity.album,
+                album_artist: album_identity.album_artist,
+            });
+        }
+        if targets.is_empty() {
+            return Err("No local files matched the selected tracks".to_string());
+        }
+
+        let mut library_paths_by_album: HashMap<ReplayGainAlbumIdentity, Vec<PathBuf>> =
+            HashMap::new();
+        for track in &local_tracks {
+            let album_identity = Self::replaygain_album_identity_from_fields(
+                &track.album,
+                &track.album_artist,
+                &track.artist,
+                track.path.as_path(),
+            );
+            library_paths_by_album
+                .entry(album_identity)
+                .or_default()
+                .push(track.path.clone());
+        }
+
+        let mut album_references = Vec::with_capacity(selected_paths_by_album.len());
+        for (album_identity, selected_album_paths) in selected_paths_by_album {
+            let mut refs = library_paths_by_album
+                .remove(&album_identity)
+                .unwrap_or_default();
+            if refs.is_empty() {
+                refs = selected_album_paths;
+            }
+            refs.sort_unstable();
+            refs.dedup();
+            album_references.push(protocol::ReplayGainAlbumReference {
+                album: album_identity.album,
+                album_artist: album_identity.album_artist,
+                paths: refs,
+            });
+        }
+        album_references.sort_by(|left, right| {
+            left.album
+                .to_ascii_lowercase()
+                .cmp(&right.album.to_ascii_lowercase())
+                .then_with(|| {
+                    left.album_artist
+                        .to_ascii_lowercase()
+                        .cmp(&right.album_artist.to_ascii_lowercase())
+                })
+                .then_with(|| left.album.cmp(&right.album))
+                .then_with(|| left.album_artist.cmp(&right.album_artist))
+        });
+
+        Ok((targets, album_references))
+    }
+
     fn add_selection_to_playlists(
         &self,
         selections: Vec<protocol::LibrarySelectionSpec>,
@@ -1980,11 +2149,21 @@ impl LibraryManager {
             ));
             return;
         }
+        let (targets, album_references) = match self.build_replaygain_scan_payload(paths) {
+            Ok(payload) => payload,
+            Err(error) => {
+                let _ = self.bus_producer.send(Message::Metadata(
+                    protocol::MetadataMessage::ReplayGainScanFailed { request_id, error },
+                ));
+                return;
+            }
+        };
 
         let _ = self.bus_producer.send(Message::Metadata(
             protocol::MetadataMessage::ScanReplayGainForPaths {
                 request_id,
-                paths,
+                targets,
+                album_references,
                 overwrite_existing,
             },
         ));

@@ -36,7 +36,7 @@ use crate::db_manager::DbManager;
 use crate::image_pipeline::{self, ManagedImageKind};
 use crate::metadata_tags;
 use crate::protocol::{
-    LibraryTrack, Message, MetadataEditorField, MetadataMessage, PropertiesEmbeddedImageSlot,
+    Message, MetadataEditorField, MetadataMessage, PropertiesEmbeddedImageSlot,
     PropertiesExternalImage, PropertiesImageDelete, PropertiesImageOverwrite,
     PropertiesMediaInfoField, TrackMetadataSummary,
 };
@@ -1264,14 +1264,11 @@ impl MetadataManager {
         album_artist: &str,
         fallback_path: &Path,
     ) -> ReplayGainAlbumKey {
-        let album_key = album.trim().to_ascii_lowercase();
-        let album_artist_key = album_artist.trim().to_ascii_lowercase();
+        let album_key = album.trim().to_string();
+        let album_artist_key = album_artist.trim().to_string();
         if album_key.is_empty() && album_artist_key.is_empty() {
             return ReplayGainAlbumKey {
-                album: format!(
-                    "path:{}",
-                    fallback_path.to_string_lossy().to_ascii_lowercase()
-                ),
+                album: format!("path:{}", fallback_path.to_string_lossy()),
                 album_artist: String::new(),
             };
         }
@@ -1281,84 +1278,77 @@ impl MetadataManager {
         }
     }
 
-    fn replaygain_album_key_for_path(
-        path: &Path,
-        library_album_keys_by_path: &HashMap<PathBuf, ReplayGainAlbumKey>,
-    ) -> ReplayGainAlbumKey {
-        if let Some(key) = library_album_keys_by_path.get(path) {
-            return key.clone();
-        }
-
-        if let Some(metadata) = metadata_tags::read_common_track_metadata(path) {
-            let album_artist = if metadata.album_artist.trim().is_empty() {
-                metadata.artist
-            } else {
-                metadata.album_artist
-            };
-            return Self::replaygain_album_key_from_fields(&metadata.album, &album_artist, path);
-        }
-
-        Self::replaygain_album_key_from_fields("", "", path)
-    }
-
-    fn build_replaygain_scan_targets(
-        db_manager: &DbManager,
-        selected_paths: &[PathBuf],
+    fn build_replaygain_scan_targets_from_request(
+        request_targets: Vec<crate::protocol::ReplayGainScanTarget>,
+        request_album_references: Vec<crate::protocol::ReplayGainAlbumReference>,
     ) -> Result<ReplayGainScanTargetsPayload, String> {
-        let library_tracks: Vec<LibraryTrack> = db_manager
-            .get_library_tracks()
-            .map_err(|error| format!("Failed to load library tracks: {}", error))?;
-        let mut library_album_keys_by_path: HashMap<PathBuf, ReplayGainAlbumKey> = HashMap::new();
-        let mut library_paths_by_album: HashMap<ReplayGainAlbumKey, Vec<PathBuf>> = HashMap::new();
-
-        for track in library_tracks {
-            if !track.path.is_file() {
+        let mut targets: Vec<ReplayGainScanTarget> = Vec::with_capacity(request_targets.len());
+        let mut seen_paths = HashSet::new();
+        let mut selected_paths_by_album: HashMap<ReplayGainAlbumKey, Vec<PathBuf>> = HashMap::new();
+        for request_target in request_targets {
+            if !request_target.path.is_file() {
                 continue;
             }
-            let album_artist = if track.album_artist.trim().is_empty() {
-                track.artist.as_str()
-            } else {
-                track.album_artist.as_str()
-            };
-            let album_key =
-                Self::replaygain_album_key_from_fields(&track.album, album_artist, &track.path);
-            library_album_keys_by_path.insert(track.path.clone(), album_key.clone());
-            library_paths_by_album
-                .entry(album_key)
-                .or_default()
-                .push(track.path);
-        }
-
-        let mut targets: Vec<ReplayGainScanTarget> = Vec::with_capacity(selected_paths.len());
-        let mut selected_paths_by_album: HashMap<ReplayGainAlbumKey, Vec<PathBuf>> = HashMap::new();
-        for path in selected_paths {
-            let album_key =
-                Self::replaygain_album_key_for_path(path.as_path(), &library_album_keys_by_path);
+            let dedupe_key = request_target.path.to_string_lossy().to_string();
+            if !seen_paths.insert(dedupe_key) {
+                continue;
+            }
+            let album_key = Self::replaygain_album_key_from_fields(
+                &request_target.album,
+                &request_target.album_artist,
+                request_target.path.as_path(),
+            );
             let has_existing_tags =
-                metadata_tags::read_replay_gain_metadata(path.as_path()).is_some();
+                metadata_tags::read_replay_gain_metadata(request_target.path.as_path()).is_some();
             targets.push(ReplayGainScanTarget {
-                path: path.clone(),
+                path: request_target.path.clone(),
                 album_key: album_key.clone(),
                 has_existing_tags,
             });
             selected_paths_by_album
                 .entry(album_key)
                 .or_default()
-                .push(path.clone());
+                .push(request_target.path);
+        }
+        if targets.is_empty() {
+            return Err("No local files matched the selected tracks".to_string());
         }
 
         let mut album_reference_paths: HashMap<ReplayGainAlbumKey, Vec<PathBuf>> = HashMap::new();
-        for (album_key, selected_album_paths) in selected_paths_by_album {
-            let mut refs = library_paths_by_album
-                .get(&album_key)
-                .cloned()
-                .unwrap_or_default();
+        for album_reference in request_album_references {
+            let album_key = Self::replaygain_album_key_from_fields(
+                &album_reference.album,
+                &album_reference.album_artist,
+                Path::new(""),
+            );
+            let mut refs = album_reference
+                .paths
+                .into_iter()
+                .filter(|path| path.is_file())
+                .collect::<Vec<_>>();
             if refs.is_empty() {
-                refs = selected_album_paths;
+                continue;
             }
             refs.sort_unstable();
             refs.dedup();
-            album_reference_paths.insert(album_key, refs);
+            album_reference_paths
+                .entry(album_key)
+                .or_default()
+                .extend(refs);
+        }
+
+        for refs in album_reference_paths.values_mut() {
+            refs.sort_unstable();
+            refs.dedup();
+        }
+
+        for (album_key, selected_album_paths) in selected_paths_by_album {
+            let refs = album_reference_paths.entry(album_key).or_default();
+            if refs.is_empty() {
+                *refs = selected_album_paths;
+                refs.sort_unstable();
+                refs.dedup();
+            }
         }
 
         Ok((targets, album_reference_paths))
@@ -1601,38 +1591,15 @@ impl MetadataManager {
         bus_producer: &Sender<Message>,
         db_manager: &DbManager,
         request_id: u64,
-        paths: Vec<PathBuf>,
+        request_targets: Vec<crate::protocol::ReplayGainScanTarget>,
+        request_album_references: Vec<crate::protocol::ReplayGainAlbumReference>,
         overwrite_existing: bool,
     ) {
-        if paths.is_empty() {
-            let _ = bus_producer.send(Message::Metadata(MetadataMessage::ReplayGainScanFailed {
-                request_id,
-                error: "No local files matched the selected tracks".to_string(),
-            }));
-            return;
-        }
-
-        let mut unique_local_paths = Vec::new();
-        let mut seen_paths = HashSet::new();
-        for path in paths {
-            if !path.is_file() {
-                continue;
-            }
-            let key = path.to_string_lossy().to_string();
-            if seen_paths.insert(key) {
-                unique_local_paths.push(path);
-            }
-        }
-        if unique_local_paths.is_empty() {
-            let _ = bus_producer.send(Message::Metadata(MetadataMessage::ReplayGainScanFailed {
-                request_id,
-                error: "No local files matched the selected tracks".to_string(),
-            }));
-            return;
-        }
-
         let (targets, album_reference_paths) =
-            match Self::build_replaygain_scan_targets(db_manager, &unique_local_paths) {
+            match Self::build_replaygain_scan_targets_from_request(
+                request_targets,
+                request_album_references,
+            ) {
                 Ok(payload) => payload,
                 Err(error) => {
                     let _ = bus_producer.send(Message::Metadata(
@@ -1820,7 +1787,8 @@ impl MetadataManager {
     fn spawn_replaygain_scan_for_paths(
         &self,
         request_id: u64,
-        paths: Vec<PathBuf>,
+        targets: Vec<crate::protocol::ReplayGainScanTarget>,
+        album_references: Vec<crate::protocol::ReplayGainAlbumReference>,
         overwrite_existing: bool,
     ) {
         let bus_producer = self.bus_producer.clone();
@@ -1843,7 +1811,8 @@ impl MetadataManager {
                     &bus_producer,
                     &db_manager,
                     request_id,
-                    paths,
+                    targets,
+                    album_references,
                     overwrite_existing,
                 );
             });
@@ -2405,10 +2374,16 @@ impl MetadataManager {
                 }
                 Ok(Message::Metadata(MetadataMessage::ScanReplayGainForPaths {
                     request_id,
-                    paths,
+                    targets,
+                    album_references,
                     overwrite_existing,
                 })) => {
-                    self.spawn_replaygain_scan_for_paths(request_id, paths, overwrite_existing);
+                    self.spawn_replaygain_scan_for_paths(
+                        request_id,
+                        targets,
+                        album_references,
+                        overwrite_existing,
+                    );
                 }
                 Ok(_) => {}
                 Err(tokio::sync::broadcast::error::RecvError::Lagged(skipped)) => {
@@ -2497,6 +2472,75 @@ mod tests {
             value: value.to_string(),
             common: true,
         }]
+    }
+
+    #[test]
+    fn test_build_replaygain_scan_targets_from_request_uses_supplied_album_references() {
+        let dir = make_temp_dir("replaygain-request-references");
+        let album_dir = dir.join("album");
+        fs::create_dir_all(&album_dir).expect("failed to create album dir");
+        let selected_path = album_dir.join("selected.mp3");
+        let peer_path = album_dir.join("peer.mp3");
+        write_file(&selected_path, b"selected");
+        write_file(&peer_path, b"peer");
+
+        let request_targets = vec![crate::protocol::ReplayGainScanTarget {
+            path: selected_path.clone(),
+            album: "Album".to_string(),
+            album_artist: "Artist".to_string(),
+        }];
+        let request_album_references = vec![crate::protocol::ReplayGainAlbumReference {
+            album: "Album".to_string(),
+            album_artist: "Artist".to_string(),
+            paths: vec![selected_path.clone(), peer_path.clone()],
+        }];
+
+        let (targets, references) = MetadataManager::build_replaygain_scan_targets_from_request(
+            request_targets,
+            request_album_references,
+        )
+        .expect("request payload should build scan targets");
+
+        assert_eq!(targets.len(), 1);
+        let target_key = targets[0].album_key.clone();
+        let resolved_refs = references
+            .get(&target_key)
+            .expect("album references should include selected target album");
+        assert_eq!(resolved_refs.len(), 2);
+        assert!(resolved_refs.contains(&selected_path));
+        assert!(resolved_refs.contains(&peer_path));
+
+        fs::remove_dir_all(&dir).expect("failed to remove temp dir");
+    }
+
+    #[test]
+    fn test_build_replaygain_scan_targets_from_request_falls_back_to_selected_paths() {
+        let dir = make_temp_dir("replaygain-request-fallback");
+        let album_dir = dir.join("album");
+        fs::create_dir_all(&album_dir).expect("failed to create album dir");
+        let selected_path = album_dir.join("selected.mp3");
+        write_file(&selected_path, b"selected");
+
+        let request_targets = vec![crate::protocol::ReplayGainScanTarget {
+            path: selected_path.clone(),
+            album: "Album".to_string(),
+            album_artist: "Artist".to_string(),
+        }];
+
+        let (targets, references) = MetadataManager::build_replaygain_scan_targets_from_request(
+            request_targets,
+            Vec::new(),
+        )
+        .expect("request payload should build scan targets");
+
+        assert_eq!(targets.len(), 1);
+        let target_key = targets[0].album_key.clone();
+        let resolved_refs = references
+            .get(&target_key)
+            .expect("fallback references should include selected target album");
+        assert_eq!(resolved_refs, &vec![selected_path.clone()]);
+
+        fs::remove_dir_all(&dir).expect("failed to remove temp dir");
     }
 
     fn staged_picture_overwrite() -> Vec<(u8, Picture)> {

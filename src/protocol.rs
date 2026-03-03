@@ -638,7 +638,8 @@ pub enum MetadataMessage {
     },
     ScanReplayGainForPaths {
         request_id: u64,
-        paths: Vec<PathBuf>,
+        targets: Vec<ReplayGainScanTarget>,
+        album_references: Vec<ReplayGainAlbumReference>,
         overwrite_existing: bool,
     },
     ReplayGainScanStarted {
@@ -665,6 +666,22 @@ pub enum MetadataMessage {
         request_id: u64,
         error: String,
     },
+}
+
+/// One selected track target for a ReplayGain scan request.
+#[derive(Debug, Clone)]
+pub struct ReplayGainScanTarget {
+    pub path: PathBuf,
+    pub album: String,
+    pub album_artist: String,
+}
+
+/// Full-library album reference set used to compute album ReplayGain values.
+#[derive(Debug, Clone)]
+pub struct ReplayGainAlbumReference {
+    pub album: String,
+    pub album_artist: String,
+    pub paths: Vec<PathBuf>,
 }
 
 /// Selection item used to resolve library items to concrete track paths.
