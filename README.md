@@ -6,11 +6,11 @@
 
 <div style="display:flex; gap:12px; align-items:flex-start;">
 <figure>
-  <img src="images/screenshot_playlist_mode.png" alt="roqtune library mode (Gruvbox Light)"/>
+  <img src="images/screenshot_playlist_mode.png" alt="roqtune library mode (Gruvbox Light)" width="48%" />
   <figcaption><em>Playlist mode (Default Theme)</em></figcaption>
 </figure>
 <figure>
-  <img src="images/screenshot_library_mode.png" alt="roqtune library mode (Gruvbox Light)"/>
+  <img src="images/screenshot_library_mode.png" alt="roqtune library mode (Gruvbox Light)" width="48%" />
   <figcaption><em>Library mode (Gruvbox Light Theme)</em></figcaption>
 </figure>
 </div>
