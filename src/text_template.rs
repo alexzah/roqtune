@@ -1298,13 +1298,13 @@ mod tests {
                 technical_channels: "2",
                 technical_bitrate_kbps: "320",
                 technical_playback_mode: "direct",
-                technical_replay_gain_adjustment: "Track: -9.2dB",
+                technical_replay_gain_adjustment: "Track: -9.2 dB",
                 ..StatusTemplateFields::default()
             }),
         );
         assert_eq!(
             rendered.plain_text,
-            "2 tracks selected|opensubsonic|FLAC|24|96000|2|320|direct|Track: -9.2dB"
+            "2 tracks selected|opensubsonic|FLAC|24|96000|2|320|direct|Track: -9.2 dB"
         );
     }
 
@@ -1405,11 +1405,11 @@ mod tests {
                 technical_sample_rate_hz: "44.1kHz",
                 technical_channels: "2",
                 technical_bitrate_kbps: "320",
-                technical_replay_gain_adjustment: "Track: -9.2dB",
+                technical_replay_gain_adjustment: "Track: -9.2 dB",
                 ..StatusTemplateFields::default()
             }),
         );
-        assert!(rendered.plain_text.contains(" | ReplayGain Track: -9.2dB"));
+        assert!(rendered.plain_text.contains(" | ReplayGain Track: -9.2 dB"));
     }
 
     #[test]

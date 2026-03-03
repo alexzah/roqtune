@@ -2152,7 +2152,7 @@ impl UiManager {
             protocol::ReplayGainAdjustmentKind::Track => "Track",
             protocol::ReplayGainAdjustmentKind::Album => "Album",
         };
-        Some(format!("{source}: {:+.1}dB", adjustment_db))
+        Some(format!("{source}: {:+.1} dB", adjustment_db))
     }
 
     fn current_track_source_label(&self) -> Option<&'static str> {
