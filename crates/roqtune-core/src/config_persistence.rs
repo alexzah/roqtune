@@ -571,7 +571,7 @@ pub fn persist_state_files_with_config_path(config: &Config, config_path: &Path)
 
 /// Returns the checked-in system layout template text.
 pub fn system_layout_template_text() -> &'static str {
-    include_str!("../config/layout.system.toml")
+    include_str!("../../../config/layout.system.toml")
 }
 
 /// Loads and parses the checked-in system layout template.
@@ -711,7 +711,7 @@ decoder_request_chunk_ms = 1500
 
     #[test]
     fn test_serialize_config_with_preserved_comments_keeps_system_template_comments() {
-        let existing = include_str!("../config/config.system.toml");
+        let existing = include_str!("../../../config/config.system.toml");
         let mut config: Config =
             toml::from_str(existing).expect("system config template should parse");
         config.ui.show_layout_edit_intro = false;
@@ -727,7 +727,7 @@ decoder_request_chunk_ms = 1500
 
     #[test]
     fn test_serialize_config_with_preserved_comments_strips_layout_owned_ui_keys() {
-        let existing = include_str!("../config/config.system.toml");
+        let existing = include_str!("../../../config/config.system.toml");
         let mut config: Config =
             toml::from_str(existing).expect("system config template should parse");
         config.ui.layout.button_cluster_instances =
@@ -830,7 +830,7 @@ panel = "track_list"
 
     #[test]
     fn test_serialize_layout_with_preserved_comments_keeps_system_template_comments() {
-        let existing = include_str!("../config/layout.system.toml");
+        let existing = include_str!("../../../config/layout.system.toml");
         let mut layout: LayoutConfig =
             toml::from_str(existing).expect("layout system template should parse");
         layout.playlist_album_art_column_min_width_px = 24;

@@ -26,43 +26,24 @@ pub struct OutputSettingsOptions {
     pub auto_bits_per_sample_value: u16,
 }
 
-#[path = "../../../src/audio/mod.rs"]
 pub mod audio;
-#[path = "../../../src/backends/mod.rs"]
 pub mod backends;
-#[path = "../../../src/cast/mod.rs"]
 pub mod cast;
-#[path = "../../../src/config.rs"]
 pub mod config;
-#[path = "../../../src/config_persistence.rs"]
 pub mod config_persistence;
-#[path = "../../../src/db_manager.rs"]
 pub mod db_manager;
-#[path = "../../../src/image_pipeline.rs"]
 pub mod image_pipeline;
-#[path = "../../../src/integration/mod.rs"]
 pub mod integration;
-#[path = "../../../src/layout.rs"]
 pub mod layout;
-#[path = "../../../src/library/mod.rs"]
 pub mod library;
-#[path = "../../../src/media_controls_manager.rs"]
 pub mod media_controls_manager;
-#[path = "../../../src/media_file_discovery.rs"]
 pub mod media_file_discovery;
-#[path = "../../../src/metadata/mod.rs"]
 pub mod metadata;
-#[path = "../../../src/playlist/playlist.rs"]
 pub mod playlist;
-#[path = "../../../src/playlist/playlist_manager.rs"]
 pub mod playlist_manager;
-#[path = "../../../src/protocol.rs"]
 pub mod protocol;
-#[path = "../../../src/protocol_utils.rs"]
 pub mod protocol_utils;
-#[path = "../../../src/runtime_config.rs"]
 pub mod runtime_config;
-#[path = "../../../src/text_template.rs"]
 pub mod text_template;
 
 pub use audio::{audio_decoder, audio_player, audio_probe, output_option_selection};

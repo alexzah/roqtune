@@ -58,22 +58,24 @@ Detailed installation and packaging instructions live in [`INSTALL.md`](INSTALL.
 
 The app is organized into cooperating runtime components connected through an event bus (`tokio::sync::broadcast`):
 
-- `src/protocol.rs`: shared message protocol for all components.
+- `crates/roqtune-core/src/protocol.rs`: shared message protocol for all components.
 - `src/main.rs`: binary entrypoint and top-level module wiring.
 - `src/app_runtime.rs`: startup/config bootstrap and runtime initialization.
 - `src/app_bootstrap/services.rs`: background worker/service spawning.
 - `src/app_callbacks/*`: Slint callback registration by feature area.
 - `src/runtime/audio_runtime_reactor.rs`: runtime config/device event coordination.
-- `src/audio/*`: decode, playback, output probing, and output option selection.
-- `src/playlist/*`: playlist data model and playlist orchestration.
-- `src/library/*`: library scanning/indexing and enrichment.
-- `src/metadata/*`: tag parsing and metadata orchestration.
-- `src/integration/*`: backend/integration management (including OpenSubsonic).
-- `src/cast/*`: cast manager and cast playback control.
+- `crates/roqtune-core/src/audio/*`: decode, playback, output probing, and output option selection.
+- `crates/roqtune-core/src/playlist.rs` + `crates/roqtune-core/src/playlist_manager.rs`: playlist data model and playlist orchestration.
+- `crates/roqtune-core/src/library/*`: library scanning/indexing and enrichment.
+- `crates/roqtune-core/src/metadata/*`: tag parsing and metadata orchestration.
+- `crates/roqtune-core/src/integration/*`: backend/integration management (including OpenSubsonic).
+- `crates/roqtune-core/src/cast/*`: cast manager and cast playback control.
 - `src/ui_manager.rs`: bus-to-UI state synchronization and UI-side orchestration.
-- `src/layout.rs`: layout tree model and edit operations.
-- `src/config.rs` + `src/config_persistence.rs`: config model and comment-preserving persistence.
-- `src/db_manager.rs`: SQLite persistence for playlists, library index/cache data, and UI metadata.
+- `crates/roqtune-core/src/layout.rs`: layout tree model and edit operations.
+- `crates/roqtune-core/src/config.rs` + `crates/roqtune-core/src/config_persistence.rs`: config model and comment-preserving persistence.
+- `crates/roqtune-core/src/db_manager.rs`: SQLite persistence for playlists, library index/cache data, and UI metadata.
+
+For a quick "where should this code go?" index, see [`docs/PROJECT_MAP.md`](docs/PROJECT_MAP.md).
 
 ## Data and Config Files
 

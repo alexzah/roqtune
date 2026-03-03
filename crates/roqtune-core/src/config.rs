@@ -622,7 +622,7 @@ decoder_request_chunk_ms = 1500
 
     #[test]
     fn test_system_config_template_matches_default_values() {
-        let parsed: Config = toml::from_str(include_str!("../config/config.system.toml"))
+        let parsed: Config = toml::from_str(include_str!("../../../config/config.system.toml"))
             .expect("system config template should parse");
         let defaults = Config::default();
 
