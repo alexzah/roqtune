@@ -493,6 +493,7 @@ struct LibraryRowPresentation {
     cover_art_path: Option<PathBuf>,
     source_badge: String,
     is_playing: bool,
+    playback_active: bool,
     favoritable: bool,
     favorited: bool,
     selected: bool,
@@ -9327,6 +9328,7 @@ impl UiManager {
             has_album_art,
             source_badge: entry.source_badge.into(),
             is_playing: entry.is_playing,
+            playback_active: entry.playback_active,
             favoritable: entry.favoritable,
             favorited: entry.favorited,
             selected: entry.selected,
@@ -9365,6 +9367,7 @@ impl UiManager {
     fn sync_library_playing_state_to_ui(&self) {
         let view_indices = self.library_view_indices.clone();
         let library_playing_index = self.library_playing_index;
+        let playback_active = self.playback_active;
         let library_playing_view_index = library_playing_index
             .and_then(|playing_source_index| {
                 view_indices
@@ -9391,10 +9394,14 @@ impl UiManager {
                     continue;
                 };
                 let is_playing = library_playing_index == Some(*source_index);
-                if row_data.is_playing == is_playing {
+                let row_playback_active = is_playing && playback_active;
+                if row_data.is_playing == is_playing
+                    && row_data.playback_active == row_playback_active
+                {
                     continue;
                 }
                 row_data.is_playing = is_playing;
+                row_data.playback_active = row_playback_active;
                 vec_model.set_row_data(row_index, row_data);
             }
         });
@@ -9729,6 +9736,7 @@ impl UiManager {
                         Self::rich_text_run(track.album.clone(), 11, album_link),
                     ])
                 };
+                let is_playing = self.playing_track.path.as_ref() == Some(&track.path);
                 LibraryRowPresentation {
                     leading: if compact_track_row_view {
                         Self::library_track_number_leading(&track.track_number)
@@ -9746,7 +9754,8 @@ impl UiManager {
                         self.resolve_library_cover_art_path(&track.path)
                     },
                     source_badge: Self::source_badge_for_track_path(track.path.as_path()),
-                    is_playing: self.playing_track.path.as_ref() == Some(&track.path),
+                    is_playing,
+                    playback_active: is_playing && self.playback_active,
                     favoritable: true,
                     favorited: self.favorites_by_key.contains_key(&favorite_key),
                     selected,
@@ -9791,6 +9800,7 @@ impl UiManager {
                     },
                     source_badge: String::new(),
                     is_playing: false,
+                    playback_active: false,
                     favoritable: true,
                     favorited: self.favorites_by_key.contains_key(&favorite_key),
                     selected,
@@ -9851,6 +9861,7 @@ impl UiManager {
                     },
                     source_badge: String::new(),
                     is_playing: false,
+                    playback_active: false,
                     favoritable: true,
                     favorited: self.favorites_by_key.contains_key(&favorite_key),
                     selected,
@@ -9880,6 +9891,7 @@ impl UiManager {
                 cover_art_path: None,
                 source_badge: String::new(),
                 is_playing: false,
+                playback_active: false,
                 favoritable: false,
                 favorited: false,
                 selected,
@@ -9908,6 +9920,7 @@ impl UiManager {
                 cover_art_path: None,
                 source_badge: String::new(),
                 is_playing: false,
+                playback_active: false,
                 favoritable: false,
                 favorited: false,
                 selected,
@@ -9926,6 +9939,7 @@ impl UiManager {
                 cover_art_path: None,
                 source_badge: String::new(),
                 is_playing: false,
+                playback_active: false,
                 favoritable: false,
                 favorited: false,
                 selected,
@@ -10151,6 +10165,7 @@ impl UiManager {
                     if let Some(playing_idx) = self.library_playing_index {
                         if *source_index == playing_idx {
                             presentation.is_playing = true;
+                            presentation.playback_active = self.playback_active;
                         }
                     }
                     presentation
@@ -13328,11 +13343,13 @@ impl UiManager {
                                 ..
                             },
                         ) => {
+                            let previous_playback_active = self.playback_active;
                             self.playback_active = is_playing;
                             if !is_playing {
                                 self.last_progress_at = None;
                             }
                             let previous_active_playing_index = self.active_playing_index;
+                            let previous_library_playing_index = self.library_playing_index;
                             self.selected_indices = Self::normalize_source_selection_indices(
                                 &selected_indices,
                                 self.track_paths.len(),
@@ -13359,6 +13376,11 @@ impl UiManager {
                             self.update_display_for_active_collection();
                             if playing_track_changed {
                                 self.sync_library_ui();
+                            }
+                            if previous_playback_active != self.playback_active
+                                || previous_library_playing_index != self.library_playing_index
+                            {
+                                self.sync_library_playing_state_to_ui();
                             }
 
                             let status_text = self
