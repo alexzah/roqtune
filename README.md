@@ -11,13 +11,15 @@
 
 ## Features
 
-- Easily manage multiple playlists of tracks with a feature rich playlist mode
-- Beautiful library mode that scans and sorts your collection for easy browsing and listening
-- Custom column support in the track list, based on metadata format strings
-- Fully user customizable UI with layout editor based on modular panels
-- Casting support for playback on local network devices
-- OpenSubsonic integration for playing your self hosted music library
-- Broad audio format support with [symphonia](https://crates.io/crates/symphonia) and [lofty](https://crates.io/crates/lofty)
+- Fully customizable UI with a live layout editor (modular panels, split/resize, undo/redo, persistent `layout.toml`)
+- Power-user playlist mode: sortable + filterable track table, multi-select, drag-reorder, and robust clipboard workflows (copy/cut/paste across playlists and from library)
+- Rich library browsing with fast scanning and views for Tracks, Albums, Artists, Genres, Decades, and Favorites
+- Album/artist detail pages with optional internet enrichment (bios, images, descriptions) plus manual override tools
+- Advanced track properties & tag editing including embedded artwork replace/remove and media info inspection
+- High-quality playback engine (seek, queue, shuffle/random, repeat modes, crossfade)
+- Audio fidelity controls including ReplayGain, resampling quality, output device/sample rate/bit-depth/channel options
+- Theming + custom colors: switch between curated color schemes or fine-tune your own palette (with per-component color editing)
+- Integrations: OpenSubsonic streaming (multi-profile) and local network casting support
 
 ## Project Status
 
