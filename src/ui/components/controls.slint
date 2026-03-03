@@ -54,6 +54,7 @@ export component PlayerButton inherits Rectangle {
     in property <bool> is-primary: false;
     in property <bool> is-danger: false;
     in property <length> font-size: 16px;
+    out property <bool> hovered: touch-area.has-hover;
     callback clicked;
     callback tooltip_hover_changed(bool, string, int, int);
 

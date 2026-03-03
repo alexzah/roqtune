@@ -1233,7 +1233,7 @@ export component AppWindow inherits Window {
                     height: 22px;
                     x: parent.width - self.width - 4px;
                     y: 4px;
-                    visible: viewer-text-panel.hovered;
+                    visible: viewer-text-panel.hovered || self.hovered;
                     icon-source: AppIcons.pencil;
                     icon-text: "";
                     font-size: 12px;
@@ -1283,7 +1283,7 @@ export component AppWindow inherits Window {
                     height: 22px;
                     x: parent.width - self.width - 4px;
                     y: 4px;
-                    visible: viewer-image-panel.hovered;
+                    visible: viewer-image-panel.hovered || self.hovered;
                     icon-source: AppIcons.pencil;
                     icon-text: "";
                     font-size: 12px;
@@ -2117,7 +2117,7 @@ export component AppWindow inherits Window {
                                     height: 22px;
                                     x: parent.width - self.width - 4px;
                                     y: 4px;
-                                    visible: detail-header-art-hover-ta.has-hover;
+                                    visible: detail-header-art-hover-ta.has-hover || self.hovered;
                                     icon-source: AppIcons.pencil;
                                     icon-text: "";
                                     font-size: 12px;
@@ -2186,7 +2186,7 @@ export component AppWindow inherits Window {
                                             height: 22px;
                                             x: parent.width - self.width;
                                             y: 0px;
-                                            visible: detail-header-blurb-hover-ta.has-hover;
+                                            visible: detail-header-blurb-hover-ta.has-hover || self.hovered;
                                             icon-source: AppIcons.pencil;
                                             icon-text: "";
                                             font-size: 12px;
