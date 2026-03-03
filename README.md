@@ -22,7 +22,6 @@
 ## Project Status
 
 - Project is in early development, and is roughly alpha quality. Major functionality is working but some bugs, especially visual, are still to be expected.
-- Only linux is supported currently, though the project is being built cross platform, since that's what I'm able to test at the moment.
 
 ## Quick Start
 
