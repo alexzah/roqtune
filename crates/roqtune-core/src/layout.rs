@@ -1726,8 +1726,9 @@ mod tests {
 
     #[test]
     fn test_layout_system_template_parses() {
-        let _parsed: LayoutConfig = toml::from_str(include_str!("../config/layout.system.toml"))
-            .expect("layout system template should parse");
+        let _parsed: LayoutConfig =
+            toml::from_str(include_str!("../../../config/layout.system.toml"))
+                .expect("layout system template should parse");
     }
 
     #[test]
@@ -1750,7 +1751,7 @@ mod tests {
 
     #[test]
     fn test_layout_deserializes_legacy_top_level_width_overrides() {
-        let mut legacy_layout = include_str!("../config/layout.system.toml").to_string();
+        let mut legacy_layout = include_str!("../../../config/layout.system.toml").to_string();
         legacy_layout.push_str(
             "\n[[playlist_column_width_overrides]]\ncolumn_key = \"{title}\"\nwidth_px = 222\n",
         );

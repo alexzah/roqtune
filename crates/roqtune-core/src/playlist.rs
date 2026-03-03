@@ -618,6 +618,12 @@ impl Playlist {
     }
 }
 
+impl Default for Playlist {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

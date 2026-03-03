@@ -4971,9 +4971,32 @@ dependencies = [
 name = "roqtune"
 version = "0.1.0"
 dependencies = [
+ "colog",
+ "cpal",
+ "dirs",
+ "getrandom 0.4.1",
+ "governor",
+ "log",
+ "md5",
+ "rfd",
+ "roqtune-core",
+ "serde",
+ "showfile",
+ "slint",
+ "slint-build",
+ "tokio",
+ "toml",
+ "ureq",
+ "urlencoding",
+ "webbrowser",
+]
+
+[[package]]
+name = "roqtune-core"
+version = "0.1.0"
+dependencies = [
  "audio-mixer",
  "chrono",
- "colog",
  "cpal",
  "dirs",
  "getrandom 0.4.1",
@@ -4986,14 +5009,11 @@ dependencies = [
  "mdns-sd",
  "native-tls",
  "rand 0.10.0",
- "rfd",
  "rubato",
  "rusqlite",
  "serde",
  "serde_json",
  "showfile",
- "slint",
- "slint-build",
  "souvlaki",
  "symphonia",
  "tokio",

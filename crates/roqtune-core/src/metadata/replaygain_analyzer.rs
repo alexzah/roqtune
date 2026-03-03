@@ -1190,10 +1190,23 @@ mod tests {
         assert_eq!(coeff.sample_rate_hz, 48_000);
     }
 
+    fn metadata_fixture_dir() -> PathBuf {
+        let manifest_dir = Path::new(env!("CARGO_MANIFEST_DIR"));
+        manifest_dir
+            .ancestors()
+            .map(|ancestor| ancestor.join("tests/fixtures/metadata_preservation"))
+            .find(|candidate| candidate.is_dir())
+            .unwrap_or_else(|| {
+                panic!(
+                    "failed to locate metadata fixtures from manifest dir {}",
+                    manifest_dir.display()
+                )
+            })
+    }
+
     #[test]
     fn test_replaygain_analyzer_decodes_metadata_fixtures() {
-        let fixtures_dir =
-            Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/metadata_preservation");
+        let fixtures_dir = metadata_fixture_dir();
         let fixtures: [PathBuf; 9] = [
             fixtures_dir.join("base.aac"),
             fixtures_dir.join("base.flac"),
@@ -1245,8 +1258,7 @@ mod tests {
 
     #[test]
     fn test_album_analysis_uses_all_paths() {
-        let fixtures_dir =
-            Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/metadata_preservation");
+        let fixtures_dir = metadata_fixture_dir();
         let single = vec![fixtures_dir.join("base.flac")];
         let multiple = vec![
             fixtures_dir.join("base.flac"),
@@ -1261,8 +1273,7 @@ mod tests {
 
     #[test]
     fn test_replaygain_baseline_matches_ffmpeg_reference_for_fixture() {
-        let fixture = Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("tests/fixtures/metadata_preservation/base.flac");
+        let fixture = metadata_fixture_dir().join("base.flac");
         let values = analyze_track(&fixture)
             .expect("fixture track analysis should succeed")
             .values()

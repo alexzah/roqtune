@@ -2350,9 +2350,20 @@ mod tests {
     }
 
     fn metadata_fixture_path(file_name: &str) -> PathBuf {
-        Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("tests/fixtures/metadata_preservation")
-            .join(file_name)
+        let manifest_dir = Path::new(env!("CARGO_MANIFEST_DIR"));
+
+        let fixture_root = manifest_dir
+            .ancestors()
+            .map(|ancestor| ancestor.join("tests/fixtures/metadata_preservation"))
+            .find(|candidate| candidate.is_dir())
+            .unwrap_or_else(|| {
+                panic!(
+                    "failed to locate metadata fixtures from manifest dir {}",
+                    manifest_dir.display()
+                )
+            });
+
+        fixture_root.join(file_name)
     }
 
     fn copy_metadata_fixture(file_name: &str) -> (PathBuf, PathBuf) {

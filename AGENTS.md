@@ -10,7 +10,7 @@ Project-specific instructions for AI agents and contributors working in this rep
 4. Maintain performance and low resource usage.
 
 ## 3. Required Workflow
-1. Analyze affected component flow through `src/protocol.rs` (event bus messages).
+1. Analyze affected component flow through `crates/roqtune-core/src/protocol.rs` (event bus messages).
 2. Implement only in relevant modules.
 3. Verify `main`/runtime wiring when callbacks, bus messages, or startup flow change.
 4. Run validation commands before handoff (see section 4).
@@ -39,19 +39,20 @@ If any cannot be run, state that explicitly and why.
   - `src/app_callbacks/*`
   - `src/runtime/audio_runtime_reactor.rs`
 - Core subsystems:
-  - `src/audio/*` (decoder/player/probe/output options)
-  - `src/playlist/*`
-  - `src/library/*`
-  - `src/metadata/*`
-  - `src/integration/*`
-  - `src/cast/*`
+  - `crates/roqtune-core/src/audio/*` (decoder/player/probe/output options)
+  - `crates/roqtune-core/src/playlist.rs`
+  - `crates/roqtune-core/src/playlist_manager.rs`
+  - `crates/roqtune-core/src/library/*`
+  - `crates/roqtune-core/src/metadata/*`
+  - `crates/roqtune-core/src/integration/*`
+  - `crates/roqtune-core/src/cast/*`
   - `src/ui_manager.rs`
 - Shared models/persistence:
-  - `src/protocol.rs`
-  - `src/layout.rs`
-  - `src/config.rs`
-  - `src/config_persistence.rs`
-  - `src/db_manager.rs`
+  - `crates/roqtune-core/src/protocol.rs`
+  - `crates/roqtune-core/src/layout.rs`
+  - `crates/roqtune-core/src/config.rs`
+  - `crates/roqtune-core/src/config_persistence.rs`
+  - `crates/roqtune-core/src/db_manager.rs`
 
 ## 7. Persistence Boundaries
 - Layout-owned settings must persist in `layout.toml` (`LayoutConfig`).
