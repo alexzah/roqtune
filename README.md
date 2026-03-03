@@ -5,8 +5,14 @@
 `roqtune` is a desktop music player that aims to bring back the fun of curating and enjoying your personal music library. It is designed to be highly customizable, feature rich, and performant. It is written in Rust and uses the cross platform Slint UI framework.
 
 <div style="display:flex; gap:12px; align-items:flex-start;">
-  <img src="images/screenshot_playlist_mode.png" width="48%" />
-  <img src="images/screenshot_library_mode.png" width="48%" />
+<figure>
+  <img src="images/screenshot_playlist_mode.png" alt="roqtune library mode (Gruvbox Light)"/>
+  <figcaption><em>Playlist mode (Default Theme)</em></figcaption>
+</figure>
+<figure>
+  <img src="images/screenshot_library_mode.png" alt="roqtune library mode (Gruvbox Light)"/>
+  <figcaption><em>Library mode (Gruvbox Light Theme)</em></figcaption>
+</figure>
 </div>
 
 ## Features
