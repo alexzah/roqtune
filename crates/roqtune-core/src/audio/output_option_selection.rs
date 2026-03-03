@@ -46,7 +46,7 @@ fn filter_common_u32(detected: &BTreeSet<u32>, common_values: &[u32], fallback: 
 }
 
 /// Picks the first preferred `u16` value present in `detected`, with fallbacks.
-pub(crate) fn choose_preferred_u16(
+pub fn choose_preferred_u16(
     detected: &BTreeSet<u16>,
     preferred_values: &[u16],
     fallback: u16,
@@ -61,7 +61,7 @@ pub(crate) fn choose_preferred_u16(
 }
 
 /// Picks the first preferred `u32` value present in `detected`, with fallbacks.
-pub(crate) fn choose_preferred_u32(
+pub fn choose_preferred_u32(
     detected: &BTreeSet<u32>,
     preferred_values: &[u32],
     fallback: u32,
@@ -76,7 +76,7 @@ pub(crate) fn choose_preferred_u32(
 }
 
 /// Resolves effective runtime output values from persisted settings plus auto/override state.
-pub(crate) fn resolve_runtime_config(
+pub fn resolve_runtime_config(
     config: &Config,
     output_options: &OutputSettingsOptions,
     runtime_output_override: Option<&RuntimeOutputOverride>,
@@ -101,7 +101,7 @@ pub(crate) fn resolve_runtime_config(
 }
 
 /// Resolves a settings dropdown index for string-valued options with an Auto slot at index `0`.
-pub(crate) fn select_output_option_index_string(
+pub fn select_output_option_index_string(
     is_auto: bool,
     value: &str,
     values: &[String],
@@ -118,7 +118,7 @@ pub(crate) fn select_output_option_index_string(
 }
 
 /// Resolves a settings dropdown index for `u16` options with an Auto slot at index `0`.
-pub(crate) fn select_output_option_index_u16(
+pub fn select_output_option_index_u16(
     is_auto: bool,
     value: u16,
     values: &[u16],
@@ -135,7 +135,7 @@ pub(crate) fn select_output_option_index_u16(
 }
 
 /// Resolves a manual selection index for `u32` options without an Auto slot.
-pub(crate) fn select_manual_output_option_index_u32(
+pub fn select_manual_output_option_index_u32(
     value: u32,
     values: &[u32],
     custom_index: usize,
@@ -188,7 +188,7 @@ fn format_verified_rates_summary(rates: &[u32]) -> String {
 /// This intentionally avoids any CPAL/ALSA device enumeration or probing so the UI can
 /// initialize immediately using the user's prior settings. Runtime probing then refreshes
 /// these options asynchronously once audio services are up.
-pub(crate) fn bootstrap_output_settings_options(config: &Config) -> OutputSettingsOptions {
+pub fn bootstrap_output_settings_options(config: &Config) -> OutputSettingsOptions {
     let configured_device_name = config.output.output_device_name.trim().to_string();
     let configured_channel_count = config.output.channel_count.max(1);
     let configured_sample_rate_hz = config.output.sample_rate_khz.max(8_000);
@@ -215,7 +215,7 @@ pub(crate) fn bootstrap_output_settings_options(config: &Config) -> OutputSettin
 }
 
 /// Returns a stable, deduplicated snapshot of output device names from a host.
-pub(crate) fn snapshot_output_device_names(host: &cpal::Host) -> Vec<String> {
+pub fn snapshot_output_device_names(host: &cpal::Host) -> Vec<String> {
     let mut device_names = Vec::new();
     if let Ok(devices) = host.output_devices() {
         for device in devices {
@@ -232,7 +232,7 @@ pub(crate) fn snapshot_output_device_names(host: &cpal::Host) -> Vec<String> {
 }
 
 /// Detects available output settings and computes preferred auto defaults.
-pub(crate) fn detect_output_settings_options(config: &Config) -> OutputSettingsOptions {
+pub fn detect_output_settings_options(config: &Config) -> OutputSettingsOptions {
     const COMMON_SAMPLE_RATES: [u32; 6] = [44_100, 48_000, 88_200, 96_000, 176_400, 192_000];
     const COMMON_CHANNEL_COUNTS: [u16; 4] = [2, 1, 6, 8];
     const COMMON_BIT_DEPTHS: [u16; 3] = [16, 24, 32];
