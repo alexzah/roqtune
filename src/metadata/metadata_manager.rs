@@ -5,10 +5,11 @@
 
 use std::borrow::Cow;
 use std::collections::{HashMap, HashSet};
-use std::fs::OpenOptions;
+use std::fs::{self, OpenOptions};
 use std::io::{Cursor, Seek};
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use chrono::{DateTime, Local};
 use log::{debug, warn};
@@ -1559,8 +1560,114 @@ impl MetadataManager {
     ) -> Result<(), String> {
         let metadata_fields =
             Self::replaygain_metadata_fields_for_path(path, track_values, album_values);
-        Self::save_track_properties_with_db(db_manager, path, &metadata_fields, &[], &[])
-            .map(|_| ())
+        match Self::save_track_properties_with_db(db_manager, path, &metadata_fields, &[], &[]) {
+            Ok(_) => Ok(()),
+            Err(primary_error) => {
+                warn!(
+                    "ReplayGain tag write failed for {}; retrying with ffmpeg metadata rewrite: {}",
+                    path.display(),
+                    primary_error
+                );
+                match Self::save_replaygain_tags_with_ffmpeg(path, track_values, album_values) {
+                    Ok(_) => Self::finalize_saved_track_properties(db_manager, path).map(|_| ()),
+                    Err(fallback_error) => Err(format!(
+                        "{primary_error}; ffmpeg fallback failed: {fallback_error}"
+                    )),
+                }
+            }
+        }
+    }
+
+    fn replaygain_ffmpeg_temp_output_path(path: &Path) -> Result<PathBuf, String> {
+        let parent = path
+            .parent()
+            .ok_or_else(|| format!("Track path has no parent directory: {}", path.display()))?;
+        let extension = path
+            .extension()
+            .and_then(|value| value.to_str())
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .unwrap_or("tmp");
+        let stem = path
+            .file_stem()
+            .and_then(|value| value.to_str())
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .unwrap_or("track");
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|value| value.as_nanos())
+            .unwrap_or(0);
+        let temp_name = format!(".roqtune-replaygain-{stem}-{nonce}.{extension}");
+        Ok(parent.join(temp_name))
+    }
+
+    fn save_replaygain_tags_with_ffmpeg(
+        path: &Path,
+        track_values: ReplayGainScanValues,
+        album_values: ReplayGainScanValues,
+    ) -> Result<(), String> {
+        let output_path = Self::replaygain_ffmpeg_temp_output_path(path)?;
+        let mut command = Command::new("ffmpeg");
+        command
+            .arg("-hide_banner")
+            .arg("-nostats")
+            .arg("-y")
+            .arg("-i")
+            .arg(path)
+            .arg("-map")
+            .arg("0")
+            .arg("-map_metadata")
+            .arg("0")
+            .arg("-c")
+            .arg("copy")
+            .arg("-metadata")
+            .arg(format!(
+                "REPLAYGAIN_TRACK_GAIN={:+.2} dB",
+                track_values.gain_db
+            ))
+            .arg("-metadata")
+            .arg(format!("REPLAYGAIN_TRACK_PEAK={:.6}", track_values.peak))
+            .arg("-metadata")
+            .arg(format!(
+                "REPLAYGAIN_ALBUM_GAIN={:+.2} dB",
+                album_values.gain_db
+            ))
+            .arg("-metadata")
+            .arg(format!("REPLAYGAIN_ALBUM_PEAK={:.6}", album_values.peak))
+            .arg("-metadata")
+            .arg("REPLAYGAIN_REFERENCE_LOUDNESS=89.0 dB")
+            .arg(&output_path);
+
+        let output = command
+            .output()
+            .map_err(|error| format!("Failed to launch ffmpeg ReplayGain fallback: {}", error))?;
+        if !output.status.success() {
+            let _ = fs::remove_file(&output_path);
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            let detail = stderr
+                .lines()
+                .rev()
+                .find(|line| !line.trim().is_empty())
+                .unwrap_or("ffmpeg returned a non-zero exit status")
+                .trim()
+                .to_string();
+            return Err(format!(
+                "Failed to write ReplayGain tags with ffmpeg for {}: {}",
+                path.display(),
+                detail
+            ));
+        }
+
+        fs::rename(&output_path, path).map_err(|error| {
+            let _ = fs::remove_file(&output_path);
+            format!(
+                "Failed to replace track after ffmpeg ReplayGain fallback for {}: {}",
+                path.display(),
+                error
+            )
+        })?;
+        Ok(())
     }
 
     fn replaygain_scan_track_label(path: &Path) -> String {
@@ -1858,17 +1965,30 @@ impl MetadataManager {
         }
         let prepared_image_overwrites = Self::prepare_image_overwrites(image_overwrites)?;
         let prepared_image_deletes = Self::prepare_image_deletes(image_deletes);
-        if Self::save_track_properties_lossless(
+        match Self::save_track_properties_lossless(
             path,
             metadata_fields,
             &prepared_image_overwrites,
             &prepared_image_deletes,
-        )? {
-            return Self::finalize_saved_track_properties(db_manager, path);
+        ) {
+            Ok(true) => {
+                return Self::finalize_saved_track_properties(db_manager, path);
+            }
+            Ok(false) => {}
+            Err(error) => {
+                warn!(
+                    "Lossless metadata save failed for {}; falling back to tolerant write: {}",
+                    path.display(),
+                    error
+                );
+            }
         }
 
-        let mut tagged_file =
-            read_from_path(path).map_err(|error| format!("Failed to read tags: {error}"))?;
+        let mut tagged_file = match read_from_path(path) {
+            Ok(tagged_file) => tagged_file,
+            Err(primary_error) => metadata_tags::read_tagged_file_for_metadata(path, true)
+                .ok_or_else(|| format!("Failed to read tags: {primary_error}"))?,
+        };
         let tag_type = tagged_file.primary_tag_type();
         if tagged_file.tag(tag_type).is_none() {
             tagged_file.insert_tag(Tag::new(tag_type));
@@ -2264,8 +2384,11 @@ impl MetadataManager {
         db_manager: &DbManager,
         path: &Path,
     ) -> Result<(TrackMetadataSummary, Option<String>), String> {
-        let refreshed =
-            read_from_path(path).map_err(|error| format!("Failed to refresh tags: {error}"))?;
+        let refreshed = match read_from_path(path) {
+            Ok(tagged_file) => tagged_file,
+            Err(primary_error) => metadata_tags::read_tagged_file_for_metadata(path, true)
+                .ok_or_else(|| format!("Failed to refresh tags: {primary_error}"))?,
+        };
         let refreshed_tag = refreshed.primary_tag().or_else(|| refreshed.first_tag());
         let summary = Self::build_summary(path, refreshed_tag);
 
@@ -2400,7 +2523,7 @@ impl MetadataManager {
 
 #[cfg(test)]
 mod tests {
-    use super::MetadataManager;
+    use super::{MetadataManager, ReplayGainScanValues};
     use crate::protocol::{MetadataEditorField, PropertiesImageDelete, PropertiesImageOverwrite};
     use lofty::aac::AacFile;
     use lofty::ape::ApeItem;
@@ -3070,6 +3193,56 @@ mod tests {
         assert_eq!(prepared[1].1.pic_type().as_u8(), 4);
         assert_eq!(prepared[0].1.data(), front_b_bytes.as_slice());
         assert_eq!(prepared[1].1.data(), back_bytes.as_slice());
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_save_replaygain_tags_with_ffmpeg_updates_fixture_metadata() {
+        if MetadataManager::ensure_ffmpeg_available().is_err() {
+            return;
+        }
+
+        let (dir, fixture_path) = copy_metadata_fixture("base.mp3");
+        MetadataManager::save_replaygain_tags_with_ffmpeg(
+            &fixture_path,
+            ReplayGainScanValues {
+                gain_db: -9.2,
+                peak: 0.987654,
+            },
+            ReplayGainScanValues {
+                gain_db: -8.1,
+                peak: 0.998877,
+            },
+        )
+        .expect("ffmpeg replaygain fallback write failed");
+
+        let replaygain = crate::metadata::metadata_tags::read_replay_gain_metadata(&fixture_path)
+            .expect("replaygain metadata should be present after ffmpeg write");
+        assert_eq!(
+            replaygain
+                .track_gain_db
+                .map(|value| (value * 100.0).round() as i32),
+            Some(-920)
+        );
+        assert_eq!(
+            replaygain
+                .album_gain_db
+                .map(|value| (value * 100.0).round() as i32),
+            Some(-810)
+        );
+        assert_eq!(
+            replaygain
+                .track_peak
+                .map(|value| (value * 1_000_000.0).round() as i32),
+            Some(987_654)
+        );
+        assert_eq!(
+            replaygain
+                .album_peak
+                .map(|value| (value * 1_000_000.0).round() as i32),
+            Some(998_877)
+        );
 
         let _ = fs::remove_dir_all(&dir);
     }
