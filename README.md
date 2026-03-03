@@ -14,8 +14,7 @@
 - Rich library browsing with fast scanning and views for Tracks, Albums, Artists, Genres, Decades, and Favorites
 - Album/artist detail pages with optional internet enrichment (bios, images, descriptions) plus manual override tools
 - Built in tag editor powered by [`lofty`](https://crates.io/crates/lofty) including embedded artwork modification and media info inspection
-- High-quality playback via [`symphonia`](https://crates.io/crates/symphonia) and [`cpal`](https://crates.io/crates/cpal)
-- Audio fidelity controls including ReplayGain, resampling quality, output device/sample rate/bit-depth/channel options
+- High-quality playback powered by  [`symphonia`](https://crates.io/crates/symphonia) and [`cpal`](https://crates.io/crates/cpal) with audio fidelity controls, as well as features like ReplayGain and crossfade
 - Theming + custom colors: switch between curated color schemes or fine-tune your own palette (with per-component color editing)
 - Integrations: OpenSubsonic streaming (multi-profile) and local network casting support
 
