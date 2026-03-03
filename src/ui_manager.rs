@@ -235,6 +235,14 @@ pub struct UiManager {
     pending_library_remove_from_playlists: bool,
     library_remove_eval_nonce: u64,
     pending_library_remove_eval_request_id: Option<u64>,
+    pending_replaygain_scan_selections: Vec<protocol::LibrarySelectionSpec>,
+    replaygain_scan_request_nonce: u64,
+    pending_replaygain_scan_eval_request_id: Option<u64>,
+    active_replaygain_scan_request_id: Option<u64>,
+    replaygain_scan_progress_visible: bool,
+    replaygain_scan_progress_processed: usize,
+    replaygain_scan_progress_total: usize,
+    replaygain_scan_progress_track_label: String,
     properties_request_nonce: u64,
     properties_pending_request_id: Option<u64>,
     properties_pending_request_kind: Option<PropertiesRequestKind>,
@@ -433,6 +441,16 @@ struct PropertiesLoadedPayload {
     external_images: Vec<protocol::PropertiesExternalImage>,
 }
 
+struct ReplayGainScanProgressPayload {
+    request_id: u64,
+    processed: usize,
+    total_tracks: usize,
+    updated: usize,
+    skipped: usize,
+    failed: usize,
+    current_track_label: String,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 enum LibraryViewState {
     TracksRoot,
@@ -601,6 +619,8 @@ const LIBRARY_REMOVE_CONFIRM_DEFAULT_MESSAGE: &str =
     "Remove from library? This will not delete any files\n\nNote: tracks may be re-added in a rescan if files remain in library folders";
 const LIBRARY_REMOVE_CONFIRM_PLAYLIST_SYNC_MESSAGE: &str =
     "Playlist to library sync is enabled. Removing these tracks will delete them from playlists. Do you want to proceed?";
+const REPLAYGAIN_SCAN_OVERWRITE_CONFIRM_DEFAULT_MESSAGE: &str =
+    "Some selected tracks already have ReplayGain tags. Overwrite existing tags?";
 
 static COVER_ART_MEMORY_CACHE_BUDGET_BYTES: AtomicU64 =
     AtomicU64::new(DEFAULT_IMAGE_MEMORY_CACHE_MAX_BYTES);
@@ -2040,6 +2060,14 @@ impl UiManager {
             pending_library_remove_from_playlists: false,
             library_remove_eval_nonce: 0,
             pending_library_remove_eval_request_id: None,
+            pending_replaygain_scan_selections: Vec::new(),
+            replaygain_scan_request_nonce: 0,
+            pending_replaygain_scan_eval_request_id: None,
+            active_replaygain_scan_request_id: None,
+            replaygain_scan_progress_visible: false,
+            replaygain_scan_progress_processed: 0,
+            replaygain_scan_progress_total: 0,
+            replaygain_scan_progress_track_label: String::new(),
             properties_request_nonce: 0,
             properties_pending_request_id: None,
             properties_pending_request_kind: None,
@@ -8171,6 +8199,242 @@ impl UiManager {
         self.reset_library_remove_confirmation_state();
     }
 
+    fn next_replaygain_scan_request_id(&mut self) -> u64 {
+        self.replaygain_scan_request_nonce = self.replaygain_scan_request_nonce.wrapping_add(1);
+        self.replaygain_scan_request_nonce
+    }
+
+    fn build_replaygain_scan_selection_specs(&self) -> Vec<protocol::LibrarySelectionSpec> {
+        if self.collection_mode == COLLECTION_MODE_LIBRARY {
+            return self.build_library_selection_specs();
+        }
+
+        let selected_paths = Self::build_copied_track_paths(
+            &self.track_paths,
+            &self.selected_indices,
+            &self.view_indices,
+        );
+        let mut specs = Vec::new();
+        let mut seen_paths = HashSet::new();
+        for path in selected_paths {
+            let key = path.to_string_lossy().to_string();
+            if seen_paths.insert(key) {
+                specs.push(protocol::LibrarySelectionSpec::Track { path });
+            }
+        }
+        specs
+    }
+
+    fn show_replaygain_scan_overwrite_confirmation_dialog(&self, message: String) {
+        let _ = self.ui.upgrade_in_event_loop(move |ui| {
+            ui.set_library_replaygain_scan_confirm_message(message.into());
+            ui.set_show_library_replaygain_scan_confirm(true);
+        });
+    }
+
+    fn reset_replaygain_scan_confirmation_ui(&self) {
+        let _ = self.ui.upgrade_in_event_loop(move |ui| {
+            ui.set_library_replaygain_scan_confirm_message(
+                REPLAYGAIN_SCAN_OVERWRITE_CONFIRM_DEFAULT_MESSAGE.into(),
+            );
+            ui.set_show_library_replaygain_scan_confirm(false);
+        });
+    }
+
+    fn sync_replaygain_scan_progress_ui(&self) {
+        let visible = self.replaygain_scan_progress_visible;
+        let processed = self
+            .replaygain_scan_progress_processed
+            .min(i32::MAX as usize) as i32;
+        let total = self.replaygain_scan_progress_total.min(i32::MAX as usize) as i32;
+        let track_label = self.replaygain_scan_progress_track_label.clone();
+        let _ = self.ui.upgrade_in_event_loop(move |ui| {
+            ui.set_show_replaygain_scan_progress(visible);
+            ui.set_replaygain_scan_progress_processed(processed);
+            ui.set_replaygain_scan_progress_total(total);
+            ui.set_replaygain_scan_progress_track_label(track_label.into());
+        });
+    }
+
+    fn request_replaygain_scan_selection(&mut self) {
+        if self.active_replaygain_scan_request_id.is_some() {
+            self.library_status_text = "ReplayGain scan already in progress.".to_string();
+            self.show_library_toast("ReplayGain scan already in progress.");
+            self.sync_library_ui();
+            return;
+        }
+
+        let selections = self.build_replaygain_scan_selection_specs();
+        if selections.is_empty() {
+            self.library_status_text = "No tracks selected for ReplayGain scan.".to_string();
+            self.show_library_toast("No tracks selected for ReplayGain scan.");
+            self.sync_library_ui();
+            return;
+        }
+
+        self.pending_replaygain_scan_selections = selections.clone();
+        let request_id = self.next_replaygain_scan_request_id();
+        self.pending_replaygain_scan_eval_request_id = Some(request_id);
+        let _ = self.bus_sender.send(protocol::Message::Library(
+            protocol::LibraryMessage::EvaluateReplayGainScanSelection {
+                request_id,
+                selections,
+            },
+        ));
+    }
+
+    fn start_pending_replaygain_scan(&mut self, overwrite_existing: bool) {
+        let selections = std::mem::take(&mut self.pending_replaygain_scan_selections);
+        self.pending_replaygain_scan_eval_request_id = None;
+        self.reset_replaygain_scan_confirmation_ui();
+        if selections.is_empty() {
+            return;
+        }
+
+        let request_id = self.next_replaygain_scan_request_id();
+        self.active_replaygain_scan_request_id = Some(request_id);
+        let _ = self.bus_sender.send(protocol::Message::Library(
+            protocol::LibraryMessage::StartReplayGainScanSelection {
+                request_id,
+                selections,
+                overwrite_existing,
+            },
+        ));
+    }
+
+    fn confirm_replaygain_scan_overwrite(&mut self) {
+        self.start_pending_replaygain_scan(true);
+    }
+
+    fn skip_replaygain_scan_existing(&mut self) {
+        self.start_pending_replaygain_scan(false);
+    }
+
+    fn cancel_replaygain_scan_overwrite(&mut self) {
+        self.pending_replaygain_scan_eval_request_id = None;
+        self.pending_replaygain_scan_selections.clear();
+        self.reset_replaygain_scan_confirmation_ui();
+    }
+
+    fn handle_replaygain_scan_evaluation_result(
+        &mut self,
+        request_id: u64,
+        track_count: usize,
+        existing_tag_count: usize,
+    ) {
+        if self.pending_replaygain_scan_eval_request_id != Some(request_id) {
+            return;
+        }
+        self.pending_replaygain_scan_eval_request_id = None;
+
+        if self.pending_replaygain_scan_selections.is_empty() || track_count == 0 {
+            self.pending_replaygain_scan_selections.clear();
+            self.reset_replaygain_scan_confirmation_ui();
+            self.library_status_text = "No local files matched the selected tracks.".to_string();
+            self.show_library_toast("No local files matched the selected tracks.");
+            self.sync_library_ui();
+            return;
+        }
+
+        if existing_tag_count > 0 {
+            let message = format!(
+                "{} of {} selected track(s) already have ReplayGain tags.\n\nChoose Overwrite to replace those tags, or Skip Existing to leave existing ReplayGain tags untouched.",
+                existing_tag_count, track_count
+            );
+            self.show_replaygain_scan_overwrite_confirmation_dialog(message);
+        } else {
+            self.start_pending_replaygain_scan(false);
+        }
+    }
+
+    fn handle_replaygain_scan_evaluation_failed(&mut self, request_id: u64, error: String) {
+        if self.pending_replaygain_scan_eval_request_id != Some(request_id) {
+            return;
+        }
+        self.pending_replaygain_scan_eval_request_id = None;
+        self.pending_replaygain_scan_selections.clear();
+        self.reset_replaygain_scan_confirmation_ui();
+        self.library_status_text = format!("ReplayGain scan unavailable: {}", error);
+        self.show_library_toast(self.library_status_text.clone());
+        self.sync_library_ui();
+    }
+
+    fn handle_replaygain_scan_started(&mut self, request_id: u64, total_tracks: usize) {
+        if self.active_replaygain_scan_request_id != Some(request_id) {
+            return;
+        }
+        self.replaygain_scan_progress_visible = true;
+        self.replaygain_scan_progress_processed = 0;
+        self.replaygain_scan_progress_total = total_tracks;
+        self.replaygain_scan_progress_track_label.clear();
+        self.sync_replaygain_scan_progress_ui();
+        self.library_status_text = format!("Scanning ReplayGain tags (0/{})", total_tracks);
+        self.sync_library_ui();
+    }
+
+    fn handle_replaygain_scan_progress(&mut self, progress: ReplayGainScanProgressPayload) {
+        if self.active_replaygain_scan_request_id != Some(progress.request_id) {
+            return;
+        }
+        self.replaygain_scan_progress_visible = true;
+        self.replaygain_scan_progress_processed = progress.processed;
+        self.replaygain_scan_progress_total = progress.total_tracks;
+        self.replaygain_scan_progress_track_label = progress.current_track_label;
+        self.sync_replaygain_scan_progress_ui();
+        self.library_status_text = format!(
+            "Scanning ReplayGain tags ({}/{}) • updated {} • skipped {} • failed {}",
+            progress.processed,
+            progress.total_tracks,
+            progress.updated,
+            progress.skipped,
+            progress.failed
+        );
+        self.sync_library_ui();
+    }
+
+    fn handle_replaygain_scan_completed(
+        &mut self,
+        request_id: u64,
+        total_tracks: usize,
+        updated: usize,
+        skipped: usize,
+        failed: usize,
+    ) {
+        if self.active_replaygain_scan_request_id != Some(request_id) {
+            return;
+        }
+        self.active_replaygain_scan_request_id = None;
+        self.replaygain_scan_progress_visible = false;
+        self.replaygain_scan_progress_processed = 0;
+        self.replaygain_scan_progress_total = 0;
+        self.replaygain_scan_progress_track_label.clear();
+        self.sync_replaygain_scan_progress_ui();
+        self.library_status_text = format!(
+            "ReplayGain scan complete ({} tracks): updated {} track(s), skipped {}, failed {}",
+            total_tracks, updated, skipped, failed
+        );
+        self.show_library_toast(self.library_status_text.clone());
+        self.sync_library_ui();
+    }
+
+    fn handle_replaygain_scan_failed(&mut self, request_id: u64, error: String) {
+        if self.active_replaygain_scan_request_id != Some(request_id) {
+            return;
+        }
+        self.active_replaygain_scan_request_id = None;
+        self.pending_replaygain_scan_eval_request_id = None;
+        self.pending_replaygain_scan_selections.clear();
+        self.reset_replaygain_scan_confirmation_ui();
+        self.replaygain_scan_progress_visible = false;
+        self.replaygain_scan_progress_processed = 0;
+        self.replaygain_scan_progress_total = 0;
+        self.replaygain_scan_progress_track_label.clear();
+        self.sync_replaygain_scan_progress_ui();
+        self.library_status_text = format!("ReplayGain scan failed: {}", error);
+        self.show_library_toast(self.library_status_text.clone());
+        self.sync_library_ui();
+    }
+
     fn paste_copied_tracks(&mut self) {
         if !self.copied_track_paths.is_empty() {
             self.pending_paste_feedback = true;
@@ -12315,6 +12579,9 @@ impl UiManager {
                             protocol::LibraryMessage::DeleteSelected => {
                                 self.request_library_remove_selection_confirmation();
                             }
+                            protocol::LibraryMessage::RequestReplayGainScanSelection => {
+                                self.request_replaygain_scan_selection();
+                            }
                             protocol::LibraryMessage::OpenFileLocation => {
                                 self.open_file_location();
                             }
@@ -12344,6 +12611,15 @@ impl UiManager {
                             }
                             protocol::LibraryMessage::CancelRemoveSelection => {
                                 self.cancel_library_remove_selection();
+                            }
+                            protocol::LibraryMessage::ConfirmReplayGainScanOverwrite => {
+                                self.confirm_replaygain_scan_overwrite();
+                            }
+                            protocol::LibraryMessage::SkipReplayGainScanExisting => {
+                                self.skip_replaygain_scan_existing();
+                            }
+                            protocol::LibraryMessage::CancelReplayGainScanOverwrite => {
+                                self.cancel_replaygain_scan_overwrite();
                             }
                             protocol::LibraryMessage::LibraryViewportChanged {
                                 first_row,
@@ -12689,6 +12965,23 @@ impl UiManager {
                                 };
                                 self.show_library_remove_confirmation_dialog(message);
                             }
+                            protocol::LibraryMessage::ReplayGainScanEvaluationResult {
+                                request_id,
+                                track_count,
+                                existing_tag_count,
+                            } => {
+                                self.handle_replaygain_scan_evaluation_result(
+                                    request_id,
+                                    track_count,
+                                    existing_tag_count,
+                                );
+                            }
+                            protocol::LibraryMessage::ReplayGainScanEvaluationFailed {
+                                request_id,
+                                error,
+                            } => {
+                                self.handle_replaygain_scan_evaluation_failed(request_id, error);
+                            }
                             protocol::LibraryMessage::RemoveSelectionFailed(error_text) => {
                                 self.pending_library_remove_selections.clear();
                                 self.reset_library_remove_confirmation_state();
@@ -12728,7 +13021,11 @@ impl UiManager {
                             | protocol::LibraryMessage::ClearEnrichmentCache
                             | protocol::LibraryMessage::AddSelectionToPlaylists { .. }
                             | protocol::LibraryMessage::PasteSelectionToActivePlaylist { .. }
-                            | protocol::LibraryMessage::RemoveSelectionFromLibrary { .. } => {}
+                            | protocol::LibraryMessage::RemoveSelectionFromLibrary { .. }
+                            | protocol::LibraryMessage::EvaluateReplayGainScanSelection {
+                                ..
+                            }
+                            | protocol::LibraryMessage::StartReplayGainScanSelection { .. } => {}
                         },
                         protocol::Message::Metadata(metadata_message) => match metadata_message {
                             protocol::MetadataMessage::OpenPropertiesForCurrentSelection => {
@@ -12808,8 +13105,57 @@ impl UiManager {
                             } => {
                                 self.handle_properties_save_failed(request_id, path, error);
                             }
+                            protocol::MetadataMessage::ReplayGainScanStarted {
+                                request_id,
+                                total_tracks,
+                            } => {
+                                self.handle_replaygain_scan_started(request_id, total_tracks);
+                            }
+                            protocol::MetadataMessage::ReplayGainScanProgress {
+                                request_id,
+                                processed,
+                                total_tracks,
+                                updated,
+                                skipped,
+                                failed,
+                                current_track_label,
+                            } => {
+                                self.handle_replaygain_scan_progress(
+                                    ReplayGainScanProgressPayload {
+                                        request_id,
+                                        processed,
+                                        total_tracks,
+                                        updated,
+                                        skipped,
+                                        failed,
+                                        current_track_label,
+                                    },
+                                );
+                            }
+                            protocol::MetadataMessage::ReplayGainScanCompleted {
+                                request_id,
+                                total_tracks,
+                                updated,
+                                skipped,
+                                failed,
+                            } => {
+                                self.handle_replaygain_scan_completed(
+                                    request_id,
+                                    total_tracks,
+                                    updated,
+                                    skipped,
+                                    failed,
+                                );
+                            }
+                            protocol::MetadataMessage::ReplayGainScanFailed {
+                                request_id,
+                                error,
+                            } => {
+                                self.handle_replaygain_scan_failed(request_id, error);
+                            }
                             protocol::MetadataMessage::RequestTrackProperties { .. }
-                            | protocol::MetadataMessage::SaveTrackProperties { .. } => {}
+                            | protocol::MetadataMessage::SaveTrackProperties { .. }
+                            | protocol::MetadataMessage::ScanReplayGainForPaths { .. } => {}
                         },
                         protocol::Message::Playlist(
                             protocol::PlaylistMessage::OpenSubsonicSyncEligiblePlaylists(

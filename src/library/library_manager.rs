@@ -1739,6 +1739,17 @@ impl LibraryManager {
         Ok(resolved_paths)
     }
 
+    fn resolve_local_selection_paths(
+        &self,
+        selections: Vec<protocol::LibrarySelectionSpec>,
+    ) -> Result<Vec<PathBuf>, String> {
+        let resolved = self.resolve_selection_paths(selections)?;
+        Ok(resolved
+            .into_iter()
+            .filter(|path| path.is_file())
+            .collect::<Vec<_>>())
+    }
+
     fn add_selection_to_playlists(
         &self,
         selections: Vec<protocol::LibrarySelectionSpec>,
@@ -1884,6 +1895,97 @@ impl LibraryManager {
             LibraryMessage::RemoveSelectionEvaluationResult {
                 request_id,
                 requires_playlist_removal,
+            },
+        ));
+    }
+
+    fn evaluate_replay_gain_scan_selection(
+        &self,
+        request_id: u64,
+        selections: Vec<protocol::LibrarySelectionSpec>,
+    ) {
+        if selections.is_empty() {
+            let _ = self.bus_producer.send(Message::Library(
+                LibraryMessage::ReplayGainScanEvaluationFailed {
+                    request_id,
+                    error: "No tracks selected for ReplayGain scan".to_string(),
+                },
+            ));
+            return;
+        }
+
+        let paths = match self.resolve_local_selection_paths(selections) {
+            Ok(paths) => paths,
+            Err(error) => {
+                let _ = self.bus_producer.send(Message::Library(
+                    LibraryMessage::ReplayGainScanEvaluationFailed { request_id, error },
+                ));
+                return;
+            }
+        };
+        if paths.is_empty() {
+            let _ = self.bus_producer.send(Message::Library(
+                LibraryMessage::ReplayGainScanEvaluationFailed {
+                    request_id,
+                    error: "No local files matched the selected tracks".to_string(),
+                },
+            ));
+            return;
+        }
+
+        let existing_tag_count = paths
+            .iter()
+            .filter(|path| metadata_tags::read_replay_gain_metadata(path.as_path()).is_some())
+            .count();
+        let _ = self.bus_producer.send(Message::Library(
+            LibraryMessage::ReplayGainScanEvaluationResult {
+                request_id,
+                track_count: paths.len(),
+                existing_tag_count,
+            },
+        ));
+    }
+
+    fn start_replay_gain_scan_selection(
+        &self,
+        request_id: u64,
+        selections: Vec<protocol::LibrarySelectionSpec>,
+        overwrite_existing: bool,
+    ) {
+        if selections.is_empty() {
+            let _ = self.bus_producer.send(Message::Metadata(
+                protocol::MetadataMessage::ReplayGainScanFailed {
+                    request_id,
+                    error: "No tracks selected for ReplayGain scan".to_string(),
+                },
+            ));
+            return;
+        }
+
+        let paths = match self.resolve_local_selection_paths(selections) {
+            Ok(paths) => paths,
+            Err(error) => {
+                let _ = self.bus_producer.send(Message::Metadata(
+                    protocol::MetadataMessage::ReplayGainScanFailed { request_id, error },
+                ));
+                return;
+            }
+        };
+        if paths.is_empty() {
+            let _ = self.bus_producer.send(Message::Metadata(
+                protocol::MetadataMessage::ReplayGainScanFailed {
+                    request_id,
+                    error: "No local files matched the selected tracks".to_string(),
+                },
+            ));
+            return;
+        }
+
+        let _ = self.bus_producer.send(Message::Metadata(
+            protocol::MetadataMessage::ScanReplayGainForPaths {
+                request_id,
+                paths,
+                overwrite_existing,
             },
         ));
     }
@@ -2138,6 +2240,23 @@ impl LibraryManager {
                         selections,
                     }) => {
                         self.evaluate_remove_selection(request_id, selections);
+                    }
+                    Message::Library(LibraryMessage::EvaluateReplayGainScanSelection {
+                        request_id,
+                        selections,
+                    }) => {
+                        self.evaluate_replay_gain_scan_selection(request_id, selections);
+                    }
+                    Message::Library(LibraryMessage::StartReplayGainScanSelection {
+                        request_id,
+                        selections,
+                        overwrite_existing,
+                    }) => {
+                        self.start_replay_gain_scan_selection(
+                            request_id,
+                            selections,
+                            overwrite_existing,
+                        );
                     }
                     Message::Library(LibraryMessage::RemoveSelectionFromLibrary {
                         selections,

@@ -322,6 +322,19 @@ pub enum LibraryMessage {
         selections: Vec<LibrarySelectionSpec>,
         remove_from_playlists: bool,
     },
+    RequestReplayGainScanSelection,
+    ConfirmReplayGainScanOverwrite,
+    SkipReplayGainScanExisting,
+    CancelReplayGainScanOverwrite,
+    EvaluateReplayGainScanSelection {
+        request_id: u64,
+        selections: Vec<LibrarySelectionSpec>,
+    },
+    StartReplayGainScanSelection {
+        request_id: u64,
+        selections: Vec<LibrarySelectionSpec>,
+        overwrite_existing: bool,
+    },
     RequestScan,
     RequestRootCounts,
     RequestFavoritesSnapshot,
@@ -487,6 +500,15 @@ pub enum LibraryMessage {
         requires_playlist_removal: bool,
     },
     RemoveSelectionFailed(String),
+    ReplayGainScanEvaluationResult {
+        request_id: u64,
+        track_count: usize,
+        existing_tag_count: usize,
+    },
+    ReplayGainScanEvaluationFailed {
+        request_id: u64,
+        error: String,
+    },
     ToastTimeout {
         generation: u64,
     },
@@ -612,6 +634,35 @@ pub enum MetadataMessage {
     TrackPropertiesSaveFailed {
         request_id: u64,
         path: PathBuf,
+        error: String,
+    },
+    ScanReplayGainForPaths {
+        request_id: u64,
+        paths: Vec<PathBuf>,
+        overwrite_existing: bool,
+    },
+    ReplayGainScanStarted {
+        request_id: u64,
+        total_tracks: usize,
+    },
+    ReplayGainScanProgress {
+        request_id: u64,
+        processed: usize,
+        total_tracks: usize,
+        updated: usize,
+        skipped: usize,
+        failed: usize,
+        current_track_label: String,
+    },
+    ReplayGainScanCompleted {
+        request_id: u64,
+        total_tracks: usize,
+        updated: usize,
+        skipped: usize,
+        failed: usize,
+    },
+    ReplayGainScanFailed {
+        request_id: u64,
         error: String,
     },
 }

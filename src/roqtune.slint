@@ -159,6 +159,11 @@ export component AppWindow inherits Window {
                 root.show_library_remove_confirm = false;
                 return accept;
             }
+            if (event.text == Key.Escape && root.show_library_replaygain_scan_confirm) {
+                root.library_cancel_replaygain_scan_overwrite();
+                root.show_library_replaygain_scan_confirm = false;
+                return accept;
+            }
             if (event.text == Key.Escape && root.library_add_to_dialog_visible) {
                 root.library_cancel_add_to_playlists();
                 return accept;
@@ -205,6 +210,7 @@ export component AppWindow inherits Window {
             if (event.text == Key.Delete) {
                 if (root.collection_mode == 1) {
                     if (root.show_library_remove_confirm
+                            || root.show_library_replaygain_scan_confirm
                             || root.show_confirm_dialog
                             || root.show_remote_detach_confirm
                             || root.show_apply_filter_view_confirm) {
@@ -214,6 +220,7 @@ export component AppWindow inherits Window {
                     return accept;
                 } else {
                     if (root.editing_playlist_index != -1
+                            || root.show_library_replaygain_scan_confirm
                             || root.show_confirm_dialog
                             || root.show_remote_detach_confirm
                             || root.show_apply_filter_view_confirm) {
@@ -277,6 +284,13 @@ export component AppWindow inherits Window {
     in-out property <bool> show_library_remove_confirm: false;
     in-out property <string> library_remove_confirm_message:
         "Remove from library? This will not delete any files\n\nNote: tracks may be re-added in a rescan if files remain in library folders";
+    in-out property <bool> show_library_replaygain_scan_confirm: false;
+    in-out property <string> library_replaygain_scan_confirm_message:
+        "Some selected files already have ReplayGain tags. Overwrite existing ReplayGain tags?";
+    in-out property <bool> show_replaygain_scan_progress: false;
+    in-out property <int> replaygain_scan_progress_processed: 0;
+    in-out property <int> replaygain_scan_progress_total: 0;
+    in-out property <string> replaygain_scan_progress_track_label: "";
     in-out property <string> apply_filter_view_confirm_message: "";
     in-out property <int> delete_custom_column_index: -1;
     in-out property <string> delete_custom_column_message: "";
@@ -468,7 +482,7 @@ export component AppWindow inherits Window {
     property <length> playlist_track_context_menu_y: 0px;
     // Context menu sizing constants
     property <length> context-menu-item-height: 24px;
-    property <int> context-menu-item-count: 6;
+    property <int> context-menu-item-count: root.settings_use_replaygain ? 7 : 6;
     property <length> context-menu-padding: 8px;
     property <length> context-menu-spacing-total: 10px;
     property <length> context-menu-margin: 8px;
@@ -4225,6 +4239,26 @@ export component AppWindow inherits Window {
                     }
                 }
             }
+            if root.settings_use_replaygain : Rectangle {
+                height: 24px;
+                border-radius: 4px;
+                background: playlist-scan-replaygain-ta.has-hover ? AppPalette.control-hover-bg : transparent;
+                Text {
+                    x: 10px;
+                    width: parent.width - 20px;
+                    text: "Scan for ReplayGain tags";
+                    color: AppPalette.text-primary;
+                    font-size: 12px;
+                    vertical-alignment: center;
+                    overflow: elide;
+                }
+                playlist-scan-replaygain-ta := TouchArea {
+                    clicked => {
+                        root.show_playlist_track_context_menu = false;
+                        root.library_request_replaygain_scan_selection();
+                    }
+                }
+            }
             Rectangle {
                 height: 24px;
                 border-radius: 4px;
@@ -4371,6 +4405,26 @@ export component AppWindow inherits Window {
                     clicked => {
                         root.show_library_context_menu = false;
                         root.open_file_location();
+                    }
+                }
+            }
+            if root.settings_use_replaygain : Rectangle {
+                height: 24px;
+                border-radius: 4px;
+                background: library-scan-replaygain-ta.has-hover ? AppPalette.control-hover-bg : transparent;
+                Text {
+                    x: 10px;
+                    width: parent.width - 20px;
+                    text: "Scan for ReplayGain tags";
+                    color: AppPalette.text-primary;
+                    font-size: 12px;
+                    vertical-alignment: center;
+                    overflow: elide;
+                }
+                library-scan-replaygain-ta := TouchArea {
+                    clicked => {
+                        root.show_library_context_menu = false;
+                        root.library_request_replaygain_scan_selection();
                     }
                 }
             }
@@ -4697,6 +4751,58 @@ export component AppWindow inherits Window {
         }
     }
 
+    if root.show_replaygain_scan_progress : Rectangle {
+        z: 150;
+        width: min(root.width - 24px, 440px);
+        height: 96px;
+        x: root.width - self.width - 12px;
+        y: root.height - self.height - 12px;
+        border-radius: 6px;
+        border-width: 1px;
+        border-color: AppPalette.border;
+        background: AppPalette.panel-bg-elevated;
+
+        VerticalLayout {
+            padding: 10px;
+            spacing: 8px;
+            Text {
+                text: "Scanning ReplayGain tags";
+                color: AppPalette.text-primary;
+                font-size: 12px;
+                font-weight: 700;
+                overflow: elide;
+            }
+            Text {
+                text: root.replaygain_scan_progress_track_label == ""
+                    ? "Preparing..."
+                    : root.replaygain_scan_progress_track_label;
+                color: AppPalette.text-muted;
+                font-size: 11px;
+                overflow: elide;
+            }
+            Rectangle {
+                height: 8px;
+                border-radius: 4px;
+                background: AppPalette.panel-bg-alt;
+                Rectangle {
+                    property <int> effective-total: max(1, root.replaygain_scan_progress_total);
+                    property <int> effective-processed:
+                        min(root.replaygain_scan_progress_processed, self.effective-total);
+                    width: parent.width * self.effective-processed / self.effective-total;
+                    height: parent.height;
+                    border-radius: 4px;
+                    background: AppPalette.accent;
+                }
+            }
+            Text {
+                text: root.replaygain_scan_progress_processed + " / "
+                    + root.replaygain_scan_progress_total;
+                color: AppPalette.text-muted;
+                font-size: 11px;
+            }
+        }
+    }
+
     // Modal overlay for confirmation
     confirm_overlay := ConfirmationDialog {
         is-visible: root.show_confirm_dialog;
@@ -4756,6 +4862,73 @@ export component AppWindow inherits Window {
             root.library_cancel_remove_selection();
             root.show_library_remove_confirm = false;
             root.refocus_main();
+        }
+    }
+
+    if root.show_library_replaygain_scan_confirm : Rectangle {
+        z: 112;
+        background: AppPalette.overlay-scrim;
+        TouchArea {}
+
+        Rectangle {
+            width: min(root.width - 40px, 560px);
+            height: 210px;
+            x: (parent.width - self.width) / 2;
+            y: (parent.height - self.height) / 2;
+            border-radius: 6px;
+            background: AppPalette.panel-bg-elevated;
+            border-width: 1px;
+            border-color: AppPalette.border;
+
+            VerticalLayout {
+                padding: 16px;
+                spacing: 10px;
+
+                Text {
+                    text: "ReplayGain Tags Detected";
+                    color: AppPalette.text-primary;
+                    font-size: 15px;
+                    font-weight: 700;
+                }
+
+                Text {
+                    text: root.library_replaygain_scan_confirm_message;
+                    color: AppPalette.text-primary;
+                    font-size: 12px;
+                    wrap: word-wrap;
+                    vertical-stretch: 1;
+                }
+
+                HorizontalLayout {
+                    spacing: 8px;
+                    Button {
+                        text: "Cancel";
+                        clicked => {
+                            root.library_cancel_replaygain_scan_overwrite();
+                            root.show_library_replaygain_scan_confirm = false;
+                            root.refocus_main();
+                        }
+                    }
+                    Rectangle { horizontal-stretch: 1; }
+                    Button {
+                        text: "Skip Existing";
+                        clicked => {
+                            root.library_skip_replaygain_scan_existing();
+                            root.show_library_replaygain_scan_confirm = false;
+                            root.refocus_main();
+                        }
+                    }
+                    Button {
+                        text: "Overwrite";
+                        primary: true;
+                        clicked => {
+                            root.library_confirm_replaygain_scan_overwrite();
+                            root.show_library_replaygain_scan_confirm = false;
+                            root.refocus_main();
+                        }
+                    }
+                }
+            }
         }
     }
 
@@ -7377,6 +7550,10 @@ export component AppWindow inherits Window {
     callback library_cancel_add_to_playlists();
     callback library_confirm_remove_selection();
     callback library_cancel_remove_selection();
+    callback library_request_replaygain_scan_selection();
+    callback library_confirm_replaygain_scan_overwrite();
+    callback library_skip_replaygain_scan_existing();
+    callback library_cancel_replaygain_scan_overwrite();
     callback open_properties_for_current_selection();
     callback properties_select_tab(int);
     callback properties_field_edited(int, string);

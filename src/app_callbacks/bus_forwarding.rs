@@ -160,6 +160,34 @@ pub fn register_bus_forwarding_callbacks(ui: &AppWindow, context: BusForwardingC
     });
 
     let bus_sender_clone = bus_sender.clone();
+    ui.on_library_request_replaygain_scan_selection(move || {
+        let _ = bus_sender_clone.send(Message::Library(
+            protocol::LibraryMessage::RequestReplayGainScanSelection,
+        ));
+    });
+
+    let bus_sender_clone = bus_sender.clone();
+    ui.on_library_confirm_replaygain_scan_overwrite(move || {
+        let _ = bus_sender_clone.send(Message::Library(
+            protocol::LibraryMessage::ConfirmReplayGainScanOverwrite,
+        ));
+    });
+
+    let bus_sender_clone = bus_sender.clone();
+    ui.on_library_skip_replaygain_scan_existing(move || {
+        let _ = bus_sender_clone.send(Message::Library(
+            protocol::LibraryMessage::SkipReplayGainScanExisting,
+        ));
+    });
+
+    let bus_sender_clone = bus_sender.clone();
+    ui.on_library_cancel_replaygain_scan_overwrite(move || {
+        let _ = bus_sender_clone.send(Message::Library(
+            protocol::LibraryMessage::CancelReplayGainScanOverwrite,
+        ));
+    });
+
+    let bus_sender_clone = bus_sender.clone();
     ui.on_open_properties_for_current_selection(move || {
         let _ = bus_sender_clone.send(Message::Metadata(
             MetadataMessage::OpenPropertiesForCurrentSelection,

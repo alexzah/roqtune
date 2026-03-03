@@ -8,6 +8,7 @@ use std::collections::{HashMap, HashSet};
 use std::fs::OpenOptions;
 use std::io::{Cursor, Seek};
 use std::path::{Path, PathBuf};
+use std::process::Command;
 
 use chrono::{DateTime, Local};
 use log::{debug, warn};
@@ -35,7 +36,7 @@ use crate::db_manager::DbManager;
 use crate::image_pipeline::{self, ManagedImageKind};
 use crate::metadata_tags;
 use crate::protocol::{
-    Message, MetadataEditorField, MetadataMessage, PropertiesEmbeddedImageSlot,
+    LibraryTrack, Message, MetadataEditorField, MetadataMessage, PropertiesEmbeddedImageSlot,
     PropertiesExternalImage, PropertiesImageDelete, PropertiesImageOverwrite,
     PropertiesMediaInfoField, TrackMetadataSummary,
 };
@@ -78,6 +79,47 @@ type TrackPropertiesPayload = (
     Vec<PropertiesEmbeddedImageSlot>,
     Vec<PropertiesExternalImage>,
 );
+type ReplayGainScanTargetsPayload = (
+    Vec<ReplayGainScanTarget>,
+    HashMap<ReplayGainAlbumKey, Vec<PathBuf>>,
+);
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+struct ReplayGainAlbumKey {
+    album: String,
+    album_artist: String,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct ReplayGainScanValues {
+    gain_db: f32,
+    peak: f32,
+}
+
+#[derive(Debug, Clone)]
+struct ReplayGainScanTarget {
+    path: PathBuf,
+    album_key: ReplayGainAlbumKey,
+    has_existing_tags: bool,
+}
+
+#[derive(Debug, Clone)]
+struct ReplayGainScanProgress {
+    processed: usize,
+    total_tracks: usize,
+    updated: usize,
+    skipped: usize,
+    failed: usize,
+    current_track_label: String,
+}
+
+#[derive(Debug, serde::Deserialize)]
+struct LoudnormSummary {
+    input_i: String,
+    input_tp: String,
+}
+
+const REPLAYGAIN_REFERENCE_LOUDNESS_LUFS: f32 = -18.0;
 
 struct MediaInfoFieldInput<'a> {
     path: &'a Path,
@@ -1217,8 +1259,623 @@ impl MetadataManager {
         delete_codes
     }
 
+    fn replaygain_album_key_from_fields(
+        album: &str,
+        album_artist: &str,
+        fallback_path: &Path,
+    ) -> ReplayGainAlbumKey {
+        let album_key = album.trim().to_ascii_lowercase();
+        let album_artist_key = album_artist.trim().to_ascii_lowercase();
+        if album_key.is_empty() && album_artist_key.is_empty() {
+            return ReplayGainAlbumKey {
+                album: format!(
+                    "path:{}",
+                    fallback_path.to_string_lossy().to_ascii_lowercase()
+                ),
+                album_artist: String::new(),
+            };
+        }
+        ReplayGainAlbumKey {
+            album: album_key,
+            album_artist: album_artist_key,
+        }
+    }
+
+    fn replaygain_album_key_for_path(
+        path: &Path,
+        library_album_keys_by_path: &HashMap<PathBuf, ReplayGainAlbumKey>,
+    ) -> ReplayGainAlbumKey {
+        if let Some(key) = library_album_keys_by_path.get(path) {
+            return key.clone();
+        }
+
+        if let Some(metadata) = metadata_tags::read_common_track_metadata(path) {
+            let album_artist = if metadata.album_artist.trim().is_empty() {
+                metadata.artist
+            } else {
+                metadata.album_artist
+            };
+            return Self::replaygain_album_key_from_fields(&metadata.album, &album_artist, path);
+        }
+
+        Self::replaygain_album_key_from_fields("", "", path)
+    }
+
+    fn build_replaygain_scan_targets(
+        db_manager: &DbManager,
+        selected_paths: &[PathBuf],
+    ) -> Result<ReplayGainScanTargetsPayload, String> {
+        let library_tracks: Vec<LibraryTrack> = db_manager
+            .get_library_tracks()
+            .map_err(|error| format!("Failed to load library tracks: {}", error))?;
+        let mut library_album_keys_by_path: HashMap<PathBuf, ReplayGainAlbumKey> = HashMap::new();
+        let mut library_paths_by_album: HashMap<ReplayGainAlbumKey, Vec<PathBuf>> = HashMap::new();
+
+        for track in library_tracks {
+            if !track.path.is_file() {
+                continue;
+            }
+            let album_artist = if track.album_artist.trim().is_empty() {
+                track.artist.as_str()
+            } else {
+                track.album_artist.as_str()
+            };
+            let album_key =
+                Self::replaygain_album_key_from_fields(&track.album, album_artist, &track.path);
+            library_album_keys_by_path.insert(track.path.clone(), album_key.clone());
+            library_paths_by_album
+                .entry(album_key)
+                .or_default()
+                .push(track.path);
+        }
+
+        let mut targets: Vec<ReplayGainScanTarget> = Vec::with_capacity(selected_paths.len());
+        let mut selected_paths_by_album: HashMap<ReplayGainAlbumKey, Vec<PathBuf>> = HashMap::new();
+        for path in selected_paths {
+            let album_key =
+                Self::replaygain_album_key_for_path(path.as_path(), &library_album_keys_by_path);
+            let has_existing_tags =
+                metadata_tags::read_replay_gain_metadata(path.as_path()).is_some();
+            targets.push(ReplayGainScanTarget {
+                path: path.clone(),
+                album_key: album_key.clone(),
+                has_existing_tags,
+            });
+            selected_paths_by_album
+                .entry(album_key)
+                .or_default()
+                .push(path.clone());
+        }
+
+        let mut album_reference_paths: HashMap<ReplayGainAlbumKey, Vec<PathBuf>> = HashMap::new();
+        for (album_key, selected_album_paths) in selected_paths_by_album {
+            let mut refs = library_paths_by_album
+                .get(&album_key)
+                .cloned()
+                .unwrap_or_default();
+            if refs.is_empty() {
+                refs = selected_album_paths;
+            }
+            refs.sort_unstable();
+            refs.dedup();
+            album_reference_paths.insert(album_key, refs);
+        }
+
+        Ok((targets, album_reference_paths))
+    }
+
+    fn ensure_ffmpeg_available() -> Result<(), String> {
+        let output = Command::new("ffmpeg")
+            .arg("-version")
+            .output()
+            .map_err(|error| format!("ffmpeg is required for ReplayGain scan: {}", error))?;
+        if output.status.success() {
+            Ok(())
+        } else {
+            Err("ffmpeg is unavailable; install ffmpeg to scan ReplayGain tags".to_string())
+        }
+    }
+
+    fn run_ffmpeg_loudnorm_command(mut command: Command, context: &str) -> Result<String, String> {
+        let output = command
+            .output()
+            .map_err(|error| format!("{context}: {}", error))?;
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let combined = if stdout.trim().is_empty() {
+            stderr.to_string()
+        } else {
+            format!("{stderr}\n{stdout}")
+        };
+
+        if !output.status.success() {
+            let detail = stderr
+                .lines()
+                .rev()
+                .find(|line| !line.trim().is_empty())
+                .unwrap_or("ffmpeg returned a non-zero exit status")
+                .trim()
+                .to_string();
+            return Err(format!("{context}: {}", detail));
+        }
+
+        Ok(combined)
+    }
+
+    fn parse_loudnorm_summary(output: &str) -> Result<ReplayGainScanValues, String> {
+        let json_start = output
+            .rfind('{')
+            .ok_or_else(|| "ffmpeg did not emit loudness summary JSON".to_string())?;
+        let json_end = output[json_start..]
+            .find('}')
+            .map(|offset| json_start + offset)
+            .ok_or_else(|| "ffmpeg emitted incomplete loudness summary JSON".to_string())?;
+        let json_payload = &output[json_start..=json_end];
+        let summary: LoudnormSummary = serde_json::from_str(json_payload)
+            .map_err(|error| format!("Failed parsing ffmpeg loudness summary: {}", error))?;
+
+        let integrated_lufs = summary
+            .input_i
+            .trim()
+            .parse::<f32>()
+            .map_err(|error| format!("Invalid loudness value from ffmpeg: {}", error))?;
+        let true_peak_dbtp = summary
+            .input_tp
+            .trim()
+            .parse::<f32>()
+            .map_err(|error| format!("Invalid true-peak value from ffmpeg: {}", error))?;
+        if !integrated_lufs.is_finite() || !true_peak_dbtp.is_finite() {
+            return Err("ffmpeg returned non-finite loudness values".to_string());
+        }
+
+        let peak = 10.0f32.powf(true_peak_dbtp / 20.0);
+        if !peak.is_finite() || peak <= 0.0 {
+            return Err("Computed ReplayGain peak is invalid".to_string());
+        }
+        Ok(ReplayGainScanValues {
+            gain_db: REPLAYGAIN_REFERENCE_LOUDNESS_LUFS - integrated_lufs,
+            peak,
+        })
+    }
+
+    fn analyze_replaygain_for_track(path: &Path) -> Result<ReplayGainScanValues, String> {
+        let mut command = Command::new("ffmpeg");
+        command
+            .arg("-hide_banner")
+            .arg("-nostats")
+            .arg("-i")
+            .arg(path)
+            .arg("-vn")
+            .arg("-sn")
+            .arg("-dn")
+            .arg("-af")
+            .arg("loudnorm=I=-18:TP=-1.5:LRA=11:print_format=json")
+            .arg("-f")
+            .arg("null")
+            .arg("-");
+        let output = Self::run_ffmpeg_loudnorm_command(
+            command,
+            &format!("ReplayGain analysis failed for {}", path.display()),
+        )?;
+        Self::parse_loudnorm_summary(&output)
+    }
+
+    fn analyze_replaygain_for_album(paths: &[PathBuf]) -> Result<ReplayGainScanValues, String> {
+        if paths.is_empty() {
+            return Err("Cannot analyze ReplayGain for an empty album selection".to_string());
+        }
+        if paths.len() == 1 {
+            return Self::analyze_replaygain_for_track(paths[0].as_path());
+        }
+
+        let mut concat_inputs = String::new();
+        for index in 0..paths.len() {
+            concat_inputs.push_str(&format!("[{index}:a]"));
+        }
+        let filter = format!(
+            "{concat_inputs}concat=n={}:v=0:a=1,loudnorm=I=-18:TP=-1.5:LRA=11:print_format=json",
+            paths.len()
+        );
+
+        let mut command = Command::new("ffmpeg");
+        command.arg("-hide_banner").arg("-nostats");
+        for path in paths {
+            command.arg("-i").arg(path);
+        }
+        command
+            .arg("-vn")
+            .arg("-sn")
+            .arg("-dn")
+            .arg("-filter_complex")
+            .arg(filter)
+            .arg("-f")
+            .arg("null")
+            .arg("-");
+        let output = Self::run_ffmpeg_loudnorm_command(
+            command,
+            "ReplayGain album analysis failed while combining album tracks",
+        )?;
+        Self::parse_loudnorm_summary(&output)
+    }
+
+    fn replaygain_tag_type_for_path(path: &Path) -> TagType {
+        match FileType::from_path(path) {
+            Some(FileType::Mpeg) | Some(FileType::Aac) | Some(FileType::Wav) => TagType::Id3v2,
+            Some(FileType::Flac) | Some(FileType::Vorbis) | Some(FileType::Opus) => {
+                TagType::VorbisComments
+            }
+            Some(FileType::Mp4) => TagType::Mp4Ilst,
+            Some(FileType::Ape) | Some(FileType::WavPack) => TagType::Ape,
+            _ => read_from_path(path)
+                .map(|tagged_file| tagged_file.primary_tag_type())
+                .unwrap_or(TagType::Id3v2),
+        }
+    }
+
+    fn replaygain_field(
+        tag_type: TagType,
+        item_key: ItemKey,
+        fallback_name: &'static str,
+        value: String,
+    ) -> MetadataEditorField {
+        let mapped_key = item_key.map_key(tag_type).unwrap_or(fallback_name);
+        MetadataEditorField {
+            id: format!("key:{mapped_key}"),
+            field_name: mapped_key.to_string(),
+            value,
+            common: false,
+        }
+    }
+
+    fn replaygain_metadata_fields_for_path(
+        path: &Path,
+        track_values: ReplayGainScanValues,
+        album_values: ReplayGainScanValues,
+    ) -> Vec<MetadataEditorField> {
+        let tag_type = Self::replaygain_tag_type_for_path(path);
+        vec![
+            Self::replaygain_field(
+                tag_type,
+                ItemKey::ReplayGainTrackGain,
+                "REPLAYGAIN_TRACK_GAIN",
+                format!("{:+.2} dB", track_values.gain_db),
+            ),
+            Self::replaygain_field(
+                tag_type,
+                ItemKey::ReplayGainTrackPeak,
+                "REPLAYGAIN_TRACK_PEAK",
+                format!("{:.6}", track_values.peak),
+            ),
+            Self::replaygain_field(
+                tag_type,
+                ItemKey::ReplayGainAlbumGain,
+                "REPLAYGAIN_ALBUM_GAIN",
+                format!("{:+.2} dB", album_values.gain_db),
+            ),
+            Self::replaygain_field(
+                tag_type,
+                ItemKey::ReplayGainAlbumPeak,
+                "REPLAYGAIN_ALBUM_PEAK",
+                format!("{:.6}", album_values.peak),
+            ),
+        ]
+    }
+
+    fn save_replaygain_tags_for_path(
+        db_manager: &DbManager,
+        path: &Path,
+        track_values: ReplayGainScanValues,
+        album_values: ReplayGainScanValues,
+    ) -> Result<(), String> {
+        let metadata_fields =
+            Self::replaygain_metadata_fields_for_path(path, track_values, album_values);
+        Self::save_track_properties_with_db(db_manager, path, &metadata_fields, &[], &[])
+            .map(|_| ())
+    }
+
+    fn replaygain_scan_track_label(path: &Path) -> String {
+        path.file_name()
+            .and_then(|name| name.to_str())
+            .map(str::to_string)
+            .filter(|value| !value.trim().is_empty())
+            .unwrap_or_else(|| path.to_string_lossy().to_string())
+    }
+
+    fn publish_replaygain_scan_progress(
+        bus_producer: &Sender<Message>,
+        request_id: u64,
+        progress: ReplayGainScanProgress,
+    ) {
+        let _ = bus_producer.send(Message::Metadata(MetadataMessage::ReplayGainScanProgress {
+            request_id,
+            processed: progress.processed,
+            total_tracks: progress.total_tracks,
+            updated: progress.updated,
+            skipped: progress.skipped,
+            failed: progress.failed,
+            current_track_label: progress.current_track_label,
+        }));
+    }
+
+    fn scan_replaygain_for_paths(
+        bus_producer: &Sender<Message>,
+        db_manager: &DbManager,
+        request_id: u64,
+        paths: Vec<PathBuf>,
+        overwrite_existing: bool,
+    ) {
+        if paths.is_empty() {
+            let _ = bus_producer.send(Message::Metadata(MetadataMessage::ReplayGainScanFailed {
+                request_id,
+                error: "No local files matched the selected tracks".to_string(),
+            }));
+            return;
+        }
+
+        let mut unique_local_paths = Vec::new();
+        let mut seen_paths = HashSet::new();
+        for path in paths {
+            if !path.is_file() {
+                continue;
+            }
+            let key = path.to_string_lossy().to_string();
+            if seen_paths.insert(key) {
+                unique_local_paths.push(path);
+            }
+        }
+        if unique_local_paths.is_empty() {
+            let _ = bus_producer.send(Message::Metadata(MetadataMessage::ReplayGainScanFailed {
+                request_id,
+                error: "No local files matched the selected tracks".to_string(),
+            }));
+            return;
+        }
+
+        let (targets, album_reference_paths) =
+            match Self::build_replaygain_scan_targets(db_manager, &unique_local_paths) {
+                Ok(payload) => payload,
+                Err(error) => {
+                    let _ = bus_producer.send(Message::Metadata(
+                        MetadataMessage::ReplayGainScanFailed { request_id, error },
+                    ));
+                    return;
+                }
+            };
+        if targets.is_empty() {
+            let _ = bus_producer.send(Message::Metadata(MetadataMessage::ReplayGainScanFailed {
+                request_id,
+                error: "No tracks selected for ReplayGain scan".to_string(),
+            }));
+            return;
+        }
+
+        let needs_analysis = targets
+            .iter()
+            .any(|target| overwrite_existing || !target.has_existing_tags);
+        if needs_analysis {
+            if let Err(error) = Self::ensure_ffmpeg_available() {
+                let _ =
+                    bus_producer.send(Message::Metadata(MetadataMessage::ReplayGainScanFailed {
+                        request_id,
+                        error,
+                    }));
+                return;
+            }
+        }
+
+        let total_tracks = targets.len();
+        let _ = bus_producer.send(Message::Metadata(MetadataMessage::ReplayGainScanStarted {
+            request_id,
+            total_tracks,
+        }));
+
+        let mut processed = 0usize;
+        let mut updated = 0usize;
+        let mut skipped = 0usize;
+        let mut failed = 0usize;
+        let mut album_scan_cache: HashMap<
+            ReplayGainAlbumKey,
+            Result<ReplayGainScanValues, String>,
+        > = HashMap::new();
+        let publish_progress = |processed: usize,
+                                updated: usize,
+                                skipped: usize,
+                                failed: usize,
+                                current_track_label: String| {
+            Self::publish_replaygain_scan_progress(
+                bus_producer,
+                request_id,
+                ReplayGainScanProgress {
+                    processed,
+                    total_tracks,
+                    updated,
+                    skipped,
+                    failed,
+                    current_track_label,
+                },
+            );
+        };
+
+        for target in targets {
+            let current_track_label = Self::replaygain_scan_track_label(target.path.as_path());
+            publish_progress(
+                processed,
+                updated,
+                skipped,
+                failed,
+                current_track_label.clone(),
+            );
+            if target.has_existing_tags && !overwrite_existing {
+                skipped = skipped.saturating_add(1);
+                processed = processed.saturating_add(1);
+                publish_progress(
+                    processed,
+                    updated,
+                    skipped,
+                    failed,
+                    current_track_label.clone(),
+                );
+                continue;
+            }
+
+            let track_values = match Self::analyze_replaygain_for_track(target.path.as_path()) {
+                Ok(values) => values,
+                Err(error) => {
+                    failed = failed.saturating_add(1);
+                    processed = processed.saturating_add(1);
+                    warn!(
+                        "ReplayGain track analysis failed for {}: {}",
+                        target.path.display(),
+                        error
+                    );
+                    publish_progress(
+                        processed,
+                        updated,
+                        skipped,
+                        failed,
+                        current_track_label.clone(),
+                    );
+                    continue;
+                }
+            };
+
+            if !album_scan_cache.contains_key(&target.album_key) {
+                let album_paths = album_reference_paths
+                    .get(&target.album_key)
+                    .cloned()
+                    .unwrap_or_else(|| vec![target.path.clone()]);
+                album_scan_cache.insert(
+                    target.album_key.clone(),
+                    Self::analyze_replaygain_for_album(&album_paths),
+                );
+            }
+
+            let album_values = match album_scan_cache.get(&target.album_key) {
+                Some(Ok(values)) => *values,
+                Some(Err(error)) => {
+                    failed = failed.saturating_add(1);
+                    processed = processed.saturating_add(1);
+                    warn!(
+                        "ReplayGain album analysis failed for {}: {}",
+                        target.path.display(),
+                        error
+                    );
+                    publish_progress(
+                        processed,
+                        updated,
+                        skipped,
+                        failed,
+                        current_track_label.clone(),
+                    );
+                    continue;
+                }
+                None => {
+                    failed = failed.saturating_add(1);
+                    processed = processed.saturating_add(1);
+                    publish_progress(
+                        processed,
+                        updated,
+                        skipped,
+                        failed,
+                        current_track_label.clone(),
+                    );
+                    continue;
+                }
+            };
+
+            match Self::save_replaygain_tags_for_path(
+                db_manager,
+                target.path.as_path(),
+                track_values,
+                album_values,
+            ) {
+                Ok(()) => {
+                    updated = updated.saturating_add(1);
+                }
+                Err(error) => {
+                    failed = failed.saturating_add(1);
+                    warn!(
+                        "ReplayGain tag write failed for {}: {}",
+                        target.path.display(),
+                        error
+                    );
+                }
+            }
+
+            processed = processed.saturating_add(1);
+            publish_progress(processed, updated, skipped, failed, current_track_label);
+        }
+
+        let _ = bus_producer.send(Message::Metadata(
+            MetadataMessage::ReplayGainScanCompleted {
+                request_id,
+                total_tracks,
+                updated,
+                skipped,
+                failed,
+            },
+        ));
+    }
+
+    fn spawn_replaygain_scan_for_paths(
+        &self,
+        request_id: u64,
+        paths: Vec<PathBuf>,
+        overwrite_existing: bool,
+    ) {
+        let bus_producer = self.bus_producer.clone();
+        let spawn_result = std::thread::Builder::new()
+            .name(format!("replaygain-scan-{request_id}"))
+            .spawn(move || {
+                let db_manager = match DbManager::new() {
+                    Ok(db_manager) => db_manager,
+                    Err(error) => {
+                        let _ = bus_producer.send(Message::Metadata(
+                            MetadataMessage::ReplayGainScanFailed {
+                                request_id,
+                                error: format!("Failed to initialize metadata database: {}", error),
+                            },
+                        ));
+                        return;
+                    }
+                };
+                Self::scan_replaygain_for_paths(
+                    &bus_producer,
+                    &db_manager,
+                    request_id,
+                    paths,
+                    overwrite_existing,
+                );
+            });
+
+        if let Err(error) = spawn_result {
+            let _ =
+                self.bus_producer
+                    .send(Message::Metadata(MetadataMessage::ReplayGainScanFailed {
+                        request_id,
+                        error: format!("Failed to start ReplayGain scan worker: {}", error),
+                    }));
+        }
+    }
+
     fn save_track_properties(
         &self,
+        path: &Path,
+        metadata_fields: &[MetadataEditorField],
+        image_overwrites: &[PropertiesImageOverwrite],
+        image_deletes: &[PropertiesImageDelete],
+    ) -> Result<(TrackMetadataSummary, Option<String>), String> {
+        Self::save_track_properties_with_db(
+            &self.db_manager,
+            path,
+            metadata_fields,
+            image_overwrites,
+            image_deletes,
+        )
+    }
+
+    fn save_track_properties_with_db(
+        db_manager: &DbManager,
         path: &Path,
         metadata_fields: &[MetadataEditorField],
         image_overwrites: &[PropertiesImageOverwrite],
@@ -1238,7 +1895,7 @@ impl MetadataManager {
             &prepared_image_overwrites,
             &prepared_image_deletes,
         )? {
-            return self.finalize_saved_track_properties(path);
+            return Self::finalize_saved_track_properties(db_manager, path);
         }
 
         let mut tagged_file =
@@ -1256,7 +1913,7 @@ impl MetadataManager {
         tagged_file
             .save_to_path(path, WriteOptions::default())
             .map_err(|error| format!("Failed to write tags: {error}"))?;
-        self.finalize_saved_track_properties(path)
+        Self::finalize_saved_track_properties(db_manager, path)
     }
 
     fn save_track_properties_lossless(
@@ -1635,7 +2292,7 @@ impl MetadataManager {
     }
 
     fn finalize_saved_track_properties(
-        &self,
+        db_manager: &DbManager,
         path: &Path,
     ) -> Result<(TrackMetadataSummary, Option<String>), String> {
         let refreshed =
@@ -1643,8 +2300,7 @@ impl MetadataManager {
         let refreshed_tag = refreshed.primary_tag().or_else(|| refreshed.first_tag());
         let summary = Self::build_summary(path, refreshed_tag);
 
-        let db_sync_warning = match self
-            .db_manager
+        let db_sync_warning = match db_manager
             .update_library_track_metadata_by_path(path.to_string_lossy().as_ref(), &summary)
         {
             Ok(_) => None,
@@ -1746,6 +2402,13 @@ impl MetadataManager {
                             ));
                         }
                     }
+                }
+                Ok(Message::Metadata(MetadataMessage::ScanReplayGainForPaths {
+                    request_id,
+                    paths,
+                    overwrite_existing,
+                })) => {
+                    self.spawn_replaygain_scan_for_paths(request_id, paths, overwrite_existing);
                 }
                 Ok(_) => {}
                 Err(tokio::sync::broadcast::error::RecvError::Lagged(skipped)) => {

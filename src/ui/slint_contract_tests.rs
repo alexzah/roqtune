@@ -205,6 +205,26 @@ mod tests {
     }
 
     #[test]
+    fn test_replaygain_scan_context_menu_action_and_confirm_contract() {
+        let slint_ui = include_str!("../roqtune.slint");
+        assert!(
+            slint_ui.contains("text: \"Scan for ReplayGain tags\""),
+            "Track context menus should expose ReplayGain scan action label"
+        );
+        assert!(
+            slint_ui.contains("callback library_request_replaygain_scan_selection();")
+                && slint_ui.contains("callback library_confirm_replaygain_scan_overwrite();")
+                && slint_ui.contains("callback library_cancel_replaygain_scan_overwrite();"),
+            "App window should expose ReplayGain scan and overwrite confirmation callbacks"
+        );
+        assert!(
+            slint_ui.contains("show_library_replaygain_scan_confirm")
+                && slint_ui.contains("library_replaygain_scan_confirm_message"),
+            "App window should expose ReplayGain overwrite confirmation state"
+        );
+    }
+
+    #[test]
     fn test_playlist_null_column_and_empty_space_trigger_deselect() {
         let slint_ui = include_str!("../roqtune.slint");
 
