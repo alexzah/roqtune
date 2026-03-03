@@ -16,7 +16,7 @@
 - Built in tag editor powered by [`lofty`](https://crates.io/crates/lofty) including embedded artwork modification and media info inspection
 - High-quality playback powered by  [`symphonia`](https://crates.io/crates/symphonia) and [`cpal`](https://crates.io/crates/cpal) with audio fidelity controls, as well as features like ReplayGain and crossfade
 - Theming + custom colors: switch between curated color schemes or fine-tune your own palette (with per-component color editing)
-- Integrations: OpenSubsonic streaming (multi-profile) and local network casting support
+- Integrations: OpenSubsonic streaming and local network casting support
 
 ## Project Status
 
