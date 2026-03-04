@@ -40,9 +40,9 @@ use crate::image_pipeline::{self, ManagedImageKind};
 use crate::metadata::replaygain_analyzer;
 use crate::metadata_tags;
 use crate::protocol::{
-    Message, MetadataEditorField, MetadataMessage, PropertiesEmbeddedImageSlot,
-    PropertiesExternalImage, PropertiesImageDelete, PropertiesImageOverwrite,
-    PropertiesMediaInfoField, TrackMetadataSummary,
+    Message, MetadataEditorField, MetadataMessage, MultiTrackSaveResult,
+    PropertiesEmbeddedImageSlot, PropertiesExternalImage, PropertiesImageDelete,
+    PropertiesImageOverwrite, PropertiesMediaInfoField, TrackMetadataSummary,
 };
 
 const COMMON_FIELD_SPECS: [(&str, &str); 17] = [
@@ -629,6 +629,7 @@ impl MetadataManager {
                     has_image: true,
                     details: Self::picture_details(picture),
                     common: true,
+                    has_multiple_images: false,
                 });
             } else {
                 slots.push(PropertiesEmbeddedImageSlot {
@@ -638,6 +639,7 @@ impl MetadataManager {
                     has_image: false,
                     details: "No embedded image".to_string(),
                     common: true,
+                    has_multiple_images: false,
                 });
             }
         }
@@ -659,6 +661,7 @@ impl MetadataManager {
                 has_image: true,
                 details: Self::picture_details(picture),
                 common: false,
+                has_multiple_images: false,
             });
         }
 
@@ -831,6 +834,7 @@ impl MetadataManager {
                     id,
                 ),
                 common: true,
+                mixed: false,
             })
             .collect();
 
@@ -854,6 +858,7 @@ impl MetadataManager {
                     field_name: technical,
                     value,
                     common: false,
+                    mixed: false,
                 });
             }
 
@@ -949,6 +954,272 @@ impl MetadataManager {
             embedded_image_slots,
             external_images,
         ))
+    }
+
+    /// Aggregates metadata fields from multiple tracks for the multi-select properties dialog.
+    ///
+    /// Only common fields are included — per-track custom fields are skipped in multi-select mode
+    /// to avoid schema-merging complexity. Fields with 1 unique value are shown as-is, 2–3 unique
+    /// values are joined with ", ", and 4+ unique values produce the "[multiple values]" sentinel.
+    fn aggregate_metadata_fields(
+        per_track_fields: &[Vec<MetadataEditorField>],
+    ) -> Vec<MetadataEditorField> {
+        COMMON_FIELD_SPECS
+            .iter()
+            .map(|(id, field_name)| {
+                let mut seen: Vec<String> = Vec::new();
+                for track_fields in per_track_fields {
+                    if let Some(f) = track_fields.iter().find(|f| f.id == *id) {
+                        let value = f.value.trim().to_string();
+                        if !seen.contains(&value) {
+                            seen.push(value);
+                        }
+                    }
+                }
+                let (display_value, mixed) = if seen.len() <= 3 {
+                    let joined = seen.join(", ");
+                    let is_mixed = seen.len() > 1;
+                    (joined, is_mixed)
+                } else {
+                    ("[multiple values]".to_string(), true)
+                };
+                MetadataEditorField {
+                    id: (*id).to_string(),
+                    field_name: (*field_name).to_string(),
+                    value: display_value,
+                    common: true,
+                    mixed,
+                }
+            })
+            .collect()
+    }
+
+    /// Aggregates embedded image slots from multiple tracks for the multi-select properties dialog.
+    ///
+    /// A slot's `has_image` is true when at least one track has an image there (enabling the
+    /// delete button). `has_multiple_images` is true when more than one track has an image in that
+    /// slot, triggering the "Multiple" visual indicator instead of a preview.
+    fn aggregate_embedded_image_slots(
+        per_track_slots: &[Vec<PropertiesEmbeddedImageSlot>],
+    ) -> Vec<PropertiesEmbeddedImageSlot> {
+        let Some(first_slots) = per_track_slots.first() else {
+            return Vec::new();
+        };
+
+        first_slots
+            .iter()
+            .enumerate()
+            .map(|(slot_index, first_slot)| {
+                let tracks_with_image: Vec<&PropertiesEmbeddedImageSlot> = per_track_slots
+                    .iter()
+                    .filter_map(|slots| slots.get(slot_index))
+                    .filter(|slot| slot.has_image)
+                    .collect();
+
+                let has_image = !tracks_with_image.is_empty();
+                let has_multiple_images = tracks_with_image.len() > 1;
+
+                // Show the preview from the single track that has an image (if exactly one).
+                let image_path = if tracks_with_image.len() == 1 {
+                    tracks_with_image[0].image_path.clone()
+                } else {
+                    None
+                };
+
+                let details = if has_multiple_images {
+                    format!("{} tracks have this image type", tracks_with_image.len())
+                } else if has_image {
+                    first_slot.details.clone()
+                } else {
+                    "No embedded image".to_string()
+                };
+
+                PropertiesEmbeddedImageSlot {
+                    picture_type_code: first_slot.picture_type_code,
+                    label: first_slot.label.clone(),
+                    image_path,
+                    has_image,
+                    details,
+                    common: first_slot.common,
+                    has_multiple_images,
+                }
+            })
+            .collect()
+    }
+
+    /// Handles a `RequestMultiTrackProperties` message synchronously.
+    ///
+    /// Reads all requested files and aggregates their common fields and image slots. Files that
+    /// fail to read are skipped with a warning; if all fail the load-failed message is sent.
+    fn handle_request_multi_track_properties(
+        bus_producer: &Sender<Message>,
+        request_id: u64,
+        paths: Vec<PathBuf>,
+    ) {
+        let mut per_track_fields: Vec<Vec<MetadataEditorField>> = Vec::with_capacity(paths.len());
+        let mut per_track_slots: Vec<Vec<PropertiesEmbeddedImageSlot>> =
+            Vec::with_capacity(paths.len());
+        let mut first_error: Option<String> = None;
+
+        for path in &paths {
+            match Self::read_properties_payload(path) {
+                Ok((_display_name, fields, _media_info, slots, _external)) => {
+                    per_track_fields.push(fields);
+                    per_track_slots.push(slots);
+                }
+                Err(error) => {
+                    warn!(
+                        "MetadataManager: multi-track load skipped {}: {}",
+                        path.display(),
+                        error
+                    );
+                    if first_error.is_none() {
+                        first_error = Some(error);
+                    }
+                }
+            }
+        }
+
+        if per_track_fields.is_empty() {
+            let error =
+                first_error.unwrap_or_else(|| "No readable tracks in selection".to_string());
+            let rep_path = paths.into_iter().next().unwrap_or_default();
+            let _ = bus_producer.send(Message::Metadata(
+                MetadataMessage::TrackPropertiesLoadFailed {
+                    request_id,
+                    path: rep_path,
+                    error,
+                },
+            ));
+            return;
+        }
+
+        let track_count = per_track_fields.len();
+        let metadata_fields = Self::aggregate_metadata_fields(&per_track_fields);
+        let embedded_image_slots = Self::aggregate_embedded_image_slots(&per_track_slots);
+
+        let _ = bus_producer.send(Message::Metadata(
+            MetadataMessage::MultiTrackPropertiesLoaded {
+                request_id,
+                paths,
+                track_count,
+                metadata_fields,
+                embedded_image_slots,
+            },
+        ));
+    }
+
+    /// Spawns a worker thread that saves changed properties to each of the selected tracks.
+    ///
+    /// Per-file results (success or failure) are collected and sent back as
+    /// `MultiTrackPropertiesSaved`. Mirrors the ReplayGain scan spawn pattern.
+    fn spawn_multi_track_properties_save(
+        &self,
+        request_id: u64,
+        paths: Vec<PathBuf>,
+        metadata_fields: Vec<MetadataEditorField>,
+        image_overwrites: Vec<PropertiesImageOverwrite>,
+        image_deletes: Vec<PropertiesImageDelete>,
+    ) {
+        let bus_producer = self.bus_producer.clone();
+        let spawn_result = std::thread::Builder::new()
+            .name(format!("multi-props-save-{request_id}"))
+            .spawn(move || {
+                let db_manager = match DbManager::new() {
+                    Ok(db_manager) => db_manager,
+                    Err(error) => {
+                        let _ = bus_producer.send(Message::Metadata(
+                            MetadataMessage::MultiTrackPropertiesSaveFailed {
+                                request_id,
+                                error: format!("Failed to initialize metadata database: {}", error),
+                            },
+                        ));
+                        return;
+                    }
+                };
+                let save_result = panic::catch_unwind(AssertUnwindSafe(|| {
+                    Self::run_multi_track_save(
+                        &bus_producer,
+                        &db_manager,
+                        request_id,
+                        &paths,
+                        &metadata_fields,
+                        &image_overwrites,
+                        &image_deletes,
+                    );
+                }));
+                if let Err(payload) = save_result {
+                    let _ = bus_producer.send(Message::Metadata(
+                        MetadataMessage::MultiTrackPropertiesSaveFailed {
+                            request_id,
+                            error: format!(
+                                "Multi-track save worker panicked: {}",
+                                Self::panic_payload_to_string(payload)
+                            ),
+                        },
+                    ));
+                }
+            });
+
+        if let Err(error) = spawn_result {
+            let _ = self.bus_producer.send(Message::Metadata(
+                MetadataMessage::MultiTrackPropertiesSaveFailed {
+                    request_id,
+                    error: format!("Failed to start multi-track save worker: {}", error),
+                },
+            ));
+        }
+    }
+
+    /// Worker body: save to each path in sequence, collecting per-file results.
+    fn run_multi_track_save(
+        bus_producer: &Sender<Message>,
+        db_manager: &DbManager,
+        request_id: u64,
+        paths: &[PathBuf],
+        metadata_fields: &[MetadataEditorField],
+        image_overwrites: &[PropertiesImageOverwrite],
+        image_deletes: &[PropertiesImageDelete],
+    ) {
+        let mut results: Vec<MultiTrackSaveResult> = Vec::with_capacity(paths.len());
+        for path in paths {
+            match Self::save_track_properties_with_db(
+                db_manager,
+                path,
+                metadata_fields,
+                image_overwrites,
+                image_deletes,
+            ) {
+                Ok((summary, db_sync_warning)) => {
+                    results.push(MultiTrackSaveResult {
+                        path: path.clone(),
+                        summary: Some(summary),
+                        error: None,
+                        db_sync_warning,
+                    });
+                }
+                Err(error) => {
+                    warn!(
+                        "MetadataManager: multi-track save failed for {}: {}",
+                        path.display(),
+                        error
+                    );
+                    results.push(MultiTrackSaveResult {
+                        path: path.clone(),
+                        summary: None,
+                        error: Some(error),
+                        db_sync_warning: None,
+                    });
+                }
+            }
+        }
+        let _ = bus_producer.send(Message::Metadata(
+            MetadataMessage::MultiTrackPropertiesSaved {
+                request_id,
+                paths: paths.to_vec(),
+                results,
+            },
+        ));
     }
 
     fn apply_common_field(tag: &mut Tag, field_id: &str, value: &str) {
@@ -1459,6 +1730,7 @@ impl MetadataManager {
             field_name: mapped_key.to_string(),
             value,
             common: false,
+            mixed: false,
         }
     }
 
@@ -2415,6 +2687,41 @@ impl MetadataManager {
                         }
                     }
                 }
+                Ok(Message::Metadata(MetadataMessage::RequestMultiTrackProperties {
+                    request_id,
+                    paths,
+                })) => {
+                    debug!(
+                        "MetadataManager: multi-track properties load request_id={} count={}",
+                        request_id,
+                        paths.len()
+                    );
+                    Self::handle_request_multi_track_properties(
+                        &self.bus_producer,
+                        request_id,
+                        paths,
+                    );
+                }
+                Ok(Message::Metadata(MetadataMessage::SaveMultiTrackProperties {
+                    request_id,
+                    paths,
+                    metadata_fields,
+                    image_overwrites,
+                    image_deletes,
+                })) => {
+                    debug!(
+                        "MetadataManager: multi-track save request_id={} count={}",
+                        request_id,
+                        paths.len()
+                    );
+                    self.spawn_multi_track_properties_save(
+                        request_id,
+                        paths,
+                        metadata_fields,
+                        image_overwrites,
+                        image_deletes,
+                    );
+                }
                 Ok(Message::Metadata(MetadataMessage::ScanReplayGainForPaths {
                     request_id,
                     targets,
@@ -2530,6 +2837,7 @@ mod tests {
             field_name: "Title".to_string(),
             value: value.to_string(),
             common: true,
+            mixed: false,
         }]
     }
 

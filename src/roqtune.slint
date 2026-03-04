@@ -505,6 +505,7 @@ export component AppWindow inherits Window {
     in-out property <[PropertiesExternalImage]> properties_external_images: [];
     in-out property <bool> properties_save_enabled: false;
     in-out property <bool> properties_track_is_local_file: false;
+    in-out property <bool> properties_is_multi_select: false;
     in-out property <bool> show_enrichment_override_dialog: false;
     in-out property <int> enrichment_override_field_kind: 0; // 1 album description, 2 artist bio
     in-out property <int> enrichment_override_display_priority: 0;
@@ -5314,11 +5315,20 @@ export component AppWindow inherits Window {
                 }
 
                 ModeTabs {
-                    labels: ["Metadata", "Media Info", "Images"];
-                    selected_index: root.properties_active_tab_index;
+                    // In multi-select mode Media Info is not meaningful, so it is hidden.
+                    // The Images tab is remapped: visual index 1 → internal index 2.
+                    labels: root.properties_is_multi_select
+                        ? ["Metadata", "Images"]
+                        : ["Metadata", "Media Info", "Images"];
+                    selected_index: root.properties_is_multi_select
+                        ? (root.properties_active_tab_index == 2 ? 1 : 0)
+                        : root.properties_active_tab_index;
                     selected(tab_index) => {
-                        root.properties_active_tab_index = tab_index;
-                        root.properties_select_tab(tab_index);
+                        // Remap visual index back to the internal 3-tab numbering.
+                        root.properties_active_tab_index = root.properties_is_multi_select
+                            ? (tab_index == 1 ? 2 : 0)
+                            : tab_index;
+                        root.properties_select_tab(root.properties_active_tab_index);
                     }
                 }
 
@@ -5383,7 +5393,11 @@ export component AppWindow inherits Window {
                                         height: 24px;
                                         border-radius: 4px;
                                         border-width: 1px;
-                                        border-color: value-input.has-focus ? AppPalette.focus-ring : AppPalette.border;
+                                        border-color: value-input.has-focus
+                                            ? AppPalette.focus-ring
+                                            : field.mixed
+                                                ? AppPalette.text-secondary.mix(AppPalette.border, 0.4)
+                                                : AppPalette.border;
                                         background: value-input.has-focus ? AppPalette.control-hover-bg : AppPalette.panel-bg;
 
                                         TouchArea {
@@ -5486,87 +5500,91 @@ export component AppWindow inherits Window {
                     VerticalLayout {
                         spacing: 8px;
 
-                        Text {
-                            text: "External Images";
-                            color: AppPalette.text-primary;
-                            font-size: 12px;
-                            font-weight: 700;
-                        }
+                        if !root.properties_is_multi_select : VerticalLayout {
+                            spacing: 8px;
 
-                        if root.properties_external_images.length == 0 : Text {
-                            text: "No supported external images found.";
-                            color: AppPalette.text-muted;
-                            font-size: 11px;
-                        }
+                            Text {
+                                text: "External Images";
+                                color: AppPalette.text-primary;
+                                font-size: 12px;
+                                font-weight: 700;
+                            }
 
-                        for external[index] in root.properties_external_images : Rectangle {
-                            height: 84px;
-                            border-radius: 4px;
-                            border-width: 1px;
-                            border-color: AppPalette.border;
-                            background: Math.mod(index, 2) == 0 ? AppPalette.panel-bg : AppPalette.panel-bg-alt;
+                            if root.properties_external_images.length == 0 : Text {
+                                text: "No supported external images found.";
+                                color: AppPalette.text-muted;
+                                font-size: 11px;
+                            }
 
-                            HorizontalLayout {
-                                padding: 8px;
-                                spacing: 8px;
+                            for external[index] in root.properties_external_images : Rectangle {
+                                height: 84px;
+                                border-radius: 4px;
+                                border-width: 1px;
+                                border-color: AppPalette.border;
+                                background: Math.mod(index, 2) == 0 ? AppPalette.panel-bg : AppPalette.panel-bg-alt;
 
-                                Rectangle {
-                                    width: 64px;
-                                    height: 64px;
-                                    border-width: 1px;
-                                    border-color: AppPalette.border;
-                                    border-radius: 3px;
-                                    background: AppPalette.panel-bg-elevated;
+                                HorizontalLayout {
+                                    padding: 8px;
+                                    spacing: 8px;
 
-                                    if external.has_preview : Image {
-                                        width: parent.width;
-                                        height: parent.height;
-                                        source: external.preview;
-                                        image-fit: contain;
+                                    Rectangle {
+                                        width: 64px;
+                                        height: 64px;
+                                        border-width: 1px;
+                                        border-color: AppPalette.border;
+                                        border-radius: 3px;
+                                        background: AppPalette.panel-bg-elevated;
+
+                                        if external.has_preview : Image {
+                                            width: parent.width;
+                                            height: parent.height;
+                                            source: external.preview;
+                                            image-fit: contain;
+                                        }
+
+                                        if !external.has_preview : Text {
+                                            text: "Unavailable";
+                                            color: AppPalette.text-muted;
+                                            font-size: 10px;
+                                            horizontal-alignment: center;
+                                            vertical-alignment: center;
+                                            width: parent.width;
+                                            height: parent.height;
+                                        }
                                     }
 
-                                    if !external.has_preview : Text {
-                                        text: "Unavailable";
-                                        color: AppPalette.text-muted;
-                                        font-size: 10px;
-                                        horizontal-alignment: center;
-                                        vertical-alignment: center;
-                                        width: parent.width;
-                                        height: parent.height;
+                                    VerticalLayout {
+                                        horizontal-stretch: 1;
+                                        spacing: 3px;
+                                        Text {
+                                            text: external.label;
+                                            color: AppPalette.text-primary;
+                                            font-size: 12px;
+                                            font-weight: 700;
+                                            overflow: elide;
+                                        }
+                                        Text {
+                                            text: external.details;
+                                            color: AppPalette.text-secondary;
+                                            font-size: 11px;
+                                            wrap: word-wrap;
+                                            overflow: elide;
+                                        }
                                     }
-                                }
 
-                                VerticalLayout {
-                                    horizontal-stretch: 1;
-                                    spacing: 3px;
-                                    Text {
-                                        text: external.label;
-                                        color: AppPalette.text-primary;
-                                        font-size: 12px;
-                                        font-weight: 700;
-                                        overflow: elide;
-                                    }
-                                    Text {
-                                        text: external.details;
-                                        color: AppPalette.text-secondary;
-                                        font-size: 11px;
-                                        wrap: word-wrap;
-                                        overflow: elide;
-                                    }
-                                }
-
-                                PlayerButton {
-                                    icon-source: AppIcons.folder;
-                                    icon-text: "";
-                                    tooltip-text: "Open external image location";
-                                    clicked => {
-                                        root.properties_open_external_image_location(index);
+                                    PlayerButton {
+                                        icon-source: AppIcons.folder;
+                                        icon-text: "";
+                                        tooltip-text: "Open external image location";
+                                        clicked => {
+                                            root.properties_open_external_image_location(index);
+                                        }
                                     }
                                 }
                             }
-                        }
 
-                        Rectangle { height: 1px; background: AppPalette.separator; }
+                            Rectangle { height: 1px; background: AppPalette.separator; }
+                        }
 
                         Text {
                             text: "Embedded Artwork";
@@ -5601,7 +5619,17 @@ export component AppWindow inherits Window {
                                         image-fit: contain;
                                     }
 
-                                    if !slot.has_preview : Text {
+                                    if !slot.has_preview && slot.has_multiple_images : Text {
+                                        text: "Multiple";
+                                        color: AppPalette.text-secondary;
+                                        font-size: 10px;
+                                        horizontal-alignment: center;
+                                        vertical-alignment: center;
+                                        width: parent.width;
+                                        height: parent.height;
+                                    }
+
+                                    if !slot.has_preview && !slot.has_multiple_images : Text {
                                         text: "Empty";
                                         color: AppPalette.text-muted;
                                         font-size: 10px;
