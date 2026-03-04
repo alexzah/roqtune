@@ -7,6 +7,7 @@ use std::borrow::Cow;
 use std::collections::{HashMap, HashSet};
 use std::fs::OpenOptions;
 use std::io::{Cursor, Seek};
+use std::panic::{self, AssertUnwindSafe};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
@@ -181,6 +182,29 @@ impl MetadataManager {
         key.map_key(tag.tag_type())
             .map(str::to_string)
             .unwrap_or_else(|| format!("{key:?}"))
+    }
+
+    fn panic_payload_to_string(payload: Box<dyn std::any::Any + Send>) -> String {
+        if let Some(message) = payload.downcast_ref::<&str>() {
+            return (*message).to_string();
+        }
+        if let Some(message) = payload.downcast_ref::<String>() {
+            return message.clone();
+        }
+        "unknown panic payload".to_string()
+    }
+
+    fn recover_replaygain_step<T, F>(step_name: &str, f: F) -> Result<T, String>
+    where
+        F: FnOnce() -> Result<T, String>,
+    {
+        match panic::catch_unwind(AssertUnwindSafe(f)) {
+            Ok(result) => result,
+            Err(payload) => Err(format!(
+                "{step_name} panicked: {}",
+                Self::panic_payload_to_string(payload)
+            )),
+        }
     }
 
     fn get_common_value(tag: Option<&Tag>, field_id: &str) -> String {
@@ -1377,15 +1401,17 @@ impl MetadataManager {
         path: &Path,
         loudness_standard: LoudnessStandard,
     ) -> Result<ReplayGainScanValues, String> {
-        let values = replaygain_analyzer::analyze_track_values(path, loudness_standard).map_err(
-            |error| {
-                format!(
-                    "ReplayGain track analysis failed for {}: {}",
-                    path.display(),
-                    error
-                )
-            },
-        )?;
+        let values = Self::recover_replaygain_step("ReplayGain track analysis", || {
+            replaygain_analyzer::analyze_track_values(path, loudness_standard)
+                .map_err(|error| error.to_string())
+        })
+        .map_err(|error| {
+            format!(
+                "ReplayGain track analysis failed for {}: {}",
+                path.display(),
+                error
+            )
+        })?;
         Ok(ReplayGainScanValues {
             gain_db: values.gain_db,
             peak: values.peak,
@@ -1396,8 +1422,11 @@ impl MetadataManager {
         paths: &[PathBuf],
         loudness_standard: LoudnessStandard,
     ) -> Result<ReplayGainScanValues, String> {
-        let values = replaygain_analyzer::analyze_album_values(paths, loudness_standard)
-            .map_err(|error| format!("ReplayGain album analysis failed: {}", error))?;
+        let values = Self::recover_replaygain_step("ReplayGain album analysis", || {
+            replaygain_analyzer::analyze_album_values(paths, loudness_standard)
+                .map_err(|error| error.to_string())
+        })
+        .map_err(|error| format!("ReplayGain album analysis failed: {}", error))?;
         Ok(ReplayGainScanValues {
             gain_db: values.gain_db,
             peak: values.peak,
@@ -1473,10 +1502,12 @@ impl MetadataManager {
         track_values: ReplayGainScanValues,
         album_values: ReplayGainScanValues,
     ) -> Result<(), String> {
-        let metadata_fields =
-            Self::replaygain_metadata_fields_for_path(path, track_values, album_values);
-        Self::save_track_properties_with_db(db_manager, path, &metadata_fields, &[], &[])
-            .map(|_| ())
+        Self::recover_replaygain_step("ReplayGain tag write", || {
+            let metadata_fields =
+                Self::replaygain_metadata_fields_for_path(path, track_values, album_values);
+            Self::save_track_properties_with_db(db_manager, path, &metadata_fields, &[], &[])
+                .map(|_| ())
+        })
     }
 
     fn replaygain_scan_track_label(path: &Path) -> String {
@@ -1781,7 +1812,25 @@ impl MetadataManager {
                         return;
                     }
                 };
-                Self::scan_replaygain_for_paths(&bus_producer, &db_manager, request, cancel_token);
+                let scan_result = panic::catch_unwind(AssertUnwindSafe(|| {
+                    Self::scan_replaygain_for_paths(
+                        &bus_producer,
+                        &db_manager,
+                        request,
+                        cancel_token,
+                    );
+                }));
+                if let Err(payload) = scan_result {
+                    let _ = bus_producer.send(Message::Metadata(
+                        MetadataMessage::ReplayGainScanFailed {
+                            request_id,
+                            error: format!(
+                                "ReplayGain scan worker panicked: {}",
+                                Self::panic_payload_to_string(payload)
+                            ),
+                        },
+                    ));
+                }
             });
 
         if let Err(error) = spawn_result {
@@ -2482,6 +2531,25 @@ mod tests {
             value: value.to_string(),
             common: true,
         }]
+    }
+
+    #[test]
+    fn test_recover_replaygain_step_returns_ok_result() {
+        let result = MetadataManager::recover_replaygain_step("ReplayGain test step", || {
+            Ok::<u32, String>(7)
+        });
+        assert_eq!(result.expect("expected successful recovery result"), 7);
+    }
+
+    #[test]
+    fn test_recover_replaygain_step_converts_panic_into_error() {
+        let result: Result<(), String> =
+            MetadataManager::recover_replaygain_step("ReplayGain panic test step", || {
+                panic!("intentional replaygain panic");
+            });
+        let error = result.expect_err("panic should be converted into an error");
+        assert!(error.contains("ReplayGain panic test step panicked"));
+        assert!(error.contains("intentional replaygain panic"));
     }
 
     #[test]
