@@ -5393,11 +5393,7 @@ export component AppWindow inherits Window {
                                         height: 24px;
                                         border-radius: 4px;
                                         border-width: 1px;
-                                        border-color: value-input.has-focus
-                                            ? AppPalette.focus-ring
-                                            : field.mixed
-                                                ? AppPalette.text-secondary.mix(AppPalette.border, 0.4)
-                                                : AppPalette.border;
+                                        border-color: value-input.has-focus ? AppPalette.focus-ring : AppPalette.border;
                                         background: value-input.has-focus ? AppPalette.control-hover-bg : AppPalette.panel-bg;
 
                                         TouchArea {
@@ -5408,15 +5404,18 @@ export component AppWindow inherits Window {
                                             }
                                         }
 
-                                        value-input := LineEdit {
-                                            x: 1px;
+                                        value-input := TextInput {
+                                            x: 5px;
                                             y: 1px;
-                                            width: max(0px, parent.width - 2px);
+                                            width: max(0px, parent.width - 10px);
                                             height: max(0px, parent.height - 2px);
                                             text: field.value;
+                                            color: field.mixed ? AppPalette.text-secondary : AppPalette.text-primary;
+                                            font-size: 13px;
+                                            vertical-alignment: center;
                                             enabled: !root.properties_busy;
-                                            edited(text) => {
-                                                root.properties_field_edited(index, text);
+                                            edited => {
+                                                root.properties_field_edited(index, self.text);
                                             }
                                         }
                                     }

@@ -959,8 +959,8 @@ impl MetadataManager {
     /// Aggregates metadata fields from multiple tracks for the multi-select properties dialog.
     ///
     /// Only common fields are included — per-track custom fields are skipped in multi-select mode
-    /// to avoid schema-merging complexity. Fields with 1 unique value are shown as-is, 2–3 unique
-    /// values are joined with ", ", and 4+ unique values produce the "[multiple values]" sentinel.
+    /// to avoid schema-merging complexity. Fields with 1 unique value are shown as-is. Fields
+    /// with 2+ unique values show "[multiple values] · ex1, ex2, …" with up to 3 examples.
     fn aggregate_metadata_fields(
         per_track_fields: &[Vec<MetadataEditorField>],
     ) -> Vec<MetadataEditorField> {
@@ -976,12 +976,15 @@ impl MetadataManager {
                         }
                     }
                 }
-                let (display_value, mixed) = if seen.len() <= 3 {
-                    let joined = seen.join(", ");
-                    let is_mixed = seen.len() > 1;
-                    (joined, is_mixed)
+                let (display_value, mixed) = if seen.len() <= 1 {
+                    (seen.into_iter().next().unwrap_or_default(), false)
                 } else {
-                    ("[multiple values]".to_string(), true)
+                    // Always lead with [multiple values], then show up to 3 examples.
+                    let examples: Vec<&str> = seen.iter().take(3).map(String::as_str).collect();
+                    let trailing = if seen.len() > 3 { ", …" } else { "" };
+                    let display =
+                        format!("[multiple values] · {}{}", examples.join(", "), trailing);
+                    (display, true)
                 };
                 MetadataEditorField {
                     id: (*id).to_string(),
