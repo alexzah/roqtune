@@ -69,6 +69,7 @@ impl UiConfigDelta {
             && self.show_tooltips.is_none()
             && self.auto_scroll_to_playing_track.is_none()
             && self.use_replaygain.is_none()
+            && self.loudness_standard.is_none()
             && self.playlist_album_art_column_min_width_px.is_none()
             && self.playlist_album_art_column_max_width_px.is_none()
             && self.layout.is_none()
@@ -94,6 +95,9 @@ impl UiConfigDelta {
         }
         if newer.use_replaygain.is_some() {
             self.use_replaygain = newer.use_replaygain;
+        }
+        if newer.loudness_standard.is_some() {
+            self.loudness_standard = newer.loudness_standard;
         }
         if newer.playlist_album_art_column_min_width_px.is_some() {
             self.playlist_album_art_column_min_width_px =

@@ -1064,6 +1064,7 @@ pub(crate) fn with_updated_layout(previous: &Config, layout: LayoutConfig) -> Co
             show_tooltips: previous.ui.show_tooltips,
             auto_scroll_to_playing_track: previous.ui.auto_scroll_to_playing_track,
             use_replaygain: previous.ui.use_replaygain,
+            loudness_standard: previous.ui.loudness_standard,
             legacy_dark_mode: previous.ui.legacy_dark_mode,
             playlist_album_art_column_min_width_px: previous
                 .ui

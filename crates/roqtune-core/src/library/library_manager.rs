@@ -2120,6 +2120,7 @@ impl LibraryManager {
         request_id: u64,
         selections: Vec<protocol::LibrarySelectionSpec>,
         overwrite_existing: bool,
+        loudness_standard: crate::config::LoudnessStandard,
     ) {
         if selections.is_empty() {
             let _ = self.bus_producer.send(Message::Metadata(
@@ -2165,6 +2166,7 @@ impl LibraryManager {
                 targets,
                 album_references,
                 overwrite_existing,
+                loudness_standard,
             },
         ));
     }
@@ -2430,11 +2432,13 @@ impl LibraryManager {
                         request_id,
                         selections,
                         overwrite_existing,
+                        loudness_standard,
                     }) => {
                         self.start_replay_gain_scan_selection(
                             request_id,
                             selections,
                             overwrite_existing,
+                            loudness_standard,
                         );
                     }
                     Message::Library(LibraryMessage::RemoveSelectionFromLibrary {

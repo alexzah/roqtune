@@ -12,7 +12,8 @@ use slint::{Model, ModelRc, VecModel};
 use crate::{
     app_context::AppSharedState,
     config::{
-        CastConfig, Config, OutputConfig, ResamplerQuality, UiConfig, UiPlaybackOrder, UiRepeatMode,
+        CastConfig, Config, LoudnessStandard, OutputConfig, ResamplerQuality, UiConfig,
+        UiPlaybackOrder, UiRepeatMode,
     },
     config_persistence::persist_state_files_with_config_path,
     protocol::{self, Message, PlaybackMessage, PlaylistMessage},
@@ -390,6 +391,7 @@ pub(crate) fn register_settings_ui_callbacks(ui: &AppWindow, shared_state: &AppS
               crossfade_enabled,
               crossfade_duration_seconds,
               use_replaygain,
+              loudness_standard_index,
               color_scheme_id,
               custom_color_values| {
             let previous_config = {
@@ -466,6 +468,10 @@ pub(crate) fn register_settings_ui_callbacks(ui: &AppWindow, shared_state: &AppS
                 1 => ResamplerQuality::Highest,
                 _ => ResamplerQuality::High,
             };
+            let loudness_standard = match loudness_standard_index.max(0) {
+                1 => LoudnessStandard::ReplayGain1,
+                _ => LoudnessStandard::R128,
+            };
             let selected_color_scheme =
                 crate::theme::normalize_scheme_id_for_persistence(&color_scheme_id);
             let custom_color_values = shared_string_model_to_vec(custom_color_values);
@@ -521,6 +527,7 @@ pub(crate) fn register_settings_ui_callbacks(ui: &AppWindow, shared_state: &AppS
                         .round()
                         .clamp(1.0, 12.0) as u32,
                     use_replaygain,
+                    loudness_standard,
                 },
                 library: previous_config.library.clone(),
                 buffering: previous_config.buffering.clone(),

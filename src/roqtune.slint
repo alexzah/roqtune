@@ -6520,6 +6520,48 @@ export component AppWindow inherits Window {
                                 }
                             }
 
+                            if root.settings_use_replaygain : Rectangle {
+                                height: 34px;
+                                background: settings-loudness-standard-label-tooltip-ta.has-hover
+                                    ? AppPalette.control-hover-bg
+                                    : transparent;
+                                border-radius: 4px;
+                                HorizontalLayout {
+                                    spacing: 10px;
+                                    loudness-standard-label-host := Rectangle {
+                                        width: settings-dialog-panel.label_column_width + 24px;
+                                        height: parent.height;
+                                        background: transparent;
+                                        Text {
+                                            text: "Loudness standard";
+                                            color: root.theme_text_primary;
+                                            font-size: 12px;
+                                            vertical-alignment: center;
+                                            horizontal-alignment: left;
+                                        }
+                                        settings-loudness-standard-label-tooltip-ta := TooltipHoverArea {
+                                            tooltip-text: "Backend loudness analyzer used when scanning ReplayGain tags.";
+                                            tooltip_hover_changed(is-hovered, tooltip, anchor-x-px, anchor-y-px) => {
+                                                root.tooltip_hover_changed(is-hovered, tooltip, anchor-x-px, anchor-y-px);
+                                            }
+                                        }
+                                    }
+                                    Rectangle {
+                                        width: settings-dialog-panel.control_max_width;
+                                        height: parent.height;
+                                        background: transparent;
+                                        ComboBox {
+                                            x: 8px;
+                                            y: 3px;
+                                            width: parent.width - 16px;
+                                            model: ["EBU R 128 (Recommended)", "ReplayGain 1.0"];
+                                            current-index <=> root.settings_loudness_standard_index;
+                                        }
+                                    }
+                                    Rectangle { horizontal-stretch: 1; }
+                                }
+                            }
+
                             Rectangle {
                                 height: 32px;
                                 background: settings-cast-fallback-toggle-ta.has-hover
@@ -7004,6 +7046,7 @@ export component AppWindow inherits Window {
                             root.settings_crossfade_enabled,
                             root.settings_crossfade_duration_seconds,
                             root.settings_use_replaygain,
+                            root.settings_loudness_standard_index,
                             root.settings_selected_color_scheme_id,
                             root.settings_custom_color_values
                         );
@@ -7466,6 +7509,7 @@ export component AppWindow inherits Window {
     in-out property <bool> settings_crossfade_enabled: false;
     in-out property <float> settings_crossfade_duration_seconds: 6;
     in-out property <bool> settings_use_replaygain: false;
+    in-out property <int> settings_loudness_standard_index: 0;
     in-out property <bool> settings_subsonic_enabled: false;
     in-out property <string> settings_subsonic_endpoint: "";
     in-out property <string> settings_subsonic_username: "";
@@ -7676,5 +7720,5 @@ export component AppWindow inherits Window {
     callback settings_refresh_custom_color_previews();
     callback settings_reset_custom_colors();
     callback settings_theme_mode_filter_changed(bool);
-    callback apply_settings(int, int, int, int, string, string, string, string, bool, bool, bool, int, int, bool, bool, bool, bool, float, bool, string, [string]);
+    callback apply_settings(int, int, int, int, string, string, string, string, bool, bool, bool, int, int, bool, bool, bool, bool, float, bool, int, string, [string]);
 }

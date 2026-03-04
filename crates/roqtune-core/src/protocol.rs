@@ -6,7 +6,8 @@
 use std::path::PathBuf;
 
 use crate::config::{
-    BackendProfileConfig, PlaylistColumnConfig, ResamplerQuality, UiPlaybackOrder, UiRepeatMode,
+    BackendProfileConfig, LoudnessStandard, PlaylistColumnConfig, ResamplerQuality,
+    UiPlaybackOrder, UiRepeatMode,
 };
 use crate::layout::LayoutConfig;
 
@@ -334,6 +335,7 @@ pub enum LibraryMessage {
         request_id: u64,
         selections: Vec<LibrarySelectionSpec>,
         overwrite_existing: bool,
+        loudness_standard: LoudnessStandard,
     },
     RequestScan,
     RequestRootCounts,
@@ -641,6 +643,7 @@ pub enum MetadataMessage {
         targets: Vec<ReplayGainScanTarget>,
         album_references: Vec<ReplayGainAlbumReference>,
         overwrite_existing: bool,
+        loudness_standard: LoudnessStandard,
     },
     ReplayGainScanStarted {
         request_id: u64,
@@ -1223,6 +1226,7 @@ pub struct UiConfigDelta {
     pub show_tooltips: Option<bool>,
     pub auto_scroll_to_playing_track: Option<bool>,
     pub use_replaygain: Option<bool>,
+    pub loudness_standard: Option<LoudnessStandard>,
     pub playlist_album_art_column_min_width_px: Option<u32>,
     pub playlist_album_art_column_max_width_px: Option<u32>,
     pub layout: Option<LayoutConfig>,

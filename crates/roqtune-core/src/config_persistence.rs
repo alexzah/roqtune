@@ -6,7 +6,7 @@ use log::warn;
 use toml_edit::{value, Array, ArrayOfTables, DocumentMut, Item, Table};
 
 use crate::{
-    config::{Config, IntegrationBackendKind, UiPlaybackOrder, UiRepeatMode},
+    config::{Config, IntegrationBackendKind, LoudnessStandard, UiPlaybackOrder, UiRepeatMode},
     layout::LayoutConfig,
 };
 
@@ -260,6 +260,15 @@ fn write_config_to_document(document: &mut DocumentMut, previous: &Config, confi
             config.ui.use_replaygain,
             value,
         );
+        if !ui.contains_key("loudness_standard")
+            || previous.ui.loudness_standard != config.ui.loudness_standard
+        {
+            let loudness_standard = match config.ui.loudness_standard {
+                LoudnessStandard::R128 => "r128",
+                LoudnessStandard::ReplayGain1 => "replay_gain1",
+            };
+            set_table_value_preserving_decor(ui, "loudness_standard", value(loudness_standard));
+        }
     }
 
     {

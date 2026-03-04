@@ -401,8 +401,8 @@ mod tests {
 
     use crate::{
         config::{
-            BufferingConfig, Config, LibraryConfig, OutputConfig, UiConfig, UiPlaybackOrder,
-            UiRepeatMode,
+            BufferingConfig, Config, LibraryConfig, LoudnessStandard, OutputConfig, UiConfig,
+            UiPlaybackOrder, UiRepeatMode,
         },
         runtime_config::RuntimeOutputOverride,
     };
@@ -475,6 +475,7 @@ mod tests {
                 show_tooltips: true,
                 auto_scroll_to_playing_track: true,
                 use_replaygain: false,
+                loudness_standard: LoudnessStandard::R128,
                 legacy_dark_mode: None,
                 show_layout_edit_intro: true,
                 playlist_album_art_column_min_width_px: 16,

@@ -8,6 +8,7 @@ use std::fs::File;
 use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
 
+use ebur128::{EbuR128, Mode as EbuR128Mode};
 use symphonia::core::audio::SampleBuffer;
 use symphonia::core::codecs::DecoderOptions;
 use symphonia::core::errors::Error as SymphoniaError;
@@ -15,6 +16,8 @@ use symphonia::core::formats::FormatOptions;
 use symphonia::core::io::MediaSourceStream;
 use symphonia::core::meta::MetadataOptions;
 use symphonia::core::probe::Hint;
+
+use crate::config::LoudnessStandard;
 
 const YULE_ORDER: usize = 10;
 const BUTTER_ORDER: usize = 2;
@@ -24,6 +27,8 @@ const RMS_PERCENTILE: f64 = 0.95;
 const RMS_WINDOW_TIME_SECONDS: f64 = 0.050;
 const PINK_REFERENCE_DB: f64 = 64.54;
 const EPSILON_POWER: f64 = 1e-16;
+const R128_REFERENCE_LOUDNESS_LUFS: f64 = -18.0;
+const R128_MIN_DURATION_SECONDS: f64 = 1e-6;
 
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct ReplayGainAnalysisValues {
@@ -1092,6 +1097,280 @@ pub(crate) fn analyze_album(paths: &[PathBuf]) -> Result<ReplayGainAnalysisValue
         analyses.push(analyze_track(path)?);
     }
     combine_track_analyses(analyses.iter())
+}
+
+#[derive(Debug, Clone, Copy)]
+struct R128TrackSummary {
+    loudness_lufs: f64,
+    peak_linear: f64,
+    duration_seconds: f64,
+}
+
+fn analyze_track_r128_summary(path: &Path) -> Result<R128TrackSummary, String> {
+    let input = File::open(path)
+        .map_err(|error| format!("R128 analysis failed opening {}: {}", path.display(), error))?;
+    let mss = MediaSourceStream::new(Box::new(input), Default::default());
+    let mut hint = Hint::new();
+    if let Some(extension) = path.extension().and_then(|value| value.to_str()) {
+        hint.with_extension(extension);
+    }
+
+    let probe = symphonia::default::get_probe()
+        .format(
+            &hint,
+            mss,
+            &FormatOptions::default(),
+            &MetadataOptions::default(),
+        )
+        .map_err(|error| format!("R128 analysis failed probing {}: {}", path.display(), error))?;
+    let mut format_reader = probe.format;
+    let default_track = format_reader
+        .default_track()
+        .ok_or_else(|| format!("R128 analysis found no audio track in {}", path.display()))?;
+    let track_id = default_track.id;
+    let codec_params = default_track.codec_params.clone();
+    let mut decoder = symphonia::default::get_codecs()
+        .make(&codec_params, &DecoderOptions::default())
+        .map_err(|error| {
+            format!(
+                "R128 analysis failed creating decoder for {}: {}",
+                path.display(),
+                error
+            )
+        })?;
+
+    let mut analyzer: Option<EbuR128> = None;
+    let mut sample_rate_hz: u32 = 0;
+    let mut channel_count: usize = 0;
+    let mut processed_frames: u64 = 0;
+    let mut decoded_any_audio = false;
+    loop {
+        let packet = match format_reader.next_packet() {
+            Ok(packet) => packet,
+            Err(SymphoniaError::IoError(error)) if error.kind() == ErrorKind::UnexpectedEof => {
+                break
+            }
+            Err(SymphoniaError::ResetRequired) => {
+                decoder = symphonia::default::get_codecs()
+                    .make(&codec_params, &DecoderOptions::default())
+                    .map_err(|error| {
+                        format!(
+                            "R128 analysis failed resetting decoder for {}: {}",
+                            path.display(),
+                            error
+                        )
+                    })?;
+                continue;
+            }
+            Err(SymphoniaError::DecodeError(_))
+            | Err(SymphoniaError::LimitError(_))
+            | Err(SymphoniaError::IoError(_)) => continue,
+            Err(other) => {
+                return Err(format!(
+                    "R128 packet read failed for {}: {}",
+                    path.display(),
+                    other
+                ));
+            }
+        };
+
+        if packet.track_id() != track_id {
+            continue;
+        }
+
+        let decoded = match decoder.decode(&packet) {
+            Ok(decoded) => decoded,
+            Err(SymphoniaError::DecodeError(_)) | Err(SymphoniaError::LimitError(_)) => continue,
+            Err(SymphoniaError::ResetRequired) => {
+                decoder = symphonia::default::get_codecs()
+                    .make(&codec_params, &DecoderOptions::default())
+                    .map_err(|error| {
+                        format!(
+                            "R128 analysis failed resetting decoder for {}: {}",
+                            path.display(),
+                            error
+                        )
+                    })?;
+                continue;
+            }
+            Err(other) => {
+                return Err(format!(
+                    "R128 decode failed for {}: {}",
+                    path.display(),
+                    other
+                ));
+            }
+        };
+
+        let spec = decoded.spec();
+        let decoded_channel_count = spec.channels.count().max(1);
+        if analyzer.is_none() {
+            sample_rate_hz = spec.rate;
+            channel_count = decoded_channel_count;
+            analyzer = Some(
+                EbuR128::new(
+                    channel_count as u32,
+                    sample_rate_hz,
+                    EbuR128Mode::I | EbuR128Mode::SAMPLE_PEAK,
+                )
+                .map_err(|error| {
+                    format!(
+                        "R128 analysis initialization failed for {}: {}",
+                        path.display(),
+                        error
+                    )
+                })?,
+            );
+        } else if decoded_channel_count != channel_count {
+            return Err(format!(
+                "R128 analysis channel layout changed while decoding {}",
+                path.display()
+            ));
+        }
+
+        let duration = decoded.capacity() as u64;
+        if duration == 0 {
+            continue;
+        }
+
+        let mut sample_buffer = SampleBuffer::<f32>::new(duration, *spec);
+        sample_buffer.copy_interleaved_ref(decoded);
+        if let Some(analyzer) = analyzer.as_mut() {
+            analyzer
+                .add_frames_f32(sample_buffer.samples())
+                .map_err(|error| {
+                    format!(
+                        "R128 analysis failed processing samples for {}: {}",
+                        path.display(),
+                        error
+                    )
+                })?;
+        }
+        processed_frames = processed_frames.saturating_add(duration);
+        decoded_any_audio = true;
+    }
+
+    if !decoded_any_audio {
+        return Err(format!(
+            "R128 analysis decoded no audio frames for {}",
+            path.display()
+        ));
+    }
+
+    let analyzer = analyzer.ok_or_else(|| {
+        format!(
+            "R128 analysis decoded no supported audio frames for {}",
+            path.display()
+        )
+    })?;
+    let loudness_lufs = analyzer.loudness_global().map_err(|error| {
+        format!(
+            "R128 analysis failed computing loudness for {}: {}",
+            path.display(),
+            error
+        )
+    })?;
+    if !loudness_lufs.is_finite() {
+        return Err(format!(
+            "R128 analysis returned non-finite loudness for {}",
+            path.display()
+        ));
+    }
+
+    let mut peak_linear = 0.0f64;
+    for channel_index in 0..channel_count {
+        let peak = analyzer
+            .sample_peak(channel_index as u32)
+            .map_err(|error| {
+                format!(
+                    "R128 analysis failed reading sample peak for {}: {}",
+                    path.display(),
+                    error
+                )
+            })?;
+        peak_linear = peak_linear.max(peak);
+    }
+    if !peak_linear.is_finite() || peak_linear <= 0.0 {
+        peak_linear = f64::from(f32::EPSILON);
+    }
+
+    let duration_seconds = if sample_rate_hz == 0 {
+        R128_MIN_DURATION_SECONDS
+    } else {
+        ((processed_frames as f64) / f64::from(sample_rate_hz)).max(R128_MIN_DURATION_SECONDS)
+    };
+
+    Ok(R128TrackSummary {
+        loudness_lufs,
+        peak_linear,
+        duration_seconds,
+    })
+}
+
+fn values_from_r128_summary(summary: R128TrackSummary) -> Result<ReplayGainAnalysisValues, String> {
+    let gain_db = (R128_REFERENCE_LOUDNESS_LUFS - summary.loudness_lufs) as f32;
+    if !gain_db.is_finite() {
+        return Err("R128 analysis computed a non-finite gain value".to_string());
+    }
+    let peak = summary.peak_linear as f32;
+    if !peak.is_finite() || peak <= 0.0 {
+        return Err("R128 analysis computed an invalid peak value".to_string());
+    }
+    Ok(ReplayGainAnalysisValues { gain_db, peak })
+}
+
+fn analyze_track_r128(path: &Path) -> Result<ReplayGainAnalysisValues, String> {
+    let summary = analyze_track_r128_summary(path)?;
+    values_from_r128_summary(summary)
+}
+
+fn analyze_album_r128(paths: &[PathBuf]) -> Result<ReplayGainAnalysisValues, String> {
+    if paths.is_empty() {
+        return Err("Cannot analyze ReplayGain for an empty album selection".to_string());
+    }
+
+    let mut total_weighted_power = 0.0f64;
+    let mut total_duration = 0.0f64;
+    let mut peak_linear = 0.0f64;
+
+    for path in paths {
+        let summary = analyze_track_r128_summary(path)?;
+        peak_linear = peak_linear.max(summary.peak_linear);
+        let power = 10.0f64.powf(summary.loudness_lufs / 10.0);
+        total_weighted_power += power * summary.duration_seconds;
+        total_duration += summary.duration_seconds;
+    }
+
+    if total_duration <= 0.0 || total_weighted_power <= 0.0 {
+        return Err("R128 album analysis produced no valid loudness data".to_string());
+    }
+
+    let album_loudness_lufs = (total_weighted_power / total_duration).log10() * 10.0;
+    values_from_r128_summary(R128TrackSummary {
+        loudness_lufs: album_loudness_lufs,
+        peak_linear: peak_linear.max(f64::from(f32::EPSILON)),
+        duration_seconds: total_duration,
+    })
+}
+
+pub(crate) fn analyze_track_values(
+    path: &Path,
+    loudness_standard: LoudnessStandard,
+) -> Result<ReplayGainAnalysisValues, String> {
+    match loudness_standard {
+        LoudnessStandard::R128 => analyze_track_r128(path),
+        LoudnessStandard::ReplayGain1 => analyze_track(path)?.values(),
+    }
+}
+
+pub(crate) fn analyze_album_values(
+    paths: &[PathBuf],
+    loudness_standard: LoudnessStandard,
+) -> Result<ReplayGainAnalysisValues, String> {
+    match loudness_standard {
+        LoudnessStandard::R128 => analyze_album_r128(paths),
+        LoudnessStandard::ReplayGain1 => analyze_album(paths),
+    }
 }
 
 #[cfg(test)]

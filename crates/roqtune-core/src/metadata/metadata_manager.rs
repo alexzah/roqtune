@@ -31,6 +31,7 @@ use lofty::tag::{ItemKey, MergeTag, SplitTag, Tag, TagType};
 use lofty::wavpack::WavPackFile;
 use lofty::TextEncoding;
 
+use crate::config::LoudnessStandard;
 use crate::db_manager::DbManager;
 use crate::image_pipeline::{self, ManagedImageKind};
 use crate::metadata::replaygain_analyzer;
@@ -1346,29 +1347,30 @@ impl MetadataManager {
         Ok((targets, album_reference_paths))
     }
 
-    fn analyze_replaygain_for_track(path: &Path) -> Result<ReplayGainScanValues, String> {
-        let analysis = replaygain_analyzer::analyze_track(path).map_err(|error| {
-            format!(
-                "ReplayGain track analysis failed for {}: {}",
-                path.display(),
-                error
-            )
-        })?;
-        let values = analysis.values().map_err(|error| {
-            format!(
-                "ReplayGain track analysis failed for {}: {}",
-                path.display(),
-                error
-            )
-        })?;
+    fn analyze_replaygain_for_track(
+        path: &Path,
+        loudness_standard: LoudnessStandard,
+    ) -> Result<ReplayGainScanValues, String> {
+        let values = replaygain_analyzer::analyze_track_values(path, loudness_standard).map_err(
+            |error| {
+                format!(
+                    "ReplayGain track analysis failed for {}: {}",
+                    path.display(),
+                    error
+                )
+            },
+        )?;
         Ok(ReplayGainScanValues {
             gain_db: values.gain_db,
             peak: values.peak,
         })
     }
 
-    fn analyze_replaygain_for_album(paths: &[PathBuf]) -> Result<ReplayGainScanValues, String> {
-        let values = replaygain_analyzer::analyze_album(paths)
+    fn analyze_replaygain_for_album(
+        paths: &[PathBuf],
+        loudness_standard: LoudnessStandard,
+    ) -> Result<ReplayGainScanValues, String> {
+        let values = replaygain_analyzer::analyze_album_values(paths, loudness_standard)
             .map_err(|error| format!("ReplayGain album analysis failed: {}", error))?;
         Ok(ReplayGainScanValues {
             gain_db: values.gain_db,
@@ -1482,6 +1484,7 @@ impl MetadataManager {
         request_targets: Vec<crate::protocol::ReplayGainScanTarget>,
         request_album_references: Vec<crate::protocol::ReplayGainAlbumReference>,
         overwrite_existing: bool,
+        loudness_standard: LoudnessStandard,
     ) {
         let (targets, album_reference_paths) =
             match Self::build_replaygain_scan_targets_from_request(
@@ -1559,7 +1562,10 @@ impl MetadataManager {
                 continue;
             }
 
-            let track_values = match Self::analyze_replaygain_for_track(target.path.as_path()) {
+            let track_values = match Self::analyze_replaygain_for_track(
+                target.path.as_path(),
+                loudness_standard,
+            ) {
                 Ok(values) => values,
                 Err(error) => {
                     failed = failed.saturating_add(1);
@@ -1587,7 +1593,7 @@ impl MetadataManager {
                     .unwrap_or_else(|| vec![target.path.clone()]);
                 album_scan_cache.insert(
                     target.album_key.clone(),
-                    Self::analyze_replaygain_for_album(&album_paths),
+                    Self::analyze_replaygain_for_album(&album_paths, loudness_standard),
                 );
             }
 
@@ -1664,6 +1670,7 @@ impl MetadataManager {
         targets: Vec<crate::protocol::ReplayGainScanTarget>,
         album_references: Vec<crate::protocol::ReplayGainAlbumReference>,
         overwrite_existing: bool,
+        loudness_standard: LoudnessStandard,
     ) {
         let bus_producer = self.bus_producer.clone();
         let spawn_result = std::thread::Builder::new()
@@ -1688,6 +1695,7 @@ impl MetadataManager {
                     targets,
                     album_references,
                     overwrite_existing,
+                    loudness_standard,
                 );
             });
 
@@ -2275,12 +2283,14 @@ impl MetadataManager {
                     targets,
                     album_references,
                     overwrite_existing,
+                    loudness_standard,
                 })) => {
                     self.spawn_replaygain_scan_for_paths(
                         request_id,
                         targets,
                         album_references,
                         overwrite_existing,
+                        loudness_standard,
                     );
                 }
                 Ok(_) => {}

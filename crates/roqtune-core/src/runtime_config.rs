@@ -191,6 +191,9 @@ pub fn config_delta_entries(previous: &Config, next: &Config) -> Vec<ConfigDelta
     if previous.ui.use_replaygain != next.ui.use_replaygain {
         ui.use_replaygain = Some(next.ui.use_replaygain);
     }
+    if previous.ui.loudness_standard != next.ui.loudness_standard {
+        ui.loudness_standard = Some(next.ui.loudness_standard);
+    }
     if !ui.is_empty() {
         deltas.push(ConfigDeltaEntry::Ui(ui));
     }
@@ -332,7 +335,10 @@ pub fn config_diff_is_runtime_sample_rate_only(previous: &Config, next: &Config)
 
 #[cfg(test)]
 mod tests {
-    use crate::{config::Config, protocol::ConfigDeltaEntry};
+    use crate::{
+        config::{Config, LoudnessStandard},
+        protocol::ConfigDeltaEntry,
+    };
 
     use super::{audio_settings_changed, config_delta_entries, output_preferences_changed};
 
@@ -422,6 +428,23 @@ mod tests {
                 ConfigDeltaEntry::Ui(ui) if ui.use_replaygain == Some(true)
             )),
             "expected ui delta with use_replaygain field"
+        );
+    }
+
+    #[test]
+    fn test_config_delta_entries_include_loudness_standard_ui_field() {
+        let previous = Config::default();
+        let mut next = previous.clone();
+        next.ui.loudness_standard = LoudnessStandard::ReplayGain1;
+
+        let deltas = config_delta_entries(&previous, &next);
+        assert!(
+            deltas.iter().any(|delta| matches!(
+                delta,
+                ConfigDeltaEntry::Ui(ui)
+                    if ui.loudness_standard == Some(LoudnessStandard::ReplayGain1)
+            )),
+            "expected ui delta with loudness_standard field"
         );
     }
 }

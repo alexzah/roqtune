@@ -46,8 +46,8 @@ use std::{
 use app_config_coordinator::apply_config_update;
 use app_context::AppSharedState;
 use config::{
-    BackendProfileConfig, BufferingConfig, Config, IntegrationsConfig, LibraryConfig, OutputConfig,
-    ResamplerQuality, UiConfig, UiPlaybackOrder, UiRepeatMode,
+    BackendProfileConfig, BufferingConfig, Config, IntegrationsConfig, LibraryConfig,
+    LoudnessStandard, OutputConfig, ResamplerQuality, UiConfig, UiPlaybackOrder, UiRepeatMode,
 };
 use layout::{add_root_leaf_if_empty, sanitize_layout_config};
 use log::warn;
@@ -470,6 +470,7 @@ pub(crate) fn sanitize_config(config: Config) -> Config {
             crossfade_enabled: config.ui.crossfade_enabled,
             crossfade_duration_seconds: clamped_crossfade_duration_seconds,
             use_replaygain: config.ui.use_replaygain,
+            loudness_standard: config.ui.loudness_standard,
         },
         library: LibraryConfig {
             folders: sanitized_library_folders,
@@ -664,6 +665,11 @@ pub(crate) fn apply_config_to_ui(
     ui.set_settings_crossfade_enabled(config.ui.crossfade_enabled);
     ui.set_settings_crossfade_duration_seconds(config.ui.crossfade_duration_seconds as f32);
     ui.set_settings_use_replaygain(config.ui.use_replaygain);
+    let loudness_standard_index = match config.ui.loudness_standard {
+        LoudnessStandard::R128 => 0,
+        LoudnessStandard::ReplayGain1 => 1,
+    };
+    ui.set_settings_loudness_standard_index(loudness_standard_index);
     let resolved_theme = resolve_theme(&config.ui.layout);
     let parse_theme_color = |value: &str| {
         parse_slint_color(value).unwrap_or_else(|| slint::Color::from_rgb_u8(0, 0, 0))

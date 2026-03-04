@@ -109,6 +109,8 @@ pub struct UiConfig {
     pub crossfade_duration_seconds: u32,
     #[serde(default)]
     pub use_replaygain: bool,
+    #[serde(default)]
+    pub loudness_standard: LoudnessStandard,
 }
 
 /// Persisted playback-order preference for startup restore.
@@ -129,6 +131,16 @@ pub enum UiRepeatMode {
     Off,
     Playlist,
     Track,
+}
+
+/// Loudness-analysis strategy used when scanning ReplayGain tags.
+#[derive(Debug, Clone, Copy, serde::Deserialize, serde::Serialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum LoudnessStandard {
+    #[default]
+    R128,
+    #[serde(alias = "rg1")]
+    ReplayGain1,
 }
 
 /// Library indexing preferences persisted between sessions.
@@ -264,6 +276,7 @@ impl Default for UiConfig {
             crossfade_enabled: false,
             crossfade_duration_seconds: default_crossfade_duration_seconds(),
             use_replaygain: false,
+            loudness_standard: LoudnessStandard::R128,
         }
     }
 }
@@ -448,7 +461,7 @@ pub fn default_playlist_columns() -> Vec<PlaylistColumnConfig> {
 mod tests {
     use super::{
         default_playlist_columns, BufferingConfig, Config, IntegrationBackendKind, LayoutConfig,
-        ResamplerQuality, UiConfig, UiPlaybackOrder, UiRepeatMode,
+        LoudnessStandard, ResamplerQuality, UiConfig, UiPlaybackOrder, UiRepeatMode,
         BUILTIN_TRACK_DETAILS_COLUMN_FORMAT,
     };
 
@@ -485,6 +498,7 @@ mod tests {
         assert!(!config.ui.crossfade_enabled);
         assert_eq!(config.ui.crossfade_duration_seconds, 6);
         assert!(!config.ui.use_replaygain);
+        assert_eq!(config.ui.loudness_standard, LoudnessStandard::R128);
         assert!(config.library.folders.is_empty());
         assert!(!config.library.online_metadata_enabled);
         assert!(config.library.online_metadata_prompt_pending);
@@ -543,6 +557,7 @@ decoder_request_chunk_ms = 1500
         assert!(!parsed.ui.crossfade_enabled);
         assert_eq!(parsed.ui.crossfade_duration_seconds, 6);
         assert!(!parsed.ui.use_replaygain);
+        assert_eq!(parsed.ui.loudness_standard, LoudnessStandard::R128);
         assert!(parsed.library.folders.is_empty());
         assert!(!parsed.library.online_metadata_enabled);
         assert!(parsed.library.online_metadata_prompt_pending);
@@ -617,6 +632,7 @@ decoder_request_chunk_ms = 1500
         assert!(config_text.contains("crossfade_enabled"));
         assert!(config_text.contains("crossfade_duration_seconds"));
         assert!(config_text.contains("use_replaygain"));
+        assert!(config_text.contains("loudness_standard"));
         assert!(config_text.contains("allow_transcode_fallback"));
     }
 
@@ -699,6 +715,7 @@ decoder_request_chunk_ms = 1500
             defaults.ui.crossfade_duration_seconds
         );
         assert_eq!(parsed.ui.use_replaygain, defaults.ui.use_replaygain);
+        assert_eq!(parsed.ui.loudness_standard, defaults.ui.loudness_standard);
         assert_eq!(parsed.library.folders, defaults.library.folders);
         assert_eq!(
             parsed.library.online_metadata_enabled,

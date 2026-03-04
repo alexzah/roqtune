@@ -26,7 +26,7 @@ use slint::{Image, Model, ModelRc, StandardListViewItem, VecModel};
 use tokio::sync::broadcast::{Receiver, Sender};
 
 use crate::{
-    config::{self, PlaylistColumnConfig},
+    config::{self, LoudnessStandard, PlaylistColumnConfig},
     image_pipeline::{self, ManagedImageKind},
     integration_keyring::get_opensubsonic_password,
     integration_uri::{is_remote_track_path, parse_opensubsonic_track_uri},
@@ -239,6 +239,7 @@ pub struct UiManager {
     replaygain_scan_request_nonce: u64,
     pending_replaygain_scan_eval_request_id: Option<u64>,
     active_replaygain_scan_request_id: Option<u64>,
+    replaygain_scan_loudness_standard: LoudnessStandard,
     replaygain_scan_progress_visible: bool,
     replaygain_scan_progress_processed: usize,
     replaygain_scan_progress_total: usize,
@@ -2064,6 +2065,7 @@ impl UiManager {
             replaygain_scan_request_nonce: 0,
             pending_replaygain_scan_eval_request_id: None,
             active_replaygain_scan_request_id: None,
+            replaygain_scan_loudness_standard: initial_ui_config.loudness_standard,
             replaygain_scan_progress_visible: false,
             replaygain_scan_progress_processed: 0,
             replaygain_scan_progress_total: 0,
@@ -8292,12 +8294,14 @@ impl UiManager {
         }
 
         let request_id = self.next_replaygain_scan_request_id();
+        let loudness_standard = self.replaygain_scan_loudness_standard;
         self.active_replaygain_scan_request_id = Some(request_id);
         let _ = self.bus_sender.send(protocol::Message::Library(
             protocol::LibraryMessage::StartReplayGainScanSelection {
                 request_id,
                 selections,
                 overwrite_existing,
+                loudness_standard,
             },
         ));
     }
@@ -12379,6 +12383,9 @@ impl UiManager {
             window_size_patch_received = has_window_width_patch || has_window_height_patch;
             if let Some(auto_scroll_to_playing_track) = ui_config.auto_scroll_to_playing_track {
                 self.auto_scroll_to_playing_track = auto_scroll_to_playing_track;
+            }
+            if let Some(loudness_standard) = ui_config.loudness_standard {
+                self.replaygain_scan_loudness_standard = loudness_standard;
             }
             if let Some(playlist_columns) = ui_config.playlist_columns {
                 self.playlist_columns = playlist_columns;
