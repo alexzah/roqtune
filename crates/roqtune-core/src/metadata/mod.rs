@@ -2,3 +2,4 @@
 
 pub mod metadata_manager;
 pub mod metadata_tags;
+pub(crate) mod replaygain_analyzer;

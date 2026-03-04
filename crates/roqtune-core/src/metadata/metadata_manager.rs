@@ -5,11 +5,9 @@
 
 use std::borrow::Cow;
 use std::collections::{HashMap, HashSet};
-use std::fs::{self, OpenOptions};
+use std::fs::OpenOptions;
 use std::io::{Cursor, Seek};
 use std::path::{Path, PathBuf};
-use std::process::Command;
-use std::time::{SystemTime, UNIX_EPOCH};
 
 use chrono::{DateTime, Local};
 use log::{debug, warn};
@@ -17,8 +15,8 @@ use tokio::sync::broadcast::{Receiver, Sender};
 
 use lofty::aac::AacFile;
 use lofty::ape::ApeFile;
-use lofty::config::ParseOptions;
 use lofty::config::WriteOptions;
+use lofty::config::{ParseOptions, ParsingMode};
 use lofty::file::{AudioFile, FileType, TaggedFileExt};
 use lofty::flac::FlacFile;
 use lofty::id3::v2::{Frame, FrameId, Id3v2Tag, TextInformationFrame};
@@ -35,6 +33,7 @@ use lofty::TextEncoding;
 
 use crate::db_manager::DbManager;
 use crate::image_pipeline::{self, ManagedImageKind};
+use crate::metadata::replaygain_analyzer;
 use crate::metadata_tags;
 use crate::protocol::{
     Message, MetadataEditorField, MetadataMessage, PropertiesEmbeddedImageSlot,
@@ -113,14 +112,6 @@ struct ReplayGainScanProgress {
     failed: usize,
     current_track_label: String,
 }
-
-#[derive(Debug, serde::Deserialize)]
-struct LoudnormSummary {
-    input_i: String,
-    input_tp: String,
-}
-
-const REPLAYGAIN_REFERENCE_LOUDNESS_LUFS: f32 = -18.0;
 
 struct MediaInfoFieldInput<'a> {
     path: &'a Path,
@@ -1355,138 +1346,34 @@ impl MetadataManager {
         Ok((targets, album_reference_paths))
     }
 
-    fn ensure_ffmpeg_available() -> Result<(), String> {
-        let output = Command::new("ffmpeg")
-            .arg("-version")
-            .output()
-            .map_err(|error| format!("ffmpeg is required for ReplayGain scan: {}", error))?;
-        if output.status.success() {
-            Ok(())
-        } else {
-            Err("ffmpeg is unavailable; install ffmpeg to scan ReplayGain tags".to_string())
-        }
-    }
-
-    fn run_ffmpeg_loudnorm_command(mut command: Command, context: &str) -> Result<String, String> {
-        let output = command
-            .output()
-            .map_err(|error| format!("{context}: {}", error))?;
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        let stdout = String::from_utf8_lossy(&output.stdout);
-        let combined = if stdout.trim().is_empty() {
-            stderr.to_string()
-        } else {
-            format!("{stderr}\n{stdout}")
-        };
-
-        if !output.status.success() {
-            let detail = stderr
-                .lines()
-                .rev()
-                .find(|line| !line.trim().is_empty())
-                .unwrap_or("ffmpeg returned a non-zero exit status")
-                .trim()
-                .to_string();
-            return Err(format!("{context}: {}", detail));
-        }
-
-        Ok(combined)
-    }
-
-    fn parse_loudnorm_summary(output: &str) -> Result<ReplayGainScanValues, String> {
-        let json_start = output
-            .rfind('{')
-            .ok_or_else(|| "ffmpeg did not emit loudness summary JSON".to_string())?;
-        let json_end = output[json_start..]
-            .find('}')
-            .map(|offset| json_start + offset)
-            .ok_or_else(|| "ffmpeg emitted incomplete loudness summary JSON".to_string())?;
-        let json_payload = &output[json_start..=json_end];
-        let summary: LoudnormSummary = serde_json::from_str(json_payload)
-            .map_err(|error| format!("Failed parsing ffmpeg loudness summary: {}", error))?;
-
-        let integrated_lufs = summary
-            .input_i
-            .trim()
-            .parse::<f32>()
-            .map_err(|error| format!("Invalid loudness value from ffmpeg: {}", error))?;
-        let true_peak_dbtp = summary
-            .input_tp
-            .trim()
-            .parse::<f32>()
-            .map_err(|error| format!("Invalid true-peak value from ffmpeg: {}", error))?;
-        if !integrated_lufs.is_finite() || !true_peak_dbtp.is_finite() {
-            return Err("ffmpeg returned non-finite loudness values".to_string());
-        }
-
-        let peak = 10.0f32.powf(true_peak_dbtp / 20.0);
-        if !peak.is_finite() || peak <= 0.0 {
-            return Err("Computed ReplayGain peak is invalid".to_string());
-        }
+    fn analyze_replaygain_for_track(path: &Path) -> Result<ReplayGainScanValues, String> {
+        let analysis = replaygain_analyzer::analyze_track(path).map_err(|error| {
+            format!(
+                "ReplayGain track analysis failed for {}: {}",
+                path.display(),
+                error
+            )
+        })?;
+        let values = analysis.values().map_err(|error| {
+            format!(
+                "ReplayGain track analysis failed for {}: {}",
+                path.display(),
+                error
+            )
+        })?;
         Ok(ReplayGainScanValues {
-            gain_db: REPLAYGAIN_REFERENCE_LOUDNESS_LUFS - integrated_lufs,
-            peak,
+            gain_db: values.gain_db,
+            peak: values.peak,
         })
     }
 
-    fn analyze_replaygain_for_track(path: &Path) -> Result<ReplayGainScanValues, String> {
-        let mut command = Command::new("ffmpeg");
-        command
-            .arg("-hide_banner")
-            .arg("-nostats")
-            .arg("-i")
-            .arg(path)
-            .arg("-vn")
-            .arg("-sn")
-            .arg("-dn")
-            .arg("-af")
-            .arg("loudnorm=I=-18:TP=-1.5:LRA=11:print_format=json")
-            .arg("-f")
-            .arg("null")
-            .arg("-");
-        let output = Self::run_ffmpeg_loudnorm_command(
-            command,
-            &format!("ReplayGain analysis failed for {}", path.display()),
-        )?;
-        Self::parse_loudnorm_summary(&output)
-    }
-
     fn analyze_replaygain_for_album(paths: &[PathBuf]) -> Result<ReplayGainScanValues, String> {
-        if paths.is_empty() {
-            return Err("Cannot analyze ReplayGain for an empty album selection".to_string());
-        }
-        if paths.len() == 1 {
-            return Self::analyze_replaygain_for_track(paths[0].as_path());
-        }
-
-        let mut concat_inputs = String::new();
-        for index in 0..paths.len() {
-            concat_inputs.push_str(&format!("[{index}:a]"));
-        }
-        let filter = format!(
-            "{concat_inputs}concat=n={}:v=0:a=1,loudnorm=I=-18:TP=-1.5:LRA=11:print_format=json",
-            paths.len()
-        );
-
-        let mut command = Command::new("ffmpeg");
-        command.arg("-hide_banner").arg("-nostats");
-        for path in paths {
-            command.arg("-i").arg(path);
-        }
-        command
-            .arg("-vn")
-            .arg("-sn")
-            .arg("-dn")
-            .arg("-filter_complex")
-            .arg(filter)
-            .arg("-f")
-            .arg("null")
-            .arg("-");
-        let output = Self::run_ffmpeg_loudnorm_command(
-            command,
-            "ReplayGain album analysis failed while combining album tracks",
-        )?;
-        Self::parse_loudnorm_summary(&output)
+        let values = replaygain_analyzer::analyze_album(paths)
+            .map_err(|error| format!("ReplayGain album analysis failed: {}", error))?;
+        Ok(ReplayGainScanValues {
+            gain_db: values.gain_db,
+            peak: values.peak,
+        })
     }
 
     fn replaygain_tag_type_for_path(path: &Path) -> TagType {
@@ -1560,114 +1447,8 @@ impl MetadataManager {
     ) -> Result<(), String> {
         let metadata_fields =
             Self::replaygain_metadata_fields_for_path(path, track_values, album_values);
-        match Self::save_track_properties_with_db(db_manager, path, &metadata_fields, &[], &[]) {
-            Ok(_) => Ok(()),
-            Err(primary_error) => {
-                warn!(
-                    "ReplayGain tag write failed for {}; retrying with ffmpeg metadata rewrite: {}",
-                    path.display(),
-                    primary_error
-                );
-                match Self::save_replaygain_tags_with_ffmpeg(path, track_values, album_values) {
-                    Ok(_) => Self::finalize_saved_track_properties(db_manager, path).map(|_| ()),
-                    Err(fallback_error) => Err(format!(
-                        "{primary_error}; ffmpeg fallback failed: {fallback_error}"
-                    )),
-                }
-            }
-        }
-    }
-
-    fn replaygain_ffmpeg_temp_output_path(path: &Path) -> Result<PathBuf, String> {
-        let parent = path
-            .parent()
-            .ok_or_else(|| format!("Track path has no parent directory: {}", path.display()))?;
-        let extension = path
-            .extension()
-            .and_then(|value| value.to_str())
-            .map(str::trim)
-            .filter(|value| !value.is_empty())
-            .unwrap_or("tmp");
-        let stem = path
-            .file_stem()
-            .and_then(|value| value.to_str())
-            .map(str::trim)
-            .filter(|value| !value.is_empty())
-            .unwrap_or("track");
-        let nonce = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .map(|value| value.as_nanos())
-            .unwrap_or(0);
-        let temp_name = format!(".roqtune-replaygain-{stem}-{nonce}.{extension}");
-        Ok(parent.join(temp_name))
-    }
-
-    fn save_replaygain_tags_with_ffmpeg(
-        path: &Path,
-        track_values: ReplayGainScanValues,
-        album_values: ReplayGainScanValues,
-    ) -> Result<(), String> {
-        let output_path = Self::replaygain_ffmpeg_temp_output_path(path)?;
-        let mut command = Command::new("ffmpeg");
-        command
-            .arg("-hide_banner")
-            .arg("-nostats")
-            .arg("-y")
-            .arg("-i")
-            .arg(path)
-            .arg("-map")
-            .arg("0")
-            .arg("-map_metadata")
-            .arg("0")
-            .arg("-c")
-            .arg("copy")
-            .arg("-metadata")
-            .arg(format!(
-                "REPLAYGAIN_TRACK_GAIN={:+.2} dB",
-                track_values.gain_db
-            ))
-            .arg("-metadata")
-            .arg(format!("REPLAYGAIN_TRACK_PEAK={:.6}", track_values.peak))
-            .arg("-metadata")
-            .arg(format!(
-                "REPLAYGAIN_ALBUM_GAIN={:+.2} dB",
-                album_values.gain_db
-            ))
-            .arg("-metadata")
-            .arg(format!("REPLAYGAIN_ALBUM_PEAK={:.6}", album_values.peak))
-            .arg("-metadata")
-            .arg("REPLAYGAIN_REFERENCE_LOUDNESS=89.0 dB")
-            .arg(&output_path);
-
-        let output = command
-            .output()
-            .map_err(|error| format!("Failed to launch ffmpeg ReplayGain fallback: {}", error))?;
-        if !output.status.success() {
-            let _ = fs::remove_file(&output_path);
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            let detail = stderr
-                .lines()
-                .rev()
-                .find(|line| !line.trim().is_empty())
-                .unwrap_or("ffmpeg returned a non-zero exit status")
-                .trim()
-                .to_string();
-            return Err(format!(
-                "Failed to write ReplayGain tags with ffmpeg for {}: {}",
-                path.display(),
-                detail
-            ));
-        }
-
-        fs::rename(&output_path, path).map_err(|error| {
-            let _ = fs::remove_file(&output_path);
-            format!(
-                "Failed to replace track after ffmpeg ReplayGain fallback for {}: {}",
-                path.display(),
-                error
-            )
-        })?;
-        Ok(())
+        Self::save_track_properties_with_db(db_manager, path, &metadata_fields, &[], &[])
+            .map(|_| ())
     }
 
     fn replaygain_scan_track_label(path: &Path) -> String {
@@ -1721,20 +1502,6 @@ impl MetadataManager {
                 error: "No tracks selected for ReplayGain scan".to_string(),
             }));
             return;
-        }
-
-        let needs_analysis = targets
-            .iter()
-            .any(|target| overwrite_existing || !target.has_existing_tags);
-        if needs_analysis {
-            if let Err(error) = Self::ensure_ffmpeg_available() {
-                let _ =
-                    bus_producer.send(Message::Metadata(MetadataMessage::ReplayGainScanFailed {
-                        request_id,
-                        error,
-                    }));
-                return;
-            }
         }
 
         let total_tracks = targets.len();
@@ -2101,6 +1868,12 @@ impl MetadataManager {
         }
     }
 
+    fn lossless_write_parse_options() -> ParseOptions {
+        ParseOptions::new()
+            .parsing_mode(ParsingMode::Relaxed)
+            .max_junk_bytes(64 * 1024)
+    }
+
     fn save_lossless_id3v2_properties_for_mpeg(
         path: &Path,
         metadata_fields: &[MetadataEditorField],
@@ -2112,7 +1885,7 @@ impl MetadataManager {
             .write(true)
             .open(path)
             .map_err(|error| format!("Failed to open MPEG for tag update: {error}"))?;
-        let mut mpeg_file = MpegFile::read_from(&mut file, ParseOptions::new())
+        let mut mpeg_file = MpegFile::read_from(&mut file, Self::lossless_write_parse_options())
             .map_err(|error| format!("Failed to parse MPEG tags: {error}"))?;
         let mut id3v2 = mpeg_file
             .id3v2_mut()
@@ -2147,7 +1920,7 @@ impl MetadataManager {
             .write(true)
             .open(path)
             .map_err(|error| format!("Failed to open AAC for tag update: {error}"))?;
-        let mut aac_file = AacFile::read_from(&mut file, ParseOptions::new())
+        let mut aac_file = AacFile::read_from(&mut file, Self::lossless_write_parse_options())
             .map_err(|error| format!("Failed to parse AAC tags: {error}"))?;
         let mut id3v2 = aac_file.id3v2_mut().map(std::mem::take).unwrap_or_default();
         Self::apply_metadata_fields_to_id3v2(&mut id3v2, metadata_fields);
@@ -2179,7 +1952,7 @@ impl MetadataManager {
             .write(true)
             .open(path)
             .map_err(|error| format!("Failed to open WAV for tag update: {error}"))?;
-        let mut wav_file = WavFile::read_from(&mut file, ParseOptions::new())
+        let mut wav_file = WavFile::read_from(&mut file, Self::lossless_write_parse_options())
             .map_err(|error| format!("Failed to parse WAV tags: {error}"))?;
         let mut id3v2 = wav_file.id3v2_mut().map(std::mem::take).unwrap_or_default();
         Self::apply_metadata_fields_to_id3v2(&mut id3v2, metadata_fields);
@@ -2211,7 +1984,7 @@ impl MetadataManager {
             .write(true)
             .open(path)
             .map_err(|error| format!("Failed to open FLAC for tag update: {error}"))?;
-        let mut flac_file = FlacFile::read_from(&mut file, ParseOptions::new())
+        let mut flac_file = FlacFile::read_from(&mut file, Self::lossless_write_parse_options())
             .map_err(|error| format!("Failed to parse FLAC tags: {error}"))?;
         let source_tag = flac_file
             .vorbis_comments_mut()
@@ -2243,8 +2016,9 @@ impl MetadataManager {
             .write(true)
             .open(path)
             .map_err(|error| format!("Failed to open OGG Vorbis for tag update: {error}"))?;
-        let mut vorbis_file = VorbisFile::read_from(&mut file, ParseOptions::new())
-            .map_err(|error| format!("Failed to parse OGG Vorbis tags: {error}"))?;
+        let mut vorbis_file =
+            VorbisFile::read_from(&mut file, Self::lossless_write_parse_options())
+                .map_err(|error| format!("Failed to parse OGG Vorbis tags: {error}"))?;
         let source_tag = std::mem::take(vorbis_file.vorbis_comments_mut());
         let updated_tag = Self::apply_properties_edits_to_split_tag(
             source_tag,
@@ -2272,7 +2046,7 @@ impl MetadataManager {
             .write(true)
             .open(path)
             .map_err(|error| format!("Failed to open Opus for tag update: {error}"))?;
-        let mut opus_file = OpusFile::read_from(&mut file, ParseOptions::new())
+        let mut opus_file = OpusFile::read_from(&mut file, Self::lossless_write_parse_options())
             .map_err(|error| format!("Failed to parse Opus tags: {error}"))?;
         let source_tag = std::mem::take(opus_file.vorbis_comments_mut());
         let updated_tag = Self::apply_properties_edits_to_split_tag(
@@ -2301,7 +2075,7 @@ impl MetadataManager {
             .write(true)
             .open(path)
             .map_err(|error| format!("Failed to open MP4 for tag update: {error}"))?;
-        let mut mp4_file = Mp4File::read_from(&mut file, ParseOptions::new())
+        let mut mp4_file = Mp4File::read_from(&mut file, Self::lossless_write_parse_options())
             .map_err(|error| format!("Failed to parse MP4 tags: {error}"))?;
         let source_tag = mp4_file.ilst_mut().map(std::mem::take).unwrap_or_default();
         let updated_tag = Self::apply_properties_edits_to_split_tag(
@@ -2330,7 +2104,7 @@ impl MetadataManager {
             .write(true)
             .open(path)
             .map_err(|error| format!("Failed to open APE for tag update: {error}"))?;
-        let mut ape_file = ApeFile::read_from(&mut file, ParseOptions::new())
+        let mut ape_file = ApeFile::read_from(&mut file, Self::lossless_write_parse_options())
             .map_err(|error| format!("Failed to parse APE tags: {error}"))?;
         let source_tag = ape_file.ape_mut().map(std::mem::take).unwrap_or_default();
         let updated_tag = Self::apply_properties_edits_to_split_tag(
@@ -2359,8 +2133,9 @@ impl MetadataManager {
             .write(true)
             .open(path)
             .map_err(|error| format!("Failed to open WavPack for tag update: {error}"))?;
-        let mut wavpack_file = WavPackFile::read_from(&mut file, ParseOptions::new())
-            .map_err(|error| format!("Failed to parse WavPack tags: {error}"))?;
+        let mut wavpack_file =
+            WavPackFile::read_from(&mut file, Self::lossless_write_parse_options())
+                .map_err(|error| format!("Failed to parse WavPack tags: {error}"))?;
         let source_tag = wavpack_file
             .ape_mut()
             .map(std::mem::take)
@@ -2523,7 +2298,7 @@ impl MetadataManager {
 
 #[cfg(test)]
 mod tests {
-    use super::{MetadataManager, ReplayGainScanValues};
+    use super::MetadataManager;
     use crate::protocol::{MetadataEditorField, PropertiesImageDelete, PropertiesImageOverwrite};
     use lofty::aac::AacFile;
     use lofty::ape::ApeItem;
@@ -3204,56 +2979,6 @@ mod tests {
         assert_eq!(prepared[1].1.pic_type().as_u8(), 4);
         assert_eq!(prepared[0].1.data(), front_b_bytes.as_slice());
         assert_eq!(prepared[1].1.data(), back_bytes.as_slice());
-
-        let _ = fs::remove_dir_all(&dir);
-    }
-
-    #[test]
-    fn test_save_replaygain_tags_with_ffmpeg_updates_fixture_metadata() {
-        if MetadataManager::ensure_ffmpeg_available().is_err() {
-            return;
-        }
-
-        let (dir, fixture_path) = copy_metadata_fixture("base.mp3");
-        MetadataManager::save_replaygain_tags_with_ffmpeg(
-            &fixture_path,
-            ReplayGainScanValues {
-                gain_db: -9.2,
-                peak: 0.987654,
-            },
-            ReplayGainScanValues {
-                gain_db: -8.1,
-                peak: 0.998877,
-            },
-        )
-        .expect("ffmpeg replaygain fallback write failed");
-
-        let replaygain = crate::metadata::metadata_tags::read_replay_gain_metadata(&fixture_path)
-            .expect("replaygain metadata should be present after ffmpeg write");
-        assert_eq!(
-            replaygain
-                .track_gain_db
-                .map(|value| (value * 100.0).round() as i32),
-            Some(-920)
-        );
-        assert_eq!(
-            replaygain
-                .album_gain_db
-                .map(|value| (value * 100.0).round() as i32),
-            Some(-810)
-        );
-        assert_eq!(
-            replaygain
-                .track_peak
-                .map(|value| (value * 1_000_000.0).round() as i32),
-            Some(987_654)
-        );
-        assert_eq!(
-            replaygain
-                .album_peak
-                .map(|value| (value * 1_000_000.0).round() as i32),
-            Some(998_877)
-        );
 
         let _ = fs::remove_dir_all(&dir);
     }
