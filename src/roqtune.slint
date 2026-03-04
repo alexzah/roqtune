@@ -4754,7 +4754,7 @@ export component AppWindow inherits Window {
     if root.show_replaygain_scan_progress : Rectangle {
         z: 150;
         width: min(root.width - 24px, 440px);
-        height: 96px;
+        height: 128px;
         x: root.width - self.width - 12px;
         y: root.height - self.height - 12px;
         border-radius: 6px;
@@ -4797,11 +4797,22 @@ export component AppWindow inherits Window {
                     background: AppPalette.accent;
                 }
             }
-            Text {
-                text: root.replaygain_scan_progress_processed + " / "
-                    + root.replaygain_scan_progress_total;
-                color: AppPalette.text-muted;
-                font-size: 11px;
+            HorizontalLayout {
+                spacing: 8px;
+                Text {
+                    text: root.replaygain_scan_progress_processed + " / "
+                        + root.replaygain_scan_progress_total;
+                    color: AppPalette.text-muted;
+                    font-size: 11px;
+                    vertical-alignment: center;
+                }
+                Rectangle { horizontal-stretch: 1; }
+                Button {
+                    text: "Abort";
+                    clicked => {
+                        root.library_abort_replaygain_scan();
+                    }
+                }
             }
         }
     }
@@ -7601,6 +7612,7 @@ export component AppWindow inherits Window {
     callback library_confirm_replaygain_scan_overwrite();
     callback library_skip_replaygain_scan_existing();
     callback library_cancel_replaygain_scan_overwrite();
+    callback library_abort_replaygain_scan();
     callback open_properties_for_current_selection();
     callback properties_select_tab(int);
     callback properties_field_edited(int, string);

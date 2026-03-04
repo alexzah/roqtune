@@ -327,6 +327,7 @@ pub enum LibraryMessage {
     ConfirmReplayGainScanOverwrite,
     SkipReplayGainScanExisting,
     CancelReplayGainScanOverwrite,
+    AbortReplayGainScan,
     EvaluateReplayGainScanSelection {
         request_id: u64,
         selections: Vec<LibrarySelectionSpec>,
@@ -638,6 +639,9 @@ pub enum MetadataMessage {
         path: PathBuf,
         error: String,
     },
+    AbortReplayGainScan {
+        request_id: u64,
+    },
     ScanReplayGainForPaths {
         request_id: u64,
         targets: Vec<ReplayGainScanTarget>,
@@ -661,6 +665,14 @@ pub enum MetadataMessage {
     ReplayGainScanCompleted {
         request_id: u64,
         total_tracks: usize,
+        updated: usize,
+        skipped: usize,
+        failed: usize,
+    },
+    ReplayGainScanAborted {
+        request_id: u64,
+        total_tracks: usize,
+        processed: usize,
         updated: usize,
         skipped: usize,
         failed: usize,

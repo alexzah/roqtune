@@ -216,13 +216,19 @@ mod tests {
         assert!(
             slint_ui.contains("callback library_request_replaygain_scan_selection();")
                 && slint_ui.contains("callback library_confirm_replaygain_scan_overwrite();")
-                && slint_ui.contains("callback library_cancel_replaygain_scan_overwrite();"),
+                && slint_ui.contains("callback library_cancel_replaygain_scan_overwrite();")
+                && slint_ui.contains("callback library_abort_replaygain_scan();"),
             "App window should expose ReplayGain scan and overwrite confirmation callbacks"
         );
         assert!(
             slint_ui.contains("show_library_replaygain_scan_confirm")
                 && slint_ui.contains("library_replaygain_scan_confirm_message"),
             "App window should expose ReplayGain overwrite confirmation state"
+        );
+        assert!(
+            slint_ui.contains("text: \"Abort\"")
+                && slint_ui.contains("library_abort_replaygain_scan()"),
+            "ReplayGain progress panel should expose an abort action"
         );
     }
 

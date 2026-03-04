@@ -8,6 +8,8 @@ use std::collections::{HashMap, HashSet};
 use std::fs::OpenOptions;
 use std::io::{Cursor, Seek};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
 
 use chrono::{DateTime, Local};
 use log::{debug, warn};
@@ -84,6 +86,7 @@ type ReplayGainScanTargetsPayload = (
     Vec<ReplayGainScanTarget>,
     HashMap<ReplayGainAlbumKey, Vec<PathBuf>>,
 );
+type ReplayGainScanCancelToken = Arc<AtomicBool>;
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 struct ReplayGainAlbumKey {
@@ -114,6 +117,27 @@ struct ReplayGainScanProgress {
     current_track_label: String,
 }
 
+struct ReplayGainScanRequest {
+    request_id: u64,
+    request_targets: Vec<crate::protocol::ReplayGainScanTarget>,
+    request_album_references: Vec<crate::protocol::ReplayGainAlbumReference>,
+    overwrite_existing: bool,
+    loudness_standard: LoudnessStandard,
+}
+
+struct ReplayGainScanCancelRegistration {
+    request_id: u64,
+    cancel_tokens: Arc<Mutex<HashMap<u64, ReplayGainScanCancelToken>>>,
+}
+
+impl Drop for ReplayGainScanCancelRegistration {
+    fn drop(&mut self) {
+        if let Ok(mut cancel_tokens) = self.cancel_tokens.lock() {
+            cancel_tokens.remove(&self.request_id);
+        }
+    }
+}
+
 struct MediaInfoFieldInput<'a> {
     path: &'a Path,
     extension: String,
@@ -135,6 +159,7 @@ pub struct MetadataManager {
     bus_consumer: Receiver<Message>,
     bus_producer: Sender<Message>,
     db_manager: DbManager,
+    replaygain_scan_cancel_tokens: Arc<Mutex<HashMap<u64, ReplayGainScanCancelToken>>>,
 }
 
 impl MetadataManager {
@@ -148,6 +173,7 @@ impl MetadataManager {
             bus_consumer,
             bus_producer,
             db_manager,
+            replaygain_scan_cancel_tokens: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 
@@ -1480,12 +1506,16 @@ impl MetadataManager {
     fn scan_replaygain_for_paths(
         bus_producer: &Sender<Message>,
         db_manager: &DbManager,
-        request_id: u64,
-        request_targets: Vec<crate::protocol::ReplayGainScanTarget>,
-        request_album_references: Vec<crate::protocol::ReplayGainAlbumReference>,
-        overwrite_existing: bool,
-        loudness_standard: LoudnessStandard,
+        request: ReplayGainScanRequest,
+        cancel_token: ReplayGainScanCancelToken,
     ) {
+        let ReplayGainScanRequest {
+            request_id,
+            request_targets,
+            request_album_references,
+            overwrite_existing,
+            loudness_standard,
+        } = request;
         let (targets, album_reference_paths) =
             match Self::build_replaygain_scan_targets_from_request(
                 request_targets,
@@ -1508,6 +1538,18 @@ impl MetadataManager {
         }
 
         let total_tracks = targets.len();
+        if cancel_token.load(Ordering::Relaxed) {
+            let _ = bus_producer.send(Message::Metadata(MetadataMessage::ReplayGainScanAborted {
+                request_id,
+                total_tracks,
+                processed: 0,
+                updated: 0,
+                skipped: 0,
+                failed: 0,
+            }));
+            return;
+        }
+
         let _ = bus_producer.send(Message::Metadata(MetadataMessage::ReplayGainScanStarted {
             request_id,
             total_tracks,
@@ -1541,6 +1583,9 @@ impl MetadataManager {
         };
 
         for target in targets {
+            if cancel_token.load(Ordering::Relaxed) {
+                break;
+            }
             let current_track_label = Self::replaygain_scan_track_label(target.path.as_path());
             publish_progress(
                 processed,
@@ -1549,6 +1594,9 @@ impl MetadataManager {
                 failed,
                 current_track_label.clone(),
             );
+            if cancel_token.load(Ordering::Relaxed) {
+                break;
+            }
             if target.has_existing_tags && !overwrite_existing {
                 skipped = skipped.saturating_add(1);
                 processed = processed.saturating_add(1);
@@ -1585,6 +1633,9 @@ impl MetadataManager {
                     continue;
                 }
             };
+            if cancel_token.load(Ordering::Relaxed) {
+                break;
+            }
 
             if !album_scan_cache.contains_key(&target.album_key) {
                 let album_paths = album_reference_paths
@@ -1629,6 +1680,9 @@ impl MetadataManager {
                     continue;
                 }
             };
+            if cancel_token.load(Ordering::Relaxed) {
+                break;
+            }
 
             match Self::save_replaygain_tags_for_path(
                 db_manager,
@@ -1653,15 +1707,38 @@ impl MetadataManager {
             publish_progress(processed, updated, skipped, failed, current_track_label);
         }
 
-        let _ = bus_producer.send(Message::Metadata(
+        let message = if cancel_token.load(Ordering::Relaxed) && processed < total_tracks {
+            MetadataMessage::ReplayGainScanAborted {
+                request_id,
+                total_tracks,
+                processed,
+                updated,
+                skipped,
+                failed,
+            }
+        } else {
             MetadataMessage::ReplayGainScanCompleted {
                 request_id,
                 total_tracks,
                 updated,
                 skipped,
                 failed,
-            },
-        ));
+            }
+        };
+        let _ = bus_producer.send(Message::Metadata(message));
+    }
+
+    fn request_replaygain_scan_abort(&self, request_id: u64) {
+        let Ok(cancel_tokens) = self.replaygain_scan_cancel_tokens.lock() else {
+            warn!(
+                "ReplayGain scan abort request for {} ignored due to poisoned cancel-token lock",
+                request_id
+            );
+            return;
+        };
+        if let Some(cancel_token) = cancel_tokens.get(&request_id) {
+            cancel_token.store(true, Ordering::Relaxed);
+        }
     }
 
     fn spawn_replaygain_scan_for_paths(
@@ -1673,9 +1750,25 @@ impl MetadataManager {
         loudness_standard: LoudnessStandard,
     ) {
         let bus_producer = self.bus_producer.clone();
+        let cancel_token = Arc::new(AtomicBool::new(false));
+        if let Ok(mut cancel_tokens) = self.replaygain_scan_cancel_tokens.lock() {
+            cancel_tokens.insert(request_id, cancel_token.clone());
+        }
+        let request = ReplayGainScanRequest {
+            request_id,
+            request_targets: targets,
+            request_album_references: album_references,
+            overwrite_existing,
+            loudness_standard,
+        };
+        let cancel_tokens = self.replaygain_scan_cancel_tokens.clone();
         let spawn_result = std::thread::Builder::new()
             .name(format!("replaygain-scan-{request_id}"))
             .spawn(move || {
+                let _cancel_registration = ReplayGainScanCancelRegistration {
+                    request_id,
+                    cancel_tokens,
+                };
                 let db_manager = match DbManager::new() {
                     Ok(db_manager) => db_manager,
                     Err(error) => {
@@ -1688,18 +1781,13 @@ impl MetadataManager {
                         return;
                     }
                 };
-                Self::scan_replaygain_for_paths(
-                    &bus_producer,
-                    &db_manager,
-                    request_id,
-                    targets,
-                    album_references,
-                    overwrite_existing,
-                    loudness_standard,
-                );
+                Self::scan_replaygain_for_paths(&bus_producer, &db_manager, request, cancel_token);
             });
 
         if let Err(error) = spawn_result {
+            if let Ok(mut cancel_tokens) = self.replaygain_scan_cancel_tokens.lock() {
+                cancel_tokens.remove(&request_id);
+            }
             let _ =
                 self.bus_producer
                     .send(Message::Metadata(MetadataMessage::ReplayGainScanFailed {
@@ -2292,6 +2380,9 @@ impl MetadataManager {
                         overwrite_existing,
                         loudness_standard,
                     );
+                }
+                Ok(Message::Metadata(MetadataMessage::AbortReplayGainScan { request_id })) => {
+                    self.request_replaygain_scan_abort(request_id);
                 }
                 Ok(_) => {}
                 Err(tokio::sync::broadcast::error::RecvError::Lagged(skipped)) => {

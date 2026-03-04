@@ -8258,6 +8258,14 @@ impl UiManager {
         });
     }
 
+    fn clear_replaygain_scan_progress_state(&mut self) {
+        self.replaygain_scan_progress_visible = false;
+        self.replaygain_scan_progress_processed = 0;
+        self.replaygain_scan_progress_total = 0;
+        self.replaygain_scan_progress_track_label.clear();
+        self.sync_replaygain_scan_progress_ui();
+    }
+
     fn request_replaygain_scan_selection(&mut self) {
         if self.active_replaygain_scan_request_id.is_some() {
             self.library_status_text = "ReplayGain scan already in progress.".to_string();
@@ -8318,6 +8326,17 @@ impl UiManager {
         self.pending_replaygain_scan_eval_request_id = None;
         self.pending_replaygain_scan_selections.clear();
         self.reset_replaygain_scan_confirmation_ui();
+    }
+
+    fn abort_replaygain_scan(&mut self) {
+        let Some(request_id) = self.active_replaygain_scan_request_id else {
+            return;
+        };
+        let _ = self.bus_sender.send(protocol::Message::Metadata(
+            protocol::MetadataMessage::AbortReplayGainScan { request_id },
+        ));
+        self.library_status_text = "Stopping ReplayGain scan...".to_string();
+        self.sync_library_ui();
     }
 
     fn handle_replaygain_scan_evaluation_result(
@@ -8408,14 +8427,32 @@ impl UiManager {
             return;
         }
         self.active_replaygain_scan_request_id = None;
-        self.replaygain_scan_progress_visible = false;
-        self.replaygain_scan_progress_processed = 0;
-        self.replaygain_scan_progress_total = 0;
-        self.replaygain_scan_progress_track_label.clear();
-        self.sync_replaygain_scan_progress_ui();
+        self.clear_replaygain_scan_progress_state();
         self.library_status_text = format!(
             "ReplayGain scan complete ({} tracks): updated {} track(s), skipped {}, failed {}",
             total_tracks, updated, skipped, failed
+        );
+        self.show_library_toast(self.library_status_text.clone());
+        self.sync_library_ui();
+    }
+
+    fn handle_replaygain_scan_aborted(
+        &mut self,
+        request_id: u64,
+        total_tracks: usize,
+        processed: usize,
+        updated: usize,
+        skipped: usize,
+        failed: usize,
+    ) {
+        if self.active_replaygain_scan_request_id != Some(request_id) {
+            return;
+        }
+        self.active_replaygain_scan_request_id = None;
+        self.clear_replaygain_scan_progress_state();
+        self.library_status_text = format!(
+            "ReplayGain scan aborted ({}/{}): updated {} track(s), skipped {}, failed {}",
+            processed, total_tracks, updated, skipped, failed
         );
         self.show_library_toast(self.library_status_text.clone());
         self.sync_library_ui();
@@ -8429,11 +8466,7 @@ impl UiManager {
         self.pending_replaygain_scan_eval_request_id = None;
         self.pending_replaygain_scan_selections.clear();
         self.reset_replaygain_scan_confirmation_ui();
-        self.replaygain_scan_progress_visible = false;
-        self.replaygain_scan_progress_processed = 0;
-        self.replaygain_scan_progress_total = 0;
-        self.replaygain_scan_progress_track_label.clear();
-        self.sync_replaygain_scan_progress_ui();
+        self.clear_replaygain_scan_progress_state();
         self.library_status_text = format!("ReplayGain scan failed: {}", error);
         self.show_library_toast(self.library_status_text.clone());
         self.sync_library_ui();
@@ -12628,6 +12661,9 @@ impl UiManager {
                             protocol::LibraryMessage::CancelReplayGainScanOverwrite => {
                                 self.cancel_replaygain_scan_overwrite();
                             }
+                            protocol::LibraryMessage::AbortReplayGainScan => {
+                                self.abort_replaygain_scan();
+                            }
                             protocol::LibraryMessage::LibraryViewportChanged {
                                 first_row,
                                 row_count,
@@ -13154,6 +13190,23 @@ impl UiManager {
                                     failed,
                                 );
                             }
+                            protocol::MetadataMessage::ReplayGainScanAborted {
+                                request_id,
+                                total_tracks,
+                                processed,
+                                updated,
+                                skipped,
+                                failed,
+                            } => {
+                                self.handle_replaygain_scan_aborted(
+                                    request_id,
+                                    total_tracks,
+                                    processed,
+                                    updated,
+                                    skipped,
+                                    failed,
+                                );
+                            }
                             protocol::MetadataMessage::ReplayGainScanFailed {
                                 request_id,
                                 error,
@@ -13162,6 +13215,7 @@ impl UiManager {
                             }
                             protocol::MetadataMessage::RequestTrackProperties { .. }
                             | protocol::MetadataMessage::SaveTrackProperties { .. }
+                            | protocol::MetadataMessage::AbortReplayGainScan { .. }
                             | protocol::MetadataMessage::ScanReplayGainForPaths { .. } => {}
                         },
                         protocol::Message::Playlist(

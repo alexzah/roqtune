@@ -188,6 +188,13 @@ pub fn register_bus_forwarding_callbacks(ui: &AppWindow, context: BusForwardingC
     });
 
     let bus_sender_clone = bus_sender.clone();
+    ui.on_library_abort_replaygain_scan(move || {
+        let _ = bus_sender_clone.send(Message::Library(
+            protocol::LibraryMessage::AbortReplayGainScan,
+        ));
+    });
+
+    let bus_sender_clone = bus_sender.clone();
     ui.on_open_properties_for_current_selection(move || {
         let _ = bus_sender_clone.send(Message::Metadata(
             MetadataMessage::OpenPropertiesForCurrentSelection,
