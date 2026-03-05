@@ -6647,16 +6647,20 @@ impl UiManager {
             self.sync_properties_edit_state_ui();
             return;
         }
-        let Some(path) = self.properties_target_path.as_ref() else {
-            return;
-        };
-        if !path.is_file() {
-            self.properties_error_text = format!(
-                "Track path is not a local file; image overwrite is unavailable: {}",
-                path.display()
-            );
-            self.sync_properties_edit_state_ui();
-            return;
+        // In single-track mode, verify the track path is a local file. In multi-select mode,
+        // all target paths are already guaranteed local (enforced at selection time).
+        if !self.properties_is_multi_select {
+            let Some(path) = self.properties_target_path.as_ref() else {
+                return;
+            };
+            if !path.is_file() {
+                self.properties_error_text = format!(
+                    "Track path is not a local file; image overwrite is unavailable: {}",
+                    path.display()
+                );
+                self.sync_properties_edit_state_ui();
+                return;
+            }
         }
         let Some(slot) = self.properties_embedded_image_slots.get(slot_index) else {
             return;
@@ -6691,16 +6695,20 @@ impl UiManager {
         if self.properties_busy || !self.properties_dialog_visible {
             return;
         }
-        let Some(path) = self.properties_target_path.as_ref() else {
-            return;
-        };
-        if !path.is_file() {
-            self.properties_error_text = format!(
-                "Track path is not a local file; image delete is unavailable: {}",
-                path.display()
-            );
-            self.sync_properties_edit_state_ui();
-            return;
+        // In single-track mode, verify the path is a local file. In multi-select mode,
+        // all target paths are already guaranteed local (enforced at selection time).
+        if !self.properties_is_multi_select {
+            let Some(path) = self.properties_target_path.as_ref() else {
+                return;
+            };
+            if !path.is_file() {
+                self.properties_error_text = format!(
+                    "Track path is not a local file; image delete is unavailable: {}",
+                    path.display()
+                );
+                self.sync_properties_edit_state_ui();
+                return;
+            }
         }
         let Some(slot) = self.properties_embedded_image_slots.get(slot_index) else {
             return;
