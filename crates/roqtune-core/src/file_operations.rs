@@ -32,14 +32,33 @@ impl Drop for CancelRegistration {
     }
 }
 
-/// Checks whether a destination path is syntactically valid (non-empty, valid
-/// UTF-8, no null bytes). Does not perform I/O.
+/// Checks whether a destination path is syntactically valid. Does not perform I/O.
+///
+/// Requirements:
+/// - Non-empty, valid UTF-8, no null bytes.
+/// - Must be absolute (relative paths are ambiguous for a batch destination).
+/// - Must have a non-empty filename component.
+/// - Must have a file extension (bare directory paths like `/tmp` have no extension).
 pub fn is_valid_dest_path(path: &Path) -> bool {
     match path.to_str() {
-        None => false,
-        Some("") => false,
-        Some(s) => !s.contains('\0'),
+        None | Some("") => return false,
+        Some(s) if s.contains('\0') => return false,
+        _ => {}
     }
+
+    if !path.is_absolute() {
+        return false;
+    }
+
+    if path.file_name().is_none_or(|n| n.is_empty()) {
+        return false;
+    }
+
+    if path.extension().is_none() {
+        return false;
+    }
+
+    true
 }
 
 /// Background service that runs batch file copy/move operations.
