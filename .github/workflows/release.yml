@@ -53,6 +53,12 @@ jobs:
           toolchain: 1.93.1
       - uses: Swatinem/rust-cache@v2
 
+      - name: Install CMake 3.26 (macOS — audiopus_sys bundled libopus requires cmake < 3.27)
+        if: runner.os == 'macOS'
+        uses: jwlawson/actions-setup-cmake@v2
+        with:
+          cmake-version: '3.26.x'
+
       - name: Build Linux binary
         if: runner.os == 'Linux'
         run: |
