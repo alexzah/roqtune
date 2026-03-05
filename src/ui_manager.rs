@@ -6966,6 +6966,7 @@ impl UiManager {
         for result in &results {
             if let Some(summary) = &result.summary {
                 self.invalidate_cover_art_caches_for_track(result.path.as_path());
+                self.clear_cover_art_in_playlist_model_for_track(result.path.as_path());
                 playlist_changed |=
                     self.apply_summary_to_playlist_metadata(result.path.as_path(), summary);
                 library_changed |=
@@ -7192,6 +7193,7 @@ impl UiManager {
         self.properties_pending_request_kind = None;
         self.properties_busy = false;
         self.invalidate_cover_art_caches_for_track(path.as_path());
+        self.clear_cover_art_in_playlist_model_for_track(path.as_path());
 
         let playlist_changed = self.apply_summary_to_playlist_metadata(&path, &summary);
         let library_changed = self.apply_summary_to_library_entries(&path, &summary);
@@ -8038,6 +8040,47 @@ impl UiManager {
                 protocol::UiImageKind::CoverArt,
             );
         }
+    }
+
+    /// Immediately clears art from playlist model rows whose track path matches `track_path`.
+    /// Called right after invalidating the cover-art cache for a track so that rows which no
+    /// longer have any art stop showing the stale image without waiting for a full model rebuild.
+    fn clear_cover_art_in_playlist_model_for_track(&mut self, track_path: &Path) {
+        if !self.is_album_art_column_visible() {
+            return;
+        }
+        let view_rows: Vec<usize> = self
+            .track_paths
+            .iter()
+            .enumerate()
+            .filter(|(_, p)| Self::is_equivalent_track_path(p.as_path(), track_path))
+            .filter_map(|(source_index, _)| self.map_source_to_view_index(source_index))
+            .collect();
+        if view_rows.is_empty() {
+            return;
+        }
+        let _ = self.ui.upgrade_in_event_loop(move |ui| {
+            let current_model = ui.get_track_model();
+            let Some(vec_model) = current_model
+                .as_any()
+                .downcast_ref::<VecModel<TrackRowData>>()
+            else {
+                return;
+            };
+            for view_row in view_rows {
+                if view_row >= vec_model.row_count() {
+                    continue;
+                }
+                let Some(mut row_data) = vec_model.row_data(view_row) else {
+                    continue;
+                };
+                if row_data.has_album_art {
+                    row_data.album_art = Image::default();
+                    row_data.has_album_art = false;
+                    vec_model.set_row_data(view_row, row_data);
+                }
+            }
+        });
     }
 
     fn refresh_visible_playlist_cover_art_rows(&mut self) -> bool {
