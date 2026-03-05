@@ -248,6 +248,10 @@ pub struct UiManager {
     properties_pending_request_id: Option<u64>,
     properties_pending_request_kind: Option<PropertiesRequestKind>,
     properties_target_path: Option<PathBuf>,
+    /// All selected paths in multi-select mode. Empty in single-track mode.
+    properties_target_paths: Vec<PathBuf>,
+    /// Whether the dialog is showing aggregated data for multiple selected tracks.
+    properties_is_multi_select: bool,
     properties_target_title: String,
     properties_active_tab_index: i32,
     properties_original_fields: Vec<protocol::MetadataEditorField>,
@@ -2074,6 +2078,8 @@ impl UiManager {
             properties_pending_request_id: None,
             properties_pending_request_kind: None,
             properties_target_path: None,
+            properties_target_paths: Vec::new(),
+            properties_is_multi_select: false,
             properties_target_title: String::new(),
             properties_active_tab_index: Self::properties_default_tab_index(),
             properties_original_fields: Vec::new(),
@@ -6138,14 +6144,105 @@ impl UiManager {
         }
     }
 
+    /// Returns `true` if at least one local-file track is selected in the playlist view.
+    fn playlist_has_local_file_selection(&self) -> bool {
+        let normalized = Self::normalize_source_selection_indices(
+            &self.selected_indices,
+            self.track_paths.len(),
+        );
+        normalized
+            .iter()
+            .any(|&index| self.track_paths.get(index).is_some_and(|p| p.is_file()))
+    }
+
+    /// Returns `true` if at least one local-file track (not artist/album/genre) is selected
+    /// in the library view.
+    fn library_has_local_file_selection(&self) -> bool {
+        let normalized = Self::normalize_source_selection_indices(
+            &self.library_selected_indices,
+            self.library_entries.len(),
+        );
+        normalized.iter().any(|&index| {
+            matches!(
+                self.library_entries.get(index),
+                Some(LibraryEntry::Track(track)) if track.path.is_file()
+            )
+        })
+    }
+
+    /// Returns `true` if exactly one local-file track is selected in the playlist view.
+    fn playlist_exactly_one_local_file_selected(&self) -> bool {
+        let normalized = Self::normalize_source_selection_indices(
+            &self.selected_indices,
+            self.track_paths.len(),
+        );
+        let local: Vec<_> = normalized
+            .iter()
+            .filter(|&&index| self.track_paths.get(index).is_some_and(|p| p.is_file()))
+            .collect();
+        local.len() == 1
+    }
+
+    /// Returns `true` if exactly one local-file track is selected in the library view.
+    fn library_exactly_one_local_file_selected(&self) -> bool {
+        let normalized = Self::normalize_source_selection_indices(
+            &self.library_selected_indices,
+            self.library_entries.len(),
+        );
+        let local: Vec<_> = normalized
+            .iter()
+            .filter(|&&index| {
+                matches!(
+                    self.library_entries.get(index),
+                    Some(LibraryEntry::Track(track)) if track.path.is_file()
+                )
+            })
+            .collect();
+        local.len() == 1
+    }
+
+    /// Collects local-file paths from all currently selected tracks in the active collection view.
+    fn collect_local_file_selected_paths(&self) -> Vec<PathBuf> {
+        if self.collection_mode == COLLECTION_MODE_LIBRARY {
+            let normalized = Self::normalize_source_selection_indices(
+                &self.library_selected_indices,
+                self.library_entries.len(),
+            );
+            normalized
+                .iter()
+                .filter_map(|&index| match self.library_entries.get(index) {
+                    Some(LibraryEntry::Track(track)) if track.path.is_file() => {
+                        Some(track.path.clone())
+                    }
+                    _ => None,
+                })
+                .collect()
+        } else {
+            let normalized = Self::normalize_source_selection_indices(
+                &self.selected_indices,
+                self.track_paths.len(),
+            );
+            normalized
+                .iter()
+                .filter_map(|&index| self.track_paths.get(index).filter(|p| p.is_file()).cloned())
+                .collect()
+        }
+    }
+
     fn sync_properties_action_state(&self) {
         let playlist_enabled = self.collection_mode == COLLECTION_MODE_PLAYLIST
-            && self.playlist_properties_target().is_some();
+            && self.playlist_has_local_file_selection();
         let library_enabled = self.collection_mode == COLLECTION_MODE_LIBRARY
-            && self.library_properties_target().is_some();
+            && self.library_has_local_file_selection();
+        let playlist_open_location_enabled = self.collection_mode == COLLECTION_MODE_PLAYLIST
+            && self.playlist_exactly_one_local_file_selected();
+        let library_open_location_enabled = self.collection_mode == COLLECTION_MODE_LIBRARY
+            && self.library_exactly_one_local_file_selected();
         let _ = self.ui.upgrade_in_event_loop(move |ui| {
             ui.set_playlist_properties_enabled(playlist_enabled);
             ui.set_library_properties_enabled(library_enabled);
+            ui.set_playlist_open_location_enabled(playlist_open_location_enabled);
+            ui.set_library_open_location_enabled(library_open_location_enabled);
         });
     }
 
@@ -6159,6 +6256,7 @@ impl UiManager {
                 field_name: field.field_name.as_str().into(),
                 value: field.value.as_str().into(),
                 common: field.common,
+                mixed: field.mixed,
             })
             .collect()
     }
@@ -6205,6 +6303,7 @@ impl UiManager {
                     has_preview,
                     has_image: slot.has_image,
                     common: slot.common,
+                    has_multiple_images: slot.has_multiple_images,
                 }
             })
             .collect()
@@ -6303,9 +6402,14 @@ impl UiManager {
     }
 
     fn properties_save_enabled(&self) -> bool {
+        let has_target = if self.properties_is_multi_select {
+            !self.properties_target_paths.is_empty()
+        } else {
+            self.properties_target_path.is_some()
+        };
         self.properties_dialog_visible
             && !self.properties_busy
-            && self.properties_target_path.is_some()
+            && has_target
             && self.properties_has_changes()
     }
 
@@ -6320,10 +6424,15 @@ impl UiManager {
         let embedded_image_slots = self.properties_embedded_image_slots.clone();
         let external_images = self.properties_external_images.clone();
         let save_enabled = self.properties_save_enabled();
-        let track_is_local_file = self
-            .properties_target_path
-            .as_ref()
-            .is_some_and(|path| path.is_file());
+        let is_multi_select = self.properties_is_multi_select;
+        // In multi-select all selected paths are local files (enforced at selection time).
+        let track_is_local_file = if is_multi_select {
+            !self.properties_target_paths.is_empty()
+        } else {
+            self.properties_target_path
+                .as_ref()
+                .is_some_and(|path| path.is_file())
+        };
         let _ = self.ui.upgrade_in_event_loop(move |ui| {
             let fields = Self::to_ui_metadata_fields(&fields);
             let media_info_fields = Self::to_ui_properties_media_info_fields(&media_info_fields);
@@ -6335,6 +6444,7 @@ impl UiManager {
             ui.set_properties_error_text(error_text.into());
             ui.set_properties_target_title(target_title.into());
             ui.set_properties_active_tab_index(active_tab_index);
+            ui.set_properties_is_multi_select(is_multi_select);
             ui.set_properties_fields(ModelRc::from(Rc::new(VecModel::from(fields))));
             ui.set_properties_media_info_fields(ModelRc::from(Rc::new(VecModel::from(
                 media_info_fields,
@@ -6363,6 +6473,8 @@ impl UiManager {
         self.properties_pending_request_id = None;
         self.properties_pending_request_kind = None;
         self.properties_target_path = None;
+        self.properties_target_paths.clear();
+        self.properties_is_multi_select = false;
         self.properties_target_title.clear();
         self.properties_active_tab_index = Self::properties_default_tab_index();
         self.properties_original_fields.clear();
@@ -6378,21 +6490,26 @@ impl UiManager {
     }
 
     fn open_properties_for_current_selection(&mut self) {
-        let Some((path, _target_title)) = self.active_properties_target() else {
+        let paths = self.collect_local_file_selected_paths();
+        if paths.is_empty() {
             return;
-        };
+        }
+        if paths.len() == 1 {
+            // Single-track path: use the existing title-resolving target lookup.
+            let Some((path, target_title)) = self.active_properties_target() else {
+                return;
+            };
+            self.open_single_track_properties(path, target_title);
+        } else {
+            self.open_multi_track_properties(paths);
+        }
+    }
 
+    fn open_single_track_properties(&mut self, path: PathBuf, target_title: String) {
+        self.reset_properties_dialog_state();
         self.properties_target_path = Some(path.clone());
-        self.properties_target_title = _target_title;
+        self.properties_target_title = target_title;
         self.properties_active_tab_index = Self::properties_default_tab_index();
-        self.properties_original_fields.clear();
-        self.properties_fields.clear();
-        self.properties_media_info_fields.clear();
-        self.properties_embedded_image_slots.clear();
-        self.properties_external_images.clear();
-        self.properties_image_overwrites.clear();
-        self.properties_image_deletes.clear();
-        self.properties_error_text.clear();
         self.properties_dialog_visible = true;
         self.properties_busy = true;
 
@@ -6402,6 +6519,26 @@ impl UiManager {
 
         let _ = self.bus_sender.send(protocol::Message::Metadata(
             protocol::MetadataMessage::RequestTrackProperties { request_id, path },
+        ));
+        self.sync_properties_dialog_ui();
+    }
+
+    fn open_multi_track_properties(&mut self, paths: Vec<PathBuf>) {
+        let count = paths.len();
+        self.reset_properties_dialog_state();
+        self.properties_is_multi_select = true;
+        self.properties_target_paths = paths.clone();
+        self.properties_target_title = format!("{count} tracks selected");
+        self.properties_active_tab_index = Self::properties_default_tab_index();
+        self.properties_dialog_visible = true;
+        self.properties_busy = true;
+
+        let request_id = self.next_properties_request_id();
+        self.properties_pending_request_id = Some(request_id);
+        self.properties_pending_request_kind = Some(PropertiesRequestKind::Load);
+
+        let _ = self.bus_sender.send(protocol::Message::Metadata(
+            protocol::MetadataMessage::RequestMultiTrackProperties { request_id, paths },
         ));
         self.sync_properties_dialog_ui();
     }
@@ -6547,16 +6684,20 @@ impl UiManager {
             self.sync_properties_edit_state_ui();
             return;
         }
-        let Some(path) = self.properties_target_path.as_ref() else {
-            return;
-        };
-        if !path.is_file() {
-            self.properties_error_text = format!(
-                "Track path is not a local file; image overwrite is unavailable: {}",
-                path.display()
-            );
-            self.sync_properties_edit_state_ui();
-            return;
+        // In single-track mode, verify the track path is a local file. In multi-select mode,
+        // all target paths are already guaranteed local (enforced at selection time).
+        if !self.properties_is_multi_select {
+            let Some(path) = self.properties_target_path.as_ref() else {
+                return;
+            };
+            if !path.is_file() {
+                self.properties_error_text = format!(
+                    "Track path is not a local file; image overwrite is unavailable: {}",
+                    path.display()
+                );
+                self.sync_properties_edit_state_ui();
+                return;
+            }
         }
         let Some(slot) = self.properties_embedded_image_slots.get(slot_index) else {
             return;
@@ -6591,16 +6732,20 @@ impl UiManager {
         if self.properties_busy || !self.properties_dialog_visible {
             return;
         }
-        let Some(path) = self.properties_target_path.as_ref() else {
-            return;
-        };
-        if !path.is_file() {
-            self.properties_error_text = format!(
-                "Track path is not a local file; image delete is unavailable: {}",
-                path.display()
-            );
-            self.sync_properties_edit_state_ui();
-            return;
+        // In single-track mode, verify the path is a local file. In multi-select mode,
+        // all target paths are already guaranteed local (enforced at selection time).
+        if !self.properties_is_multi_select {
+            let Some(path) = self.properties_target_path.as_ref() else {
+                return;
+            };
+            if !path.is_file() {
+                self.properties_error_text = format!(
+                    "Track path is not a local file; image delete is unavailable: {}",
+                    path.display()
+                );
+                self.sync_properties_edit_state_ui();
+                return;
+            }
         }
         let Some(slot) = self.properties_embedded_image_slots.get(slot_index) else {
             return;
@@ -6663,6 +6808,8 @@ impl UiManager {
             return;
         }
         field.value = value;
+        // Clear mixed flag: the user has typed a real value that will apply to all tracks.
+        field.mixed = false;
         self.properties_error_text.clear();
         self.sync_properties_edit_state_ui();
     }
@@ -6671,10 +6818,17 @@ impl UiManager {
         if !self.properties_save_enabled() {
             return;
         }
+        if self.properties_is_multi_select {
+            self.save_multi_track_properties();
+        } else {
+            self.save_single_track_properties();
+        }
+    }
+
+    fn save_single_track_properties(&mut self) {
         let Some(path) = self.properties_target_path.clone() else {
             return;
         };
-
         let request_id = self.next_properties_request_id();
         self.properties_pending_request_id = Some(request_id);
         self.properties_pending_request_kind = Some(PropertiesRequestKind::Save);
@@ -6698,6 +6852,34 @@ impl UiManager {
         self.sync_properties_dialog_ui();
     }
 
+    fn save_multi_track_properties(&mut self) {
+        let paths = self.properties_target_paths.clone();
+        if paths.is_empty() {
+            return;
+        }
+        let request_id = self.next_properties_request_id();
+        self.properties_pending_request_id = Some(request_id);
+        self.properties_pending_request_kind = Some(PropertiesRequestKind::Save);
+        self.properties_busy = true;
+        self.properties_error_text.clear();
+        let metadata_fields = Self::properties_changed_metadata_fields(
+            &self.properties_fields,
+            &self.properties_original_fields,
+        );
+        let image_overwrites = self.properties_image_overwrites.clone();
+        let image_deletes = self.properties_image_deletes.clone();
+        let _ = self.bus_sender.send(protocol::Message::Metadata(
+            protocol::MetadataMessage::SaveMultiTrackProperties {
+                request_id,
+                paths,
+                metadata_fields,
+                image_overwrites,
+                image_deletes,
+            },
+        ));
+        self.sync_properties_dialog_ui();
+    }
+
     fn cancel_properties(&mut self) {
         self.reset_properties_dialog_state();
         self.sync_properties_dialog_ui();
@@ -6709,10 +6891,15 @@ impl UiManager {
         request_id: u64,
         path: &Path,
     ) -> bool {
-        let matches_target_path = self
-            .properties_target_path
-            .as_deref()
-            .is_some_and(|target_path| Self::is_equivalent_track_path(target_path, path));
+        // In multi-select mode the path check is not applicable — identity is scoped to
+        // the request ID alone, since there is no single canonical target path.
+        let matches_target_path = if self.properties_is_multi_select {
+            true
+        } else {
+            self.properties_target_path
+                .as_deref()
+                .is_some_and(|target_path| Self::is_equivalent_track_path(target_path, path))
+        };
         self.properties_dialog_visible
             && self.properties_pending_request_kind == Some(kind)
             && self.properties_pending_request_id == Some(request_id)
@@ -6750,6 +6937,143 @@ impl UiManager {
 
     fn handle_properties_load_failed(&mut self, request_id: u64, path: PathBuf, error: String) {
         if !self.expected_properties_response(PropertiesRequestKind::Load, request_id, &path) {
+            return;
+        }
+
+        self.properties_pending_request_id = None;
+        self.properties_pending_request_kind = None;
+        self.properties_busy = false;
+        self.properties_error_text = error;
+        self.sync_properties_dialog_ui();
+    }
+
+    fn handle_multi_properties_loaded(
+        &mut self,
+        request_id: u64,
+        paths: Vec<PathBuf>,
+        metadata_fields: Vec<protocol::MetadataEditorField>,
+        embedded_image_slots: Vec<protocol::PropertiesEmbeddedImageSlot>,
+    ) {
+        if !self.properties_dialog_visible
+            || !self.properties_is_multi_select
+            || self.properties_pending_request_id != Some(request_id)
+            || self.properties_pending_request_kind != Some(PropertiesRequestKind::Load)
+        {
+            return;
+        }
+
+        self.properties_pending_request_id = None;
+        self.properties_pending_request_kind = None;
+        self.properties_busy = false;
+        self.properties_error_text.clear();
+        self.properties_target_paths = paths;
+        self.properties_original_fields = metadata_fields.clone();
+        self.properties_fields = metadata_fields;
+        self.properties_media_info_fields = Vec::new();
+        self.properties_embedded_image_slots = embedded_image_slots;
+        self.properties_external_images = Vec::new();
+        self.properties_image_overwrites.clear();
+        self.properties_image_deletes.clear();
+        self.sync_properties_dialog_ui();
+    }
+
+    fn handle_multi_properties_saved(
+        &mut self,
+        request_id: u64,
+        results: Vec<protocol::MultiTrackSaveResult>,
+    ) {
+        if !self.properties_dialog_visible
+            || !self.properties_is_multi_select
+            || self.properties_pending_request_id != Some(request_id)
+            || self.properties_pending_request_kind != Some(PropertiesRequestKind::Save)
+        {
+            return;
+        }
+
+        self.properties_pending_request_id = None;
+        self.properties_pending_request_kind = None;
+        self.properties_busy = false;
+
+        let mut playlist_changed = false;
+        let mut library_changed = false;
+        let mut db_sync_warnings: Vec<String> = Vec::new();
+        let mut failed_count = 0usize;
+        let mut error_details: Vec<String> = Vec::new();
+
+        for result in &results {
+            if let Some(summary) = &result.summary {
+                self.invalidate_cover_art_caches_for_track(result.path.as_path());
+                self.clear_cover_art_in_playlist_model_for_track(result.path.as_path());
+                playlist_changed |=
+                    self.apply_summary_to_playlist_metadata(result.path.as_path(), summary);
+                library_changed |=
+                    self.apply_summary_to_library_entries(result.path.as_path(), summary);
+                if let Some(warning) = &result.db_sync_warning {
+                    db_sync_warnings.push(warning.clone());
+                }
+            } else {
+                failed_count += 1;
+                if let Some(error) = &result.error {
+                    let file_name = result
+                        .path
+                        .file_name()
+                        .and_then(|n| n.to_str())
+                        .unwrap_or("unknown");
+                    error_details.push(format!("{file_name}: {error}"));
+                }
+            }
+        }
+
+        if playlist_changed {
+            self.refresh_playlist_column_content_targets();
+            self.apply_playlist_column_layout();
+            self.rebuild_track_model();
+        }
+        if self.collection_mode == COLLECTION_MODE_LIBRARY && library_changed {
+            self.sync_library_ui();
+        }
+        if self.collection_mode == COLLECTION_MODE_LIBRARY && db_sync_warnings.is_empty() {
+            self.request_library_view_data();
+        }
+        self.refresh_playing_track_metadata();
+        self.update_display_for_active_collection();
+        if self.collection_mode == COLLECTION_MODE_PLAYLIST {
+            self.refresh_visible_playlist_cover_art_rows();
+        } else if self.collection_mode == COLLECTION_MODE_LIBRARY {
+            self.refresh_visible_library_cover_art_rows();
+        }
+        self.sync_app_window_title_to_ui();
+
+        if failed_count > 0 {
+            // Partial or total failure — leave dialog open so the user can see what went wrong.
+            let succeeded = results.len() - failed_count;
+            let mut error_text =
+                format!("{succeeded} track(s) saved. {failed_count} track(s) failed.");
+            if !error_details.is_empty() {
+                error_text.push(' ');
+                error_text.push_str(&error_details.join("; "));
+            }
+            self.properties_error_text = error_text;
+            self.sync_properties_dialog_ui();
+        } else {
+            // All succeeded.
+            if !db_sync_warnings.is_empty() {
+                let warning = db_sync_warnings.join(" ");
+                self.library_status_text = warning.clone();
+                self.show_library_toast(warning);
+            }
+            self.reset_properties_dialog_state();
+            self.sync_properties_dialog_ui();
+            self.sync_properties_action_state();
+        }
+    }
+
+    fn handle_multi_properties_save_failed(&mut self, request_id: u64, error: String) {
+        if !self.properties_dialog_visible
+            || !self.properties_is_multi_select
+            || self.properties_pending_request_id != Some(request_id)
+            || self.properties_pending_request_kind != Some(PropertiesRequestKind::Save)
+        {
             return;
         }
 
@@ -6906,6 +7230,7 @@ impl UiManager {
         self.properties_pending_request_kind = None;
         self.properties_busy = false;
         self.invalidate_cover_art_caches_for_track(path.as_path());
+        self.clear_cover_art_in_playlist_model_for_track(path.as_path());
 
         let playlist_changed = self.apply_summary_to_playlist_metadata(&path, &summary);
         let library_changed = self.apply_summary_to_library_entries(&path, &summary);
@@ -7752,6 +8077,47 @@ impl UiManager {
                 protocol::UiImageKind::CoverArt,
             );
         }
+    }
+
+    /// Immediately clears art from playlist model rows whose track path matches `track_path`.
+    /// Called right after invalidating the cover-art cache for a track so that rows which no
+    /// longer have any art stop showing the stale image without waiting for a full model rebuild.
+    fn clear_cover_art_in_playlist_model_for_track(&mut self, track_path: &Path) {
+        if !self.is_album_art_column_visible() {
+            return;
+        }
+        let view_rows: Vec<usize> = self
+            .track_paths
+            .iter()
+            .enumerate()
+            .filter(|(_, p)| Self::is_equivalent_track_path(p.as_path(), track_path))
+            .filter_map(|(source_index, _)| self.map_source_to_view_index(source_index))
+            .collect();
+        if view_rows.is_empty() {
+            return;
+        }
+        let _ = self.ui.upgrade_in_event_loop(move |ui| {
+            let current_model = ui.get_track_model();
+            let Some(vec_model) = current_model
+                .as_any()
+                .downcast_ref::<VecModel<TrackRowData>>()
+            else {
+                return;
+            };
+            for view_row in view_rows {
+                if view_row >= vec_model.row_count() {
+                    continue;
+                }
+                let Some(mut row_data) = vec_model.row_data(view_row) else {
+                    continue;
+                };
+                if row_data.has_album_art {
+                    row_data.album_art = Image::default();
+                    row_data.has_album_art = false;
+                    vec_model.set_row_data(view_row, row_data);
+                }
+            }
+        });
     }
 
     fn refresh_visible_playlist_cover_art_rows(&mut self) -> bool {
@@ -13148,6 +13514,33 @@ impl UiManager {
                             } => {
                                 self.handle_properties_save_failed(request_id, path, error);
                             }
+                            protocol::MetadataMessage::MultiTrackPropertiesLoaded {
+                                request_id,
+                                paths,
+                                track_count: _,
+                                metadata_fields,
+                                embedded_image_slots,
+                            } => {
+                                self.handle_multi_properties_loaded(
+                                    request_id,
+                                    paths,
+                                    metadata_fields,
+                                    embedded_image_slots,
+                                );
+                            }
+                            protocol::MetadataMessage::MultiTrackPropertiesSaved {
+                                request_id,
+                                paths: _,
+                                results,
+                            } => {
+                                self.handle_multi_properties_saved(request_id, results);
+                            }
+                            protocol::MetadataMessage::MultiTrackPropertiesSaveFailed {
+                                request_id,
+                                error,
+                            } => {
+                                self.handle_multi_properties_save_failed(request_id, error);
+                            }
                             protocol::MetadataMessage::ReplayGainScanStarted {
                                 request_id,
                                 total_tracks,
@@ -13215,6 +13608,8 @@ impl UiManager {
                             }
                             protocol::MetadataMessage::RequestTrackProperties { .. }
                             | protocol::MetadataMessage::SaveTrackProperties { .. }
+                            | protocol::MetadataMessage::RequestMultiTrackProperties { .. }
+                            | protocol::MetadataMessage::SaveMultiTrackProperties { .. }
                             | protocol::MetadataMessage::AbortReplayGainScan { .. }
                             | protocol::MetadataMessage::ScanReplayGainForPaths { .. } => {}
                         },
@@ -14259,6 +14654,7 @@ mod tests {
             field_name: "Test".to_string(),
             value: value.to_string(),
             common: true,
+            mixed: false,
         }
     }
 
@@ -14351,6 +14747,7 @@ mod tests {
             has_image: false,
             details: "No embedded image".to_string(),
             common: true,
+            has_multiple_images: false,
         };
         let source = PathBuf::from("/tmp/new-front.jpg");
         UiManager::apply_staged_overwrite_to_slot(&mut slot, source.as_path());
@@ -14369,6 +14766,7 @@ mod tests {
             has_image: true,
             details: "600x600 | JPEG".to_string(),
             common: true,
+            has_multiple_images: false,
         };
         UiManager::apply_staged_delete_to_slot(&mut slot);
 

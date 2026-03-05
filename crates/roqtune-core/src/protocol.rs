@@ -639,6 +639,45 @@ pub enum MetadataMessage {
         path: PathBuf,
         error: String,
     },
+    /// Load properties for multiple selected tracks (aggregates fields across all files).
+    RequestMultiTrackProperties {
+        request_id: u64,
+        paths: Vec<PathBuf>,
+    },
+    /// Aggregated properties response for multiple selected tracks.
+    MultiTrackPropertiesLoaded {
+        request_id: u64,
+        paths: Vec<PathBuf>,
+        track_count: usize,
+        /// Aggregated metadata fields — common fields only, values joined or replaced with
+        /// "[multiple values]" per the display rules. `mixed = true` on non-uniform fields.
+        metadata_fields: Vec<MetadataEditorField>,
+        /// Aggregated embedded image slots. `has_multiple_images = true` when >1 track has
+        /// an image in the same slot.
+        embedded_image_slots: Vec<PropertiesEmbeddedImageSlot>,
+        // Note: media_info_fields and external_images are intentionally absent — they are
+        // hidden in multi-select mode.
+    },
+    /// Save changed properties to all selected tracks.
+    SaveMultiTrackProperties {
+        request_id: u64,
+        paths: Vec<PathBuf>,
+        /// Only the fields the user actually edited (unchanged aggregated fields excluded).
+        metadata_fields: Vec<MetadataEditorField>,
+        image_overwrites: Vec<PropertiesImageOverwrite>,
+        image_deletes: Vec<PropertiesImageDelete>,
+    },
+    /// Per-file save results after a multi-track properties save.
+    MultiTrackPropertiesSaved {
+        request_id: u64,
+        paths: Vec<PathBuf>,
+        results: Vec<MultiTrackSaveResult>,
+    },
+    /// Fatal error that prevented the multi-track save worker from starting.
+    MultiTrackPropertiesSaveFailed {
+        request_id: u64,
+        error: String,
+    },
     AbortReplayGainScan {
         request_id: u64,
     },
@@ -1127,6 +1166,9 @@ pub struct MetadataEditorField {
     pub value: String,
     /// Whether this field is part of the built-in common set.
     pub common: bool,
+    /// Whether the value is an aggregated multi-track placeholder (2–3 values joined, or
+    /// "[multiple values]" for 4+). When `true` the user is editing across multiple tracks.
+    pub mixed: bool,
 }
 
 /// One read-only media info field shown in the Properties dialog.
@@ -1155,6 +1197,9 @@ pub struct PropertiesEmbeddedImageSlot {
     pub details: String,
     /// Whether this slot is part of the built-in common set.
     pub common: bool,
+    /// Whether more than one selected track has an image in this slot (multi-select only).
+    /// When `true` the preview is absent and a "Multiple" indicator is shown instead.
+    pub has_multiple_images: bool,
 }
 
 /// One discovered external image candidate for the selected track.
@@ -1197,6 +1242,19 @@ pub struct TrackMetadataSummary {
     pub genre: String,
     pub year: String,
     pub track_number: String,
+}
+
+/// Per-track result for a multi-track properties save operation.
+#[derive(Debug, Clone)]
+pub struct MultiTrackSaveResult {
+    /// File path that was processed.
+    pub path: PathBuf,
+    /// Metadata summary used to refresh playlist/library rows on success.
+    pub summary: Option<TrackMetadataSummary>,
+    /// Error message when saving this specific file failed.
+    pub error: Option<String>,
+    /// Non-fatal DB sync warning from this specific file.
+    pub db_sync_warning: Option<String>,
 }
 
 /// Runtime configuration updates and hardware notifications.

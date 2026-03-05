@@ -60,6 +60,8 @@ export struct MetadataEditorField {
     field_name: string,
     value: string,
     common: bool,
+    /// true when the value is an aggregated multi-track placeholder (mixed values across tracks)
+    mixed: bool,
 }
 
 export struct PropertiesMediaInfoField {
@@ -76,6 +78,8 @@ export struct PropertiesEmbeddedImageSlot {
     has_preview: bool,
     has_image: bool,
     common: bool,
+    /// true when more than one selected track has an image in this slot (multi-select only)
+    has_multiple_images: bool,
 }
 
 export struct PropertiesExternalImage {
