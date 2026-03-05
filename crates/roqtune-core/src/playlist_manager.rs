@@ -2443,6 +2443,37 @@ impl PlaylistManager {
                         }
                     }
                     protocol::Message::Playlist(
+                        protocol::PlaylistMessage::ExportPlaylistByIndex { index, destination },
+                    ) => {
+                        let playlists = self.db_manager.get_all_playlists().unwrap_or_default();
+                        if let Some(playlist) = playlists.get(index) {
+                            let name = playlist.name.clone();
+                            let id = playlist.id.clone();
+                            match self.db_manager.get_tracks_for_playlist(&id) {
+                                Ok(tracks) => {
+                                    if let Err(e) = write_m3u8(&destination, &name, &tracks) {
+                                        error!(
+                                            "Failed to write M3U8 for playlist '{}': {}",
+                                            name, e
+                                        );
+                                    } else {
+                                        info!(
+                                            "Exported playlist '{}' to {}",
+                                            name,
+                                            destination.display()
+                                        );
+                                    }
+                                }
+                                Err(e) => {
+                                    error!(
+                                        "Failed to load tracks for playlist '{}' during export: {}",
+                                        name, e
+                                    );
+                                }
+                            }
+                        }
+                    }
+                    protocol::Message::Playlist(
                         protocol::PlaylistMessage::SyncPlaylistToOpenSubsonic { id },
                     ) => {
                         self.request_opensubsonic_sync_for_playlist(&id);
@@ -3123,6 +3154,27 @@ impl PlaylistManager {
             protocol::PlaylistMessage::SelectionChanged(selected_indices),
         ));
     }
+}
+
+/// Writes an M3U8 playlist file to `destination`.
+///
+/// The output is UTF-8 encoded and includes the extended M3U header, an optional
+/// `#PLAYLIST` tag with the playlist name, and one absolute path per track.
+fn write_m3u8(
+    destination: &std::path::Path,
+    playlist_name: &str,
+    tracks: &[protocol::RestoredTrack],
+) -> std::io::Result<()> {
+    use std::io::Write;
+    let mut file = std::fs::File::create(destination)?;
+    writeln!(file, "#EXTM3U")?;
+    if !playlist_name.is_empty() {
+        writeln!(file, "#PLAYLIST:{}", playlist_name)?;
+    }
+    for track in tracks {
+        writeln!(file, "{}", track.path.display())?;
+    }
+    Ok(())
 }
 
 #[cfg(test)]

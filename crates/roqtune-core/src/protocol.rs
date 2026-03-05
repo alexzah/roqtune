@@ -214,6 +214,10 @@ pub enum PlaylistMessage {
     },
     DeletePlaylistByIndex(usize),
     SyncPlaylistToOpenSubsonicByIndex(usize),
+    ExportPlaylistByIndex {
+        index: usize,
+        destination: std::path::PathBuf,
+    },
     SyncPlaylistToOpenSubsonic {
         id: String,
     },

@@ -1080,6 +1080,10 @@ export component AppWindow inherits Window {
                                         root.new_playlist_edit_index = -1;
                                         root.sync_playlist_to_opensubsonic(i);
                                     }
+                                    context-menu-export() => {
+                                        root.new_playlist_edit_index = -1;
+                                        root.export_playlist_as_m3u8(i);
+                                    }
                                 }
                             }
                         }
@@ -7699,6 +7703,7 @@ export component AppWindow inherits Window {
     callback rename_playlist(int, string);
     callback delete_playlist(int);
     callback sync_playlist_to_opensubsonic(int);
+    callback export_playlist_as_m3u8(int);
     callback remote_detach_confirm(string);
     callback remote_detach_cancel(string);
     callback toggle_playlist_column(int);

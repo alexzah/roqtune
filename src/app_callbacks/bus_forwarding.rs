@@ -617,4 +617,25 @@ pub fn register_bus_forwarding_callbacks(ui: &AppWindow, context: BusForwardingC
             PlaylistMessage::SyncPlaylistToOpenSubsonicByIndex(index as usize),
         ));
     });
+
+    let bus_sender_clone = bus_sender.clone();
+    ui.on_export_playlist_as_m3u8(move |index| {
+        debug!("Export playlist as M3U8 requested: index={}", index);
+        let Some(destination) = FileDialog::new()
+            .add_filter("M3U8 Playlist", &["m3u8"])
+            .set_file_name("playlist.m3u8")
+            .save_file()
+        else {
+            return;
+        };
+        let destination = if destination.extension().is_none() {
+            destination.with_extension("m3u8")
+        } else {
+            destination
+        };
+        let _ = bus_sender_clone.send(Message::Playlist(PlaylistMessage::ExportPlaylistByIndex {
+            index: index as usize,
+            destination,
+        }));
+    });
 }

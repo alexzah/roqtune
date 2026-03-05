@@ -18,6 +18,7 @@ export component PlaylistRow inherits Rectangle {
     callback context-menu-rename();
     callback context-menu-delete();
     callback context-menu-sync();
+    callback context-menu-export();
     callback cancel-edit();
 
     property <length> menu-x;
@@ -96,6 +97,9 @@ export component PlaylistRow inherits Rectangle {
         y: root.menu-y;
         rename => {
             root.context-menu-rename();
+        }
+        export-m3u8 => {
+            root.context-menu-export();
         }
         sync-opensubsonic => {
             root.context-menu-sync();
