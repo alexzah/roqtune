@@ -4916,12 +4916,12 @@ export component AppWindow inherits Window {
         }
     }
 
-    // Batch file operations progress overlay (bottom-left, away from ReplayGain)
+    // Batch file operations progress overlay (bottom-right, matching ReplayGain position)
     if root.show_batch_file_op_progress : Rectangle {
         z: 150;
         width: min(root.width - 24px, 440px);
         height: 128px;
-        x: 12px;
+        x: root.width - self.width - 12px;
         y: root.height - self.height - 12px;
         border-radius: 6px;
         border-width: 1px;
@@ -5285,6 +5285,7 @@ export component AppWindow inherits Window {
 
         Rectangle {
             width: min(340px, root.width - 40px);
+            height: inner-layout.preferred-height;
             x: (parent.width - self.width) / 2;
             y: (parent.height - self.height) / 2;
             background: AppPalette.panel-bg-elevated;
@@ -5292,7 +5293,7 @@ export component AppWindow inherits Window {
             border-color: AppPalette.border;
             border-radius: 6px;
 
-            VerticalLayout {
+            inner-layout := VerticalLayout {
                 padding: 16px;
                 spacing: 12px;
 

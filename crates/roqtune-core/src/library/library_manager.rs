@@ -21,7 +21,8 @@ use crate::integration_uri::parse_opensubsonic_track_uri;
 use crate::metadata_tags;
 use crate::protocol::{self, IntegrationMessage, LibraryMessage, Message};
 
-const SUPPORTED_AUDIO_EXTENSIONS: [&str; 7] = ["mp3", "wav", "ogg", "flac", "aac", "m4a", "mp4"];
+const SUPPORTED_AUDIO_EXTENSIONS: [&str; 8] =
+    ["mp3", "wav", "ogg", "opus", "flac", "aac", "m4a", "mp4"];
 const LIBRARY_SCAN_UPSERT_BATCH_SIZE: usize = 256;
 const LIBRARY_SCAN_METADATA_BATCH_SIZE: usize = 128;
 const LIBRARY_SCAN_PROGRESS_INTERVAL: usize = 256;

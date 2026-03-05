@@ -1109,7 +1109,7 @@ Check Settings -> OpenSubsonic status and re-save credentials if needed.",
                         }
                         Err(Error::ResetRequired) => {
                             debug!("DecodeWorker: Reset required. Re-creating decoder.");
-                            match symphonia::default::get_codecs()
+                            match super::get_codecs()
                                 .make(&active.codec_params, &DecoderOptions::default())
                             {
                                 Ok(decoder) => {
@@ -1172,8 +1172,7 @@ Check Settings -> OpenSubsonic status and re-save credentials if needed.",
                 }
                 Err(Error::ResetRequired) => {
                     debug!("DecodeWorker: Packet reader requested decoder reset.");
-                    match symphonia::default::get_codecs()
-                        .make(&active.codec_params, &DecoderOptions::default())
+                    match super::get_codecs().make(&active.codec_params, &DecoderOptions::default())
                     {
                         Ok(decoder) => {
                             active.decoder = decoder;
@@ -1372,7 +1371,7 @@ Check Settings -> OpenSubsonic status and re-save credentials if needed.",
 
         let mut selected_track: Option<(u32, CodecParameters, Box<dyn Decoder>)> = None;
         for (track_id, codec_params) in candidate_tracks {
-            match symphonia::default::get_codecs().make(&codec_params, &DecoderOptions::default()) {
+            match super::get_codecs().make(&codec_params, &DecoderOptions::default()) {
                 Ok(decoder) => {
                     selected_track = Some((track_id, codec_params, decoder));
                     break;

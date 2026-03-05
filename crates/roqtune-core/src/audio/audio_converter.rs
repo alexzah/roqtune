@@ -104,8 +104,7 @@ fn decode_file(path: &Path) -> Result<DecodedAudio, String> {
     if let Some(t) = format_reader.default_track() {
         let id = t.id;
         let params = t.codec_params.clone();
-        if let Ok(dec) = symphonia::default::get_codecs().make(&params, &DecoderOptions::default())
-        {
+        if let Ok(dec) = super::get_codecs().make(&params, &DecoderOptions::default()) {
             selected = Some((id, params, dec));
         }
     }
@@ -113,9 +112,7 @@ fn decode_file(path: &Path) -> Result<DecodedAudio, String> {
         for t in format_reader.tracks() {
             let id = t.id;
             let params = t.codec_params.clone();
-            if let Ok(dec) =
-                symphonia::default::get_codecs().make(&params, &DecoderOptions::default())
-            {
+            if let Ok(dec) = super::get_codecs().make(&params, &DecoderOptions::default()) {
                 selected = Some((id, params, dec));
                 break;
             }
@@ -138,7 +135,7 @@ fn decode_file(path: &Path) -> Result<DecodedAudio, String> {
                 break;
             }
             Err(SymphoniaError::ResetRequired) => {
-                let _ = symphonia::default::get_codecs()
+                let _ = super::get_codecs()
                     .make(&codec_params, &DecoderOptions::default())
                     .map(|d| decoder = d);
                 continue;

@@ -8,8 +8,8 @@ use std::{
 use log::debug;
 
 /// File extensions treated as importable audio tracks.
-pub const SUPPORTED_AUDIO_EXTENSIONS: [&str; 7] =
-    ["mp3", "wav", "ogg", "flac", "aac", "m4a", "mp4"];
+pub const SUPPORTED_AUDIO_EXTENSIONS: [&str; 8] =
+    ["mp3", "wav", "ogg", "opus", "flac", "aac", "m4a", "mp4"];
 
 /// Returns `true` when `path` has a supported audio extension.
 pub fn is_supported_audio_file(path: &Path) -> bool {
