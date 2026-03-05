@@ -958,7 +958,7 @@ pub(crate) fn analyze_track(path: &Path) -> Result<ReplayGainTrackAnalysis, Stri
     let track_id = default_track.id;
     let codec_params = default_track.codec_params.clone();
     let mut analyzer: Option<Rg1PcmAnalyzer> = None;
-    let mut decoder = symphonia::default::get_codecs()
+    let mut decoder = crate::audio::get_codecs()
         .make(&codec_params, &DecoderOptions::default())
         .map_err(|error| {
             format!(
@@ -976,7 +976,7 @@ pub(crate) fn analyze_track(path: &Path) -> Result<ReplayGainTrackAnalysis, Stri
                 break
             }
             Err(SymphoniaError::ResetRequired) => {
-                decoder = symphonia::default::get_codecs()
+                decoder = crate::audio::get_codecs()
                     .make(&codec_params, &DecoderOptions::default())
                     .map_err(|error| {
                         format!(
@@ -1007,7 +1007,7 @@ pub(crate) fn analyze_track(path: &Path) -> Result<ReplayGainTrackAnalysis, Stri
             Ok(decoded) => decoded,
             Err(SymphoniaError::DecodeError(_)) | Err(SymphoniaError::LimitError(_)) => continue,
             Err(SymphoniaError::ResetRequired) => {
-                decoder = symphonia::default::get_codecs()
+                decoder = crate::audio::get_codecs()
                     .make(&codec_params, &DecoderOptions::default())
                     .map_err(|error| {
                         format!(
@@ -1129,7 +1129,7 @@ fn analyze_track_r128_summary(path: &Path) -> Result<R128TrackSummary, String> {
         .ok_or_else(|| format!("R128 analysis found no audio track in {}", path.display()))?;
     let track_id = default_track.id;
     let codec_params = default_track.codec_params.clone();
-    let mut decoder = symphonia::default::get_codecs()
+    let mut decoder = crate::audio::get_codecs()
         .make(&codec_params, &DecoderOptions::default())
         .map_err(|error| {
             format!(
@@ -1151,7 +1151,7 @@ fn analyze_track_r128_summary(path: &Path) -> Result<R128TrackSummary, String> {
                 break
             }
             Err(SymphoniaError::ResetRequired) => {
-                decoder = symphonia::default::get_codecs()
+                decoder = crate::audio::get_codecs()
                     .make(&codec_params, &DecoderOptions::default())
                     .map_err(|error| {
                         format!(
@@ -1182,7 +1182,7 @@ fn analyze_track_r128_summary(path: &Path) -> Result<R128TrackSummary, String> {
             Ok(decoded) => decoded,
             Err(SymphoniaError::DecodeError(_)) | Err(SymphoniaError::LimitError(_)) => continue,
             Err(SymphoniaError::ResetRequired) => {
-                decoder = symphonia::default::get_codecs()
+                decoder = crate::audio::get_codecs()
                     .make(&codec_params, &DecoderOptions::default())
                     .map_err(|error| {
                         format!(

@@ -23,6 +23,6 @@ static CODEC_REGISTRY: LazyLock<CodecRegistry> = LazyLock::new(|| {
 });
 
 /// Returns the extended codec registry (built-in Symphonia codecs + Opus).
-pub(crate) fn get_codecs() -> &'static CodecRegistry {
+pub fn get_codecs() -> &'static CodecRegistry {
     &CODEC_REGISTRY
 }

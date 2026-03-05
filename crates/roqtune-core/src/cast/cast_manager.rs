@@ -1414,7 +1414,7 @@ fn transcode_to_wav_pcm(path: &Path, cache_dir: &Path) -> Result<PathBuf, String
         .map(|channels| channels.count() as u16)
         .unwrap_or(2)
         .max(1);
-    let mut decoder = symphonia::default::get_codecs()
+    let mut decoder = crate::audio::get_codecs()
         .make(&codec_params, &DecoderOptions::default())
         .map_err(|err| format!("failed to create decoder: {err}"))?;
 
