@@ -423,6 +423,20 @@ impl<'a> TemplateContext<'a> {
             "file_name" | "filename" | "file" => {
                 Some(self.file_name.unwrap_or_default().to_string())
             }
+            "file_stem" | "filestem" | "stem" => Some(
+                self.path
+                    .and_then(|p| Path::new(p).file_stem())
+                    .and_then(|s| s.to_str())
+                    .unwrap_or_default()
+                    .to_string(),
+            ),
+            "file_ext" | "fileext" | "ext" | "extension" => Some(
+                self.path
+                    .and_then(|p| Path::new(p).extension())
+                    .and_then(|s| s.to_str())
+                    .unwrap_or_default()
+                    .to_string(),
+            ),
             "path" => Some(self.path.unwrap_or_default().to_string()),
             "selection_summary" | "selectionsummary" => Some(self.selection_summary.to_string()),
             "source_provider" | "sourceprovider" => {
@@ -840,6 +854,68 @@ pub fn render_template_with_options(
 
 pub fn template_metrics(source: &str) -> TemplateMetrics {
     parse_template(source).metrics
+}
+
+/// Renders a template as a plain string with no markup, suitable for file paths.
+///
+/// Resolves `{variable}` placeholders and `[if=...]/[else]/[/if]` conditionals
+/// exactly as the rich renderer does, but discards all styling tags and converts
+/// newlines to spaces. Use `{file_stem}` and `{file_ext}` to refer to the source
+/// file stem and extension respectively.
+pub fn render_path_template(source: &str, context: &TemplateContext<'_>) -> String {
+    let parsed = parse_template(source);
+    let mut output = String::new();
+    let mut condition_stack: Vec<ConditionFrame> = vec![ConditionFrame {
+        parent_active: true,
+        condition_true: true,
+        else_seen: false,
+    }];
+
+    for segment in &parsed.segments {
+        let active = conditions_active(&condition_stack);
+        match segment {
+            TemplateSegment::Text(text) => {
+                if active {
+                    output.push_str(text);
+                }
+            }
+            TemplateSegment::Placeholder { fallbacks, .. } => {
+                if active {
+                    if let Some(resolved) = resolve_placeholder(context, fallbacks) {
+                        output.push_str(&resolved.value);
+                    }
+                }
+            }
+            TemplateSegment::NewLine => {
+                if active {
+                    output.push(' ');
+                }
+            }
+            TemplateSegment::IfOpen { fallbacks } => {
+                let parent_active = active;
+                let condition_true = resolve_placeholder(context, fallbacks)
+                    .map(|r| !r.value.is_empty())
+                    .unwrap_or(false);
+                condition_stack.push(ConditionFrame {
+                    parent_active,
+                    condition_true,
+                    else_seen: false,
+                });
+            }
+            TemplateSegment::IfElse { .. } => {
+                if let Some(frame) = condition_stack.last_mut() {
+                    frame.else_seen = true;
+                }
+            }
+            TemplateSegment::IfClose { .. } => {
+                condition_stack.pop();
+            }
+            // Ignore all style tags.
+            TemplateSegment::OpenStyle(_) | TemplateSegment::CloseStyle { .. } => {}
+        }
+    }
+
+    output
 }
 
 struct ResolvedPlaceholder {

@@ -32,6 +32,7 @@ pub mod cast;
 pub mod config;
 pub mod config_persistence;
 pub mod db_manager;
+pub mod file_operations;
 pub mod image_pipeline;
 pub mod integration;
 pub mod layout;
@@ -48,6 +49,7 @@ pub mod text_template;
 
 pub use audio::{audio_decoder, audio_player, audio_probe, output_option_selection};
 pub use cast::cast_manager;
+pub use file_operations::BatchFileOperationManager;
 pub use integration::{
     integration_keyring, integration_manager, integration_uri, opensubsonic_controller,
 };

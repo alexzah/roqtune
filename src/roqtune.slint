@@ -1,6 +1,8 @@
 import { Button, ComboBox, VerticalBox, StandardTableView, ScrollView, LineEdit, TextEdit, ListView, Switch, Slider } from "std-widgets.slint";
 
 import {
+    BatchFilePreviewItem,
+    BatchFileResultItem,
     LayoutAlbumArtViewerPanelModel,
     LayoutButtonClusterPanelModel,
     LayoutMetadataViewerPanelModel,
@@ -291,6 +293,24 @@ export component AppWindow inherits Window {
     in-out property <int> replaygain_scan_progress_processed: 0;
     in-out property <int> replaygain_scan_progress_total: 0;
     in-out property <string> replaygain_scan_progress_track_label: "";
+    // Batch file operations dialog
+    in-out property <bool> show_batch_file_op_dialog: false;
+    in-out property <bool> batch_file_op_mode_is_move: false;
+    in-out property <bool> batch_file_op_move_folder_contents: false;
+    in-out property <string> batch_file_op_template: "";
+    in-out property <[BatchFilePreviewItem]> batch_file_op_preview: [];
+    in-out property <bool> batch_file_op_has_remote: false;
+    in-out property <int> batch_file_op_remote_count: 0;
+    in-out property <int> batch_file_op_invalid_count: 0;
+    in-out property <int> batch_file_op_valid_count: 0;
+    // Batch file operations progress overlay
+    in-out property <bool> show_batch_file_op_progress: false;
+    in-out property <string> batch_file_op_progress_label: "";
+    in-out property <int> batch_file_op_progress_processed: 0;
+    in-out property <int> batch_file_op_progress_total: 0;
+    // Batch file operations summary dialog
+    in-out property <bool> show_batch_file_op_summary: false;
+    in-out property <[BatchFileResultItem]> batch_file_op_summary_results: [];
     in-out property <string> apply_filter_view_confirm_message: "";
     in-out property <int> delete_custom_column_index: -1;
     in-out property <string> delete_custom_column_message: "";
@@ -482,7 +502,7 @@ export component AppWindow inherits Window {
     property <length> playlist_track_context_menu_y: 0px;
     // Context menu sizing constants
     property <length> context-menu-item-height: 24px;
-    property <int> context-menu-item-count: root.settings_use_replaygain ? 7 : 6;
+    property <int> context-menu-item-count: root.settings_use_replaygain ? 8 : 7;
     property <length> context-menu-padding: 8px;
     property <length> context-menu-spacing-total: 10px;
     property <length> context-menu-margin: 8px;
@@ -4289,6 +4309,26 @@ export component AppWindow inherits Window {
             Rectangle {
                 height: 24px;
                 border-radius: 4px;
+                background: playlist-batch-file-op-ta.has-hover ? AppPalette.control-hover-bg : transparent;
+                Text {
+                    x: 10px;
+                    width: parent.width - 20px;
+                    text: "Batch file operations...";
+                    color: AppPalette.text-primary;
+                    font-size: 12px;
+                    vertical-alignment: center;
+                    overflow: elide;
+                }
+                playlist-batch-file-op-ta := TouchArea {
+                    clicked => {
+                        root.show_playlist_track_context_menu = false;
+                        root.batch_file_operation_requested();
+                    }
+                }
+            }
+            Rectangle {
+                height: 24px;
+                border-radius: 4px;
                 background: playlist-cut-ta.has-hover ? AppPalette.control-hover-bg : transparent;
                 Text {
                     x: 10px;
@@ -4452,6 +4492,26 @@ export component AppWindow inherits Window {
                     clicked => {
                         root.show_library_context_menu = false;
                         root.library_request_replaygain_scan_selection();
+                    }
+                }
+            }
+            Rectangle {
+                height: 24px;
+                border-radius: 4px;
+                background: library-batch-file-op-ta.has-hover ? AppPalette.control-hover-bg : transparent;
+                Text {
+                    x: 10px;
+                    width: parent.width - 20px;
+                    text: "Batch file operations...";
+                    color: AppPalette.text-primary;
+                    font-size: 12px;
+                    vertical-alignment: center;
+                    overflow: elide;
+                }
+                library-batch-file-op-ta := TouchArea {
+                    clicked => {
+                        root.show_library_context_menu = false;
+                        root.batch_file_operation_requested();
                     }
                 }
             }
@@ -4838,6 +4898,426 @@ export component AppWindow inherits Window {
                     text: "Abort";
                     clicked => {
                         root.library_abort_replaygain_scan();
+                    }
+                }
+            }
+        }
+    }
+
+    // Batch file operations progress overlay (bottom-left, away from ReplayGain)
+    if root.show_batch_file_op_progress : Rectangle {
+        z: 150;
+        width: min(root.width - 24px, 440px);
+        height: 128px;
+        x: 12px;
+        y: root.height - self.height - 12px;
+        border-radius: 6px;
+        border-width: 1px;
+        border-color: AppPalette.border;
+        background: AppPalette.panel-bg-elevated;
+
+        VerticalLayout {
+            padding: 10px;
+            spacing: 8px;
+            Text {
+                text: root.batch_file_op_mode_is_move ? "Moving files" : "Copying files";
+                color: AppPalette.text-primary;
+                font-size: 12px;
+                font-weight: 700;
+                overflow: elide;
+            }
+            Text {
+                text: root.batch_file_op_progress_label == ""
+                    ? "Preparing..."
+                    : root.batch_file_op_progress_label;
+                color: AppPalette.text-muted;
+                font-size: 11px;
+                overflow: elide;
+            }
+            Rectangle {
+                width: parent.width;
+                height: 8px;
+                border-radius: 4px;
+                background: AppPalette.panel-bg-alt;
+                Rectangle {
+                    property <int> effective-total: max(1, root.batch_file_op_progress_total);
+                    property <int> effective-processed:
+                        min(root.batch_file_op_progress_processed, self.effective-total);
+                    x: 0px;
+                    y: 0px;
+                    width: parent.width * self.effective-processed / self.effective-total;
+                    height: parent.height;
+                    border-radius: 4px;
+                    background: AppPalette.accent;
+                }
+            }
+            HorizontalLayout {
+                spacing: 8px;
+                Text {
+                    text: root.batch_file_op_progress_processed + " / "
+                        + root.batch_file_op_progress_total;
+                    color: AppPalette.text-muted;
+                    font-size: 11px;
+                    vertical-alignment: center;
+                }
+                Rectangle { horizontal-stretch: 1; }
+                Button {
+                    text: "Abort";
+                    clicked => { root.batch_file_op_abort(); }
+                }
+            }
+        }
+    }
+
+    // Batch file operations dialog (modal)
+    if root.show_batch_file_op_dialog : Rectangle {
+        z: 160;
+        background: AppPalette.overlay-scrim;
+        TouchArea {}
+
+        Rectangle {
+            width: min(600px, max(360px, root.width - 40px));
+            height: min(560px, max(300px, root.height - 60px));
+            x: (parent.width - self.width) / 2;
+            y: (parent.height - self.height) / 2;
+            background: AppPalette.panel-bg-elevated;
+            border-width: 1px;
+            border-color: AppPalette.border;
+            border-radius: 6px;
+
+            VerticalLayout {
+                padding: 16px;
+                spacing: 10px;
+
+                Text {
+                    text: "Batch File Operations";
+                    color: AppPalette.text-primary;
+                    font-size: 14px;
+                    font-weight: 700;
+                }
+
+                Rectangle { height: 1px; background: AppPalette.separator; }
+
+                // Operation mode toggle
+                HorizontalLayout {
+                    spacing: 8px;
+                    alignment: start;
+                    Text {
+                        text: "Operation:";
+                        color: AppPalette.text-secondary;
+                        font-size: 12px;
+                        vertical-alignment: center;
+                        width: 72px;
+                    }
+                    copy-mode-ta := Rectangle {
+                        width: 64px;
+                        height: 26px;
+                        border-radius: 4px;
+                        border-width: 1px;
+                        border-color: !root.batch_file_op_mode_is_move ? AppPalette.accent : AppPalette.border;
+                        background: !root.batch_file_op_mode_is_move ? AppPalette.accent.transparentize(0.85) : transparent;
+                        Text {
+                            text: "Copy";
+                            color: !root.batch_file_op_mode_is_move ? AppPalette.accent : AppPalette.text-secondary;
+                            font-size: 12px;
+                            font-weight: !root.batch_file_op_mode_is_move ? 700 : 400;
+                            horizontal-alignment: center;
+                            vertical-alignment: center;
+                        }
+                        TouchArea {
+                            clicked => { root.batch_file_op_mode_changed(false); }
+                        }
+                    }
+                    move-mode-ta := Rectangle {
+                        width: 64px;
+                        height: 26px;
+                        border-radius: 4px;
+                        border-width: 1px;
+                        border-color: root.batch_file_op_mode_is_move ? AppPalette.accent : AppPalette.border;
+                        background: root.batch_file_op_mode_is_move ? AppPalette.accent.transparentize(0.85) : transparent;
+                        Text {
+                            text: "Move";
+                            color: root.batch_file_op_mode_is_move ? AppPalette.accent : AppPalette.text-secondary;
+                            font-size: 12px;
+                            font-weight: root.batch_file_op_mode_is_move ? 700 : 400;
+                            horizontal-alignment: center;
+                            vertical-alignment: center;
+                        }
+                        TouchArea {
+                            clicked => { root.batch_file_op_mode_changed(true); }
+                        }
+                    }
+                }
+
+                // Folder contents toggle
+                HorizontalLayout {
+                    spacing: 8px;
+                    alignment: start;
+                    Switch {
+                        checked: root.batch_file_op_move_folder_contents;
+                        text: root.batch_file_op_mode_is_move
+                            ? "Also move other folder files (e.g. cover art)"
+                            : "Also copy other folder files (e.g. cover art)";
+                        toggled => {
+                            root.batch_file_op_move_contents_changed(self.checked);
+                        }
+                    }
+                }
+
+                // Template input
+                Text {
+                    text: "Target path template:";
+                    color: AppPalette.text-secondary;
+                    font-size: 12px;
+                }
+                LineEdit {
+                    text: root.batch_file_op_template;
+                    placeholder-text: "/music/{album_artist}/{album}/{track_number} - {title}.{file_ext}";
+                    edited(value) => { root.batch_file_op_template_changed(value); }
+                }
+
+                // Remote warning banner
+                if root.batch_file_op_has_remote : Rectangle {
+                    height: 28px;
+                    border-radius: 4px;
+                    background: AppPalette.warning.transparentize(0.85);
+                    border-width: 1px;
+                    border-color: AppPalette.warning.transparentize(0.5);
+                    Text {
+                        x: 10px;
+                        width: parent.width - 20px;
+                        text: root.batch_file_op_remote_count + " remote track(s) will be skipped (not supported)";
+                        color: AppPalette.warning;
+                        font-size: 11px;
+                        vertical-alignment: center;
+                        overflow: elide;
+                    }
+                }
+
+                // Invalid paths warning
+                if root.batch_file_op_invalid_count > 0 : Rectangle {
+                    height: 28px;
+                    border-radius: 4px;
+                    background: AppPalette.warning.transparentize(0.85);
+                    border-width: 1px;
+                    border-color: AppPalette.warning.transparentize(0.5);
+                    Text {
+                        x: 10px;
+                        width: parent.width - 20px;
+                        text: root.batch_file_op_invalid_count + " path(s) are invalid and will be skipped";
+                        color: AppPalette.warning;
+                        font-size: 11px;
+                        vertical-alignment: center;
+                        overflow: elide;
+                    }
+                }
+
+                // Preview header
+                Text {
+                    text: "Preview (" + root.batch_file_op_preview.length + " tracks):";
+                    color: AppPalette.text-secondary;
+                    font-size: 12px;
+                }
+
+                // Preview list
+                Rectangle {
+                    vertical-stretch: 1;
+                    border-radius: 4px;
+                    border-width: 1px;
+                    border-color: AppPalette.border;
+                    clip: true;
+
+                    ScrollView {
+                        VerticalLayout {
+                            alignment: start;
+                            for item in root.batch_file_op_preview : preview-row := Rectangle {
+                                height: 32px;
+                                background: transparent;
+                                HorizontalLayout {
+                                    padding-left: 8px;
+                                    padding-right: 8px;
+                                    spacing: 6px;
+                                    alignment: center;
+                                    // Status icon
+                                    Text {
+                                        text: item.is_skipped ? "⊘" : (item.is_valid ? "✓" : "✗");
+                                        color: item.is_skipped ? AppPalette.text-muted
+                                            : (item.is_valid ? AppPalette.success : AppPalette.danger);
+                                        font-size: 12px;
+                                        vertical-alignment: center;
+                                        width: 16px;
+                                        horizontal-alignment: center;
+                                    }
+                                    // Source name
+                                    Text {
+                                        text: item.source_name;
+                                        color: item.is_skipped ? AppPalette.text-muted
+                                            : (item.is_valid ? AppPalette.text-muted : AppPalette.danger);
+                                        font-size: 11px;
+                                        vertical-alignment: center;
+                                        overflow: elide;
+                                        width: 140px;
+                                    }
+                                    Text {
+                                        text: "→";
+                                        color: AppPalette.text-muted;
+                                        font-size: 11px;
+                                        vertical-alignment: center;
+                                    }
+                                    // Folder part
+                                    Text {
+                                        text: item.dest_folder;
+                                        color: item.is_skipped ? AppPalette.text-muted
+                                            : (item.is_valid ? AppPalette.text-secondary : AppPalette.danger);
+                                        font-size: 11px;
+                                        vertical-alignment: center;
+                                        overflow: elide;
+                                        horizontal-stretch: 1;
+                                    }
+                                    // Filename part
+                                    Text {
+                                        text: item.dest_filename;
+                                        color: item.is_skipped ? AppPalette.text-muted
+                                            : (item.is_valid ? AppPalette.text-primary : AppPalette.danger);
+                                        font-size: 11px;
+                                        font-weight: item.is_valid && !item.is_skipped ? 600 : 400;
+                                        vertical-alignment: center;
+                                        overflow: elide;
+                                        width: 160px;
+                                    }
+                                }
+                                Rectangle { height: 1px; background: AppPalette.separator; y: parent.height - 1px; }
+                                TooltipHoverArea {
+                                    tooltip-text: item.dest_folder + item.dest_filename;
+                                    tooltip-enabled: item.dest_folder != "" || item.dest_filename != "";
+                                    tooltip_hover_changed(is-hovered, tooltip, anchor-x-px, anchor-y-px) => {
+                                        root.tooltip_hover_changed(is-hovered, tooltip, anchor-x-px, anchor-y-px);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+
+                Rectangle { height: 1px; background: AppPalette.separator; }
+
+                HorizontalLayout {
+                    spacing: 10px;
+                    Rectangle { horizontal-stretch: 1; }
+                    Button {
+                        text: "Cancel";
+                        clicked => {
+                            root.show_batch_file_op_dialog = false;
+                        }
+                    }
+                    Button {
+                        text: root.batch_file_op_mode_is_move ? "Move" : "Copy";
+                        primary: true;
+                        enabled: root.batch_file_op_valid_count > 0;
+                        clicked => {
+                            root.show_batch_file_op_dialog = false;
+                            root.batch_file_op_confirm();
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // Batch file operations summary dialog (modal)
+    if root.show_batch_file_op_summary : Rectangle {
+        z: 160;
+        background: AppPalette.overlay-scrim;
+        TouchArea {}
+
+        Rectangle {
+            width: min(560px, max(360px, root.width - 40px));
+            height: min(480px, max(280px, root.height - 60px));
+            x: (parent.width - self.width) / 2;
+            y: (parent.height - self.height) / 2;
+            background: AppPalette.panel-bg-elevated;
+            border-width: 1px;
+            border-color: AppPalette.border;
+            border-radius: 6px;
+
+            VerticalLayout {
+                padding: 16px;
+                spacing: 10px;
+
+                Text {
+                    text: "Batch File Operations — Summary";
+                    color: AppPalette.text-primary;
+                    font-size: 14px;
+                    font-weight: 700;
+                }
+
+                Rectangle { height: 1px; background: AppPalette.separator; }
+
+                Rectangle {
+                    vertical-stretch: 1;
+                    border-radius: 4px;
+                    border-width: 1px;
+                    border-color: AppPalette.border;
+                    clip: true;
+
+                    ScrollView {
+                        VerticalLayout {
+                            alignment: start;
+                            for result in root.batch_file_op_summary_results : Rectangle {
+                                height: 36px;
+                                background: transparent;
+                                HorizontalLayout {
+                                    padding-left: 8px;
+                                    padding-right: 8px;
+                                    spacing: 6px;
+                                    alignment: start;
+                                    Text {
+                                        text: result.success ? "✓" : "✗";
+                                        color: result.success ? AppPalette.success : AppPalette.danger;
+                                        font-size: 13px;
+                                        vertical-alignment: center;
+                                        width: 16px;
+                                        horizontal-alignment: center;
+                                    }
+                                    VerticalLayout {
+                                        horizontal-stretch: 1;
+                                        spacing: 2px;
+                                        alignment: center;
+                                        Text {
+                                            text: result.source_name + " → " + result.dest_path;
+                                            color: result.success ? AppPalette.text-primary : AppPalette.text-secondary;
+                                            font-size: 11px;
+                                            overflow: elide;
+                                        }
+                                        if !result.success : Text {
+                                            text: result.error;
+                                            color: AppPalette.danger;
+                                            font-size: 10px;
+                                            overflow: elide;
+                                        }
+                                    }
+                                }
+                                Rectangle { height: 1px; background: AppPalette.separator; y: parent.height - 1px; }
+                                TooltipHoverArea {
+                                    tooltip-text: result.source_name + " → " + result.dest_path;
+                                    tooltip-enabled: result.dest_path != "";
+                                    tooltip_hover_changed(is-hovered, tooltip, anchor-x-px, anchor-y-px) => {
+                                        root.tooltip_hover_changed(is-hovered, tooltip, anchor-x-px, anchor-y-px);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+
+                Rectangle { height: 1px; background: AppPalette.separator; }
+
+                HorizontalLayout {
+                    Rectangle { horizontal-stretch: 1; }
+                    Button {
+                        text: "Close";
+                        primary: true;
+                        clicked => { root.batch_file_op_summary_close(); }
                     }
                 }
             }
@@ -7666,6 +8146,13 @@ export component AppWindow inherits Window {
     callback library_skip_replaygain_scan_existing();
     callback library_cancel_replaygain_scan_overwrite();
     callback library_abort_replaygain_scan();
+    callback batch_file_operation_requested();
+    callback batch_file_op_mode_changed(/* is_move: */ bool);
+    callback batch_file_op_move_contents_changed(/* move_folder_contents: */ bool);
+    callback batch_file_op_template_changed(string);
+    callback batch_file_op_confirm();
+    callback batch_file_op_abort();
+    callback batch_file_op_summary_close();
     callback open_properties_for_current_selection();
     callback properties_select_tab(int);
     callback properties_field_edited(int, string);

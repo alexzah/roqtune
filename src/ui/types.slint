@@ -130,6 +130,21 @@ export struct LayoutMetadataViewerPanelModel {
     display_text_elided: bool,
 }
 
+export struct BatchFilePreviewItem {
+    source_name: string,
+    dest_folder: string,
+    dest_filename: string,
+    is_valid: bool,
+    is_skipped: bool,
+}
+
+export struct BatchFileResultItem {
+    source_name: string,
+    dest_path: string,
+    success: bool,
+    error: string,
+}
+
 export struct LayoutAlbumArtViewerPanelModel {
     leaf_id: string,
     x_px: int,

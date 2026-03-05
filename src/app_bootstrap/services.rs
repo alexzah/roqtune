@@ -14,6 +14,7 @@ use crate::{
     cast_manager::CastManager,
     config,
     db_manager::DbManager,
+    file_operations::BatchFileOperationManager,
     integration_manager::IntegrationManager,
     library_enrichment_manager::LibraryEnrichmentManager,
     library_manager::LibraryManager,
@@ -148,6 +149,14 @@ pub fn spawn_background_services(config: BackgroundServicesConfig) {
             db_manager,
         );
         metadata_manager.run();
+    });
+
+    let batch_file_op_bus_receiver = bus_sender.subscribe();
+    let batch_file_op_bus_sender = bus_sender.clone();
+    thread::spawn(move || {
+        let mut batch_file_op_manager =
+            BatchFileOperationManager::new(batch_file_op_bus_receiver, batch_file_op_bus_sender);
+        batch_file_op_manager.run();
     });
 
     let media_controls_bus_receiver = bus_sender.subscribe();

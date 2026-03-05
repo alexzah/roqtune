@@ -523,6 +523,61 @@ pub enum LibraryMessage {
     ToastTimeout {
         generation: u64,
     },
+    RequestBatchFileOperation,
+    BatchFileOperationTemplateChanged {
+        template: String,
+    },
+    BatchFileOperationModeChanged {
+        mode: BatchFileMode,
+    },
+    BatchFileOperationConfirm,
+    BatchFileOperationMoveContentsChanged {
+        move_folder_contents: bool,
+    },
+    StartBatchFileOperation {
+        request_id: u64,
+        mode: BatchFileMode,
+        targets: Vec<BatchFileTarget>,
+        move_folder_contents: bool,
+    },
+    BatchFileOperationAbort {
+        request_id: u64,
+    },
+    BatchFileOperationSummaryClose,
+    BatchFileOperationProgress {
+        request_id: u64,
+        processed: usize,
+        total: usize,
+        current: String,
+    },
+    BatchFileOperationCompleted {
+        request_id: u64,
+        results: Vec<BatchFileResult>,
+    },
+}
+
+/// File operation mode for batch file operations.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum BatchFileMode {
+    #[default]
+    Copy,
+    Move,
+}
+
+/// A single source→destination pair for a batch file operation.
+#[derive(Debug, Clone)]
+pub struct BatchFileTarget {
+    pub source_path: PathBuf,
+    pub dest_path: PathBuf,
+}
+
+/// Result of one file operation in a batch.
+#[derive(Debug, Clone)]
+pub struct BatchFileResult {
+    pub source_path: PathBuf,
+    pub dest_path: PathBuf,
+    pub success: bool,
+    pub error: Option<String>,
 }
 
 /// Stable identity for one enrichable library entity.

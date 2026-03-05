@@ -31,8 +31,10 @@ use crate::{
     integration_keyring::get_opensubsonic_password,
     integration_uri::{is_remote_track_path, parse_opensubsonic_track_uri},
     layout::PlaylistColumnWidthOverrideConfig,
-    metadata_tags, protocol, text_template, AppWindow, LayoutAlbumArtViewerPanelModel,
-    LayoutMetadataViewerPanelModel, LibraryRowData, MetadataEditorField as UiMetadataEditorField,
+    metadata_tags, protocol, text_template, AppWindow,
+    BatchFilePreviewItem as UiBatchFilePreviewItem, BatchFileResultItem as UiBatchFileResultItem,
+    LayoutAlbumArtViewerPanelModel, LayoutMetadataViewerPanelModel, LibraryRowData,
+    MetadataEditorField as UiMetadataEditorField,
     PropertiesEmbeddedImageSlot as UiPropertiesEmbeddedImageSlot,
     PropertiesExternalImage as UiPropertiesExternalImage,
     PropertiesMediaInfoField as UiPropertiesMediaInfoField, RichTextBlock as UiRichTextBlock,
@@ -264,6 +266,20 @@ pub struct UiManager {
     properties_dialog_visible: bool,
     properties_busy: bool,
     properties_error_text: String,
+    batch_file_op_request_nonce: u64,
+    active_batch_file_op_request_id: Option<u64>,
+    batch_file_op_dialog_visible: bool,
+    batch_file_op_mode_is_move: bool,
+    batch_file_op_move_folder_contents: bool,
+    batch_file_op_template: String,
+    /// Resolved track data used for live preview computation.
+    batch_file_op_tracks: Vec<BatchFileOpTrack>,
+    batch_file_op_progress_visible: bool,
+    batch_file_op_progress_label: String,
+    batch_file_op_progress_processed: usize,
+    batch_file_op_progress_total: usize,
+    batch_file_op_summary_visible: bool,
+    batch_file_op_summary_results: Vec<protocol::BatchFileResult>,
 }
 
 /// Normalized track metadata snapshot used for row rendering and side panel display.
@@ -340,6 +356,20 @@ impl TechnicalInfoTemplateFields {
             technical_replay_gain_adjustment: &self.technical_replay_gain_adjustment,
         }
     }
+}
+
+/// Track data snapshot used for batch file operation preview computation.
+struct BatchFileOpTrack {
+    path: PathBuf,
+    title: String,
+    artist: String,
+    album: String,
+    album_artist: String,
+    date: String,
+    year: String,
+    genre: String,
+    track_number: String,
+    is_remote: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -2092,6 +2122,19 @@ impl UiManager {
             properties_dialog_visible: false,
             properties_busy: false,
             properties_error_text: String::new(),
+            batch_file_op_request_nonce: 0,
+            active_batch_file_op_request_id: None,
+            batch_file_op_dialog_visible: false,
+            batch_file_op_mode_is_move: false,
+            batch_file_op_move_folder_contents: false,
+            batch_file_op_template: String::new(),
+            batch_file_op_tracks: Vec::new(),
+            batch_file_op_progress_visible: false,
+            batch_file_op_progress_label: String::new(),
+            batch_file_op_progress_processed: 0,
+            batch_file_op_progress_total: 0,
+            batch_file_op_summary_visible: false,
+            batch_file_op_summary_results: Vec::new(),
         };
         // Seed column-width overrides from startup layout so playlist rendering does not depend on
         // racing the asynchronous `ConfigLoaded` bus message.
@@ -8838,6 +8881,348 @@ impl UiManager {
         self.sync_library_ui();
     }
 
+    fn next_batch_file_op_request_id(&mut self) -> u64 {
+        self.batch_file_op_request_nonce = self.batch_file_op_request_nonce.wrapping_add(1);
+        self.batch_file_op_request_nonce
+    }
+
+    fn request_batch_file_operation(&mut self) {
+        if self.active_batch_file_op_request_id.is_some() {
+            self.show_library_toast("Batch file operation already in progress.");
+            return;
+        }
+        let tracks = self.collect_batch_file_op_tracks();
+        if tracks.is_empty() {
+            self.show_library_toast("No local tracks selected for batch file operations.");
+            return;
+        }
+        self.batch_file_op_tracks = tracks;
+        self.batch_file_op_dialog_visible = true;
+        self.sync_batch_file_op_dialog_ui();
+    }
+
+    /// Collect track data for the current selection from either playlist or library view.
+    fn collect_batch_file_op_tracks(&self) -> Vec<BatchFileOpTrack> {
+        let mut tracks: Vec<BatchFileOpTrack> = Vec::new();
+        if self.collection_mode == COLLECTION_MODE_PLAYLIST {
+            for &idx in &self.selected_indices {
+                let Some(path) = self.track_paths.get(idx) else {
+                    continue;
+                };
+                let is_remote = is_remote_track_path(path.as_path());
+                let (title, artist, album, album_artist, date, year, genre, track_number) =
+                    if let Some(meta) = self.track_metadata.get(idx) {
+                        (
+                            meta.title.clone(),
+                            meta.artist.clone(),
+                            meta.album.clone(),
+                            meta.album_artist.clone(),
+                            meta.date.clone(),
+                            meta.year.clone(),
+                            meta.genre.clone(),
+                            meta.track_number.clone(),
+                        )
+                    } else {
+                        (
+                            String::new(),
+                            String::new(),
+                            String::new(),
+                            String::new(),
+                            String::new(),
+                            String::new(),
+                            String::new(),
+                            String::new(),
+                        )
+                    };
+                tracks.push(BatchFileOpTrack {
+                    path: path.clone(),
+                    title,
+                    artist,
+                    album,
+                    album_artist,
+                    date,
+                    year,
+                    genre,
+                    track_number,
+                    is_remote,
+                });
+            }
+        } else {
+            for &idx in &self.library_selected_indices {
+                let Some(entry) = self.library_entries.get(idx) else {
+                    continue;
+                };
+                let LibraryEntry::Track(track) = entry else {
+                    continue;
+                };
+                let is_remote = is_remote_track_path(track.path.as_path());
+                tracks.push(BatchFileOpTrack {
+                    path: track.path.clone(),
+                    title: track.title.clone(),
+                    artist: track.artist.clone(),
+                    album: track.album.clone(),
+                    album_artist: track.album_artist.clone(),
+                    date: String::new(),
+                    year: track.year.clone(),
+                    genre: track.genre.clone(),
+                    track_number: track.track_number.clone(),
+                    is_remote,
+                });
+            }
+        }
+        tracks
+    }
+
+    fn batch_file_op_template_changed(&mut self, template: String) {
+        self.batch_file_op_template = template;
+        self.sync_batch_file_op_dialog_ui();
+    }
+
+    fn batch_file_op_mode_changed(&mut self, is_move: bool) {
+        self.batch_file_op_mode_is_move = is_move;
+        self.sync_batch_file_op_dialog_ui();
+    }
+
+    fn batch_file_op_move_contents_changed(&mut self, move_folder_contents: bool) {
+        self.batch_file_op_move_folder_contents = move_folder_contents;
+    }
+
+    fn batch_file_op_confirm(&mut self) {
+        use crate::file_operations::is_valid_dest_path;
+        let mode = if self.batch_file_op_mode_is_move {
+            protocol::BatchFileMode::Move
+        } else {
+            protocol::BatchFileMode::Copy
+        };
+        let template = self.batch_file_op_template.clone();
+        let targets: Vec<protocol::BatchFileTarget> = self
+            .batch_file_op_tracks
+            .iter()
+            .filter(|t| !t.is_remote)
+            .filter_map(|t| {
+                let ctx = Self::build_template_context_for_track(t);
+                let dest_str = text_template::render_path_template(&template, &ctx);
+                if dest_str.is_empty() {
+                    return None;
+                }
+                let dest = std::path::PathBuf::from(&dest_str);
+                if !is_valid_dest_path(&dest) {
+                    return None;
+                }
+                Some(protocol::BatchFileTarget {
+                    source_path: t.path.clone(),
+                    dest_path: dest,
+                })
+            })
+            .collect();
+
+        if targets.is_empty() {
+            return;
+        }
+
+        let request_id = self.next_batch_file_op_request_id();
+        self.active_batch_file_op_request_id = Some(request_id);
+        self.batch_file_op_progress_visible = true;
+        self.batch_file_op_progress_processed = 0;
+        self.batch_file_op_progress_total = targets.len();
+        self.batch_file_op_progress_label.clear();
+        self.sync_batch_file_op_progress_ui();
+        let move_folder_contents = self.batch_file_op_move_folder_contents;
+        let _ = self.bus_sender.send(protocol::Message::Library(
+            protocol::LibraryMessage::StartBatchFileOperation {
+                request_id,
+                mode,
+                targets,
+                move_folder_contents,
+            },
+        ));
+    }
+
+    fn batch_file_op_abort(&mut self) {
+        if let Some(request_id) = self.active_batch_file_op_request_id {
+            let _ = self.bus_sender.send(protocol::Message::Library(
+                protocol::LibraryMessage::BatchFileOperationAbort { request_id },
+            ));
+        }
+    }
+
+    fn batch_file_op_summary_close(&mut self) {
+        self.batch_file_op_summary_visible = false;
+        self.batch_file_op_summary_results.clear();
+        self.sync_batch_file_op_summary_ui();
+    }
+
+    fn handle_batch_file_op_progress(
+        &mut self,
+        request_id: u64,
+        processed: usize,
+        total: usize,
+        current: String,
+    ) {
+        if self.active_batch_file_op_request_id != Some(request_id) {
+            return;
+        }
+        self.batch_file_op_progress_processed = processed;
+        self.batch_file_op_progress_total = total;
+        self.batch_file_op_progress_label = current;
+        self.sync_batch_file_op_progress_ui();
+    }
+
+    fn handle_batch_file_op_completed(
+        &mut self,
+        request_id: u64,
+        results: Vec<protocol::BatchFileResult>,
+    ) {
+        if self.active_batch_file_op_request_id != Some(request_id) {
+            return;
+        }
+        self.active_batch_file_op_request_id = None;
+        self.batch_file_op_progress_visible = false;
+        self.batch_file_op_summary_results = results;
+        self.batch_file_op_summary_visible = true;
+        self.sync_batch_file_op_progress_ui();
+        self.sync_batch_file_op_summary_ui();
+    }
+
+    fn build_template_context_for_track(
+        t: &BatchFileOpTrack,
+    ) -> text_template::TemplateContext<'_> {
+        text_template::TemplateContext::from_path_metadata(
+            &t.title,
+            &t.artist,
+            &t.album,
+            &t.album_artist,
+            &t.date,
+            &t.year,
+            &t.genre,
+            &t.track_number,
+            Some(t.path.as_path()),
+        )
+    }
+
+    fn compute_batch_file_op_preview(&self) -> Vec<UiBatchFilePreviewItem> {
+        use crate::file_operations::is_valid_dest_path;
+        let template = &self.batch_file_op_template;
+        self.batch_file_op_tracks
+            .iter()
+            .map(|t| {
+                let source_name = t
+                    .path
+                    .file_name()
+                    .and_then(|n| n.to_str())
+                    .unwrap_or("")
+                    .to_string();
+                if t.is_remote {
+                    return UiBatchFilePreviewItem {
+                        source_name: source_name.into(),
+                        dest_folder: "Remote track".into(),
+                        dest_filename: String::new().into(),
+                        is_valid: false,
+                        is_skipped: true,
+                    };
+                }
+                let ctx = Self::build_template_context_for_track(t);
+                let dest_str = text_template::render_path_template(template, &ctx);
+                let dest = std::path::PathBuf::from(&dest_str);
+                let is_valid = !dest_str.is_empty() && is_valid_dest_path(&dest);
+                let dest_folder = dest
+                    .parent()
+                    .and_then(|p| p.to_str())
+                    .map(|s| {
+                        if s.is_empty() {
+                            String::new()
+                        } else {
+                            format!("{}/", s)
+                        }
+                    })
+                    .unwrap_or_default();
+                let dest_filename = dest
+                    .file_name()
+                    .and_then(|n| n.to_str())
+                    .unwrap_or("")
+                    .to_string();
+                UiBatchFilePreviewItem {
+                    source_name: source_name.into(),
+                    dest_folder: dest_folder.into(),
+                    dest_filename: dest_filename.into(),
+                    is_valid,
+                    is_skipped: false,
+                }
+            })
+            .collect()
+    }
+
+    fn sync_batch_file_op_dialog_ui(&self) {
+        let visible = self.batch_file_op_dialog_visible;
+        let is_move = self.batch_file_op_mode_is_move;
+        let template = self.batch_file_op_template.clone();
+        let preview = self.compute_batch_file_op_preview();
+        let remote_count = preview.iter().filter(|p| p.is_skipped).count();
+        let invalid_count = preview
+            .iter()
+            .filter(|p| !p.is_skipped && !p.is_valid)
+            .count();
+        let valid_count = preview
+            .iter()
+            .filter(|p| !p.is_skipped && p.is_valid)
+            .count();
+        let has_remote = remote_count > 0;
+
+        let _ = self.ui.upgrade_in_event_loop(move |ui| {
+            let preview_model: slint::ModelRc<UiBatchFilePreviewItem> =
+                slint::ModelRc::new(slint::VecModel::from(preview));
+            ui.set_show_batch_file_op_dialog(visible);
+            ui.set_batch_file_op_mode_is_move(is_move);
+            ui.set_batch_file_op_template(template.into());
+            ui.set_batch_file_op_preview(preview_model);
+            ui.set_batch_file_op_has_remote(has_remote);
+            ui.set_batch_file_op_remote_count(remote_count as i32);
+            ui.set_batch_file_op_invalid_count(invalid_count as i32);
+            ui.set_batch_file_op_valid_count(valid_count as i32);
+        });
+    }
+
+    fn sync_batch_file_op_progress_ui(&self) {
+        let visible = self.batch_file_op_progress_visible;
+        let is_move = self.batch_file_op_mode_is_move;
+        let label = self.batch_file_op_progress_label.clone();
+        let processed = self.batch_file_op_progress_processed.min(i32::MAX as usize) as i32;
+        let total = self.batch_file_op_progress_total.min(i32::MAX as usize) as i32;
+        let _ = self.ui.upgrade_in_event_loop(move |ui| {
+            ui.set_show_batch_file_op_progress(visible);
+            ui.set_batch_file_op_mode_is_move(is_move);
+            ui.set_batch_file_op_progress_label(label.into());
+            ui.set_batch_file_op_progress_processed(processed);
+            ui.set_batch_file_op_progress_total(total);
+        });
+    }
+
+    fn sync_batch_file_op_summary_ui(&self) {
+        let visible = self.batch_file_op_summary_visible;
+        let results: Vec<UiBatchFileResultItem> = self
+            .batch_file_op_summary_results
+            .iter()
+            .map(|r| UiBatchFileResultItem {
+                source_name: r
+                    .source_path
+                    .file_name()
+                    .and_then(|n| n.to_str())
+                    .unwrap_or("")
+                    .to_string()
+                    .into(),
+                dest_path: r.dest_path.to_string_lossy().to_string().into(),
+                success: r.success,
+                error: r.error.clone().unwrap_or_default().into(),
+            })
+            .collect();
+        let _ = self.ui.upgrade_in_event_loop(move |ui| {
+            let results_model: slint::ModelRc<UiBatchFileResultItem> =
+                slint::ModelRc::new(slint::VecModel::from(results));
+            ui.set_show_batch_file_op_summary(visible);
+            ui.set_batch_file_op_summary_results(results_model);
+        });
+    }
+
     fn paste_copied_tracks(&mut self) {
         if !self.copied_track_paths.is_empty() {
             self.pending_paste_feedback = true;
@@ -12988,6 +13373,46 @@ impl UiManager {
                             protocol::LibraryMessage::RequestReplayGainScanSelection => {
                                 self.request_replaygain_scan_selection();
                             }
+                            protocol::LibraryMessage::RequestBatchFileOperation => {
+                                self.request_batch_file_operation();
+                            }
+                            protocol::LibraryMessage::BatchFileOperationTemplateChanged {
+                                template,
+                            } => {
+                                self.batch_file_op_template_changed(template);
+                            }
+                            protocol::LibraryMessage::BatchFileOperationModeChanged { mode } => {
+                                self.batch_file_op_mode_changed(
+                                    mode == protocol::BatchFileMode::Move,
+                                );
+                            }
+                            protocol::LibraryMessage::BatchFileOperationMoveContentsChanged {
+                                move_folder_contents,
+                            } => {
+                                self.batch_file_op_move_contents_changed(move_folder_contents);
+                            }
+                            protocol::LibraryMessage::BatchFileOperationConfirm => {
+                                self.batch_file_op_confirm();
+                            }
+                            protocol::LibraryMessage::BatchFileOperationProgress {
+                                request_id,
+                                processed,
+                                total,
+                                current,
+                            } => {
+                                self.handle_batch_file_op_progress(
+                                    request_id, processed, total, current,
+                                );
+                            }
+                            protocol::LibraryMessage::BatchFileOperationCompleted {
+                                request_id,
+                                results,
+                            } => {
+                                self.handle_batch_file_op_completed(request_id, results);
+                            }
+                            protocol::LibraryMessage::BatchFileOperationSummaryClose => {
+                                self.batch_file_op_summary_close();
+                            }
                             protocol::LibraryMessage::OpenFileLocation => {
                                 self.open_file_location();
                             }
@@ -13434,7 +13859,18 @@ impl UiManager {
                             | protocol::LibraryMessage::EvaluateReplayGainScanSelection {
                                 ..
                             }
-                            | protocol::LibraryMessage::StartReplayGainScanSelection { .. } => {}
+                            | protocol::LibraryMessage::StartReplayGainScanSelection { .. }
+                            | protocol::LibraryMessage::StartBatchFileOperation { .. } => {}
+                            protocol::LibraryMessage::BatchFileOperationAbort { request_id } => {
+                                // The Slint callback sends request_id=0 as a "user wants to abort"
+                                // signal. ui_manager resolves the real active request id and
+                                // forwards the actual abort. Messages with a real request_id are
+                                // produced by ui_manager itself and are meant for the
+                                // BatchFileOperationManager; ignore them here.
+                                if request_id == 0 {
+                                    self.batch_file_op_abort();
+                                }
+                            }
                         },
                         protocol::Message::Metadata(metadata_message) => match metadata_message {
                             protocol::MetadataMessage::OpenPropertiesForCurrentSelection => {

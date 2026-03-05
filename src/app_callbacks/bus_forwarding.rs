@@ -195,6 +195,66 @@ pub fn register_bus_forwarding_callbacks(ui: &AppWindow, context: BusForwardingC
     });
 
     let bus_sender_clone = bus_sender.clone();
+    ui.on_batch_file_operation_requested(move || {
+        let _ = bus_sender_clone.send(Message::Library(
+            protocol::LibraryMessage::RequestBatchFileOperation,
+        ));
+    });
+
+    let bus_sender_clone = bus_sender.clone();
+    ui.on_batch_file_op_mode_changed(move |is_move| {
+        let _ = bus_sender_clone.send(Message::Library(
+            protocol::LibraryMessage::BatchFileOperationModeChanged {
+                mode: if is_move {
+                    protocol::BatchFileMode::Move
+                } else {
+                    protocol::BatchFileMode::Copy
+                },
+            },
+        ));
+    });
+
+    let bus_sender_clone = bus_sender.clone();
+    ui.on_batch_file_op_move_contents_changed(move |move_folder_contents| {
+        let _ = bus_sender_clone.send(Message::Library(
+            protocol::LibraryMessage::BatchFileOperationMoveContentsChanged {
+                move_folder_contents,
+            },
+        ));
+    });
+
+    let bus_sender_clone = bus_sender.clone();
+    ui.on_batch_file_op_template_changed(move |template| {
+        let _ = bus_sender_clone.send(Message::Library(
+            protocol::LibraryMessage::BatchFileOperationTemplateChanged {
+                template: template.to_string(),
+            },
+        ));
+    });
+
+    let bus_sender_clone = bus_sender.clone();
+    ui.on_batch_file_op_confirm(move || {
+        let _ = bus_sender_clone.send(Message::Library(
+            protocol::LibraryMessage::BatchFileOperationConfirm,
+        ));
+    });
+
+    let bus_sender_clone = bus_sender.clone();
+    ui.on_batch_file_op_abort(move || {
+        // Request ID is resolved inside ui_manager from active state.
+        let _ = bus_sender_clone.send(Message::Library(
+            protocol::LibraryMessage::BatchFileOperationAbort { request_id: 0 },
+        ));
+    });
+
+    let bus_sender_clone = bus_sender.clone();
+    ui.on_batch_file_op_summary_close(move || {
+        let _ = bus_sender_clone.send(Message::Library(
+            protocol::LibraryMessage::BatchFileOperationSummaryClose,
+        ));
+    });
+
+    let bus_sender_clone = bus_sender.clone();
     ui.on_open_properties_for_current_selection(move || {
         let _ = bus_sender_clone.send(Message::Metadata(
             MetadataMessage::OpenPropertiesForCurrentSelection,

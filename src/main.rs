@@ -16,8 +16,8 @@ mod ui;
 mod ui_manager;
 
 pub use roqtune_core::{
-    audio, backends, cast, config, config_persistence, db_manager, image_pipeline, integration,
-    layout, library, media_controls_manager, media_file_discovery, metadata, playlist,
+    audio, backends, cast, config, config_persistence, db_manager, file_operations, image_pipeline,
+    integration, layout, library, media_controls_manager, media_file_discovery, metadata, playlist,
     playlist_manager, protocol, protocol_utils, runtime_config, text_template,
     OutputSettingsOptions,
 };
