@@ -334,7 +334,7 @@ export component AppWindow inherits Window {
     in-out property <[int]> layout_region_collection_modes: [];
     in-out property <bool> show_import_menu: false;
     property <length> import_menu_width: 176px;
-    property <length> import_menu_height: 104px;
+    property <length> import_menu_height: 136px;
     property <length> import_menu_x: 0px;
     property <length> import_menu_y: 0px;
     in-out property <bool> show_library_folder_menu: false;
@@ -4177,6 +4177,26 @@ export component AppWindow inherits Window {
                     }
                 }
             }
+
+            Rectangle {
+                height: 28px;
+                border-radius: 4px;
+                background: import-playlist-ta.has-hover ? AppPalette.control-hover-bg : transparent;
+                Text {
+                    x: 10px;
+                    width: parent.width - 20px;
+                    text: "Import playlist...";
+                    color: AppPalette.text-primary;
+                    font-size: 12px;
+                    vertical-alignment: center;
+                }
+                import-playlist-ta := TouchArea {
+                    clicked => {
+                        root.show_import_menu = false;
+                        root.import_playlist();
+                    }
+                }
+            }
         }
     }
 
@@ -7704,6 +7724,7 @@ export component AppWindow inherits Window {
     callback delete_playlist(int);
     callback sync_playlist_to_opensubsonic(int);
     callback export_playlist_as_m3u8(int);
+    callback import_playlist();
     callback remote_detach_confirm(string);
     callback remote_detach_cancel(string);
     callback toggle_playlist_column(int);

@@ -204,6 +204,10 @@ pub enum PlaylistMessage {
     CreatePlaylist {
         name: String,
     },
+    ImportPlaylistFromM3u {
+        name: String,
+        paths: Vec<PathBuf>,
+    },
     RenamePlaylist {
         id: String,
         name: String,

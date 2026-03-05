@@ -2381,6 +2381,46 @@ impl PlaylistManager {
                         }
                     }
                     protocol::Message::Playlist(
+                        protocol::PlaylistMessage::ImportPlaylistFromM3u { name, paths },
+                    ) => {
+                        if !paths.is_empty() {
+                            let existing_names = self
+                                .db_manager
+                                .get_all_playlists()
+                                .unwrap_or_default()
+                                .into_iter()
+                                .map(|p| p.name)
+                                .collect::<Vec<_>>();
+                            let resolved_name =
+                                Self::generate_unique_playlist_name(&existing_names, &name);
+                            let id = Uuid::new_v4().to_string();
+                            debug!(
+                                "PlaylistManager: Importing M3U playlist '{}' ({}) with {} track(s)",
+                                resolved_name,
+                                id,
+                                paths.len()
+                            );
+                            if let Err(e) = self.db_manager.create_playlist(&id, &resolved_name) {
+                                error!("Failed to create playlist for M3U import: {}", e);
+                            } else {
+                                let pending: Vec<(String, PathBuf)> = paths
+                                    .into_iter()
+                                    .map(|path| (Uuid::new_v4().to_string(), path))
+                                    .collect();
+                                if let Err(e) = self.db_manager.save_tracks_batch(&id, &pending, 0)
+                                {
+                                    error!("Failed to save tracks for M3U import: {}", e);
+                                }
+                                let playlists =
+                                    self.db_manager.get_all_playlists().unwrap_or_default();
+                                self.emit_opensubsonic_sync_eligible_playlists(&playlists);
+                                let _ = self.bus_producer.send(protocol::Message::Playlist(
+                                    protocol::PlaylistMessage::PlaylistsRestored(playlists),
+                                ));
+                            }
+                        }
+                    }
+                    protocol::Message::Playlist(
                         protocol::PlaylistMessage::RenamePlaylistByIndex(index, name),
                     ) => {
                         let playlists = self.db_manager.get_all_playlists().unwrap_or_default();

@@ -619,6 +619,27 @@ pub fn register_bus_forwarding_callbacks(ui: &AppWindow, context: BusForwardingC
     });
 
     let bus_sender_clone = bus_sender.clone();
+    ui.on_import_playlist(move || {
+        debug!("Import playlist requested");
+        let Some(source_path) = FileDialog::new()
+            .add_filter("M3U Playlist", &["m3u", "m3u8"])
+            .pick_file()
+        else {
+            return;
+        };
+        let name = source_path
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .unwrap_or("Imported playlist")
+            .to_string();
+        let paths = parse_m3u(&source_path);
+        let _ = bus_sender_clone.send(Message::Playlist(PlaylistMessage::ImportPlaylistFromM3u {
+            name,
+            paths,
+        }));
+    });
+
+    let bus_sender_clone = bus_sender.clone();
     ui.on_export_playlist_as_m3u8(move |index| {
         debug!("Export playlist as M3U8 requested: index={}", index);
         let Some(destination) = FileDialog::new()
@@ -638,4 +659,30 @@ pub fn register_bus_forwarding_callbacks(ui: &AppWindow, context: BusForwardingC
             destination,
         }));
     });
+}
+
+/// Parses an M3U or M3U8 file and returns a list of resolved absolute paths.
+///
+/// Lines starting with `#` are skipped. Relative paths are resolved against the
+/// directory containing the playlist file. Entries that do not resolve to an
+/// existing file are silently omitted.
+fn parse_m3u(playlist_path: &std::path::Path) -> Vec<PathBuf> {
+    let base_dir = playlist_path.parent().unwrap_or(std::path::Path::new("."));
+    let Ok(content) = std::fs::read_to_string(playlist_path) else {
+        warn!("Failed to read M3U file: {}", playlist_path.display());
+        return Vec::new();
+    };
+    content
+        .lines()
+        .filter(|line| !line.trim().is_empty() && !line.trim_start().starts_with('#'))
+        .map(|line| {
+            let path = PathBuf::from(line.trim());
+            if path.is_absolute() {
+                path
+            } else {
+                base_dir.join(path)
+            }
+        })
+        .filter(|path| path.is_file())
+        .collect()
 }
