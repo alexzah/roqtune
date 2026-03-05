@@ -6170,6 +6170,37 @@ impl UiManager {
         })
     }
 
+    /// Returns `true` if exactly one local-file track is selected in the playlist view.
+    fn playlist_exactly_one_local_file_selected(&self) -> bool {
+        let normalized = Self::normalize_source_selection_indices(
+            &self.selected_indices,
+            self.track_paths.len(),
+        );
+        let local: Vec<_> = normalized
+            .iter()
+            .filter(|&&index| self.track_paths.get(index).is_some_and(|p| p.is_file()))
+            .collect();
+        local.len() == 1
+    }
+
+    /// Returns `true` if exactly one local-file track is selected in the library view.
+    fn library_exactly_one_local_file_selected(&self) -> bool {
+        let normalized = Self::normalize_source_selection_indices(
+            &self.library_selected_indices,
+            self.library_entries.len(),
+        );
+        let local: Vec<_> = normalized
+            .iter()
+            .filter(|&&index| {
+                matches!(
+                    self.library_entries.get(index),
+                    Some(LibraryEntry::Track(track)) if track.path.is_file()
+                )
+            })
+            .collect();
+        local.len() == 1
+    }
+
     /// Collects local-file paths from all currently selected tracks in the active collection view.
     fn collect_local_file_selected_paths(&self) -> Vec<PathBuf> {
         if self.collection_mode == COLLECTION_MODE_LIBRARY {
@@ -6203,9 +6234,15 @@ impl UiManager {
             && self.playlist_has_local_file_selection();
         let library_enabled = self.collection_mode == COLLECTION_MODE_LIBRARY
             && self.library_has_local_file_selection();
+        let playlist_open_location_enabled = self.collection_mode == COLLECTION_MODE_PLAYLIST
+            && self.playlist_exactly_one_local_file_selected();
+        let library_open_location_enabled = self.collection_mode == COLLECTION_MODE_LIBRARY
+            && self.library_exactly_one_local_file_selected();
         let _ = self.ui.upgrade_in_event_loop(move |ui| {
             ui.set_playlist_properties_enabled(playlist_enabled);
             ui.set_library_properties_enabled(library_enabled);
+            ui.set_playlist_open_location_enabled(playlist_open_location_enabled);
+            ui.set_library_open_location_enabled(library_open_location_enabled);
         });
     }
 

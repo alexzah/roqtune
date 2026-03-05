@@ -489,6 +489,8 @@ export component AppWindow inherits Window {
     property <length> context-menu-height: context-menu-item-height * context-menu-item-count + context-menu-spacing-total + context-menu-padding;
     in-out property <bool> playlist_properties_enabled: false;
     in-out property <bool> library_properties_enabled: false;
+    in-out property <bool> playlist_open_location_enabled: false;
+    in-out property <bool> library_open_location_enabled: false;
     in-out property <bool> library_add_to_dialog_visible: false;
     in-out property <[string]> library_add_to_playlist_labels: [];
     in-out property <[bool]> library_add_to_playlist_checked: [];
@@ -4222,18 +4224,18 @@ export component AppWindow inherits Window {
             Rectangle {
                 height: 24px;
                 border-radius: 4px;
-                background: playlist-open-location-ta.has-hover && root.playlist_properties_enabled ? AppPalette.control-hover-bg : transparent;
+                background: playlist-open-location-ta.has-hover && root.playlist_open_location_enabled ? AppPalette.control-hover-bg : transparent;
                 Text {
                     x: 10px;
                     width: parent.width - 20px;
                     text: "Open File Location";
-                    color: root.playlist_properties_enabled ? AppPalette.text-primary : AppPalette.text-disabled;
+                    color: root.playlist_open_location_enabled ? AppPalette.text-primary : AppPalette.text-disabled;
                     font-size: 12px;
                     vertical-alignment: center;
                     overflow: elide;
                 }
                 playlist-open-location-ta := TouchArea {
-                    enabled: root.playlist_properties_enabled;
+                    enabled: root.playlist_open_location_enabled;
                     clicked => {
                         root.show_playlist_track_context_menu = false;
                         root.open_file_location();
@@ -4391,18 +4393,18 @@ export component AppWindow inherits Window {
             Rectangle {
                 height: 24px;
                 border-radius: 4px;
-                background: library-open-location-ta.has-hover && root.library_properties_enabled ? AppPalette.control-hover-bg : transparent;
+                background: library-open-location-ta.has-hover && root.library_open_location_enabled ? AppPalette.control-hover-bg : transparent;
                 Text {
                     x: 10px;
                     width: parent.width - 20px;
                     text: "Open File Location";
-                    color: root.library_properties_enabled ? AppPalette.text-primary : AppPalette.text-disabled;
+                    color: root.library_open_location_enabled ? AppPalette.text-primary : AppPalette.text-disabled;
                     font-size: 12px;
                     vertical-alignment: center;
                     overflow: elide;
                 }
                 library-open-location-ta := TouchArea {
-                    enabled: root.library_properties_enabled;
+                    enabled: root.library_open_location_enabled;
                     clicked => {
                         root.show_library_context_menu = false;
                         root.open_file_location();
