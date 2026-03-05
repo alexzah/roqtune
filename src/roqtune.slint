@@ -1,6 +1,10 @@
 import { Button, ComboBox, VerticalBox, StandardTableView, ScrollView, LineEdit, TextEdit, ListView, Switch, Slider } from "std-widgets.slint";
 
 import {
+    BatchConversionFlacSettings,
+    BatchConversionMp3Settings,
+    BatchConversionOpusSettings,
+    BatchConversionWavSettings,
     BatchFilePreviewItem,
     BatchFileResultItem,
     LayoutAlbumArtViewerPanelModel,
@@ -311,6 +315,14 @@ export component AppWindow inherits Window {
     // Batch file operations summary dialog
     in-out property <bool> show_batch_file_op_summary: false;
     in-out property <[BatchFileResultItem]> batch_file_op_summary_results: [];
+    // Batch file operations conversion settings
+    in-out property <bool> batch_file_op_convert_enabled: false;
+    in-out property <int> batch_file_op_format_index: 0;  // 0=WAV,1=FLAC,2=Opus,3=MP3
+    in-out property <bool> show_batch_file_op_format_settings: false;
+    in-out property <BatchConversionWavSettings> batch_conv_wav_settings: { bit_depth_index: 0 };
+    in-out property <BatchConversionFlacSettings> batch_conv_flac_settings: { compression_index: 5, bit_depth_index: 0 };
+    in-out property <BatchConversionOpusSettings> batch_conv_opus_settings: { bitrate_index: 2 };
+    in-out property <BatchConversionMp3Settings> batch_conv_mp3_settings: { mode_index: 1, cbr_bitrate_index: 2, vbr_quality_index: 1 };
     in-out property <string> apply_filter_view_confirm_message: "";
     in-out property <int> delete_custom_column_index: -1;
     in-out property <string> delete_custom_column_message: "";
@@ -4920,7 +4932,9 @@ export component AppWindow inherits Window {
             padding: 10px;
             spacing: 8px;
             Text {
-                text: root.batch_file_op_mode_is_move ? "Moving files" : "Copying files";
+                text: root.batch_file_op_convert_enabled
+                    ? (root.batch_file_op_mode_is_move ? "Converting and moving files" : "Converting files")
+                    : (root.batch_file_op_mode_is_move ? "Moving files" : "Copying files");
                 color: AppPalette.text-primary;
                 font-size: 12px;
                 font-weight: 700;
@@ -5060,6 +5074,45 @@ export component AppWindow inherits Window {
                             : "Also copy other folder files (e.g. cover art)";
                         toggled => {
                             root.batch_file_op_move_contents_changed(self.checked);
+                        }
+                    }
+                }
+
+                // Convert toggle row
+                HorizontalLayout {
+                    spacing: 8px;
+                    alignment: start;
+                    Switch {
+                        checked: root.batch_file_op_convert_enabled;
+                        text: "Convert to:";
+                        toggled => {
+                            root.batch_file_op_convert_toggled(self.checked);
+                        }
+                    }
+                    if root.batch_file_op_convert_enabled : ComboBox {
+                        width: 100px;
+                        model: ["WAV", "FLAC", "Opus", "MP3"];
+                        current-index: root.batch_file_op_format_index;
+                        selected(value) => {
+                            root.batch_file_op_format_changed(self.current-index);
+                        }
+                    }
+                    if root.batch_file_op_convert_enabled : Rectangle {
+                        width: 28px;
+                        height: 28px;
+                        border-radius: 4px;
+                        border-width: 1px;
+                        border-color: AppPalette.border;
+                        background: gear-ta.has-hover ? AppPalette.panel-bg-alt : transparent;
+                        Text {
+                            text: "⚙";
+                            color: AppPalette.text-primary;
+                            font-size: 14px;
+                            horizontal-alignment: center;
+                            vertical-alignment: center;
+                        }
+                        gear-ta := TouchArea {
+                            clicked => { root.batch_file_op_open_format_settings(); }
                         }
                     }
                 }
@@ -5219,6 +5272,175 @@ export component AppWindow inherits Window {
                             root.batch_file_op_confirm();
                         }
                     }
+                }
+            }
+        }
+    }
+
+    // Batch conversion format settings popup (modal, z: 170 above batch dialog)
+    if root.show_batch_file_op_format_settings : Rectangle {
+        z: 170;
+        background: AppPalette.overlay-scrim;
+        TouchArea {}
+
+        Rectangle {
+            width: min(340px, root.width - 40px);
+            x: (parent.width - self.width) / 2;
+            y: (parent.height - self.height) / 2;
+            background: AppPalette.panel-bg-elevated;
+            border-width: 1px;
+            border-color: AppPalette.border;
+            border-radius: 6px;
+
+            VerticalLayout {
+                padding: 16px;
+                spacing: 12px;
+
+                Text {
+                    text: ["WAV", "FLAC", "Opus", "MP3"][root.batch_file_op_format_index] + " Settings";
+                    color: AppPalette.text-primary;
+                    font-size: 13px;
+                    font-weight: 700;
+                }
+
+                Rectangle { height: 1px; background: AppPalette.border; }
+
+                // WAV settings
+                if root.batch_file_op_format_index == 0 : HorizontalLayout {
+                    spacing: 8px;
+                    alignment: start;
+                    Text {
+                        text: "Bit depth:";
+                        color: AppPalette.text-secondary;
+                        font-size: 12px;
+                        vertical-alignment: center;
+                    }
+                    ComboBox {
+                        model: ["16-bit", "24-bit", "32-bit float"];
+                        current-index: root.batch_conv_wav_settings.bit_depth_index;
+                        selected(value) => {
+                            root.batch_file_op_wav_settings_changed(self.current-index);
+                        }
+                    }
+                }
+
+                // FLAC settings
+                if root.batch_file_op_format_index == 1 : VerticalLayout {
+                    spacing: 8px;
+                    HorizontalLayout {
+                        spacing: 8px;
+                        alignment: start;
+                        Text {
+                            text: "Compression:";
+                            color: AppPalette.text-secondary;
+                            font-size: 12px;
+                            vertical-alignment: center;
+                        }
+                        ComboBox {
+                            model: ["0 (fastest)", "1", "2", "3", "4", "5 (default)", "6", "7", "8 (smallest)"];
+                            current-index: root.batch_conv_flac_settings.compression_index;
+                            selected(value) => {
+                                root.batch_file_op_flac_settings_changed(self.current-index, root.batch_conv_flac_settings.bit_depth_index);
+                            }
+                        }
+                    }
+                    HorizontalLayout {
+                        spacing: 8px;
+                        alignment: start;
+                        Text {
+                            text: "Bit depth:";
+                            color: AppPalette.text-secondary;
+                            font-size: 12px;
+                            vertical-alignment: center;
+                        }
+                        ComboBox {
+                            model: ["16-bit", "24-bit"];
+                            current-index: root.batch_conv_flac_settings.bit_depth_index;
+                            selected(value) => {
+                                root.batch_file_op_flac_settings_changed(root.batch_conv_flac_settings.compression_index, self.current-index);
+                            }
+                        }
+                    }
+                }
+
+                // Opus settings
+                if root.batch_file_op_format_index == 2 : HorizontalLayout {
+                    spacing: 8px;
+                    alignment: start;
+                    Text {
+                        text: "Bitrate:";
+                        color: AppPalette.text-secondary;
+                        font-size: 12px;
+                        vertical-alignment: center;
+                    }
+                    ComboBox {
+                        model: ["64 kbps", "96 kbps", "128 kbps", "192 kbps", "256 kbps"];
+                        current-index: root.batch_conv_opus_settings.bitrate_index;
+                        selected(value) => {
+                            root.batch_file_op_opus_settings_changed(self.current-index);
+                        }
+                    }
+                }
+
+                // MP3 settings
+                if root.batch_file_op_format_index == 3 : VerticalLayout {
+                    spacing: 8px;
+                    HorizontalLayout {
+                        spacing: 8px;
+                        alignment: start;
+                        Text {
+                            text: "Mode:";
+                            color: AppPalette.text-secondary;
+                            font-size: 12px;
+                            vertical-alignment: center;
+                        }
+                        ComboBox {
+                            model: ["CBR", "VBR"];
+                            current-index: root.batch_conv_mp3_settings.mode_index;
+                            selected(value) => {
+                                root.batch_file_op_mp3_settings_changed(self.current-index, root.batch_conv_mp3_settings.cbr_bitrate_index, root.batch_conv_mp3_settings.vbr_quality_index);
+                            }
+                        }
+                    }
+                    if root.batch_conv_mp3_settings.mode_index == 0 : HorizontalLayout {
+                        spacing: 8px;
+                        alignment: start;
+                        Text {
+                            text: "Bitrate:";
+                            color: AppPalette.text-secondary;
+                            font-size: 12px;
+                            vertical-alignment: center;
+                        }
+                        ComboBox {
+                            model: ["128 kbps", "192 kbps", "256 kbps", "320 kbps"];
+                            current-index: root.batch_conv_mp3_settings.cbr_bitrate_index;
+                            selected(value) => {
+                                root.batch_file_op_mp3_settings_changed(root.batch_conv_mp3_settings.mode_index, self.current-index, root.batch_conv_mp3_settings.vbr_quality_index);
+                            }
+                        }
+                    }
+                    if root.batch_conv_mp3_settings.mode_index == 1 : HorizontalLayout {
+                        spacing: 8px;
+                        alignment: start;
+                        Text {
+                            text: "Quality:";
+                            color: AppPalette.text-secondary;
+                            font-size: 12px;
+                            vertical-alignment: center;
+                        }
+                        ComboBox {
+                            model: ["V0 (best)", "V2", "V4"];
+                            current-index: root.batch_conv_mp3_settings.vbr_quality_index;
+                            selected(value) => {
+                                root.batch_file_op_mp3_settings_changed(root.batch_conv_mp3_settings.mode_index, root.batch_conv_mp3_settings.cbr_bitrate_index, self.current-index);
+                            }
+                        }
+                    }
+                }
+
+                Button {
+                    text: "Close";
+                    clicked => { root.batch_file_op_close_format_settings(); }
                 }
             }
         }
@@ -8153,6 +8375,14 @@ export component AppWindow inherits Window {
     callback batch_file_op_confirm();
     callback batch_file_op_abort();
     callback batch_file_op_summary_close();
+    callback batch_file_op_convert_toggled(/* enabled: */ bool);
+    callback batch_file_op_format_changed(/* index: */ int);
+    callback batch_file_op_open_format_settings();
+    callback batch_file_op_close_format_settings();
+    callback batch_file_op_wav_settings_changed(/* bit_depth_index: */ int);
+    callback batch_file_op_flac_settings_changed(/* compression_index: */ int, /* bit_depth_index: */ int);
+    callback batch_file_op_opus_settings_changed(/* bitrate_index: */ int);
+    callback batch_file_op_mp3_settings_changed(/* mode_index: */ int, /* cbr_bitrate_index: */ int, /* vbr_quality_index: */ int);
     callback open_properties_for_current_selection();
     callback properties_select_tab(int);
     callback properties_field_edited(int, string);

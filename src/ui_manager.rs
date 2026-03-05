@@ -283,6 +283,9 @@ pub struct UiManager {
     batch_file_op_progress_total: usize,
     batch_file_op_summary_visible: bool,
     batch_file_op_summary_results: Vec<protocol::BatchFileResult>,
+    batch_file_op_convert_enabled: bool,
+    batch_file_op_conversion_config: roqtune_core::conversion_config::ConversionConfig,
+    batch_file_op_format_settings_popup_visible: bool,
 }
 
 /// Normalized track metadata snapshot used for row rendering and side panel display.
@@ -2139,6 +2142,10 @@ impl UiManager {
             batch_file_op_progress_total: 0,
             batch_file_op_summary_visible: false,
             batch_file_op_summary_results: Vec::new(),
+            batch_file_op_convert_enabled: false,
+            batch_file_op_conversion_config:
+                roqtune_core::conversion_config::ConversionConfig::default(),
+            batch_file_op_format_settings_popup_visible: false,
         };
         // Seed column-width overrides from startup layout so playlist rendering does not depend on
         // racing the asynchronous `ConfigLoaded` bus message.
@@ -8991,6 +8998,56 @@ impl UiManager {
         self.batch_file_op_move_folder_contents = move_folder_contents;
     }
 
+    fn batch_file_op_convert_toggled(&mut self, enabled: bool) {
+        self.batch_file_op_convert_enabled = enabled;
+        self.sync_batch_file_op_dialog_ui();
+    }
+
+    fn batch_file_op_format_changed(
+        &mut self,
+        format: roqtune_core::conversion_config::ConversionFormat,
+    ) {
+        self.batch_file_op_conversion_config.format = format;
+        self.sync_batch_file_op_dialog_ui();
+    }
+
+    fn batch_file_op_wav_settings_changed(
+        &mut self,
+        settings: roqtune_core::conversion_config::WavSettings,
+    ) {
+        self.batch_file_op_conversion_config.wav = settings;
+    }
+
+    fn batch_file_op_flac_settings_changed(
+        &mut self,
+        settings: roqtune_core::conversion_config::FlacSettings,
+    ) {
+        self.batch_file_op_conversion_config.flac = settings;
+    }
+
+    fn batch_file_op_opus_settings_changed(
+        &mut self,
+        settings: roqtune_core::conversion_config::OpusSettings,
+    ) {
+        self.batch_file_op_conversion_config.opus = settings;
+    }
+
+    fn batch_file_op_mp3_settings_changed(
+        &mut self,
+        settings: roqtune_core::conversion_config::Mp3Settings,
+    ) {
+        self.batch_file_op_conversion_config.mp3 = settings;
+    }
+
+    fn batch_file_op_toggle_format_settings_popup(&mut self) {
+        self.batch_file_op_format_settings_popup_visible =
+            !self.batch_file_op_format_settings_popup_visible;
+        let visible = self.batch_file_op_format_settings_popup_visible;
+        let _ = self.ui.upgrade_in_event_loop(move |ui| {
+            ui.set_show_batch_file_op_format_settings(visible);
+        });
+    }
+
     fn batch_file_op_confirm(&mut self) {
         use crate::file_operations::is_valid_dest_path;
         let mode = if self.batch_file_op_mode_is_move {
@@ -8999,12 +9056,18 @@ impl UiManager {
             protocol::BatchFileMode::Copy
         };
         let template = self.batch_file_op_template.clone();
+        let ext_override: Option<&'static str> = if self.batch_file_op_convert_enabled {
+            Some(self.batch_file_op_conversion_config.format.file_extension())
+        } else {
+            None
+        };
         let targets: Vec<protocol::BatchFileTarget> = self
             .batch_file_op_tracks
             .iter()
             .filter(|t| !t.is_remote)
             .filter_map(|t| {
-                let ctx = Self::build_template_context_for_track(t);
+                let mut ctx = Self::build_template_context_for_track(t);
+                ctx.extension_override = ext_override;
                 let dest_str = text_template::render_path_template(&template, &ctx);
                 if dest_str.is_empty() {
                     return None;
@@ -9041,12 +9104,18 @@ impl UiManager {
         self.batch_file_op_progress_label.clear();
         self.sync_batch_file_op_progress_ui();
         let move_folder_contents = self.batch_file_op_move_folder_contents;
+        let conversion = if self.batch_file_op_convert_enabled {
+            Some(self.batch_file_op_conversion_config.clone())
+        } else {
+            None
+        };
         let _ = self.bus_sender.send(protocol::Message::Library(
             protocol::LibraryMessage::StartBatchFileOperation {
                 request_id,
                 mode,
                 targets,
                 move_folder_contents,
+                conversion,
             },
         ));
     }
@@ -9137,6 +9206,11 @@ impl UiManager {
     fn compute_batch_file_op_preview(&self) -> Vec<UiBatchFilePreviewItem> {
         use crate::file_operations::is_valid_dest_path;
         let template = &self.batch_file_op_template;
+        let ext_override: Option<&'static str> = if self.batch_file_op_convert_enabled {
+            Some(self.batch_file_op_conversion_config.format.file_extension())
+        } else {
+            None
+        };
         self.batch_file_op_tracks
             .iter()
             .map(|t| {
@@ -9155,7 +9229,8 @@ impl UiManager {
                         is_skipped: true,
                     };
                 }
-                let ctx = Self::build_template_context_for_track(t);
+                let mut ctx = Self::build_template_context_for_track(t);
+                ctx.extension_override = ext_override;
                 let dest_str = text_template::render_path_template(template, &ctx);
                 let dest = std::path::PathBuf::from(&dest_str);
                 let is_valid = !dest_str.is_empty() && is_valid_dest_path(&dest);
@@ -9187,6 +9262,7 @@ impl UiManager {
     }
 
     fn sync_batch_file_op_dialog_ui(&self) {
+        use roqtune_core::conversion_config::ConversionFormat;
         let visible = self.batch_file_op_dialog_visible;
         let is_move = self.batch_file_op_mode_is_move;
         let template = self.batch_file_op_template.clone();
@@ -9201,6 +9277,13 @@ impl UiManager {
             .filter(|p| !p.is_skipped && p.is_valid)
             .count();
         let has_remote = remote_count > 0;
+        let convert_enabled = self.batch_file_op_convert_enabled;
+        let format_index = match self.batch_file_op_conversion_config.format {
+            ConversionFormat::Wav => 0,
+            ConversionFormat::Flac => 1,
+            ConversionFormat::Opus => 2,
+            ConversionFormat::Mp3 => 3,
+        };
 
         let _ = self.ui.upgrade_in_event_loop(move |ui| {
             let preview_model: slint::ModelRc<UiBatchFilePreviewItem> =
@@ -9213,6 +9296,8 @@ impl UiManager {
             ui.set_batch_file_op_remote_count(remote_count as i32);
             ui.set_batch_file_op_invalid_count(invalid_count as i32);
             ui.set_batch_file_op_valid_count(valid_count as i32);
+            ui.set_batch_file_op_convert_enabled(convert_enabled);
+            ui.set_batch_file_op_format_index(format_index);
         });
     }
 
@@ -13425,6 +13510,39 @@ impl UiManager {
                             } => {
                                 self.batch_file_op_move_contents_changed(move_folder_contents);
                             }
+                            protocol::LibraryMessage::BatchFileOperationConvertToggled {
+                                enabled,
+                            } => {
+                                self.batch_file_op_convert_toggled(enabled);
+                            }
+                            protocol::LibraryMessage::BatchFileOperationFormatChanged {
+                                format,
+                            } => {
+                                self.batch_file_op_format_changed(format);
+                            }
+                            protocol::LibraryMessage::BatchFileOperationWavSettingsChanged {
+                                settings,
+                            } => {
+                                self.batch_file_op_wav_settings_changed(settings);
+                            }
+                            protocol::LibraryMessage::BatchFileOperationFlacSettingsChanged {
+                                settings,
+                            } => {
+                                self.batch_file_op_flac_settings_changed(settings);
+                            }
+                            protocol::LibraryMessage::BatchFileOperationOpusSettingsChanged {
+                                settings,
+                            } => {
+                                self.batch_file_op_opus_settings_changed(settings);
+                            }
+                            protocol::LibraryMessage::BatchFileOperationMp3SettingsChanged {
+                                settings,
+                            } => {
+                                self.batch_file_op_mp3_settings_changed(settings);
+                            }
+                            protocol::LibraryMessage::BatchFileOperationToggleFormatSettings => {
+                                self.batch_file_op_toggle_format_settings_popup();
+                            }
                             protocol::LibraryMessage::BatchFileOperationConfirm => {
                                 self.batch_file_op_confirm();
                             }
@@ -15354,6 +15472,7 @@ mod tests {
             technical_channel_to_channels: "",
             technical_dithered: "",
             technical_replay_gain_adjustment: "",
+            extension_override: None,
         }
     }
 

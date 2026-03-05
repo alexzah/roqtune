@@ -540,11 +540,40 @@ pub enum LibraryMessage {
     BatchFileOperationMoveContentsChanged {
         move_folder_contents: bool,
     },
+    /// User toggled the "Convert" switch in the batch file dialog.
+    BatchFileOperationConvertToggled {
+        enabled: bool,
+    },
+    /// User changed the target conversion format.
+    BatchFileOperationFormatChanged {
+        format: crate::conversion_config::ConversionFormat,
+    },
+    /// User updated WAV conversion settings.
+    BatchFileOperationWavSettingsChanged {
+        settings: crate::conversion_config::WavSettings,
+    },
+    /// User updated FLAC conversion settings.
+    BatchFileOperationFlacSettingsChanged {
+        settings: crate::conversion_config::FlacSettings,
+    },
+    /// User updated Opus conversion settings.
+    BatchFileOperationOpusSettingsChanged {
+        settings: crate::conversion_config::OpusSettings,
+    },
+    /// User updated MP3 conversion settings.
+    BatchFileOperationMp3SettingsChanged {
+        settings: crate::conversion_config::Mp3Settings,
+    },
+    /// User opened or closed the per-format settings popup.
+    BatchFileOperationToggleFormatSettings,
     StartBatchFileOperation {
         request_id: u64,
         mode: BatchFileMode,
         targets: Vec<BatchFileTarget>,
         move_folder_contents: bool,
+        /// When `Some`, each audio target is decoded and re-encoded instead of
+        /// copied/moved.  Companion (non-audio) files are always copied/moved.
+        conversion: Option<crate::conversion_config::ConversionConfig>,
     },
     BatchFileOperationAbort {
         request_id: u64,

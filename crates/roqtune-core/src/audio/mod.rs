@@ -1,5 +1,6 @@
 //! Audio subsystem modules (decode, playback, probing, and option selection).
 
+pub mod audio_converter;
 pub mod audio_decoder;
 pub mod audio_player;
 pub mod audio_probe;

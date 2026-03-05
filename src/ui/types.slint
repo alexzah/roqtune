@@ -145,6 +145,26 @@ export struct BatchFileResultItem {
     error: string,
 }
 
+// Conversion settings structs — all fields are option indices into the UI combo boxes.
+export struct BatchConversionWavSettings {
+    bit_depth_index: int,   // 0=16-bit, 1=24-bit, 2=float32
+}
+
+export struct BatchConversionFlacSettings {
+    compression_index: int, // 0..=8 compression level
+    bit_depth_index: int,   // 0=16-bit, 1=24-bit
+}
+
+export struct BatchConversionOpusSettings {
+    bitrate_index: int,     // 0=64k, 1=96k, 2=128k, 3=192k, 4=256k
+}
+
+export struct BatchConversionMp3Settings {
+    mode_index: int,        // 0=CBR, 1=VBR
+    cbr_bitrate_index: int, // 0=128k, 1=192k, 2=256k, 3=320k
+    vbr_quality_index: int, // 0=V0, 1=V2, 2=V4
+}
+
 export struct LayoutAlbumArtViewerPanelModel {
     leaf_id: string,
     x_px: int,

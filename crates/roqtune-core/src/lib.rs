@@ -31,6 +31,7 @@ pub mod backends;
 pub mod cast;
 pub mod config;
 pub mod config_persistence;
+pub mod conversion_config;
 pub mod db_manager;
 pub mod file_operations;
 pub mod image_pipeline;

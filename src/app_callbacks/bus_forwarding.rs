@@ -255,6 +255,127 @@ pub fn register_bus_forwarding_callbacks(ui: &AppWindow, context: BusForwardingC
     });
 
     let bus_sender_clone = bus_sender.clone();
+    ui.on_batch_file_op_convert_toggled(move |enabled| {
+        let _ = bus_sender_clone.send(Message::Library(
+            protocol::LibraryMessage::BatchFileOperationConvertToggled { enabled },
+        ));
+    });
+
+    let bus_sender_clone = bus_sender.clone();
+    ui.on_batch_file_op_format_changed(move |index| {
+        use roqtune_core::conversion_config::ConversionFormat;
+        let format = match index {
+            1 => ConversionFormat::Flac,
+            2 => ConversionFormat::Opus,
+            3 => ConversionFormat::Mp3,
+            _ => ConversionFormat::Wav,
+        };
+        let _ = bus_sender_clone.send(Message::Library(
+            protocol::LibraryMessage::BatchFileOperationFormatChanged { format },
+        ));
+    });
+
+    let bus_sender_clone = bus_sender.clone();
+    ui.on_batch_file_op_open_format_settings(move || {
+        let _ = bus_sender_clone.send(Message::Library(
+            protocol::LibraryMessage::BatchFileOperationToggleFormatSettings,
+        ));
+    });
+
+    let bus_sender_clone = bus_sender.clone();
+    ui.on_batch_file_op_close_format_settings(move || {
+        let _ = bus_sender_clone.send(Message::Library(
+            protocol::LibraryMessage::BatchFileOperationToggleFormatSettings,
+        ));
+    });
+
+    let bus_sender_clone = bus_sender.clone();
+    ui.on_batch_file_op_wav_settings_changed(move |bit_depth_index| {
+        use roqtune_core::conversion_config::{WavBitDepth, WavSettings};
+        let bit_depth = match bit_depth_index {
+            1 => WavBitDepth::Bits24,
+            2 => WavBitDepth::Float32,
+            _ => WavBitDepth::Bits16,
+        };
+        let _ = bus_sender_clone.send(Message::Library(
+            protocol::LibraryMessage::BatchFileOperationWavSettingsChanged {
+                settings: WavSettings { bit_depth },
+            },
+        ));
+    });
+
+    let bus_sender_clone = bus_sender.clone();
+    ui.on_batch_file_op_flac_settings_changed(move |compression_index, bit_depth_index| {
+        use roqtune_core::conversion_config::{FlacBitDepth, FlacSettings};
+        // compression_index 0..=8 maps directly to compression level 0..=8
+        let compression = compression_index.clamp(0, 8) as u8;
+        let bit_depth = if bit_depth_index == 1 {
+            FlacBitDepth::Bits24
+        } else {
+            FlacBitDepth::Bits16
+        };
+        let _ = bus_sender_clone.send(Message::Library(
+            protocol::LibraryMessage::BatchFileOperationFlacSettingsChanged {
+                settings: FlacSettings {
+                    compression,
+                    bit_depth,
+                },
+            },
+        ));
+    });
+
+    let bus_sender_clone = bus_sender.clone();
+    ui.on_batch_file_op_opus_settings_changed(move |bitrate_index| {
+        use roqtune_core::conversion_config::{OpusBitrate, OpusSettings};
+        let bitrate = match bitrate_index {
+            0 => OpusBitrate::Kbps64,
+            1 => OpusBitrate::Kbps96,
+            2 => OpusBitrate::Kbps128,
+            3 => OpusBitrate::Kbps192,
+            _ => OpusBitrate::Kbps256,
+        };
+        let _ = bus_sender_clone.send(Message::Library(
+            protocol::LibraryMessage::BatchFileOperationOpusSettingsChanged {
+                settings: OpusSettings { bitrate },
+            },
+        ));
+    });
+
+    let bus_sender_clone = bus_sender.clone();
+    ui.on_batch_file_op_mp3_settings_changed(
+        move |mode_index, cbr_bitrate_index, vbr_quality_index| {
+            use roqtune_core::conversion_config::{
+                Mp3CbrBitrate, Mp3Mode, Mp3Settings, Mp3VbrQuality,
+            };
+            let mode = if mode_index == 0 {
+                Mp3Mode::Cbr
+            } else {
+                Mp3Mode::Vbr
+            };
+            let cbr_bitrate = match cbr_bitrate_index {
+                0 => Mp3CbrBitrate::Kbps128,
+                1 => Mp3CbrBitrate::Kbps192,
+                2 => Mp3CbrBitrate::Kbps256,
+                _ => Mp3CbrBitrate::Kbps320,
+            };
+            let vbr_quality = match vbr_quality_index {
+                0 => Mp3VbrQuality::V0,
+                1 => Mp3VbrQuality::V2,
+                _ => Mp3VbrQuality::V4,
+            };
+            let _ = bus_sender_clone.send(Message::Library(
+                protocol::LibraryMessage::BatchFileOperationMp3SettingsChanged {
+                    settings: Mp3Settings {
+                        mode,
+                        cbr_bitrate,
+                        vbr_quality,
+                    },
+                },
+            ));
+        },
+    );
+
+    let bus_sender_clone = bus_sender.clone();
     ui.on_open_properties_for_current_selection(move || {
         let _ = bus_sender_clone.send(Message::Metadata(
             MetadataMessage::OpenPropertiesForCurrentSelection,

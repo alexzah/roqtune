@@ -277,6 +277,10 @@ pub struct TemplateContext<'a> {
     pub technical_channel_to_channels: &'a str,
     pub technical_dithered: &'a str,
     pub technical_replay_gain_adjustment: &'a str,
+    /// When `Some`, overrides the `{file_ext}` variable with the given extension
+    /// (e.g. `"mp3"`, `"flac"`). Used by batch conversion to force the correct
+    /// output extension regardless of the source file's extension.
+    pub extension_override: Option<&'a str>,
 }
 
 #[derive(Clone, Copy, Debug, Default)]
@@ -359,6 +363,7 @@ impl<'a> TemplateContext<'a> {
             technical_channel_to_channels: "",
             technical_dithered: "",
             technical_replay_gain_adjustment: "",
+            extension_override: None,
         }
     }
 
@@ -431,11 +436,15 @@ impl<'a> TemplateContext<'a> {
                     .to_string(),
             ),
             "file_ext" | "fileext" | "ext" | "extension" => Some(
-                self.path
-                    .and_then(|p| Path::new(p).extension())
-                    .and_then(|s| s.to_str())
-                    .unwrap_or_default()
-                    .to_string(),
+                self.extension_override
+                    .map(ToOwned::to_owned)
+                    .unwrap_or_else(|| {
+                        self.path
+                            .and_then(|p| Path::new(p).extension())
+                            .and_then(|s| s.to_str())
+                            .unwrap_or_default()
+                            .to_string()
+                    }),
             ),
             "path" => Some(self.path.unwrap_or_default().to_string()),
             "selection_summary" | "selectionsummary" => Some(self.selection_summary.to_string()),
@@ -1288,6 +1297,7 @@ mod tests {
             technical_channel_to_channels: "",
             technical_dithered: "",
             technical_replay_gain_adjustment: "",
+            extension_override: None,
         }
     }
 

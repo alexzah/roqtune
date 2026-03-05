@@ -13,6 +13,8 @@ use std::sync::{Arc, Mutex};
 use log::{info, warn};
 use tokio::sync::broadcast::{Receiver, Sender};
 
+use crate::audio::audio_converter;
+use crate::conversion_config::ConversionConfig;
 use crate::protocol::{BatchFileMode, BatchFileResult, BatchFileTarget, LibraryMessage, Message};
 
 type CancelToken = Arc<AtomicBool>;
@@ -75,8 +77,15 @@ impl BatchFileOperationManager {
                 mode,
                 targets,
                 move_folder_contents,
+                conversion,
             } => {
-                self.spawn_batch_operation(request_id, mode, targets, move_folder_contents);
+                self.spawn_batch_operation(
+                    request_id,
+                    mode,
+                    targets,
+                    move_folder_contents,
+                    conversion,
+                );
             }
             LibraryMessage::BatchFileOperationAbort { request_id } => {
                 self.request_abort(request_id);
@@ -99,6 +108,7 @@ impl BatchFileOperationManager {
         mode: BatchFileMode,
         targets: Vec<BatchFileTarget>,
         move_folder_contents: bool,
+        conversion: Option<ConversionConfig>,
     ) {
         let bus_producer = self.bus_producer.clone();
         let cancel_token = Arc::new(AtomicBool::new(false));
@@ -122,6 +132,7 @@ impl BatchFileOperationManager {
                         mode,
                         targets,
                         move_folder_contents,
+                        conversion,
                         cancel_token,
                     );
                 }));
@@ -162,6 +173,7 @@ fn run_batch_operation(
     mode: BatchFileMode,
     targets: Vec<BatchFileTarget>,
     move_folder_contents: bool,
+    conversion: Option<ConversionConfig>,
     cancel_token: CancelToken,
 ) {
     let total = targets.len();
@@ -188,7 +200,12 @@ fn run_batch_operation(
             },
         ));
 
-        let outcome = execute_single_operation(mode, &target.source_path, &target.dest_path);
+        let outcome = if let Some(ref config) = conversion {
+            execute_single_conversion(mode, &target.source_path, &target.dest_path, config)
+                .map_err(std::io::Error::other)
+        } else {
+            execute_single_operation(mode, &target.source_path, &target.dest_path)
+        };
         let (success, error) = match outcome {
             Ok(()) => (true, None),
             Err(e) => (false, Some(e.to_string())),
@@ -360,6 +377,22 @@ fn execute_single_operation(
                 std::fs::remove_file(source)?;
             }
         }
+    }
+    Ok(())
+}
+
+fn execute_single_conversion(
+    mode: BatchFileMode,
+    source: &Path,
+    dest: &Path,
+    config: &ConversionConfig,
+) -> Result<(), String> {
+    if let Some(parent) = dest.parent() {
+        std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+    }
+    audio_converter::convert_audio_file(source, dest, config)?;
+    if mode == BatchFileMode::Move {
+        std::fs::remove_file(source).map_err(|e| e.to_string())?;
     }
     Ok(())
 }
