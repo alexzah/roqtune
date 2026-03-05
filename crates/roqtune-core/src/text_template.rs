@@ -871,6 +871,46 @@ pub fn template_metrics(source: &str) -> TemplateMetrics {
 /// exactly as the rich renderer does, but discards all styling tags and converts
 /// newlines to spaces. Use `{file_stem}` and `{file_ext}` to refer to the source
 /// file stem and extension respectively.
+/// Strips or replaces characters that are unsafe in a filesystem path component.
+///
+/// Applied to each metadata value (`{title}`, `{artist}`, …) expanded inside a
+/// path template, so the resulting filename is valid on the current OS and
+/// portable to Windows.
+///
+/// - `/` and `\` → `-` (both are path separators on some platform)
+/// - Windows-reserved chars (`:` `*` `?` `"` `<` `>` `|`) → `-`
+/// - ASCII control characters (U+0000–U+001F) and DEL (U+007F) → removed
+/// - Leading spaces and trailing spaces/dots trimmed (Windows FS rules)
+/// - Per-component byte length capped at 240 (OS limit is 255; leaves headroom
+///   for short suffixes like `.flac` that the template appends)
+fn sanitize_path_component(s: &str) -> String {
+    let replaced: String = s
+        .chars()
+        .filter_map(|ch| match ch {
+            '\0'..='\x1f' | '\x7f' => None,
+            '/' | '\\' => Some('-'),
+            ':' | '*' | '?' | '"' | '<' | '>' | '|' => Some('-'),
+            _ => Some(ch),
+        })
+        .collect();
+
+    let trimmed = replaced
+        .trim_start_matches(' ')
+        .trim_end_matches([' ', '.']);
+
+    let mut out = String::with_capacity(trimmed.len().min(240));
+    let mut byte_len = 0usize;
+    for ch in trimmed.chars() {
+        let ch_len = ch.len_utf8();
+        if byte_len + ch_len > 240 {
+            break;
+        }
+        out.push(ch);
+        byte_len += ch_len;
+    }
+    out
+}
+
 pub fn render_path_template(source: &str, context: &TemplateContext<'_>) -> String {
     let parsed = parse_template(source);
     let mut output = String::new();
@@ -891,7 +931,7 @@ pub fn render_path_template(source: &str, context: &TemplateContext<'_>) -> Stri
             TemplateSegment::Placeholder { fallbacks, .. } => {
                 if active {
                     if let Some(resolved) = resolve_placeholder(context, fallbacks) {
-                        output.push_str(&resolved.value);
+                        output.push_str(&sanitize_path_component(&resolved.value));
                     }
                 }
             }
@@ -1643,5 +1683,89 @@ mod tests {
         let metrics = template_metrics("[size=h2]{title}[/size]");
         assert_eq!(metrics.explicit_line_count, 1);
         assert_eq!(metrics.max_font_size_px, 23);
+    }
+
+    // ── render_path_template sanitization ────────────────────────────────────
+
+    fn path_context<'a>(
+        title: &'a str,
+        artist: &'a str,
+        album: &'a str,
+    ) -> TemplateContext<'a> {
+        TemplateContext {
+            title,
+            artist,
+            album,
+            ..context("")
+        }
+    }
+
+    #[test]
+    fn test_path_template_replaces_forward_slash_in_artist() {
+        // "AC/DC" must not create a spurious subdirectory.
+        let ctx = path_context("Highway to Hell", "AC/DC", "Highway to Hell");
+        let out = super::render_path_template("/music/{artist}/{title}.mp3", &ctx);
+        assert_eq!(out, "/music/AC-DC/Highway to Hell.mp3");
+    }
+
+    #[test]
+    fn test_path_template_replaces_windows_reserved_chars() {
+        // Colon common in titles like "Side A: Intro"
+        let ctx = path_context("Side A: Intro", "Artist", "Album");
+        let out = super::render_path_template("/music/{artist}/{title}.flac", &ctx);
+        assert_eq!(out, "/music/Artist/Side A- Intro.flac");
+    }
+
+    #[test]
+    fn test_path_template_strips_control_characters() {
+        let ctx = path_context("Bad\x01Title", "Artist", "Album");
+        let out = super::render_path_template("/music/{artist}/{title}.mp3", &ctx);
+        assert_eq!(out, "/music/Artist/BadTitle.mp3");
+    }
+
+    #[test]
+    fn test_path_template_trims_trailing_dot_from_value() {
+        // Windows rejects filenames ending in '.'
+        let ctx = path_context("Track.", "Artist.", "Album");
+        let out = super::render_path_template("/music/{artist}/{title}.mp3", &ctx);
+        assert_eq!(out, "/music/Artist/Track.mp3");
+    }
+
+    #[test]
+    fn test_path_template_static_separators_are_not_sanitized() {
+        // The '/' and '.' in the static template parts must be preserved.
+        let ctx = path_context("Song", "Artist", "Album");
+        let out = super::render_path_template("/music/{artist}/{album}/{title}.flac", &ctx);
+        assert_eq!(out, "/music/Artist/Album/Song.flac");
+    }
+
+    #[test]
+    fn test_path_template_unicode_symbols_preserved() {
+        // Justice "†", Bowie "★" are valid Unicode and fine on modern filesystems.
+        let ctx = path_context("†", "Justice", "†");
+        let out = super::render_path_template("/music/{artist}/{album}/{title}.flac", &ctx);
+        assert_eq!(out, "/music/Justice/†/†.flac");
+    }
+
+    #[test]
+    fn test_path_template_truncates_long_component() {
+        let long_title = "A".repeat(300);
+        let ctx = path_context(&long_title, "Artist", "Album");
+        let out = super::render_path_template("/music/{title}.mp3", &ctx);
+        // Title component must be capped at 240 bytes.
+        let title_part = out
+            .strip_prefix("/music/")
+            .unwrap()
+            .strip_suffix(".mp3")
+            .unwrap();
+        assert!(title_part.len() <= 240);
+        assert_eq!(title_part.len(), 240);
+    }
+
+    #[test]
+    fn test_sanitize_path_component_backslash_replaced() {
+        let ctx = path_context("Song", "Art\\ist", "Album");
+        let out = super::render_path_template("/music/{artist}/{title}.mp3", &ctx);
+        assert_eq!(out, "/music/Art-ist/Song.mp3");
     }
 }
