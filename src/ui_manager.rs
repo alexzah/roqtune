@@ -6365,9 +6365,14 @@ impl UiManager {
     }
 
     fn properties_save_enabled(&self) -> bool {
+        let has_target = if self.properties_is_multi_select {
+            !self.properties_target_paths.is_empty()
+        } else {
+            self.properties_target_path.is_some()
+        };
         self.properties_dialog_visible
             && !self.properties_busy
-            && self.properties_target_path.is_some()
+            && has_target
             && self.properties_has_changes()
     }
 
