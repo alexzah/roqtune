@@ -518,6 +518,22 @@ impl PlaylistManager {
         self.broadcast_selection_changed();
     }
 
+    fn apply_moved_file_paths(&mut self, mappings: Vec<(PathBuf, PathBuf)>) {
+        if mappings.is_empty() {
+            return;
+        }
+        if let Err(err) = self.db_manager.update_playlist_track_paths(&mappings) {
+            error!("Failed to update playlist track paths after move: {err}");
+        }
+        let map: std::collections::HashMap<PathBuf, PathBuf> = mappings.into_iter().collect();
+        self.editing_playlist.update_track_paths(&map);
+        // Notify UI of updated track list so path references stay valid.
+        let restored_tracks = self.snapshot_editing_playlist_tracks();
+        let _ = self.bus_producer.send(protocol::Message::Playlist(
+            protocol::PlaylistMessage::PlaylistRestored(restored_tracks),
+        ));
+    }
+
     fn remove_remote_metadata_for_profile(&mut self, profile_id: &str) {
         self.remote_track_metadata_by_path.retain(|path, _| {
             parse_opensubsonic_track_uri(path.as_path())
@@ -2120,6 +2136,11 @@ impl PlaylistManager {
                         protocol::PlaylistMessage::PruneActivePlaylistPaths { paths },
                     ) => {
                         self.prune_active_playlist_paths(paths);
+                    }
+                    protocol::Message::Playlist(
+                        protocol::PlaylistMessage::UpdateMovedFilePaths { mappings },
+                    ) => {
+                        self.apply_moved_file_paths(mappings);
                     }
                     protocol::Message::Playlist(protocol::PlaylistMessage::SelectTrackMulti {
                         index,

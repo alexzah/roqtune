@@ -271,6 +271,9 @@ pub struct UiManager {
     batch_file_op_dialog_visible: bool,
     batch_file_op_mode_is_move: bool,
     batch_file_op_move_folder_contents: bool,
+    /// Source paths of tracks queued in the active move operation (empty for copy).
+    /// Used to filter completion results when updating playlist/library paths.
+    batch_file_op_pending_track_sources: std::collections::HashSet<std::path::PathBuf>,
     batch_file_op_template: String,
     /// Resolved track data used for live preview computation.
     batch_file_op_tracks: Vec<BatchFileOpTrack>,
@@ -2127,6 +2130,7 @@ impl UiManager {
             batch_file_op_dialog_visible: false,
             batch_file_op_mode_is_move: false,
             batch_file_op_move_folder_contents: false,
+            batch_file_op_pending_track_sources: std::collections::HashSet::new(),
             batch_file_op_template: String::new(),
             batch_file_op_tracks: Vec::new(),
             batch_file_op_progress_visible: false,
@@ -9020,6 +9024,15 @@ impl UiManager {
             return;
         }
 
+        // Record source paths of tracks being moved so completion can update DB references.
+        self.batch_file_op_pending_track_sources.clear();
+        if self.batch_file_op_mode_is_move {
+            for t in &targets {
+                self.batch_file_op_pending_track_sources
+                    .insert(t.source_path.clone());
+            }
+        }
+
         let request_id = self.next_batch_file_op_request_id();
         self.active_batch_file_op_request_id = Some(request_id);
         self.batch_file_op_progress_visible = true;
@@ -9078,6 +9091,27 @@ impl UiManager {
         }
         self.active_batch_file_op_request_id = None;
         self.batch_file_op_progress_visible = false;
+
+        // After a move, update playlist and library entries to point to new paths.
+        if !self.batch_file_op_pending_track_sources.is_empty() {
+            let mappings: Vec<(std::path::PathBuf, std::path::PathBuf)> = results
+                .iter()
+                .filter(|r| {
+                    r.success
+                        && self
+                            .batch_file_op_pending_track_sources
+                            .contains(&r.source_path)
+                })
+                .map(|r| (r.source_path.clone(), r.dest_path.clone()))
+                .collect();
+            if !mappings.is_empty() {
+                let _ = self.bus_sender.send(protocol::Message::Playlist(
+                    protocol::PlaylistMessage::UpdateMovedFilePaths { mappings },
+                ));
+            }
+            self.batch_file_op_pending_track_sources.clear();
+        }
+
         self.batch_file_op_summary_results = results;
         self.batch_file_op_summary_visible = true;
         self.sync_batch_file_op_progress_ui();

@@ -1245,6 +1245,74 @@ impl DbManager {
         Ok(removed_unique_paths)
     }
 
+    /// Updates `path` in the `tracks` table for each `(old, new)` mapping.
+    /// Rows not matching an old path are silently skipped.
+    pub fn update_playlist_track_paths(
+        &self,
+        mappings: &[(PathBuf, PathBuf)],
+    ) -> Result<(), rusqlite::Error> {
+        if mappings.is_empty() {
+            return Ok(());
+        }
+        self.conn.execute("BEGIN IMMEDIATE TRANSACTION", [])?;
+        let mut stmt = match self
+            .conn
+            .prepare("UPDATE tracks SET path = ?2 WHERE path = ?1")
+        {
+            Ok(stmt) => stmt,
+            Err(err) => {
+                let _ = self.conn.execute("ROLLBACK", []);
+                return Err(err);
+            }
+        };
+        for (old, new) in mappings {
+            let old_str = old.to_string_lossy();
+            let new_str = new.to_string_lossy();
+            if let Err(err) = stmt.execute(params![old_str, new_str]) {
+                drop(stmt);
+                let _ = self.conn.execute("ROLLBACK", []);
+                return Err(err);
+            }
+        }
+        drop(stmt);
+        self.conn.execute("COMMIT", [])?;
+        Ok(())
+    }
+
+    /// Updates `path` in the `library_tracks` table for each `(old, new)` mapping.
+    /// Rows not matching an old path are silently skipped.
+    pub fn update_library_track_paths(
+        &self,
+        mappings: &[(PathBuf, PathBuf)],
+    ) -> Result<(), rusqlite::Error> {
+        if mappings.is_empty() {
+            return Ok(());
+        }
+        self.conn.execute("BEGIN IMMEDIATE TRANSACTION", [])?;
+        let mut stmt = match self
+            .conn
+            .prepare("UPDATE library_tracks SET path = ?2 WHERE path = ?1")
+        {
+            Ok(stmt) => stmt,
+            Err(err) => {
+                let _ = self.conn.execute("ROLLBACK", []);
+                return Err(err);
+            }
+        };
+        for (old, new) in mappings {
+            let old_str = old.to_string_lossy();
+            let new_str = new.to_string_lossy();
+            if let Err(err) = stmt.execute(params![old_str, new_str]) {
+                drop(stmt);
+                let _ = self.conn.execute("ROLLBACK", []);
+                return Err(err);
+            }
+        }
+        drop(stmt);
+        self.conn.execute("COMMIT", [])?;
+        Ok(())
+    }
+
     /// Loads all tracks in library sorted alphabetically by title.
     pub fn get_library_tracks(&self) -> Result<Vec<LibraryTrack>, rusqlite::Error> {
         let mut stmt = self.conn.prepare(

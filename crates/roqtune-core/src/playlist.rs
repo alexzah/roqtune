@@ -151,6 +151,16 @@ impl Playlist {
         self.tracks.len()
     }
 
+    /// Replaces track paths in-place according to `mappings`. Tracks whose path
+    /// is not in the map are left unchanged. Playback state is preserved.
+    pub fn update_track_paths(&mut self, mappings: &std::collections::HashMap<PathBuf, PathBuf>) {
+        for track in &mut self.tracks {
+            if let Some(new_path) = mappings.get(&track.path) {
+                track.path = new_path.clone();
+            }
+        }
+    }
+
     /// Deletes one track and updates selection/playing/shuffle indices accordingly.
     pub fn delete_track(&mut self, index: usize) {
         if index >= self.tracks.len() {

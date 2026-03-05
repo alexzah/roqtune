@@ -2452,6 +2452,16 @@ impl LibraryManager {
                             warn!("Failed to apply favorite toggle: {}", error);
                         }
                     }
+                    Message::Playlist(protocol::PlaylistMessage::UpdateMovedFilePaths {
+                        mappings,
+                    }) => {
+                        if let Err(err) = self.db_manager.update_library_track_paths(&mappings) {
+                            warn!("Failed to update library track paths after move: {err}");
+                        }
+                        self.publish_root_counts();
+                        self.publish_tracks();
+                        self.publish_global_search_data();
+                    }
                     _ => {}
                 },
                 Err(tokio::sync::broadcast::error::RecvError::Lagged(skipped)) => {

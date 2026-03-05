@@ -113,6 +113,12 @@ pub enum PlaylistMessage {
     PruneActivePlaylistPaths {
         paths: Vec<PathBuf>,
     },
+    /// Update in-memory and persisted track paths after a successful batch move.
+    /// Each entry is `(old_path, new_path)`. Only successfully moved audio tracks
+    /// should be included (not companion files such as cover art).
+    UpdateMovedFilePaths {
+        mappings: Vec<(PathBuf, PathBuf)>,
+    },
     /// UI requested playback for a currently rendered track row.
     /// The index is in filtered/sorted view coordinates and must be mapped
     /// to playlist source coordinates by the UI manager.
