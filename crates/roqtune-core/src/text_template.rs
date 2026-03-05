@@ -1687,11 +1687,7 @@ mod tests {
 
     // ── render_path_template sanitization ────────────────────────────────────
 
-    fn path_context<'a>(
-        title: &'a str,
-        artist: &'a str,
-        album: &'a str,
-    ) -> TemplateContext<'a> {
+    fn path_context<'a>(title: &'a str, artist: &'a str, album: &'a str) -> TemplateContext<'a> {
         TemplateContext {
             title,
             artist,
