@@ -9204,6 +9204,8 @@ impl UiManager {
     }
 
     fn compute_batch_file_op_preview(&self) -> Vec<UiBatchFilePreviewItem> {
+        use std::collections::HashMap;
+
         use crate::file_operations::is_valid_dest_path;
         let template = &self.batch_file_op_template;
         let ext_override: Option<&'static str> = if self.batch_file_op_convert_enabled {
@@ -9211,7 +9213,10 @@ impl UiManager {
         } else {
             None
         };
-        self.batch_file_op_tracks
+
+        // First pass: render each item.
+        let mut items: Vec<UiBatchFilePreviewItem> = self
+            .batch_file_op_tracks
             .iter()
             .map(|t| {
                 let source_name = t
@@ -9227,6 +9232,7 @@ impl UiManager {
                         dest_filename: String::new().into(),
                         is_valid: false,
                         is_skipped: true,
+                        is_duplicate: false,
                     };
                 }
                 let mut ctx = Self::build_template_context_for_track(t);
@@ -9256,9 +9262,29 @@ impl UiManager {
                     dest_filename: dest_filename.into(),
                     is_valid,
                     is_skipped: false,
+                    is_duplicate: false,
                 }
             })
-            .collect()
+            .collect();
+
+        // Second pass: mark items whose dest path is shared by more than one valid item.
+        let mut dest_counts: HashMap<String, usize> = HashMap::new();
+        for item in &items {
+            if !item.is_skipped && item.is_valid {
+                let key = format!("{}{}", item.dest_folder, item.dest_filename);
+                *dest_counts.entry(key).or_insert(0) += 1;
+            }
+        }
+        for item in &mut items {
+            if !item.is_skipped && item.is_valid {
+                let key = format!("{}{}", item.dest_folder, item.dest_filename);
+                if dest_counts.get(key.as_str()).copied().unwrap_or(0) > 1 {
+                    item.is_duplicate = true;
+                }
+            }
+        }
+
+        items
     }
 
     fn sync_batch_file_op_dialog_ui(&self) {
@@ -9272,6 +9298,7 @@ impl UiManager {
             .iter()
             .filter(|p| !p.is_skipped && !p.is_valid)
             .count();
+        let duplicate_count = preview.iter().filter(|p| p.is_duplicate).count();
         let valid_count = preview
             .iter()
             .filter(|p| !p.is_skipped && p.is_valid)
@@ -9295,6 +9322,7 @@ impl UiManager {
             ui.set_batch_file_op_has_remote(has_remote);
             ui.set_batch_file_op_remote_count(remote_count as i32);
             ui.set_batch_file_op_invalid_count(invalid_count as i32);
+            ui.set_batch_file_op_duplicate_count(duplicate_count as i32);
             ui.set_batch_file_op_valid_count(valid_count as i32);
             ui.set_batch_file_op_convert_enabled(convert_enabled);
             ui.set_batch_file_op_format_index(format_index);

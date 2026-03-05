@@ -307,6 +307,8 @@ export component AppWindow inherits Window {
     in-out property <int> batch_file_op_remote_count: 0;
     in-out property <int> batch_file_op_invalid_count: 0;
     in-out property <int> batch_file_op_valid_count: 0;
+    in-out property <int> batch_file_op_duplicate_count: 0;
+    in-out property <bool> show_batch_file_op_warn_confirm: false;
     // Batch file operations progress overlay
     in-out property <bool> show_batch_file_op_progress: false;
     in-out property <string> batch_file_op_progress_label: "";
@@ -5165,6 +5167,24 @@ export component AppWindow inherits Window {
                     }
                 }
 
+                // Duplicate destination warning
+                if root.batch_file_op_duplicate_count > 0 : Rectangle {
+                    height: 28px;
+                    border-radius: 4px;
+                    background: AppPalette.warning.transparentize(0.85);
+                    border-width: 1px;
+                    border-color: AppPalette.warning.transparentize(0.5);
+                    Text {
+                        x: 10px;
+                        width: parent.width - 20px;
+                        text: root.batch_file_op_duplicate_count + " path(s) resolve to the same destination and will overwrite each other";
+                        color: AppPalette.warning;
+                        font-size: 11px;
+                        vertical-alignment: center;
+                        overflow: elide;
+                    }
+                }
+
                 // Preview header
                 Text {
                     text: "Preview (" + root.batch_file_op_preview.length + " tracks):";
@@ -5193,9 +5213,10 @@ export component AppWindow inherits Window {
                                     alignment: center;
                                     // Status icon
                                     Text {
-                                        text: item.is_skipped ? "⊘" : (item.is_valid ? "✓" : "✗");
+                                        text: item.is_skipped ? "⊘" : (item.is_duplicate ? "⚠" : (item.is_valid ? "✓" : "✗"));
                                         color: item.is_skipped ? AppPalette.text-muted
-                                            : (item.is_valid ? AppPalette.success : AppPalette.danger);
+                                            : (item.is_duplicate ? AppPalette.warning
+                                            : (item.is_valid ? AppPalette.success : AppPalette.danger));
                                         font-size: 12px;
                                         vertical-alignment: center;
                                         width: 16px;
@@ -5205,7 +5226,8 @@ export component AppWindow inherits Window {
                                     Text {
                                         text: item.source_name;
                                         color: item.is_skipped ? AppPalette.text-muted
-                                            : (item.is_valid ? AppPalette.text-muted : AppPalette.danger);
+                                            : (item.is_duplicate ? AppPalette.warning
+                                            : (item.is_valid ? AppPalette.text-muted : AppPalette.danger));
                                         font-size: 11px;
                                         vertical-alignment: center;
                                         overflow: elide;
@@ -5221,7 +5243,8 @@ export component AppWindow inherits Window {
                                     Text {
                                         text: item.dest_folder;
                                         color: item.is_skipped ? AppPalette.text-muted
-                                            : (item.is_valid ? AppPalette.text-secondary : AppPalette.danger);
+                                            : (item.is_duplicate ? AppPalette.warning
+                                            : (item.is_valid ? AppPalette.text-secondary : AppPalette.danger));
                                         font-size: 11px;
                                         vertical-alignment: center;
                                         overflow: elide;
@@ -5231,7 +5254,8 @@ export component AppWindow inherits Window {
                                     Text {
                                         text: item.dest_filename;
                                         color: item.is_skipped ? AppPalette.text-muted
-                                            : (item.is_valid ? AppPalette.text-primary : AppPalette.danger);
+                                            : (item.is_duplicate ? AppPalette.warning
+                                            : (item.is_valid ? AppPalette.text-primary : AppPalette.danger));
                                         font-size: 11px;
                                         font-weight: item.is_valid && !item.is_skipped ? 600 : 400;
                                         vertical-alignment: center;
@@ -5264,12 +5288,16 @@ export component AppWindow inherits Window {
                         }
                     }
                     Button {
-                        text: root.batch_file_op_mode_is_move ? "Move" : "Copy";
+                        text: root.batch_file_op_mode_is_move ? "Move" : (root.batch_file_op_convert_enabled ? "Convert" : "Copy");
                         primary: true;
                         enabled: root.batch_file_op_valid_count > 0;
                         clicked => {
-                            root.show_batch_file_op_dialog = false;
-                            root.batch_file_op_confirm();
+                            if (root.batch_file_op_invalid_count > 0 || root.batch_file_op_duplicate_count > 0) {
+                                root.show_batch_file_op_warn_confirm = true;
+                            } else {
+                                root.show_batch_file_op_dialog = false;
+                                root.batch_file_op_confirm();
+                            }
                         }
                     }
                 }
@@ -5689,6 +5717,24 @@ export component AppWindow inherits Window {
             root.show_delete_custom_column_confirm = false;
             root.delete_custom_column_index = -1;
             root.refocus_main();
+        }
+    }
+
+    batch_file_op_warn_confirm_overlay := ConfirmationDialog {
+        z: 180;
+        is-visible: root.show_batch_file_op_warn_confirm;
+        message: (root.batch_file_op_invalid_count > 0 ? root.batch_file_op_invalid_count + " track(s) are invalid and will be skipped" : "")
+            + (root.batch_file_op_invalid_count > 0 && root.batch_file_op_duplicate_count > 0 ? " and " : "")
+            + (root.batch_file_op_duplicate_count > 0 ? root.batch_file_op_duplicate_count + " track(s) will overwrite each other" : "")
+            + ". Would you like to proceed?";
+        confirm-button-text: root.batch_file_op_mode_is_move ? "Move" : (root.batch_file_op_convert_enabled ? "Convert" : "Copy");
+        confirmed => {
+            root.show_batch_file_op_warn_confirm = false;
+            root.show_batch_file_op_dialog = false;
+            root.batch_file_op_confirm();
+        }
+        cancelled => {
+            root.show_batch_file_op_warn_confirm = false;
         }
     }
 
